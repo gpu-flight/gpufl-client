@@ -43,10 +43,10 @@ def test_pipeline():
 
         for cat, path in expected_files.items():
             if not os.path.exists(path):
-                print(f"❌ FAILED: Missing {cat} log file at {path}")
+                print(f"FAILED: Missing {cat} log file at {path}")
                 exit(1)
             else:
-                print(f"✅ Found {cat} log: {path}")
+                print(f"Found {cat} log: {path}")
 
         # 6. Verify Content (JSON Parsing)
         print("6. Verifying JSON Content...")
@@ -56,7 +56,7 @@ def test_pipeline():
             lines = f.readlines()
             # We expect at least: Init, Scope Begin, Scope End, Shutdown
             if len(lines) < 4:
-                print(f"❌ FAILED: Scope log has insufficient lines. Found {len(lines)}")
+                print(f"FAILED: Scope log has insufficient lines. Found {len(lines)}")
                 exit(1)
 
             # Parse line by line
@@ -71,13 +71,13 @@ def test_pipeline():
                             duration = data.get('duration_ns', 0)
                             print(f"     -> Captured Duration: {duration} ns")
                             if duration <= 0:
-                                print("❌ FAILED: Duration is invalid")
+                                print("FAILED: Duration is invalid")
                                 exit(1)
                 except json.JSONDecodeError:
-                    print(f"❌ FAILED: Invalid JSON line: {line}")
+                    print(f"FAILED: Invalid JSON line: {line}")
                     exit(1)
 
-        print("\n✅ SUCCESS: GPUMON Python Bindings are working correctly.")
+        print("\nSUCCESS: GPUMON Python Bindings are working correctly.")
 
     finally:
         # Cleanup
