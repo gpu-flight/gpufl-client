@@ -36,6 +36,8 @@ jobs:
       # 3. Install Build Tools
       - name: Install build dependencies
         run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev 
           python -m pip install --upgrade pip
           pip install scikit-build-core pybind11 cmake ninja
 
