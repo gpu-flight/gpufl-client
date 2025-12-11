@@ -9,7 +9,7 @@ int main(int argc, char** argv) {
     opts.appName = "SystemMonitor";
 
     // Optional: Set a specific log path or let it default
-    opts.logFilePath = "gpumon_system.log";
+    opts.logPath = "gpumon_system.log";
 
     gpumon::init(opts);
 

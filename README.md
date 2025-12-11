@@ -42,8 +42,12 @@ You should include only `gpumon/gpumon.hpp` in application code.
 int main() {
     gpumon::InitOptions opts;
     opts.appName = "my_cuda_app";
-    opts.logFilePath = "gpumon.log";    // leave empty to use GPUMON_LOG_DIR
-    opts.sampleIntervalMs = 0;           // >0 enables periodic memory sampling in scopes
+    // Base path/prefix (no extension). Three files will be created:
+    //   <base>.kernel.log, <base>.scope.log, <base>.system.log
+    // If empty, default is "gpumon" in the current working directory.
+    opts.logPath = "logs/my_app"; 
+    // >0 enables periodic GPU device sampling during scopes
+    opts.sampleIntervalMs = 0; 
 
     gpumon::init(opts);
 
@@ -53,8 +57,6 @@ int main() {
 }
 ```
 
-Environment support:
-- `GPUMON_LOG_DIR` — if `logFilePath` is empty, the log path becomes `GPUMON_LOG_DIR/gpumon_<app>_<pid>.log`.
 
 ### 3) Monitor work
 
@@ -96,8 +98,11 @@ GPUMON_LAUNCH(MyKernel, grid, block, sharedMemBytes, stream, arg1, arg2);
 namespace gpumon {
   struct InitOptions {
     std::string appName;
-    std::string logFilePath;   // empty -> use GPUMON_LOG_DIR
-    uint32_t    sampleIntervalMs = 0; // background memory sampling period for scopes (0 = off)
+    // Base path/prefix for logs; three files will be produced:
+    //   <base>.kernel.log, <base>.scope.log, <base>.system.log
+    // If empty, default is "gpumon" in the current directory
+    std::string logPath;   
+    uint32_t    sampleIntervalMs = 0; // background sampling for scopes (0 = off)
   };
 
   bool init(const InitOptions&);
@@ -117,12 +122,22 @@ namespace gpumon {
 ```
 
 Notes:
-- `GPUMON_SCOPE` optionally samples GPU memory periodically if `sampleIntervalMs > 0` in `InitOptions`.
+- `GPUMON_SCOPE` optionally samples GPU/device metrics periodically if `sampleIntervalMs > 0`.
 - Scope end will call the backend `synchronize()` to ensure timing covers in-flight GPU work.
+
+## Log files and categories
+
+Events are now written to three separate NDJSON files, one line per event:
+
+- Kernel events: `<base>.kernel.log`
+- Scope lifecycle/events: `<base>.scope.log`
+- System-level periodic sampling: `<base>.system.log`
+
+Meta events (`init`, `shutdown`) are written to all three logs so that each file is self-contained.
 
 ## NDJSON events
 
-One JSON object per line (NDJSON). Key event types:
+One JSON object per line (NDJSON). Key event types and shapes (fields may be extended in the future):
 
 - Initialization
 
@@ -131,7 +146,6 @@ One JSON object per line (NDJSON). Key event types:
   "type": "init",
   "pid": 1234,
   "app": "my_cuda_app",
-  "logPath": "gpumon.log",
   "ts_ns": 1731958400123456
 }
 ```
@@ -139,8 +153,8 @@ One JSON object per line (NDJSON). Key event types:
 - Scope lifecycle (begin, sample, end). Examples (two lines shown as text to illustrate NDJSON):
 
 ```text
-{"type":"scope_begin","pid":1234,"app":"my_cuda_app","name":"epoch_1","ts_ns":1731958400123456,"memory":[{"device":0,"used_mib":1024,"free_mib":8192,"total_mib":9216}]}
-{"type":"scope_sample","pid":1234,"app":"my_cuda_app","name":"epoch_1","ts_ns":1731958401123456,"memory":[{"device":0,"used_mib":1100,"free_mib":8116,"total_mib":9216}]}
+{"type":"scope_begin","pid":1234,"app":"my_cuda_app","name":"epoch_1","ts_ns":1731958400123456,"devices":[{"id":0,"name":"NVIDIA RTX","uuid":"GPU-...","pci_bus":1,"used_mib":1024,"free_mib":8192,"total_mib":9216,"util_gpu":0,"util_mem":0,"temp_c":0,"power_mw":0,"clk_gfx":0,"clk_sm":0,"clk_mem":0}]}
+{"type":"scope_sample","pid":1234,"app":"my_cuda_app","name":"epoch_1","ts_ns":1731958401123456,"devices":[{"id":0,"name":"NVIDIA RTX","uuid":"GPU-...","pci_bus":1,"used_mib":1100,"free_mib":8116,"total_mib":9216,"util_gpu":0,"util_mem":0,"temp_c":0,"power_mw":0,"clk_gfx":0,"clk_sm":0,"clk_mem":0}]}
 ```
 
 - Scope end includes full timing and final memory snapshot:
@@ -154,7 +168,7 @@ One JSON object per line (NDJSON). Key event types:
   "ts_start_ns": 1731958400123456,
   "ts_end_ns":   1731958403123456,
   "duration_ns": 3000000,
-  "memory": [{"device":0, "used_mib":1110, "free_mib":8106, "total_mib":9216}]
+  "devices": [{"id":0,"name":"NVIDIA RTX","uuid":"GPU-...","pci_bus":1,"used_mib":1110,"free_mib":8106,"total_mib":9216,"util_gpu":0,"util_mem":0,"temp_c":0,"power_mw":0,"clk_gfx":0,"clk_sm":0,"clk_mem":0}]
 }
 ```
 
@@ -165,14 +179,31 @@ One JSON object per line (NDJSON). Key event types:
   "type": "kernel",
   "pid": 1234,
   "app": "my_cuda_app",
-  "kernel": "vectorAdd",
+  "devices": [{"id":0,"name":"NVIDIA RTX","uuid":"GPU-...","pci_bus":1,"total_mib":9216}],
+  "name": "vectorAdd",
   "ts_start_ns": 1731958400123456,
   "ts_end_ns":   1731958400126789,
   "duration_ns": 3333,
-  "grid": [128, 1, 1],
-  "block": [256, 1, 1],
-  "shared_mem_bytes": 0,
+  "grid": "(128,1,1)",
+  "block": "(256,1,1)",
+  "dyn_shared_bytes": 0,
+  "num_regs": 32,
+  "static_shared_bytes": 0,
+  "local_bytes": 0,
+  "const_bytes": 0,
   "cuda_error": "cudaSuccess"
+}
+```
+
+- System sample (periodic, independent of scopes):
+
+```json
+{
+  "type": "system_sample",
+  "app": "my_cuda_app",
+  "name": "system",
+  "ts_ns": 1731958402123456,
+  "devices": [{"id":0,"name":"NVIDIA RTX","uuid":"GPU-...","pci_bus":1,"used_mib":1024,"free_mib":8192,"total_mib":9216,"util_gpu":0,"util_mem":0,"temp_c":0,"power_mw":0,"clk_gfx":0,"clk_sm":0,"clk_mem":0}]
 }
 ```
 
@@ -187,22 +218,19 @@ One JSON object per line (NDJSON). Key event types:
 }
 ```
 
-## Data flow and schema (client → crawler → backend)
+## Data flow and schema
 
-GPUmon client does not send data to your backend directly. Its sole responsibility is to write NDJSON log lines to a file.
+GPUmon client does not send data to your backend directly. Its sole responsibility is to write NDJSON log lines to files.
 
-- Client output: NDJSON log file written by the target process.
-  - Location is either the explicit InitOptions::logFilePath you provide, or
-  - If logFilePath is empty and GPUMON_LOG_DIR is set, the file is written as GPUMON_LOG_DIR/gpumon_<app>_<pid>.log.
-- Crawler: A separate gpumon/crawler component is responsible for:
-  - Discovering client log files (watching GPUMON_LOG_DIR or configured paths)
-  - Validating each NDJSON line against the schema
-  - Forwarding well-formed events to your backend/metrics pipeline
-- Schema location: gpumon_client/schema contains both human-readable docs and a machine-readable JSON Schema.
-  - gpumon_client/schema/README.md — event shapes, examples, notes
-  - gpumon_client/schema/ndjson.schema.json — JSON Schema (draft‑07) using oneOf on the "type" field
-
-This separation lets you deploy the lightweight header-only client anywhere, while evolving ingestion/transport inside the crawler without touching application code.
+- Client output: three NDJSON log files written by the target process, based on `InitOptions::logPath` base.
+  - `<base>.kernel.log`, `<base>.scope.log`, `<base>.system.log`
+- A downstream process (crawler/ingestor) can:
+  - Discover and tail the three files
+  - Validate each NDJSON line against the schema
+  - Forward well-formed events to your backend/metrics pipeline
+- Schema location: `gpumon_client/schema` contains human-readable docs and a JSON Schema.
+  - `schema/README.md` — event shapes, examples, notes
+  - `schema/ndjson.schema.json` — JSON Schema (draft‑07) keyed on the `type` field
 
 ## End-to-end example
 
@@ -219,7 +247,7 @@ void vectorAdd(int* a, int* b, int* c, int n) {
 int main() {
   gpumon::InitOptions opts;
   opts.appName = "vector_add_demo";
-  opts.logFilePath = "gpumon.log";
+  opts.logPath = "gpumon"; // produces gpumon.kernel.log, gpumon.scope.log, gpumon.system.log
   opts.sampleIntervalMs = 5; // try periodic sampling inside scopes
 
   gpumon::init(opts);
@@ -291,12 +319,35 @@ Roadmap items include async timing via CUDA events and non-blocking instrumentat
 
 ## Troubleshooting
 
-- No log file is produced
-  - Ensure the directory exists and the process can write there
-  - Try setting `GPUMON_LOG_DIR` or pass an absolute `logFilePath`
+- No log files are produced
+  - Ensure the directory for your base path exists and the process can write there
+  - Pass an absolute `logPath` if running from an unexpected working directory
 
 - CUDA compile errors about `dim3` or runtime headers
   - Make sure the translation unit is compiled with NVCC and includes `<cuda_runtime.h>`
 
 - Link/undefined references
   - This is header-only; usually indicates the file isn’t compiled as CUDA (`.cu`) when needed. Enable `CUDA_SEPARABLE_COMPILATION` or place CUDA code in `.cu` sources
+
+## Python bindings (optional)
+
+Basic Python API is provided via a tiny extension:
+
+```python
+import gpumon
+
+# Initialize
+gpumon.init(app_name="my_py_app", log_path="logs/my_py", interval_ms=0)
+
+# Scoped monitor (context manager)
+with gpumon.scope("stage-1", tag="train"):
+    # ... work ...
+
+# Shutdown (optional; occurs at interpreter exit too)
+gpumon.shutdown()
+```
+
+Arguments:
+- app_name: string application name
+- log_path: base path/prefix used to create `<base>.kernel.log`, `<base>.scope.log`, `<base>.system.log` (default: `"gpumon"`)
+- interval_ms: background sampling interval for scopes (0 disables)

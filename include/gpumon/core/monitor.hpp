@@ -24,58 +24,59 @@ namespace gpumon {
         // Call Backend Init (No-op for CUDA, but needed for pattern)
         backend::initialize();
 
-        // 3. Open Log File
-        std::string logPath = opts.logFilePath;
-        if (logPath.empty()) {
-            logPath = detail::getDefaultLogPath(state.appName, state.pid);
+        std::string basePath = opts.logPath;
+        if (basePath.empty()) {
+            basePath = "gpumon"; // Fallback to local CWD file if user provided nothing
         }
 
-        if (logPath.empty()) {
-            state.initialized = true;
-            return true;
-        }
-        state.logFile.open(logPath, std::ios::out | std::ios::app);
-        if (!state.logFile.is_open()) {
-            // Mark initialized even if log file failed (silent mode)
-            state.initialized = true;
-            return true;
-        }
+        // Helper lambda to open file
+        auto openLog = [&](const LogCategory cat, const std::string &suffix) {
+            const std::string path = detail::generateLogPath(basePath, suffix);
+            state.logFiles[cat].open(path, std::ios::out | std::ios::app);
+        };
 
-        state.initialized = true;
+        state.initialized = true; // Set true early so we can open files
 
+        openLog(LogCategory::Kernel, "kernel");
+        openLog(LogCategory::Scope,  "scope");
+        openLog(LogCategory::System, "system");
+
+        // 4. Log Init Event to ALL files (Meta)
         std::ostringstream oss;
         oss << R"({"type":"init",)"
             << "\"pid\":" << state.pid << ","
             << R"("app":")" << detail::escapeJson(state.appName) << "\","
-            << R"("logPath":")" << detail::escapeJson(logPath) << "\","
             << "\"ts_ns\":" << detail::getTimestampNs()
             << "}";
-        detail::writeLogLine(oss.str());
+
+        detail::writeLogLine(LogCategory::Meta, oss.str());
 
         return true;
     }
 
     inline void shutdown() {
         auto& state = detail::getState();
-
         if (!state.initialized) return;
 
-        // Log shutdown event
-        if (state.logFile.is_open()) {
-            std::ostringstream oss;
-            oss << R"({"type":"shutdown",)"
-                << "\"pid\":" << state.pid << ","
-                << R"("app":")" << detail::escapeJson(state.appName) << "\","
-                << "\"ts_ns\":" << detail::getTimestampNs()
-                << "}";
-            detail::writeLogLine(oss.str());
-        }
+        // Log shutdown event to ALL files (Meta)
+        std::ostringstream oss;
+        oss << R"({"type":"shutdown",)"
+            << "\"pid\":" << state.pid << ","
+            << R"("app":")" << detail::escapeJson(state.appName) << "\","
+            << "\"ts_ns\":" << detail::getTimestampNs()
+            << "}";
+        detail::writeLogLine(LogCategory::Meta, oss.str());
 
         // Backend Shutdown (GENERIC CALL)
         backend::shutdown();
         std::lock_guard lock(state.logMutex);
         state.initialized = false;
-        if (state.logFile.is_open()) state.logFile.close();
+
+        // Close all files
+        for (auto& pair : state.logFiles) {
+            if (pair.second.is_open()) pair.second.close();
+        }
+        state.logFiles.clear();
     }
 
     // ============================================================================
@@ -93,8 +94,7 @@ namespace gpumon {
 
             // 1. Log Scope Begin with initial snapshot
             auto snapshots = backend::get_device_snapshots();
-            logScopeEvent("scope_begin", tsStart_, snapshots);
-
+            logScopeEvent(LogCategory::Scope, "scope_begin", tsStart_, snapshots);
             // 2. Start Background Sampler (if configured)
             if (state.sampleIntervalMs > 0) {
                 samplerThread_ = std::thread(&ScopedMonitor::samplingLoop, this, state.sampleIntervalMs);
@@ -121,7 +121,7 @@ namespace gpumon {
             auto snapshots = backend::get_device_snapshots();
 
             // 4. Log Scope End
-            logScopeEvent("scope_end", tsEnd, snapshots, tsStart_);
+            logScopeEvent(LogCategory::Scope, "scope_end", tsEnd, snapshots, tsStart_);
         }
 
         // Disable copy/move
@@ -137,7 +137,7 @@ namespace gpumon {
         std::thread samplerThread_;
 
         // Helper to format and write the JSON
-        void logScopeEvent(const char* type, const int64_t timestamp,
+        void logScopeEvent(const LogCategory category, const char* type, const int64_t timestamp,
                       const std::vector<detail::DeviceSnapshot>& snapshots,
                       const int64_t startTime = 0) {
 
@@ -164,20 +164,18 @@ namespace gpumon {
             detail::writeDeviceJson(oss, snapshots);
             oss << "}";
 
-            detail::writeLogLine(oss.str());
+            detail::writeLogLine(category, oss.str());
         }
 
         void samplingLoop(uint32_t intervalMs) {
             while (!stopSampling_) {
-                // Sleep first to avoid immediate duplicate sample
                 std::this_thread::sleep_for(std::chrono::milliseconds(intervalMs));
                 if (stopSampling_) break;
-                // GENERIC CALL to backend
                 auto snapshots = backend::get_device_snapshots();
 
                 int64_t now = detail::getTimestampNs();
 
-                logScopeEvent("scope_sample", now, snapshots);
+                logScopeEvent(LogCategory::Scope, "scope_sample", now, snapshots);
             }
         }
     };
@@ -216,7 +214,7 @@ namespace gpumon {
 
                 auto snapshots = backend::get_device_snapshots();
 
-                int64_t now = detail::getTimestampNs();
+                const int64_t now = detail::getTimestampNs();
                 const auto& state = detail::getState();
 
                 std::ostringstream oss;
@@ -228,7 +226,7 @@ namespace gpumon {
                 detail::writeDeviceJson(oss, snapshots);
                 oss << "}";
 
-                detail::writeLogLine(oss.str());
+                detail::writeLogLine(LogCategory::System, oss.str());
             }
         }
     };

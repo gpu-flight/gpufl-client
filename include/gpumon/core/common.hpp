@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <cstdint>
 #include <atomic>
+#include <map>
 
 #ifdef _WIN32
 #include <process.h>
@@ -19,13 +20,16 @@
 
 namespace gpumon {
 
-    // ============================================================================
-    // Data Structures
-    // ============================================================================
+    enum class LogCategory {
+        Meta,   // Init, Shutdown for all files
+        Kernel,
+        Scope,
+        System
+    };
 
     struct InitOptions {
         std::string appName;
-        std::string logFilePath;
+        std::string logPath;
         uint32_t sampleIntervalMs = 0; // 0 to disable background sampling
     };
 
@@ -52,7 +56,7 @@ namespace gpumon {
 
         struct State {
             std::string appName;
-            std::ofstream logFile;
+            std::map<LogCategory, std::ofstream> logFiles;
             std::mutex logMutex;
             int32_t pid;
             std::atomic<bool> initialized;
@@ -85,20 +89,8 @@ namespace gpumon {
             return std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count();
         }
 
-        inline std::string getDefaultLogPath(const std::string& appName, const int32_t pid) {
-            const char* logDirEnv = std::getenv("GPUMON_LOG_DIR");
-            if (!logDirEnv || logDirEnv[0] == '\0') return "";
-
-            const std::string logDir = logDirEnv;
-            std::ostringstream oss;
-            oss << logDir;
-        #ifdef _WIN32
-            if (!logDir.empty() && logDir.back() != '\\' && logDir.back() != '/') oss << "\\";
-        #else
-            if (!logDir.empty() && logDir.back() != '/') oss << "/";
-        #endif
-            oss << "gpumon_" << appName << "_" << pid << ".log";
-            return oss.str();
+        inline std::string generateLogPath(const std::string& prefix, const std::string& suffix) {
+            return prefix + "." + suffix + ".log";
         }
 
         // ============================================================================
@@ -117,13 +109,28 @@ namespace gpumon {
             return oss.str();
         }
 
-        inline void writeLogLine(const std::string& jsonLine) {
+        inline void writeLogLine(const LogCategory category, const std::string& jsonLine) {
             State& state = getState();
-            // Use lock to ensure thread-safe writing from sampler + main thread
             std::lock_guard lock(state.logMutex);
-            if (state.logFile.is_open()) {
-                state.logFile << jsonLine << '\n';
-                state.logFile.flush();
+
+            if (!state.initialized) return;
+
+            // Meta events (Init/Shutdown) write to ALL open files to keep them self-contained
+            if (category == LogCategory::Meta) {
+                for (auto& pair : state.logFiles) {
+                    if (pair.second.is_open()) {
+                        pair.second << jsonLine << '\n';
+                        pair.second.flush();
+                    }
+                }
+                return;
+            }
+
+            // Normal events write to their specific file
+            auto it = state.logFiles.find(category);
+            if (it != state.logFiles.end() && it->second.is_open()) {
+                it->second << jsonLine << '\n';
+                it->second.flush();
             }
         }
 

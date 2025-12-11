@@ -238,7 +238,7 @@ namespace gpumon {
             if (!tag.empty()) oss << R"(,"tag":")" << escapeJson(tag) << "\"";
 
             oss << R"(,"cuda_error":")" << escapeJson(cudaError) << "\"}";
-            writeLogLine(oss.str());
+            writeLogLine(LogCategory::Kernel, oss.str());
         }
 
         inline const char* getCudaErrorString(const cudaError_t error) {

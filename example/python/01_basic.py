@@ -4,7 +4,7 @@ import time
 # 1. Initialize the library
 # Arguments: (AppName, LogFilePath, SampleIntervalMs)
 # Interval=0 means "Only log start/end", no background sampling.
-gpumon.init("PythonDemo", "gpumon_basic.log", 0)
+gpumon.init("PythonDemo", "gpumon_basic.log", 5)
 
 print("Starting Trace...")
 

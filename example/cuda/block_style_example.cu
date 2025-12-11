@@ -30,7 +30,7 @@ int main() {
     // Initialize GPUmon
     gpumon::InitOptions opts;
     opts.appName = "block_style_demo";
-    opts.logFilePath = "gpumon_block.log";
+    opts.logPath = "gpumon_block.log";
     opts.sampleIntervalMs = 5;
     
     if (!gpumon::init(opts)) {
@@ -39,7 +39,7 @@ int main() {
     }
     
     std::cout << "=== GPUmon Block-Style API Demo ===" << std::endl;
-    std::cout << "Logs: " << opts.logFilePath << "\n" << std::endl;
+    std::cout << "Logs: " << opts.logPath << "\n" << std::endl;
     
     const int n = 1024;
     const size_t bytes = n * sizeof(int);
@@ -153,7 +153,7 @@ int main() {
     gpumon::shutdown();
     
     std::cout << "\n=== Demo Complete ===" << std::endl;
-    std::cout << "Check " << opts.logFilePath << " for detailed logs" << std::endl;
+    std::cout << "Check " << opts.logPath << " for detailed logs" << std::endl;
     
     return 0;
 }

@@ -27,7 +27,7 @@ PYBIND11_MODULE(_gpumon_client, m) {
     m.def("init", [](std::string app_name, std::string log_path, int interval_ms) {
         gpumon::InitOptions opts;
         opts.appName = app_name;
-        opts.logFilePath = log_path;
+        opts.logPath = log_path;
         opts.sampleIntervalMs = interval_ms;
         return gpumon::init(opts);
     }, py::arg("app_name"), py::arg("log_path") = "", py::arg("interval_ms") = 0);
