@@ -1,0 +1,59 @@
+name: Build GPUMON Client
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+        python-version: ["3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 1. Setup Python
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # GitHub runners do NOT have GPUs, but they can compile CUDA code if the toolkit is present.
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.29
+        id: cuda-toolkit
+        with:
+          cuda: '12.8.0'
+          method: 'network' # Faster download
+          use-github-cache: false
+
+      # 3a. Install System Dependencies (Linux Only)
+      - name: Install system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev
+
+      # 3b. Install Python Build Tools (All Platforms)
+      - name: Install python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install scikit-build-core pybind11 cmake ninja
+
+      # 4. Build & Install
+      # This triggers the CMake build defined in your pyproject.toml
+      - name: Build and Install
+        run: |
+          pip install . -v
+
+      # 5. Verification (Import Test)
+      # We cannot run the actual profiling (no GPU), but we can verify the module loads.
+      - name: Verify Logging Pipeline
+        run: |
+          python tests/verify_pipeline.py
