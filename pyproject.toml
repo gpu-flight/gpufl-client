@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "gpufl"
-version = "0.0.1"
+version = "0.1.0.dev"
 description = "GPU Monitoring Client"
 readme = "README.md"
 authors = [
@@ -28,6 +28,10 @@ Issues = "https://github.com/gpufl/gpufl-client/issues"
 
 [project.optional-dependencies]
 numba = ["numba", "numpy"]
+viz = [
+    "pandas>=1.5",
+    "matplotlib>=3.7"
+]
 
 [tool.scikit-build]
 cmake.args = ["-DCMAKE_BUILD_TYPE=Release"]
