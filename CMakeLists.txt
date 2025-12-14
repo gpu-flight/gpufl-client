@@ -45,12 +45,6 @@ set(GPUFL_HAS_CUDA 0)
 set(GPUFL_HAS_NVML 0)
 set(GPUFL_HAS_ROCM 0)
 
-target_compile_definitions(gpufl PUBLIC
-    GPUFL_HAS_CUDA=0
-    GPUFL_HAS_NVML=0
-    GPUFL_HAS_ROCM=0
-)
-
 # -----------------------
 # Backends
 # -----------------------
@@ -86,8 +80,6 @@ if(GPUFL_ENABLE_NVIDIA)
             "$ENV{CUDA_PATH}/lib/x64"
             PATH_SUFFIXES lib lib/x64
         )
-        set(GPUFL_HAS_NVML 1)
-        target_compile_definitions(gpufl PUBLIC GPUFL_HAS_NVML=1)
     else()
         find_library(NVML_LIBRARY NAMES nvidia-ml)
     endif()

@@ -1,6 +1,6 @@
 #include <stdexcept>
 #include <pybind11/pybind11.h>
-#include "../include/gpufl/gpufl.hpp"
+#include "gpufl/gpufl.hpp"
 
 namespace py = pybind11;
 

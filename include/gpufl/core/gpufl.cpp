@@ -2,7 +2,6 @@
 
 #include <atomic>
 #include <memory>
-#include <sstream>
 #include <string>
 #include <utility>
 
@@ -233,57 +232,4 @@ namespace gpufl {
         rt->logger->logScopeEnd(e);
     }
 
-    // ---- kernel event logging ----
-
-    // ---- helpers ----
-
-#if GPUFL_HAS_CUDA
-    static std::string dim3ToString_(dim3 v) {
-        std::ostringstream oss;
-        oss << "(" << v.x << "," << v.y << "," << v.z << ")";
-        return oss.str();
-    }
-
-    namespace detail {
-
-        void logKernelEvent(const std::string& kernelName,
-                            int64_t ts_start_ns,
-                            int64_t ts_end_ns,
-                            dim3 grid,
-                            dim3 block,
-                            int dyn_shared_bytes,
-                            const std::string& cuda_error,
-                            const cudaFuncAttributes& attrs) {
-            Runtime* rt = runtime();
-            if (!rt || !rt->logger) return;
-
-            KernelEvent e;
-            e.pid = detail::getPid();
-            e.app = rt->appName;
-            e.name = kernelName;
-
-            e.tsStartNs = ts_start_ns;
-            e.tsEndNs = ts_end_ns;
-            e.durationNs = (ts_end_ns >= ts_start_ns) ? (ts_end_ns - ts_start_ns) : 0;
-
-            e.grid = dim3ToString_(grid);
-            e.block = dim3ToString_(block);
-
-            e.dynSharedBytes = dyn_shared_bytes;
-            e.numRegs = attrs.numRegs;
-            e.staticSharedBytes = attrs.sharedSizeBytes;
-            e.localBytes = attrs.localSizeBytes;
-            e.constBytes = attrs.constSizeBytes;
-            e.cudaError = cuda_error.empty() ? "no error" : cuda_error;
-
-            // Inventory JSON is okay for now. Later you might want sampleAll() here (more expensive).
-            const std::string devicesJson = rt->collector
-                ? rt->collector->devicesInventoryJson()
-                : "[]";
-
-            rt->logger->logKernel(e, devicesJson);
-        }
-
-    }  // namespace detail
-#endif
 } // namespace gpufl
