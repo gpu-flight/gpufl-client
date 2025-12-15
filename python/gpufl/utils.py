@@ -16,7 +16,7 @@ def launch_kernel(kernel_func, grid, block, *args):
         raise ImportError("Numba is required to use 'launch_kernel'. Please run: pip install numba")
 
     # 1. Capture Start
-    start_ns = time.time_ns()
+    start_ns = time.monotonic_ns()
 
     # 2. Run Kernel
     kernel_func[grid, block](*args)
@@ -25,7 +25,7 @@ def launch_kernel(kernel_func, grid, block, *args):
     cuda.synchronize()
 
     # 4. Capture End
-    end_ns = time.time_ns()
+    end_ns = time.monotonic_ns()
 
     # 5. Log
     # Handle tuple/int formats for grid/block

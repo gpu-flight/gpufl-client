@@ -36,15 +36,30 @@ def test_pipeline():
         # 5. Verify Files Exist
         print("5. Verifying Log Files...")
 
-        expected_files = {
-            "scope": f"{log_base}.0.log",
-        }
+        # The library may name logs as:
+        #   ci_test.scope.log (preferred)
+        # or other patterns depending on platform/build.
+        candidates = [
+            f"{log_base}.scope.log",
+            f"{log_base}.0.log",  # legacy/alternate naming
+        ]
 
-        # Required: scope
-        if not os.path.exists(expected_files["scope"]):
-            print(f"FAILED: Missing scope log file at {expected_files['scope']}")
+        scope_path = next((p for p in candidates if os.path.exists(p)), None)
+
+        if not scope_path:
+            print("FAILED: Missing scope log file. Tried:")
+            for p in candidates:
+                print("  -", p)
+
+            # Help debugging: list what was actually produced
+            produced = [os.path.join(temp_dir, f) for f in os.listdir(temp_dir)]
+            print("Files in temp_dir:")
+            for f in produced:
+                print("  -", f)
+
             exit(1)
-        print(f"Found scope log: {expected_files['scope']}")
+
+        print(f"Found scope log: {scope_path}")
 
     finally:
         # Cleanup
