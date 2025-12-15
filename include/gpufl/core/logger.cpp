@@ -69,8 +69,8 @@ namespace gpufl {
     }
 
     void Logger::close() {
-        opened_ = false;
-        file_ = LogFileState{};
+        std::lock_guard lk(mu_);
+        closeLocked_();
     }
 
     void Logger::closeLocked_() {
