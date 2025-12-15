@@ -14,7 +14,8 @@ namespace gpufl {
     struct InitOptions {
         std::string appName = "gpufl";
         std::string logPath = "";     // if empty, will default to "<app>.log"
-        int sampleIntervalMs = 0;     // 0 disables background system sampling
+        int scopeSampleRateMs = 0;
+        int systemSampleRateMs = 0;
         BackendKind backend = BackendKind::Auto;
     };
 

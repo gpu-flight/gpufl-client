@@ -1,5 +1,6 @@
 #include <stdexcept>
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 #include "gpufl/gpufl.hpp"
 
 namespace py = pybind11;
@@ -25,6 +26,13 @@ private:
 PYBIND11_MODULE(_gpufl_client, m) {
     m.doc() = "GPUFL Internal C++ Binding";
 
+    py::class_<gpufl::InitOptions>(m, "InitOptions")
+        .def(py::init<>())
+        .def_readwrite("appName", &gpufl::InitOptions::appName)
+        .def_readwrite("logPath", &gpufl::InitOptions::logPath)
+        .def_readwrite("scopeSampleRateMs", &gpufl::InitOptions::scopeSampleRateMs)
+        .def_readwrite("systemSampleRateMs", &gpufl::InitOptions::systemSampleRateMs);
+
     m.def("init", [](const std::string &app_name,
                  const std::string &log_path,
                  const int interval_ms,
@@ -32,7 +40,8 @@ PYBIND11_MODULE(_gpufl_client, m) {
             gpufl::InitOptions opts;
             opts.appName = app_name;
             opts.logPath = log_path;
-            opts.sampleIntervalMs = interval_ms;
+            opts.scopeSampleRateMs = interval_ms;
+            opts.systemSampleRateMs = interval_ms;
 
             // runtime backend selection
             if (backend == "auto") {

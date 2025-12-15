@@ -19,6 +19,8 @@ namespace gpufl {
             std::string basePath;
             std::size_t rotateBytes = 64 * 1024 * 1024; // 64 MiB default
             bool flushAlways = false;
+            int scopeSampleRateMs = 0;
+            int systemSampleRateMs = 0;
         };
 
         Logger();

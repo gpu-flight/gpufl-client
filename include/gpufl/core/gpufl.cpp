@@ -25,6 +25,8 @@
 namespace gpufl {
     struct InitOptions;
 
+    static std::atomic<int> g_scopeSampleRateMs{0};
+
     static std::string defaultLogPath_(const std::string& app) {
         return app + ".log";
     }
@@ -103,6 +105,10 @@ namespace gpufl {
 
         Logger::Options logOpts;
         logOpts.basePath = logPath;
+        logOpts.scopeSampleRateMs = opts.scopeSampleRateMs;
+        logOpts.systemSampleRateMs = opts.systemSampleRateMs;
+
+        g_scopeSampleRateMs.store(opts.scopeSampleRateMs, std::memory_order_relaxed);
 
         if (!rt->logger->open(logOpts)) {
             return false;
@@ -126,8 +132,8 @@ namespace gpufl {
         rt->logger->logInit(ie, devicesJson);
 
         // Start sampler if enabled and collector exists
-        if (opts.sampleIntervalMs > 0 && rt->collector) {
-            rt->sampler.start(rt->appName, rt->logger, rt->collector, opts.sampleIntervalMs, rt->appName);
+        if (opts.systemSampleRateMs > 0 && rt->collector) {
+            rt->sampler.start(rt->appName, rt->logger, rt->collector, opts.systemSampleRateMs, rt->appName);
         }
 
         set_runtime(std::move(rt));
@@ -194,7 +200,7 @@ namespace gpufl {
           startTs_(detail::getTimestampNs()),
           scopeId_(nextScopeId_()) {
 
-        const Runtime* rt = runtime();
+        Runtime* rt = runtime();
         if (!rt || !rt->logger) return;
 
         ScopeBeginEvent e;
@@ -205,16 +211,20 @@ namespace gpufl {
         e.tsNs = startTs_;
         e.scopeId = scopeId_;
 
-        // Boundary snapshot: ensures useful data even when sampleIntervalMs == 0
         if (rt->collector) {
             e.devices = rt->collector->sampleAll();
         }
-
         rt->logger->logScopeBegin(e);
+
+        int rate = g_scopeSampleRateMs.load(std::memory_order_relaxed);
+        if (rate > 0 && rt->collector) {
+            rt->sampler.start(rt->appName, rt->logger, rt->collector, rate, name_);
+        }
+
     }
 
     ScopedMonitor::~ScopedMonitor() {
-        Runtime* rt = runtime();
+        const Runtime* rt = runtime();
         if (!rt || !rt->logger) return;
 
         ScopeEndEvent e;

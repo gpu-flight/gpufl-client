@@ -92,9 +92,7 @@ namespace gpufl {
         // Naming format: basePath.category.index.log
         oss << opt_.basePath << "." << name_ << "." << index_ << ".log";
 
-        fs::path base(opt_.basePath);
-
-        return base.string() + oss.str();
+        return opt_.basePath + oss.str();
     }
 
     void Logger::LogChannel::ensureOpenLocked() {
@@ -108,7 +106,6 @@ namespace gpufl {
         if (p.has_parent_path()) {
             std::error_code ec;
             fs::create_directories(p.parent_path(), ec);
-            // ignore error, it might already exist
         }
 
         stream_.open(p, std::ios::out | std::ios::app);
@@ -192,6 +189,8 @@ namespace gpufl {
             << ",\"app\":\"" << jsonEscape(e.app) << "\""
             << ",\"logPath\":\"" << jsonEscape(e.logPath) << "\""
             << ",\"ts_ns\":" << e.tsNs
+            << ",\"scope_rate_ms\":" << opt_.scopeSampleRateMs
+            << ",\"system_rate_ms\":" << opt_.systemSampleRateMs
             << ",\"devices\":" << devicesJson
             << "}";
 
