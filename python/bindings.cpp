@@ -35,28 +35,12 @@ PYBIND11_MODULE(_gpufl_client, m) {
 
     m.def("init", [](const std::string &app_name,
                  const std::string &log_path,
-                 const int sampleIntervalMs,
-                 const std::string &backend = "auto")->bool {
+                 const int sampleIntervalMs)->bool {
         gpufl::InitOptions opts;
         opts.appName = app_name;
         opts.logPath = log_path;
         opts.scopeSampleRateMs = sampleIntervalMs;
         opts.systemSampleRateMs = sampleIntervalMs;
-
-        // runtime backend selection
-        if (backend == "auto") {
-            opts.backend = gpufl::BackendKind::Auto;
-        } else if (backend == "nvidia") {
-            opts.backend = gpufl::BackendKind::Nvidia;
-        } else if (backend == "amd") {
-            opts.backend = gpufl::BackendKind::Amd;
-        } else if (backend == "none") {
-            opts.backend = gpufl::BackendKind::None;
-        } else {
-            throw std::runtime_error(
-                "Invalid backend: " + backend +
-                " (expected: 'auto', 'nvidia', 'amd', 'none')");
-        }
 
         return gpufl::init(opts);
     }, py::arg("app_name"),
