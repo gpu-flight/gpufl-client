@@ -62,4 +62,4 @@ jobs:
 
       - name: Verify Logging Pipeline
         run: |
-          python tests/verify_pipeline.py
+          python -u tests/verify_pipeline.py
