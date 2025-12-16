@@ -42,8 +42,8 @@ PYBIND11_MODULE(_gpufl_client, m) {
         gpufl::InitOptions opts;
         opts.appName = app_name;
         opts.logPath = log_path;
-        opts.scopeSampleRateMs = sampleIntervalMs;
-        opts.systemSampleRateMs = sampleIntervalMs;
+        opts.scopeSampleRateMs = intervals_ms;
+        opts.systemSampleRateMs = intervals_ms;
 
         return gpufl::init(opts);
     }, py::arg("app_name"),
