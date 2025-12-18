@@ -237,9 +237,10 @@ namespace gpufl {
         if (!chanKernel_) return;
         std::ostringstream oss;
         oss << "{"
-            << "\"type\":\"kernel\""
+            << "\"type\":\"kernel_start\""
             << ",\"pid\":" << e.pid
             << ",\"app\":\"" << jsonEscape(e.app) << "\""
+            << ",\"host\":" << hostToJson(e.host)
             << ",\"devices\":" << devicesToJson(e.devices)
             << ",\"name\":\"" << jsonEscape(e.name) << "\""
             << ",\"ts_start_ns\":" << e.tsStartNs
@@ -252,6 +253,8 @@ namespace gpufl {
             << ",\"static_shared_bytes\":" << e.staticSharedBytes
             << ",\"local_bytes\":" << e.localBytes
             << ",\"const_bytes\":" << e.constBytes
+            << ",\"occupancy\":" << e.occupancy
+            << ",\"max_active_blocks\":" << e.maxActiveBlocks
             << ",\"cuda_error\":\"" << jsonEscape(e.cudaError) << "\""
             << "}";
         chanKernel_->write(oss.str());

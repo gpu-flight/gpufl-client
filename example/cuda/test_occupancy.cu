@@ -1,0 +1,58 @@
+#include <iostream>
+#include <cuda_runtime.h>
+#include "gpufl/gpufl.hpp"
+#include "gpufl/core/common.hpp"
+#include "gpufl/cuda/cuda.hpp"
+#include "gpufl/cuda/launch.hpp"
+
+// A simple kernel to test
+__global__ void vector_add(const float* a, const float* b, float* c, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        c[idx] = a[idx] + b[idx];
+    }
+}
+
+int main() {
+    // [2] Initialize GPUFL
+    gpufl::init({"OccupancyTest", "gpufl_test.log", 10});
+
+    const int N = 1000000;
+    const int bytes = N * sizeof(float);
+
+    // Allocate Memory
+    float *d_a, *d_b, *d_c;
+    cudaMalloc(&d_a, bytes);
+    cudaMalloc(&d_b, bytes);
+    cudaMalloc(&d_c, bytes);
+
+    // --- Test 1: High Occupancy (Standard Block Size) ---
+    // 256 threads is usually a "sweet spot" for occupancy
+    {
+        int threads = 256;
+        int blocks = (N + threads - 1) / threads;
+        
+        std::cout << "Launching Kernel with 256 threads (Expect High Occupancy)..." << std::endl;
+        
+        // Use GFL_LAUNCH instead of <<<>>>
+        GFL_LAUNCH(vector_add, blocks, threads, 0, 0, d_a, d_b, d_c, N);
+    }
+
+    // --- Test 2: Low Occupancy (Tiny Block Size) ---
+    // 32 threads (1 warp) per block often wastes SM resources due to block limit caps
+    {
+        int threads = 32;
+        int blocks = (N + threads - 1) / threads;
+        
+        std::cout << "Launching Kernel with 32 threads (Expect Lower Occupancy)..." << std::endl;
+        
+        GFL_LAUNCH_TAGGED("inefficient_launch", vector_add, blocks, threads, 0, 0, d_a, d_b, d_c, N);
+    }
+
+    // [3] Shutdown
+    gpufl::shutdown();
+    
+    cudaFree(d_a); cudaFree(d_b); cudaFree(d_c);
+    std::cout << "Done! Check gpufl_test.log for 'occupancy' fields." << std::endl;
+    return 0;
+}
