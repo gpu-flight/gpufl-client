@@ -122,7 +122,10 @@ namespace gpufl {
         ie.app = rt->appName;
         ie.logPath = logPath;
         ie.tsNs = detail::getTimestampNs();
-        ie.devices = rt->collector->sampleAll();
+        // Collector may be unavailable on systems without NVML/ROCm. Guard usage.
+        if (rt->collector) {
+            ie.devices = rt->collector->sampleAll();
+        }
         ie.host = rt->hostCollector->sample();
 
         rt->logger->logInit(ie);

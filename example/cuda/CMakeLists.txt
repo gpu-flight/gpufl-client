@@ -16,6 +16,7 @@ if(NOT TARGET CUDA::nvml)
     if(NVML_LIB AND NVML_INC)
         add_library(CUDA::nvml UNKNOWN IMPORTED)
         set_target_properties(CUDA::nvml PROPERTIES
+
                 IMPORTED_LOCATION "${NVML_LIB}"
                 INTERFACE_INCLUDE_DIRECTORIES "${NVML_INC}"
         )
@@ -25,11 +26,13 @@ if(NOT TARGET CUDA::nvml)
 endif()
 
 # Define Executables
+add_executable(test_occupancy test_occupancy.cu)
 add_executable(gfl_block_example block_style_example.cu)
 add_executable(system_monitor system_monitor.cu)
 
 # 3. Link Libraries
 # Link against the target 'CUDA::nvml' instead of raw library names
+target_link_libraries(test_occupancy PRIVATE gpufl::gpufl)
 target_link_libraries(gfl_block_example PRIVATE gpufl::gpufl)
 
 target_link_libraries(system_monitor PRIVATE
@@ -46,6 +49,10 @@ set_target_properties(gfl_block_example PROPERTIES
 set_target_properties(system_monitor PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
         CUDA_ARCHITECTURES "native"
+)
+set_target_properties(test_occupancy PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_ARCHITECTURES "native"
 )
 
 # Platform Specifics

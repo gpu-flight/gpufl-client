@@ -7,29 +7,41 @@ try:
     HAS_NUMBA = True
 except ImportError:
     HAS_NUMBA = False
+
+def _to_dim3_str(val):
+    if isinstance(val, int):
+        return f"({val},1,1)"
+    if isinstance(val, (tuple, list)):
+        x = val[0] if len(val) > 0 else 1
+        y = val[1] if len(val) > 1 else 1
+        z = val[2] if len(val) > 2 else 1
+        return f"({x},{y},{z})"
+    return "(1,1,1)"
+
 def launch_kernel(kernel_func, grid, block, *args):
     """
-    Python equivalent of GFL_LAUNCH.
-    Executes kernel, syncs, and logs the specific kernel duration.
+    Executes a Numba CUDA kernel wrapped in a GPUFL KernelScope.
     """
     if not HAS_NUMBA:
-        raise ImportError("Numba is required to use 'launch_kernel'. Please run: pip install numba")
+        raise ImportError("Numba is required to use 'launch_kernel'.")
 
-    # 1. Capture Start
-    start_ns = time.monotonic_ns()
+    if getattr(gfl, 'KernelScope', None) is None:
+        kernel_func[grid, block](*args)
+        cuda.synchronize()
+        return
 
-    # 2. Run Kernel
-    kernel_func[grid, block](*args)
+    grid_str = _to_dim3_str(grid)
+    block_str = _to_dim3_str(block)
 
-    # 3. Synchronize (Essential!)
-    cuda.synchronize()
-
-    # 4. Capture End
-    end_ns = time.monotonic_ns()
-
-    # 5. Log
-    # Handle tuple/int formats for grid/block
-    gx, gy, gz = (grid + (1, 1))[:3] if isinstance(grid, tuple) else (grid, 1, 1)
-    bx, by, bz = (block + (1, 1))[:3] if isinstance(block, tuple) else (block, 1, 1)
-
-    gfl.log_kernel(kernel_func.__name__, gx, gy, gz, bx, by, bz, start_ns, end_ns)
+    # Since Numba introspection is failing/unsupported, we pass 0 defaults.
+    # This prevents crashes and keeps logs clean.
+    with gfl.KernelScope(
+            kernel_func.__name__,
+            tag="numba",
+            grid=grid_str,
+            block=block_str,
+            occupancy=0.0,
+            maxActiveBlocks=0
+    ):
+        kernel_func[grid, block](*args)
+        cuda.synchronize()

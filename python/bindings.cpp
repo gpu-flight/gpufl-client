@@ -32,21 +32,29 @@ public:
     PyKernelScope(std::string name, std::string tag,
                   std::string grid, std::string block,
                   int dynShared, int numRegs,
-                  size_t staticShared, size_t localBytes, size_t constBytes)
+                  size_t staticShared, size_t localBytes, size_t constBytes,
+                  float occupancy, int maxActiveBlocks)
         : name_(name), tag_(tag), grid_(grid), block_(block),
           dynShared_(dynShared), numRegs_(numRegs),
-          staticShared_(staticShared), localBytes_(localBytes), constBytes_(constBytes) {}
+          staticShared_(staticShared), localBytes_(localBytes), constBytes_(constBytes),
+          occupancy_(occupancy), maxActiveBlocks_(maxActiveBlocks) {}
 
     void enter() {
+        // [UPDATED] Pass new metrics to KernelMonitor
         monitor_ = std::make_unique<gpufl::cuda::KernelMonitor>(
-            name_, tag_, grid_, block_, dynShared_, numRegs_, staticShared_, localBytes_, constBytes_
+            name_, tag_, grid_, block_, dynShared_, numRegs_,
+            staticShared_, localBytes_, constBytes_,
+            occupancy_, maxActiveBlocks_
         );
     }
     void exit(py::object, py::object, py::object) { monitor_.reset(); }
+
 private:
     std::string name_, tag_, grid_, block_;
     int dynShared_, numRegs_;
     size_t staticShared_, localBytes_, constBytes_;
+    float occupancy_;         // New member
+    int maxActiveBlocks_;     // New member
     std::unique_ptr<gpufl::cuda::KernelMonitor> monitor_;
 };
 #endif
@@ -86,12 +94,13 @@ PYBIND11_MODULE(_gpufl_client, m) {
 
 #if GPUFL_HAS_CUDA
     py::class_<PyKernelScope>(m, "KernelScope")
-        .def(py::init<std::string, std::string, std::string, std::string, int, int, size_t, size_t, size_t>(),
+        .def(py::init<std::string, std::string, std::string, std::string, int, int, size_t, size_t, size_t, float, int>(),
              py::arg("name"),
              py::arg("tag") = "",
              py::arg("grid") = "", py::arg("block") = "",
              py::arg("dynShared") = 0, py::arg("numRegs") = 0,
-             py::arg("staticShared") = 0, py::arg("localBytes") = 0, py::arg("constBytes") = 0)
+             py::arg("staticShared") = 0, py::arg("localBytes") = 0, py::arg("constBytes") = 0,
+             py::arg("occupancy") = 0.0f, py::arg("maxActiveBlocks") = 0)
         .def("__enter__", [](PyKernelScope &self) { self.enter(); return &self; })
         .def("__exit__", &PyKernelScope::exit);
 #endif

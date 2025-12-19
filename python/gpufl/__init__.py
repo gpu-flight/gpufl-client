@@ -12,7 +12,7 @@ if os.name == 'nt':
 
 # 2. Import C++ Core Bindings
 try:
-    from ._gpufl_client import Scope, init, shutdown
+    from ._gpufl_client import Scope, init, shutdown, KernelScope
 except Exception as e:
     if os.environ.get("GITHUB_ACTIONS") == "true":
         raise RuntimeError(
@@ -37,4 +37,4 @@ except ImportError:
     launch_kernel = None
 
 # 4. Define Public API
-__all__ = ["Scope", "init", "shutdown", "log_kernel", "launch_kernel"]
+__all__ = ["Scope", "init", "shutdown", "KernelScope", "launch_kernel"]

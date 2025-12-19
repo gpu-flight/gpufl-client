@@ -1,4 +1,4 @@
-from gpufl._gpufl_client import Scope, init, shutdown
+import gpufl as gfl
 import os
 import time
 import tempfile
@@ -18,15 +18,15 @@ def test_pipeline():
     try:
         print("2. Initializing GPUFL...")
         # Passing 0 for interval
-        res = init("CI_Test_App", log_base_path, 5)
+        res = gfl.init("CI_Test_App", log_base_path, 5)
         print("3. Running Scope...")
-        with Scope("ci_scope_01", "test_tag"):
+        with gfl.Scope("ci_scope_01", "test_tag"):
             time.sleep(0.1)
             x = 0
             for i in range(1000): x += i
 
         print("4. Shutting down...")
-        shutdown()
+        gfl.shutdown()
 
         print("5. Verifying Log Files...")
         files = sorted(os.listdir(temp_dir))

@@ -9,18 +9,9 @@
 #include "gpufl/gpufl.hpp"
 
 namespace gpufl::cuda {
+    const cudaDeviceProp& getDevicePropsCached(int deviceId);
 
     std::string dim3ToString(dim3 v);
-
-    void logKernelEvent(const std::string& kernelName,
-                        int64_t ts_start_ns,
-                        int64_t ts_end_ns,
-                        dim3 grid,
-                        dim3 block,
-                        int dyn_shared_bytes,
-                        const std::string& cuda_error,
-                        const cudaFuncAttributes& attrs,
-                        const std::string& tag = "");
 
     const char* getCudaErrorString(cudaError_t error);
 
@@ -43,18 +34,14 @@ namespace gpufl::cuda {
                                int numRegs = 0,
                                size_t staticShared = 0,
                                size_t localBytes = 0,
-                               size_t constBytes = 0);
+                               size_t constBytes = 0,
+                               float occupancy = 0.0f,
+                               int maxActiveBlocks = 0);
 
         ~KernelMonitor();
 
         void setError(std::string err) {
             error_ = std::move(err);
-        }
-
-        static std::string dim3ToString(dim3 v) {
-            std::ostringstream oss;
-            oss << "(" << v.x << "," << v.y << "," << v.z << ")";
-            return oss.str();
         }
 
         static const char* getCudaErrorString(const cudaError_t error) {

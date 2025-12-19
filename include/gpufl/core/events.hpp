@@ -62,6 +62,8 @@ namespace gpufl {
         std::size_t localBytes = 0;
         std::size_t constBytes = 0;
         std::string cudaError;
+        float occupancy = 0.0f;
+        int maxActiveBlocks = 0;
 
         HostSample host;
         std::vector<DeviceSample> devices;
