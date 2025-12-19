@@ -19,6 +19,7 @@ namespace gpufl {
             std::string basePath;
             std::size_t rotateBytes = 64 * 1024 * 1024; // 64 MiB default
             bool flushAlways = false;
+            int scopeSampleRateMs = 0;
             int systemSampleRateMs = 0;
         };
 
@@ -29,23 +30,21 @@ namespace gpufl {
         void close();
 
         // Lifecycle: writes to ALL active channels
-        void logInit(const InitEvent& e) const;
-        void logShutdown(const ShutdownEvent& e) const;
+        void logInit(const InitEvent& e, const std::string& devicesJson );
+        void logShutdown(const ShutdownEvent& e);
 
         // Kernel channel
-        void logKernelBegin(const KernelBeginEvent& e) const;
-        void logKernelEnd(const KernelEndEvent& e) const;
-        void logKernelSample(const KernelSampleEvent& e) const;
+        void logKernel(const KernelEvent& e, const std::string& devicesJson);
 
         // Scope channel
-        void logScopeBegin(const ScopeBeginEvent& e) const;
-        void logScopeEnd(const ScopeEndEvent& e) const;
-        void logScopeSample(const ScopeSampleEvent& e) const;
+        void logScopeBegin(const ScopeBeginEvent& e);
+        void logScopeEnd(const ScopeEndEvent& e);
+        void logScopeSample(const ScopeSampleEvent& e);
 
         // System channel
-        void logSystemStart(const SystemStartEvent& e) const;
-        void logSystemStop(const SystemStopEvent& e) const;
-        void logSystemSample(const SystemSampleEvent& e) const;
+        void logSystemStart(const SystemStartEvent& e);
+        void logSystemStop(const SystemStopEvent& e);
+        void logSystemSample(const SystemSampleEvent& e);
 
         static std::string hostToJson(const HostSample& h);
 

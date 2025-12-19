@@ -9,56 +9,33 @@
 #if !defined(__CUDACC__)
   #error "gpufl/cuda/launch.hpp must be compiled with NVCC (__CUDACC__)"
 #endif
-#define GFL_LAUNCH(kernel, grid, block, sharedMem, stream, ...)                      \
-    do {                                                                             \
-        auto& _attrs = gpufl::cuda::get_kernel_static_attrs(kernel);                 \
-        std::string _gStr = gpufl::cuda::KernelMonitor::dim3ToString(grid);          \
-        std::string _bStr = gpufl::cuda::KernelMonitor::dim3ToString(block);         \
-        gpufl::cuda::KernelMonitor _monitor(                                         \
-            #kernel,                                                                 \
-            "",                                                                      \
-            _gStr,                                                                   \
-            _bStr,                                                                   \
-            (sharedMem),                                                             \
-            _attrs.numRegs,                                                          \
-            _attrs.sharedSizeBytes,                                                  \
-            _attrs.localSizeBytes,                                                   \
-            _attrs.constSizeBytes                                                    \
-        );                                                                           \
-                                                                                     \
-        kernel<<<(grid), (block), (sharedMem), (stream)>>>(__VA_ARGS__);             \
-                                                                                     \
-        cudaError_t _err = cudaGetLastError();                                       \
-        if (_err == cudaSuccess) {                                                   \
-            cudaError_t _syncErr = cudaDeviceSynchronize();                          \
-            if (_syncErr != cudaSuccess) _err = _syncErr;                            \
-        }                                                                            \
-        _monitor.setError(cudaGetErrorString(_err));                                 \
-    } while (0)
 
-#define GFL_LAUNCH_TAGGED(tag, kernel, grid, block, sharedMem, stream, ...)          \
-    do {                                                                             \
-        auto& _attrs = gpufl::cuda::get_kernel_static_attrs(kernel);                 \
-        std::string _gStr = gpufl::cuda::KernelMonitor::dim3ToString(grid);          \
-        std::string _bStr = gpufl::cuda::KernelMonitor::dim3ToString(block);         \
-        gpufl::cuda::KernelMonitor _monitor(                                         \
-            #kernel,                                                                 \
-            (tag),                                                                   \
-            _gStr,                                                                   \
-            _bStr,                                                                   \
-            (sharedMem),                                                             \
-            _attrs.numRegs,                                                          \
-            _attrs.sharedSizeBytes,                                                  \
-            _attrs.localSizeBytes,                                                   \
-            _attrs.constSizeBytes                                                    \
-        );                                                                           \
-                                                                                     \
-        kernel<<<(grid), (block), (sharedMem), (stream)>>>(__VA_ARGS__);             \
-                                                                                     \
-        cudaError_t _err = cudaGetLastError();                                       \
-        if (_err == cudaSuccess) {                                                   \
-            cudaError_t _syncErr = cudaDeviceSynchronize();                          \
-            if (_syncErr != cudaSuccess) _err = _syncErr;                            \
-        }                                                                            \
-        _monitor.setError(cudaGetErrorString(_err));                                 \
-    } while (0)
+#define GFL_LAUNCH(kernel, grid, block, sharedMem, stream, ...) \
+    do { \
+        int64_t _gfl_ts_start = gpufl::detail::getTimestampNs(); \
+        kernel<<<grid, block, sharedMem, stream>>>(__VA_ARGS__); \
+        cudaError_t _gfl_err = cudaGetLastError(); \
+        cudaError_t _gfl_sync_err = cudaDeviceSynchronize(); \
+        if (_gfl_sync_err != cudaSuccess && _gfl_err == cudaSuccess) { \
+            _gfl_err = _gfl_sync_err; \
+        } \
+        int64_t _gfl_ts_end = gpufl::detail::getTimestampNs(); \
+        auto& _attrs = gpufl::cuda::get_kernel_static_attrs(kernel); \
+        gpufl::cuda::logKernelEvent(#kernel, _gfl_ts_start, _gfl_ts_end, grid, block, sharedMem, gpufl::cuda::getCudaErrorString(_gfl_err), _attrs); \
+    } while(0)
+
+// wraps a single kernel launch with custom tag
+#define GFL_LAUNCH_TAGGED(tag, kernel, grid, block, sharedMem, stream, ...) \
+    do { \
+        int64_t _gfl_ts_start = gpufl::detail::getTimestampNs(); \
+        kernel<<<grid, block, sharedMem, stream>>>(__VA_ARGS__); \
+        cudaError_t _gfl_err = cudaGetLastError(); \
+        cudaError_t _gfl_sync_err = cudaDeviceSynchronize(); \
+        if (_gfl_sync_err != cudaSuccess && _gfl_err == cudaSuccess) { \
+            _gfl_err = _gfl_sync_err; \
+        } \
+        int64_t _gfl_ts_end = gpufl::detail::getTimestampNs(); \
+        auto& _attrs = gpufl::cuda::get_kernel_static_attrs(kernel); \
+        gpufl::cuda::logKernelEvent(#kernel, _gfl_ts_start, _gfl_ts_end, grid, block, sharedMem, gpufl::cuda::getCudaErrorString(_gfl_err), _attrs, tag); \
+    } while(0)
+

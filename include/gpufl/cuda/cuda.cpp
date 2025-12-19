@@ -1,54 +1,58 @@
-#define GPUFL_EXPORTS
 #include "gpufl/cuda/cuda.hpp"
 #include "gpufl/core/events.hpp"
 #include "gpufl/core/runtime.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/logger.hpp"
+#include <sstream>
 
 namespace gpufl::cuda {
 
-    KernelMonitor::KernelMonitor(std::string name,
-                                 std::string tag,
-                                 std::string grid, std::string block,
-                                 const int dynShared, const int numRegs,
-                                 const size_t staticShared, const size_t localBytes, const size_t constBytes)
-        : name_(std::move(name)), pid_(detail::getPid()), startTs_(detail::getTimestampNs()), tag_(std::move(tag)) {
-
-        Runtime* rt = runtime();
-        if (!rt || !rt->logger) return;
-
-        KernelBeginEvent e;
-        e.pid = pid_;
-        e.app = rt->appName;
-        e.name = name_;
-        e.tag = std::move(tag);
-        e.tsStartNs = startTs_; // Maps to user's 'tsStartNs'
-
-        // Populate Launch Params
-        e.grid = std::move(grid);
-        e.block = std::move(block);
-        e.dynSharedBytes = dynShared;
-        e.numRegs = numRegs;
-        e.staticSharedBytes = staticShared;
-        e.localBytes = localBytes;
-        e.constBytes = constBytes;
-
-        if (rt->collector) e.devices = rt->collector->sampleAll();
-        if (rt->hostCollector) e.host = rt->hostCollector->sample();
-
-        rt->logger->logKernelBegin(e);
+    std::string dim3ToString(dim3 v) {
+        std::ostringstream oss;
+        oss << "(" << v.x << "," << v.y << "," << v.z << ")";
+        return oss.str();
     }
 
-    KernelMonitor::~KernelMonitor() {
+    void logKernelEvent(const std::string& kernelName,
+                    int64_t ts_start_ns,
+                    int64_t ts_end_ns,
+                    dim3 grid,
+                    dim3 block,
+                    int dyn_shared_bytes,
+                    const std::string& cuda_error,
+                    const cudaFuncAttributes& attrs,
+                    const std::string& tag) {
         Runtime* rt = gpufl::runtime();
         if (!rt || !rt->logger) return;
-        KernelEndEvent e;
-        e.pid = pid_;
+
+        KernelEvent e;
+        e.pid = gpufl::detail::getPid();
         e.app = rt->appName;
-        e.name = name_;
-        e.tsNs = detail::getTimestampNs();
-        e.tag = tag_;
-        e.devices = rt->collector ? rt->collector->sampleAll() : std::vector<DeviceSample>();
-        rt->logger->logKernelEnd(e);
+        e.name = kernelName;
+
+        e.tsStartNs = ts_start_ns;
+        e.tsEndNs = ts_end_ns;
+        e.durationNs = (ts_end_ns >= ts_start_ns) ? (ts_end_ns - ts_start_ns) : 0;
+
+        e.grid = gpufl::cuda::dim3ToString(grid);
+        e.block = gpufl::cuda::dim3ToString(block);
+
+        e.dynSharedBytes = dyn_shared_bytes;
+        e.numRegs = attrs.numRegs;
+        e.staticSharedBytes = attrs.sharedSizeBytes;
+        e.localBytes = attrs.localSizeBytes;
+        e.constBytes = attrs.constSizeBytes;
+        e.cudaError = cuda_error.empty() ? "no error" : cuda_error;
+        e.tag = tag;
+
+        const std::string devicesJson = rt->collector
+            ? rt->collector->devicesInventoryJson()
+            : "[]";
+
+        rt->logger->logKernel(e, devicesJson);
+    }
+
+    const char* getCudaErrorString(const cudaError_t error) {
+        return ::cudaGetErrorString(error);
     }
 }

@@ -12,6 +12,7 @@ namespace gpufl::amd {
         RocmCollector();
         ~RocmCollector() override;
 
+        std::string devicesInventoryJson() override;
         std::vector<DeviceSample> sampleAll() override;
     };
 

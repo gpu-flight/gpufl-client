@@ -1,5 +1,6 @@
 #include "gpufl.hpp"
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <utility>
@@ -24,6 +25,8 @@
 
 namespace gpufl {
     struct InitOptions;
+
+    static std::atomic<int> g_scopeSampleRateMs{0};
 
     static std::string defaultLogPath_(const std::string& app) {
         return app + ".log";
@@ -104,9 +107,10 @@ namespace gpufl {
 
         Logger::Options logOpts;
         logOpts.basePath = logPath;
+        logOpts.scopeSampleRateMs = opts.scopeSampleRateMs;
         logOpts.systemSampleRateMs = opts.systemSampleRateMs;
 
-        g_systemSampleRateMs.store(opts.systemSampleRateMs, std::memory_order_relaxed);
+        g_scopeSampleRateMs.store(opts.scopeSampleRateMs, std::memory_order_relaxed);
 
         if (!rt->logger->open(logOpts)) {
             return false;
@@ -122,10 +126,12 @@ namespace gpufl {
         ie.app = rt->appName;
         ie.logPath = logPath;
         ie.tsNs = detail::getTimestampNs();
-        ie.devices = rt->collector->sampleAll();
-        ie.host = rt->hostCollector->sample();
 
-        rt->logger->logInit(ie);
+        const std::string devicesJson = rt->collector
+            ? rt->collector->devicesInventoryJson()
+            : "[]";
+
+        rt->logger->logInit(ie, devicesJson);
 
         // Start sampler if enabled and collector exists
         if (opts.systemSampleRateMs > 0 && rt->collector) {
@@ -136,9 +142,10 @@ namespace gpufl {
         return true;
     }
 
-    void systemStart(std::string name) {
+    void systemStart(const int intervalMs, std::string name) {
         Runtime* rt = runtime();
         if (!rt || !rt->logger) return;
+        if (intervalMs <= 0) return;
 
         {
             SystemStartEvent e;
@@ -150,7 +157,8 @@ namespace gpufl {
             if (rt->hostCollector) e.host = rt->hostCollector->sample();
             rt->logger->logSystemStart(e);
         }
-        if (const int intervalMs = g_systemSampleRateMs.load(std::memory_order_relaxed); intervalMs > 0 && rt->collector) {
+
+        if (rt->collector) {
             rt->sampler.start(rt->appName, rt->logger, rt->collector, intervalMs, name);
         }
     }
@@ -212,6 +220,12 @@ namespace gpufl {
         }
         if (rt->hostCollector) e.host = rt->hostCollector->sample();
         rt->logger->logScopeBegin(e);
+
+        int rate = g_scopeSampleRateMs.load(std::memory_order_relaxed);
+        if (rate > 0 && rt->collector) {
+            rt->sampler.start(rt->appName, rt->logger, rt->collector, rate, name_);
+        }
+
     }
 
     ScopedMonitor::~ScopedMonitor() {
@@ -233,4 +247,5 @@ namespace gpufl {
 
         rt->logger->logScopeEnd(e);
     }
+
 } // namespace gpufl

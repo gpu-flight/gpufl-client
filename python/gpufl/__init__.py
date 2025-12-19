@@ -12,7 +12,7 @@ if os.name == 'nt':
 
 # 2. Import C++ Core Bindings
 try:
-    from ._gpufl_client import Scope, init, shutdown
+    from ._gpufl_client import Scope, init, shutdown, log_kernel
 except Exception as e:
     if os.environ.get("GITHUB_ACTIONS") == "true":
         raise RuntimeError(
@@ -25,6 +25,7 @@ except Exception as e:
     # For local dev, keep a safe fallback (optional)
     def init(*args, **kwargs): return False
     def shutdown(): return None
+    def log_kernel(*args): return None
     class Scope:
         def __init__(self, *args): pass
         def __enter__(self): return self

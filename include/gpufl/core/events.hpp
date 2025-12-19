@@ -34,8 +34,6 @@ namespace gpufl {
         std::string app;
         std::string logPath;
         int64_t tsNs = 0;
-        HostSample host;
-        std::vector<DeviceSample> devices;
     };
 
     struct ShutdownEvent {
@@ -44,11 +42,11 @@ namespace gpufl {
         int64_t tsNs = 0;
     };
 
-    struct KernelBeginEvent {
+    struct KernelEvent {
         int pid = 0;
         std::string app;
+
         std::string name;
-        std::string tag;
 
         int64_t tsStartNs = 0;
         int64_t tsEndNs = 0;
@@ -57,34 +55,14 @@ namespace gpufl {
         std::string grid;
         std::string block;
         int dynSharedBytes = 0;
+
         int numRegs = 0;
         std::size_t staticSharedBytes = 0;
         std::size_t localBytes = 0;
         std::size_t constBytes = 0;
+
         std::string cudaError;
-
-        HostSample host;
-        std::vector<DeviceSample> devices;
-    };
-
-    struct KernelEndEvent {
-        int pid = 0;
-        std::string app;
-        std::string name;
         std::string tag;
-        int64_t tsNs = 0;
-        std::string cudaError;
-        HostSample host;
-        std::vector<DeviceSample> devices;
-    };
-
-    struct KernelSampleEvent {
-        int pid;
-        std::string app;
-        std::string name;
-        int64_t tsNs;
-        HostSample host;
-        std::vector<DeviceSample> devices;
     };
 
     struct ScopeBeginEvent {

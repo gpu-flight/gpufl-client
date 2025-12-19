@@ -4,15 +4,17 @@
 #include <functional>
 #include <memory>
 #include <string>
-#include <atomic>
+
+#if GPUFL_HAS_CUDA
+#include "gpufl/cuda/cuda.hpp"
+#endif
 
 namespace gpufl {
     enum class BackendKind { Auto, Nvidia, Amd, None };
-    static std::atomic<int> g_systemSampleRateMs{0};
-
     struct InitOptions {
         std::string appName = "gpufl";
         std::string logPath = "";     // if empty, will default to "<app>.log"
+        int scopeSampleRateMs = 0;
         int systemSampleRateMs = 0;
         BackendKind backend = BackendKind::Auto;
     };
@@ -25,7 +27,7 @@ namespace gpufl {
     BackendProbeResult probeNvml();
     BackendProbeResult probeRocm();
 
-    void systemStart(std::string name="system");
+    void systemStart(int intervalMs, std::string name="system");
     void systemStop(std::string name="system");
 
     // Start global runtime. Returns true on success.
@@ -63,5 +65,5 @@ namespace gpufl {
 #define GFL_SCOPE_TAGGED(name, tag) \
     if (gpufl::ScopedMonitor _gpufl_scope{name, tag}; true)
 
-#define GFL_SYSTEM_START(name) ::gpufl::systemStart(name)
+#define GFL_SYSTEM_START(interval, name) ::gpufl::systemStart(interval, name)
 #define GFL_SYSTEM_STOP(name)  ::gpufl::systemStop(name)

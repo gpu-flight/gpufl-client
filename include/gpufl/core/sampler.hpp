@@ -16,6 +16,7 @@ namespace gpufl {
     public:
         virtual ~ISystemCollector() = default;
 
+        virtual std::string devicesInventoryJson() = 0;
         virtual std::vector<DeviceSample> sampleAll() = 0;
     };
 
