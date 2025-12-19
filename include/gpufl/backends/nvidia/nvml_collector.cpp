@@ -46,48 +46,6 @@ namespace gpufl::nvidia {
         }
     }
 
-    std::string NvmlCollector::devicesInventoryJson() {
-        std::ostringstream oss;
-        oss << "[";
-
-        if (!initialized_ || deviceCount_ == 0) {
-            oss << "]";
-            return oss.str();
-        }
-
-        for (unsigned int i = 0; i < deviceCount_; ++i) {
-            if (i) oss << ",";
-
-            nvmlDevice_t dev{};
-            nvmlReturn_t r = nvmlDeviceGetHandleByIndex_v2(i, &dev);
-            if (r != NVML_SUCCESS) {
-                oss << "{}";
-                continue;
-            }
-
-            char name[NVML_DEVICE_NAME_BUFFER_SIZE]{};
-            char uuid[NVML_DEVICE_UUID_BUFFER_SIZE]{};
-            nvmlPciInfo_t pci{};
-            nvmlMemory_t mem{};
-
-            nvmlDeviceGetName(dev, name, sizeof(name));
-            nvmlDeviceGetUUID(dev, uuid, sizeof(uuid));
-            nvmlDeviceGetPciInfo_v3(dev, &pci);
-            nvmlDeviceGetMemoryInfo(dev, &mem);
-
-            oss << "{"
-                << "\"id\":" << i
-                << ",\"name\":\"" << name << "\""
-                << ",\"uuid\":\"" << uuid << "\""
-                << ",\"pci_bus\":" << static_cast<int>(pci.bus)
-                << ",\"total_mib\":" << toMiB(mem.total)
-                << "}";
-        }
-
-        oss << "]";
-        return oss.str();
-    }
-
     std::vector<gpufl::DeviceSample> NvmlCollector::sampleAll() {
         std::vector<gpufl::DeviceSample> out;
 

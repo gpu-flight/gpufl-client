@@ -10,11 +10,12 @@ int main(int argc, char** argv) {
 
     // Optional: Set a specific log path or let it default
     opts.logPath = "gpufl_system.log";
+    opts.systemSampleRateMs = 1000;
 
     gpufl::init(opts);
 
     std::cout << "Starting GPU System Monitor (Ctrl+C to stop)..." << std::endl;
-    GFL_SYSTEM_START(1000, "system");
+    GFL_SYSTEM_START("system");
 
     gpufl::shutdown();
     return 0;

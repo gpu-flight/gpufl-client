@@ -91,12 +91,7 @@ namespace gpufl {
         std::ostringstream oss;
         // Naming format: basePath.category.index.log
         oss << "." << name_ << "." << index_ << ".log";
-        std::string finalPath = opt_.basePath + oss.str();
-
-        // [DEBUG] Print the exact path C++ is generating
-        std::fprintf(stderr, "[GPUFL-LOGGER] makePathLocked: %s\n", finalPath.c_str());
-        std::fflush(stderr);
-        return finalPath;
+        return opt_.basePath + oss.str();
     }
 
     void Logger::LogChannel::ensureOpenLocked() {
@@ -198,7 +193,7 @@ namespace gpufl {
         return oss.str();
     }
 
-    void Logger::logInit(const InitEvent& e, const std::string& devicesJson) {
+    void Logger::logInit(const InitEvent& e) const {
         std::ostringstream oss;
         oss << "{"
             << "\"type\":\"init\""
@@ -206,9 +201,9 @@ namespace gpufl {
             << ",\"app\":\"" << jsonEscape(e.app) << "\""
             << ",\"logPath\":\"" << jsonEscape(e.logPath) << "\""
             << ",\"ts_ns\":" << e.tsNs
-            << ",\"scope_rate_ms\":" << opt_.scopeSampleRateMs
             << ",\"system_rate_ms\":" << opt_.systemSampleRateMs
-            << ",\"devices\":" << devicesJson
+            << ",\"host\":" << hostToJson(e.host)
+            << ",\"devices\":" << devicesToJson(e.devices)
             << "}";
 
         std::string json = oss.str();
@@ -219,7 +214,7 @@ namespace gpufl {
         if (chanSystem_) chanSystem_->write(json);
     }
 
-    void Logger::logShutdown(const ShutdownEvent& e) {
+    void Logger::logShutdown(const ShutdownEvent& e) const {
         std::ostringstream oss;
         oss << "{"
             << "\"type\":\"shutdown\""
@@ -238,14 +233,14 @@ namespace gpufl {
 
     // --- Specific Event Channels ---
 
-    void Logger::logKernel(const KernelEvent& e, const std::string& devicesJson) {
+    void Logger::logKernelBegin(const KernelBeginEvent& e) const {
         if (!chanKernel_) return;
         std::ostringstream oss;
         oss << "{"
             << "\"type\":\"kernel\""
             << ",\"pid\":" << e.pid
             << ",\"app\":\"" << jsonEscape(e.app) << "\""
-            << ",\"devices\":" << devicesJson
+            << ",\"devices\":" << devicesToJson(e.devices)
             << ",\"name\":\"" << jsonEscape(e.name) << "\""
             << ",\"ts_start_ns\":" << e.tsStartNs
             << ",\"ts_end_ns\":" << e.tsEndNs
@@ -262,7 +257,39 @@ namespace gpufl {
         chanKernel_->write(oss.str());
     }
 
-    void Logger::logScopeBegin(const ScopeBeginEvent& e) {
+    void Logger::logKernelEnd(const KernelEndEvent& e) const {
+        if (!chanKernel_) return;
+        std::ostringstream oss;
+        oss << "{"
+            << "\"type\":\"kernel_end\""
+            << ",\"pid\":" << e.pid
+            << ",\"app\":\"" << jsonEscape(e.app) << "\""
+            << ",\"name\":\"" << jsonEscape(e.name) << "\""
+            << ",\"tag\":\"" << jsonEscape(e.tag) << "\""
+            << ",\"ts_ns\":" << e.tsNs
+            << ",\"cuda_error\":\"" << jsonEscape(e.cudaError) << "\""
+            << ",\"host\":" << hostToJson(e.host)
+            << ",\"devices\":" << devicesToJson(e.devices)
+            << "}";
+        chanKernel_->write(oss.str());
+    }
+
+    void Logger::logKernelSample(const KernelSampleEvent& e) const {
+        if (!chanKernel_) return;
+        std::ostringstream oss;
+        oss << "{"
+            << "\"type\":\"kernel_sample\""
+            << ",\"pid\":" << e.pid
+            << ",\"app\":\"" << jsonEscape(e.app) << "\""
+            << ",\"name\":\"" << jsonEscape(e.name) << "\""
+            << ",\"ts_ns\":" << e.tsNs
+            << ",\"host\":" << hostToJson(e.host)
+            << ",\"devices\":" << devicesToJson(e.devices)
+            << "}";
+        chanKernel_->write(oss.str());
+    }
+
+    void Logger::logScopeBegin(const ScopeBeginEvent& e) const {
         if (!chanScope_) return;
         std::ostringstream oss;
         oss << "{"
@@ -278,7 +305,7 @@ namespace gpufl {
         chanScope_->write(oss.str());
     }
 
-    void Logger::logScopeEnd(const ScopeEndEvent& e) {
+    void Logger::logScopeEnd(const ScopeEndEvent& e) const {
         if (!chanScope_) return;
         std::ostringstream oss;
         oss << "{"
@@ -294,7 +321,7 @@ namespace gpufl {
         chanScope_->write(oss.str());
     }
 
-    void Logger::logScopeSample(const ScopeSampleEvent& e) {
+    void Logger::logScopeSample(const ScopeSampleEvent& e) const {
         if (!chanScope_) return;
         std::ostringstream oss;
         oss << "{"
@@ -310,7 +337,7 @@ namespace gpufl {
         chanScope_->write(oss.str());
     }
 
-    void Logger::logSystemSample(const SystemSampleEvent& e) {
+    void Logger::logSystemSample(const SystemSampleEvent& e) const {
         if (!chanSystem_) return;
         std::ostringstream oss;
         oss << "{"
@@ -325,7 +352,7 @@ namespace gpufl {
         chanSystem_->write(oss.str());
     }
 
-    void Logger::logSystemStart(const SystemStartEvent &e) {
+    void Logger::logSystemStart(const SystemStartEvent &e) const {
         if (!chanSystem_) return;
         std::ostringstream oss;
         oss << "{"
@@ -340,7 +367,7 @@ namespace gpufl {
         chanSystem_->write(oss.str());
     }
 
-    void Logger::logSystemStop(const SystemStopEvent &e) {
+    void Logger::logSystemStop(const SystemStopEvent &e) const {
         if (!chanSystem_) return;
         std::ostringstream oss;
         oss << "{"

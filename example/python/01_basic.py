@@ -4,7 +4,7 @@ import time
 # 1. Initialize the library
 # Arguments: (AppName, LogFilePath, SampleIntervalMs)
 # Interval=0 means "Only log start/end", no background sampling.
-gfl.init("PythonDemo", "gpufl_basic", 5)
+res = gfl.init("PythonDemo", "gpufl_basic", 5)
 
 print("Starting Trace...")
 

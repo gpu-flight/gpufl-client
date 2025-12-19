@@ -13,7 +13,6 @@ namespace gpufl::nvidia {
         NvmlCollector();
         ~NvmlCollector() override;
 
-        std::string devicesInventoryJson() override;
         std::vector<DeviceSample> sampleAll() override;
         static bool isAvailable(std::string* reason = nullptr);
 
