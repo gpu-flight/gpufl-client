@@ -172,7 +172,7 @@ def plot_combined_timeline(df, title="GPUFL Timeline"):
     # 1. Scopes: Try explicit Scopes FIRST, then fallback to App (Init/Shutdown)
     scope_data = _reconstruct_intervals(df, "scope_start", "scope_end")
     if not scope_data:
-        # [NEW] Try to visualize the App lifespan if no specific scopes exist
+        # Fallback to App lifespan if no specific scopes exist
         app_data = _reconstruct_intervals(df, "init", "shutdown", name_col="app", fallback_name="App")
         scope_data.extend(app_data)
 
@@ -182,74 +182,94 @@ def plot_combined_timeline(df, title="GPUFL Timeline"):
     # 3. GPU Metrics
     gpu_samples = _explode_device_samples(df, gpu_id=0)
 
-    # 4. Host Metrics (NEW)
+    # 4. Host Metrics
     host_samples = _explode_host_samples(df)
 
-    # --- Plotting (4 Rows) ---
-    # Heights: Scopes=1, Kernels=1, GPU=2, Host=2
-    fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(12, 10), sharex=True,
-                                             gridspec_kw={'height_ratios': [1, 1, 2, 2]})
+    # --- Plotting (2 Rows) ---
+    # Heights: GPU=2, Host=2
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 7.5), sharex=True,
+                                   gridspec_kw={'height_ratios': [2, 2]})
 
-    # Track 1: Scopes
-    if scope_data:
-        bars = [(s[0], s[1]) for s in scope_data]
-        ax1.broken_barh(bars, (10, 8), facecolors='tab:blue', alpha=0.6)
-        for s in scope_data:
-            ax1.text(s[0] + s[1]/2, 14, s[2], ha='center', va='center', fontsize=8, color='white', clip_on=True)
-    ax1.set_yticks([])
-    ax1.set_ylabel("Scopes", rotation=0, ha='right', va='center')
-    ax1.grid(True, alpha=0.3, axis='x')
-
-    # Track 2: Kernels
-    if kernel_data:
-        bars = [(k[0], k[1]) for k in kernel_data]
-        ax2.broken_barh(bars, (10, 8), facecolors='tab:orange', alpha=0.8)
-        for k in kernel_data:
-            ax2.text(k[0] + k[1]/2, 14, k[2], ha='center', va='center', fontsize=8, clip_on=True)
-    ax2.set_yticks([])
-    ax2.set_ylabel("Kernels", rotation=0, ha='right', va='center')
-    ax2.grid(True, alpha=0.3, axis='x')
-
-    # Track 3: GPU Metrics
+    # Row 1: GPU Metrics
     if not gpu_samples.empty:
         # Re-calc relative time just to be safe
         t = (gpu_samples["ts_ns"] - min_ts) / 1e9
-        ax3.plot(t, gpu_samples["util_gpu"], label="GPU %", color='tab:green')
-        ax3.plot(t, gpu_samples["util_mem"], label="Mem %", color='tab:purple', linestyle="--")
-        ax3.set_ylabel("GPU Util %")
-        ax3.set_ylim(-5, 105)
-        ax3.legend(loc="upper left", fontsize='x-small')
+        ax1.plot(t, gpu_samples["util_gpu"], label="GPU %", color='tab:green')
+        ax1.plot(t, gpu_samples["util_mem"], label="Mem %", color='tab:purple', linestyle="--")
+        ax1.set_ylabel("GPU Util %")
+        ax1.set_ylim(-5, 105)
+        ax1.legend(loc="upper left", fontsize='x-small')
 
         # Memory MiB on right axis
-        ax3b = ax3.twinx()
-        ax3b.fill_between(t, gpu_samples["used_mib"], color='tab:gray', alpha=0.1, label="VRAM Used")
-        ax3b.set_ylabel("VRAM (MiB)", color='gray')
-        ax3b.set_ylim(bottom=0)
-    ax3.grid(True, alpha=0.3)
-    ax3.set_title("GPU Metrics", fontsize=10)
+        ax1b = ax1.twinx()
+        ax1b.fill_between(t, gpu_samples["used_mib"], color='tab:gray', alpha=0.1, label="VRAM Used")
+        ax1b.set_ylabel("VRAM (MiB)", color='gray')
+        ax1b.set_ylim(bottom=0)
 
-    # Track 4: Host Metrics (NEW)
+    # Overlay Scopes as vertical lines on GPU metrics
+    if scope_data:
+        y_top = ax1.get_ylim()[1] if len(ax1.get_lines()) > 0 else 100
+        for start_sec, dur_sec, name in scope_data:
+            ax1.axvline(x=start_sec, color='tab:red', linestyle='--', alpha=0.6, linewidth=1)
+            ax1.text(start_sec, y_top * 0.95, name, rotation=90, va='top', ha='center', fontsize=7,
+                     color='tab:red', alpha=0.9,
+                     bbox=dict(boxstyle='round,pad=0.1', facecolor='white', alpha=0.3, edgecolor='none'))
+
+    # Overlay Kernels as vertical lines (start & end) on GPU metrics
+    if kernel_data:
+        y_top_k = ax1.get_ylim()[1] if len(ax1.get_lines()) > 0 else 100
+        for start_sec, dur_sec, name in kernel_data:
+            end_sec = start_sec + (dur_sec if dur_sec is not None else 0)
+            # Start line (solid orange)
+            ax1.axvline(x=start_sec, color='tab:orange', linestyle='-', linewidth=1.2)
+            ax1.text(start_sec, y_top_k * 0.9, name, rotation=90, va='top', ha='center', fontsize=7,
+                     color='tab:orange', alpha=0.9)
+            # End line (dashed orange)
+            if dur_sec and dur_sec > 0:
+                ax1.axvline(x=end_sec, color='tab:orange', linestyle='--', linewidth=1.2)
+                ax1.text(end_sec, y_top_k * 0.9, f"{name} end", rotation=90, va='top', ha='center', fontsize=6,
+                         color='tab:orange', alpha=0.7)
+
+    ax1.grid(True, alpha=0.3)
+    ax1.set_title("GPU Metrics", fontsize=10)
+
+    # Row 2: Host Metrics
     if not host_samples.empty:
         t_host = (host_samples["ts_ns"] - min_ts) / 1e9
-
         # CPU on Left
-        ax4.plot(t_host, host_samples["cpu_pct"], label="CPU %", color='tab:red')
-        ax4.set_ylabel("CPU Util %", color='tab:red')
-        ax4.set_ylim(-5, 105)
-        ax4.tick_params(axis='y', labelcolor='tab:red')
-        ax4.legend(loc="upper left", fontsize='x-small')
-
+        ax2.plot(t_host, host_samples["cpu_pct"], label="CPU %", color='tab:red')
+        ax2.set_ylabel("CPU Util %", color='tab:red')
+        ax2.set_ylim(-5, 105)
+        ax2.tick_params(axis='y', labelcolor='tab:red')
+        ax2.legend(loc="upper left", fontsize='x-small')
         # RAM on Right
-        ax4b = ax4.twinx()
-        ax4b.plot(t_host, host_samples["ram_used_mib"] / 1024, label="RAM (GiB)", color='tab:blue', linestyle="--")
-        ax4b.set_ylabel("Sys RAM (GiB)", color='tab:blue')
-        ax4b.tick_params(axis='y', labelcolor='tab:blue')
-        ax4b.set_ylim(bottom=0)
-        ax4b.legend(loc="upper right", fontsize='x-small')
+        ax2b = ax2.twinx()
+        ax2b.plot(t_host, host_samples["ram_used_mib"] / 1024, label="RAM (GiB)", color='tab:blue', linestyle="--")
+        ax2b.set_ylabel("Sys RAM (GiB)", color='tab:blue')
+        ax2b.tick_params(axis='y', labelcolor='tab:blue')
+        ax2b.set_ylim(bottom=0)
+        ax2b.legend(loc="upper right", fontsize='x-small')
 
-    ax4.set_xlabel("Time (seconds)")
-    ax4.grid(True, alpha=0.3)
-    ax4.set_title("Host Metrics", fontsize=10)
+    # Overlay Scopes on Host metrics as well (subtle gray)
+    if scope_data:
+        y_top_host = ax2.get_ylim()[1] if len(ax2.get_lines()) > 0 else 100
+        for start_sec, dur_sec, name in scope_data:
+            ax2.axvline(x=start_sec, color='gray', linestyle=':', alpha=0.4, linewidth=1)
+            ax2.text(start_sec, y_top_host * 0.95, name, rotation=90, va='top', ha='center', fontsize=6,
+                     color='gray', alpha=0.7)
+
+    # Overlay Kernels on Host metrics (subtle)
+    if kernel_data:
+        y_top_host_k = ax2.get_ylim()[1] if len(ax2.get_lines()) > 0 else 100
+        for start_sec, dur_sec, name in kernel_data:
+            end_sec = start_sec + (dur_sec if dur_sec is not None else 0)
+            ax2.axvline(x=start_sec, color='tab:orange', linestyle='-', alpha=0.3, linewidth=1)
+            if dur_sec and dur_sec > 0:
+                ax2.axvline(x=end_sec, color='tab:orange', linestyle='--', alpha=0.25, linewidth=1)
+
+    ax2.set_xlabel("Time (seconds)")
+    ax2.grid(True, alpha=0.3)
+    ax2.set_title("Host Metrics", fontsize=10)
 
     fig.suptitle(title, fontsize=14)
     plt.tight_layout()

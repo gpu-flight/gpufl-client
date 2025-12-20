@@ -12,7 +12,7 @@ def vector_add(a, b, c):
 def run():
     gpufl.init("Kernel_Test", "./logs", 10)
 
-    N = 2048 * 2048
+    N = 1024 * 1024
     a = cuda.to_device(np.ones(N))
     b = cuda.to_device(np.ones(N))
     c = cuda.device_array(N)
