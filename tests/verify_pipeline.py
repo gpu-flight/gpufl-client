@@ -43,7 +43,7 @@ def test_pipeline():
             keep = True
             raise SystemExit(1)
 
-        categories = ["kernel", "scope", "system"]
+        categories = ["scope", "system"]
         for cat in categories:
             expected_name = f"{log_base_name}.{cat}.0.log"
             full_path = os.path.join(temp_dir, expected_name)

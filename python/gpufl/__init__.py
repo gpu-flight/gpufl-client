@@ -12,7 +12,7 @@ if os.name == 'nt':
 
 # 2. Import C++ Core Bindings
 try:
-    from ._gpufl_client import Scope, init, shutdown, KernelScope
+    from ._gpufl_client import Scope, init, shutdown
 except Exception as e:
     if os.environ.get("GITHUB_ACTIONS") == "true":
         raise RuntimeError(
@@ -30,11 +30,4 @@ except Exception as e:
         def __enter__(self): return self
         def __exit__(self, *args): pass
 
-# 3. Import Python Utilities (The Numba Wrapper)
-try:
-    from .utils import launch_kernel
-except ImportError:
-    launch_kernel = None
-
-# 4. Define Public API
-__all__ = ["Scope", "init", "shutdown", "KernelScope", "launch_kernel"]
+__all__ = ["Scope", "init", "shutdown"]
