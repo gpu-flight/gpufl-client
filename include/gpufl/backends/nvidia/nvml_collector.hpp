@@ -6,8 +6,15 @@
 
 #if GPUFL_ENABLE_NVIDIA && GPUFL_HAS_NVML
 #include <nvml.h>
+#include <map>
 
 namespace gpufl::nvidia {
+    struct NvLinkState {
+        unsigned long long lastRxTotal = 0;
+        unsigned long long lastTxTotal = 0;
+        std::chrono::steady_clock::time_point lastTime;
+        bool initialized = false;
+    };
     class NvmlCollector : public ISystemCollector {
     public:
         NvmlCollector();

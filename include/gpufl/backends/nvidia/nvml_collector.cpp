@@ -6,6 +6,9 @@
 
 #include <sstream>
 
+// Define max links (Hopper/Ampere usually have max 12-18 links)
+#define MAX_LVLINKS 18
+
 namespace gpufl::nvidia {
     std::string NvmlCollector::nvmlErrorToString(nvmlReturn_t r) {
         const char* s = nvmlErrorString(r);
@@ -119,6 +122,42 @@ namespace gpufl::nvidia {
                 s.throttlePower = false;
                 s.throttleThermal = false;
             }
+
+            // ---------------------------------------------------------
+            // NVLink Bandwidth Calculation
+            // ---------------------------------------------------------
+
+            std::vector<nvmlFieldValue_t> fields(2);
+            fields[0].fieldId = NVML_FI_DEV_NVLINK_THROUGHPUT_DATA_RX;
+            fields[1].fieldId = NVML_FI_DEV_NVLINK_THROUGHPUT_DATA_TX;
+
+            if (nvmlReturn_t ret = nvmlDeviceGetFieldValues(dev, 2, fields.data()); ret == NVML_SUCCESS) {
+                unsigned long long rxKiB = (fields[0].nvmlReturn == NVML_SUCCESS) ? fields[0].value.ullVal : 0;
+                unsigned long long txKiB = (fields[1].nvmlReturn == NVML_SUCCESS) ? fields[1].value.ullVal : 0;
+
+                s.nvlinkRxBps = rxKiB * 1024;
+                s.nvlinkTxBps = txKiB * 1024;
+            } else {
+                s.nvlinkRxBps = 0;
+                s.nvlinkTxBps = 0;
+            }
+
+
+            // ---------------------------------------------------------
+            // NVLink PCIe Throughput
+            // ---------------------------------------------------------
+
+            unsigned int pcieRx = 0; // KB/s
+            unsigned int pcieTx = 0; // KB/s
+
+            nvmlReturn_t r1 = nvmlDeviceGetPcieThroughput(dev, NVML_PCIE_UTIL_RX_BYTES, &pcieRx);
+            nvmlReturn_t r2 = nvmlDeviceGetPcieThroughput(dev, NVML_PCIE_UTIL_TX_BYTES, &pcieTx);
+
+            if (r1 == NVML_SUCCESS) s.pcieRxBps = static_cast<unsigned long long>(pcieRx) * 1024; // KB/s -> B/s
+            else s.pcieRxBps = 0;
+
+            if (r2 == NVML_SUCCESS) s.pcieTxBps = static_cast<unsigned long long>(pcieTx) * 1024; // KB/s -> B/s
+            else s.pcieTxBps = 0;
 
             out.push_back(std::move(s));
         }

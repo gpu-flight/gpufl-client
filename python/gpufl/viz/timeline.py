@@ -22,7 +22,6 @@ def _require_pandas():
 
 def _ensure_event_type_col(df):
     if df is None: return df
-    # Map 'type' to 'event_type' if missing
     if "event_type" not in df.columns and "type" in df.columns:
         df = df.copy()
         df["event_type"] = df["type"]
@@ -46,7 +45,6 @@ def _explode_device_samples(df, gpu_id=0):
     pd = _require_pandas()
     df = _ensure_event_type_col(df)
 
-    # Events that might have device info
     target_types = ["scope_sample", "system_sample", "kernel_start", "kernel_end", "init"]
     if "event_type" not in df.columns: return pd.DataFrame()
 
@@ -72,6 +70,9 @@ def _explode_device_samples(df, gpu_id=0):
                 "util_gpu": found.get("util_gpu", 0),
                 "util_mem": found.get("util_mem", 0),
                 "used_mib": found.get("used_mib", 0),
+                # [NEW] Extract Bandwidth and convert B/s -> GB/s
+                "pcie_rx_gbps": found.get("pcie_rx_bw", 0) / 1e9,
+                "pcie_tx_gbps": found.get("pcie_tx_bw", 0) / 1e9,
             })
 
     out = pd.DataFrame(rows)
@@ -85,7 +86,6 @@ def _explode_host_samples(df):
     pd = _require_pandas()
     df = _ensure_event_type_col(df)
 
-    # Events that typically carry host metrics
     target_types = ["scope_sample", "system_sample", "kernel_start", "init", "shutdown"]
     if "event_type" not in df.columns: return pd.DataFrame()
 
@@ -105,24 +105,16 @@ def _explode_host_samples(df):
     out = pd.DataFrame(rows)
     if not out.empty:
         out = out.dropna(subset=["ts_ns"]).sort_values("ts_ns")
-        # Relative time (s)
         out["t_s_abs"] = (out["ts_ns"] - out["ts_ns"].min()) / 1e9
     return out
 
 def _reconstruct_intervals(df, start_type, end_type, name_col="name", fallback_name="Scope"):
-    """
-    Pairs Start/End events into (start_sec, duration_sec, label).
-    Handles multiple nesting levels naively (stack).
-    """
-    pd = _require_pandas() # [FIXED: Was missing]
-
+    pd = _require_pandas()
     subset = df[df["event_type"].isin([start_type, end_type])].copy()
     if subset.empty: return []
 
     intervals = []
-    stack = {} # name -> start_ns
-
-    # Global min for relative time
+    stack = {}
     min_ts = df["ts_ns"].min()
     if pd.isna(min_ts): min_ts = 0
 
@@ -131,14 +123,11 @@ def _reconstruct_intervals(df, start_type, end_type, name_col="name", fallback_n
         name = r.get(name_col, fallback_name)
         if pd.isna(name): name = fallback_name
 
-        # Get timestamp
         ts = r.get("ts_ns")
         if pd.isna(ts): ts = r.get("ts_start_ns")
         if pd.isna(ts): continue
 
         if etype == start_type:
-            # If name already in stack, it's a nested call or collision.
-            # Simple overwrite for now, or use a list for stack if needed.
             stack[name] = ts
         elif etype == end_type:
             if name in stack:
@@ -146,8 +135,6 @@ def _reconstruct_intervals(df, start_type, end_type, name_col="name", fallback_n
                 start_sec = (start_ns - min_ts) / 1e9
                 dur_sec = (ts - start_ns) / 1e9
                 intervals.append((start_sec, dur_sec, name))
-
-    # If using init/shutdown, usually there is only one "App" or "Kernel_Test"
     return intervals
 
 # ==========================================
@@ -163,120 +150,112 @@ def plot_combined_timeline(df, title="GPUFL Timeline"):
         print("[Viz] Error: No event_type column found.")
         return None
 
-    # Calculate Global Start Time
     min_ts = df["ts_ns"].min()
     if pd.isna(min_ts): min_ts = 0
 
     # --- Prepare Data ---
-
-    # 1. Scopes: Try explicit Scopes FIRST, then fallback to App (Init/Shutdown)
     scope_data = _reconstruct_intervals(df, "scope_start", "scope_end")
     if not scope_data:
-        # Fallback to App lifespan if no specific scopes exist
         app_data = _reconstruct_intervals(df, "init", "shutdown", name_col="app", fallback_name="App")
         scope_data.extend(app_data)
 
-    # 2. Kernels
     kernel_data = _reconstruct_intervals(df, "kernel_start", "kernel_end")
-
-    # 3. GPU Metrics
     gpu_samples = _explode_device_samples(df, gpu_id=0)
-
-    # 4. Host Metrics
     host_samples = _explode_host_samples(df)
 
-    # --- Plotting (2 Rows) ---
-    # Heights: GPU=2, Host=2
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 7.5), sharex=True,
-                                   gridspec_kw={'height_ratios': [2, 2]})
+    # --- Plotting (3 Rows) ---
+    # Heights: GPU=2, PCIe=1.5, Host=2
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 10), sharex=True,
+                                        gridspec_kw={'height_ratios': [2, 1.5, 2]})
 
-    # Row 1: GPU Metrics
+    # --- Helper to Overlay Markers ---
+    def overlay_markers(ax, y_lim_ref=None):
+        """Draws vertical lines for Scopes and Kernels on the given axis."""
+        # Get Y-limit to position text
+        y_top = y_lim_ref if y_lim_ref else (ax.get_ylim()[1] if len(ax.get_lines()) > 0 else 100)
+
+        # Scopes (Red dashed)
+        if scope_data:
+            for start_sec, dur_sec, name in scope_data:
+                ax.axvline(x=start_sec, color='tab:red', linestyle='--', alpha=0.6, linewidth=1)
+                ax.text(start_sec, y_top * 0.95, name, rotation=90, va='top', ha='center', fontsize=7,
+                        color='tab:red', alpha=0.9,
+                        bbox=dict(boxstyle='round,pad=0.1', facecolor='white', alpha=0.3, edgecolor='none'))
+
+        # Kernels (Orange solid/dashed)
+        if kernel_data:
+            for start_sec, dur_sec, name in kernel_data:
+                end_sec = start_sec + (dur_sec if dur_sec is not None else 0)
+                ax.axvline(x=start_sec, color='tab:orange', linestyle='-', linewidth=1.2)
+                ax.text(start_sec, y_top * 0.85, name, rotation=90, va='top', ha='center', fontsize=7,
+                        color='tab:orange', alpha=0.9)
+                if dur_sec and dur_sec > 0:
+                    ax.axvline(x=end_sec, color='tab:orange', linestyle='--', linewidth=1.2)
+                    ax.text(end_sec, y_top * 0.85, f"{name} end", rotation=90, va='top', ha='center', fontsize=6,
+                            color='tab:orange', alpha=0.7)
+
+    # --- Row 1: GPU Metrics ---
     if not gpu_samples.empty:
-        # Re-calc relative time just to be safe
-        t = (gpu_samples["ts_ns"] - min_ts) / 1e9
+        t = gpu_samples["t_s_abs"]
         ax1.plot(t, gpu_samples["util_gpu"], label="GPU %", color='tab:green')
         ax1.plot(t, gpu_samples["util_mem"], label="Mem %", color='tab:purple', linestyle="--")
         ax1.set_ylabel("GPU Util %")
         ax1.set_ylim(-5, 105)
         ax1.legend(loc="upper left", fontsize='x-small')
 
-        # Memory MiB on right axis
         ax1b = ax1.twinx()
         ax1b.fill_between(t, gpu_samples["used_mib"], color='tab:gray', alpha=0.1, label="VRAM Used")
         ax1b.set_ylabel("VRAM (MiB)", color='gray')
         ax1b.set_ylim(bottom=0)
 
-    # Overlay Scopes as vertical lines on GPU metrics
-    if scope_data:
-        y_top = ax1.get_ylim()[1] if len(ax1.get_lines()) > 0 else 100
-        for start_sec, dur_sec, name in scope_data:
-            ax1.axvline(x=start_sec, color='tab:red', linestyle='--', alpha=0.6, linewidth=1)
-            ax1.text(start_sec, y_top * 0.95, name, rotation=90, va='top', ha='center', fontsize=7,
-                     color='tab:red', alpha=0.9,
-                     bbox=dict(boxstyle='round,pad=0.1', facecolor='white', alpha=0.3, edgecolor='none'))
-
-    # Overlay Kernels as vertical lines (start & end) on GPU metrics
-    if kernel_data:
-        y_top_k = ax1.get_ylim()[1] if len(ax1.get_lines()) > 0 else 100
-        for start_sec, dur_sec, name in kernel_data:
-            end_sec = start_sec + (dur_sec if dur_sec is not None else 0)
-            # Start line (solid orange)
-            ax1.axvline(x=start_sec, color='tab:orange', linestyle='-', linewidth=1.2)
-            ax1.text(start_sec, y_top_k * 0.9, name, rotation=90, va='top', ha='center', fontsize=7,
-                     color='tab:orange', alpha=0.9)
-            # End line (dashed orange)
-            if dur_sec and dur_sec > 0:
-                ax1.axvline(x=end_sec, color='tab:orange', linestyle='--', linewidth=1.2)
-                ax1.text(end_sec, y_top_k * 0.9, f"{name} end", rotation=90, va='top', ha='center', fontsize=6,
-                         color='tab:orange', alpha=0.7)
-
     ax1.grid(True, alpha=0.3)
     ax1.set_title("GPU Metrics", fontsize=10)
+    overlay_markers(ax1, y_lim_ref=105)
 
-    # Row 2: Host Metrics
-    if not host_samples.empty:
-        t_host = (host_samples["ts_ns"] - min_ts) / 1e9
-        # CPU on Left
-        ax2.plot(t_host, host_samples["cpu_pct"], label="CPU %", color='tab:red')
-        ax2.set_ylabel("CPU Util %", color='tab:red')
-        ax2.set_ylim(-5, 105)
-        ax2.tick_params(axis='y', labelcolor='tab:red')
+    # --- Row 2: PCIe Bandwidth (NEW) ---
+    if not gpu_samples.empty:
+        t = gpu_samples["t_s_abs"]
+        # Plot RX (Host -> Device) and TX (Device -> Host)
+        ax2.plot(t, gpu_samples["pcie_rx_gbps"], label="PCIe RX (Upload)", color='tab:blue')
+        ax2.plot(t, gpu_samples["pcie_tx_gbps"], label="PCIe TX (Download)", color='tab:cyan', linestyle="--")
+
+        ax2.set_ylabel("BW (GB/s)")
+        # Dynamically scale Y-axis but keep min at 0
+        ax2.set_ylim(bottom=0)
         ax2.legend(loc="upper left", fontsize='x-small')
-        # RAM on Right
-        ax2b = ax2.twinx()
-        ax2b.plot(t_host, host_samples["ram_used_mib"] / 1024, label="RAM (GiB)", color='tab:blue', linestyle="--")
-        ax2b.set_ylabel("Sys RAM (GiB)", color='tab:blue')
-        ax2b.tick_params(axis='y', labelcolor='tab:blue')
-        ax2b.set_ylim(bottom=0)
-        ax2b.legend(loc="upper right", fontsize='x-small')
 
-    # Overlay Scopes on Host metrics as well (subtle gray)
-    if scope_data:
-        y_top_host = ax2.get_ylim()[1] if len(ax2.get_lines()) > 0 else 100
-        for start_sec, dur_sec, name in scope_data:
-            ax2.axvline(x=start_sec, color='gray', linestyle=':', alpha=0.4, linewidth=1)
-            ax2.text(start_sec, y_top_host * 0.95, name, rotation=90, va='top', ha='center', fontsize=6,
-                     color='gray', alpha=0.7)
-
-    # Overlay Kernels on Host metrics (subtle)
-    if kernel_data:
-        y_top_host_k = ax2.get_ylim()[1] if len(ax2.get_lines()) > 0 else 100
-        for start_sec, dur_sec, name in kernel_data:
-            end_sec = start_sec + (dur_sec if dur_sec is not None else 0)
-            ax2.axvline(x=start_sec, color='tab:orange', linestyle='-', alpha=0.3, linewidth=1)
-            if dur_sec and dur_sec > 0:
-                ax2.axvline(x=end_sec, color='tab:orange', linestyle='--', alpha=0.25, linewidth=1)
-
-    ax2.set_xlabel("Time (seconds)")
     ax2.grid(True, alpha=0.3)
-    ax2.set_title("Host Metrics", fontsize=10)
+    ax2.set_title("PCIe Bandwidth", fontsize=10)
+    # Overlay markers (passing None lets helper figure out Y-max from data)
+    overlay_markers(ax2)
+
+    # --- Row 3: Host Metrics ---
+    if not host_samples.empty:
+        t_host = host_samples["t_s_abs"]
+        ax3.plot(t_host, host_samples["cpu_pct"], label="CPU %", color='tab:red')
+        ax3.set_ylabel("CPU Util %", color='tab:red')
+        ax3.set_ylim(-5, 105)
+        ax3.tick_params(axis='y', labelcolor='tab:red')
+        ax3.legend(loc="upper left", fontsize='x-small')
+
+        ax3b = ax3.twinx()
+        ax3b.plot(t_host, host_samples["ram_used_mib"] / 1024, label="RAM (GiB)", color='tab:blue', linestyle="--")
+        ax3b.set_ylabel("Sys RAM (GiB)", color='tab:blue')
+        ax3b.tick_params(axis='y', labelcolor='tab:blue')
+        ax3b.set_ylim(bottom=0)
+        ax3b.legend(loc="upper right", fontsize='x-small')
+
+    ax3.set_xlabel("Time (seconds)")
+    ax3.grid(True, alpha=0.3)
+    ax3.set_title("Host Metrics", fontsize=10)
+    overlay_markers(ax3, y_lim_ref=105)
 
     fig.suptitle(title, fontsize=14)
     plt.tight_layout()
-    plt.subplots_adjust(hspace=0.2)
+    plt.subplots_adjust(hspace=0.25)
     return fig
 
-# Legacy wrappers (required by __init__)
+# Legacy wrappers
 def plot_kernel_timeline(df, title="Kernels"): return plot_combined_timeline(df, title)
 def plot_scope_timeline(df, title="Scopes"): return plot_combined_timeline(df, title)
 def plot_host_timeline(df, title="Host"): return plot_combined_timeline(df, title)

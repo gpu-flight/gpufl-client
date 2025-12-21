@@ -51,6 +51,8 @@ namespace gpufl {
                 << ",\"clk_mem\":" << dev.clockMem
                 << ",\"throttle_pwr\":" << (dev.throttlePower ? 1 : 0)
                 << ",\"throttle_therm\":" << (dev.throttleThermal ? 1 : 0)
+                << ",\"pcie_rx_bw\":" << dev.pcieRxBps
+                << ",\"pcie_tx_bw\":" << dev.pcieTxBps
                 << "}";
         }
         oss << "]";

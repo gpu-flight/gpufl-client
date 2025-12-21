@@ -30,6 +30,12 @@ namespace gpufl {
 
         bool throttlePower; // True if hitting Power CAp
         bool throttleThermal; // True if slowing down due to Heat
+
+        unsigned long long nvlinkRxBps; // Receive Speed
+        unsigned long long nvlinkTxBps; // Transmit Speed
+
+        unsigned long long pcieRxBps; // Host -> Device (Upload)
+        unsigned long long pcieTxBps; // Device -> Host (Download)
     };
 
     struct InitEvent {
