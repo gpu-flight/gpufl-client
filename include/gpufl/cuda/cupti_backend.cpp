@@ -157,11 +157,12 @@ namespace gpufl {
                         std::snprintf(out.name, sizeof(out.name), "%s", (k->name ? k->name : "kernel"));
                         out.cpuStartNs = baseCpuNs + static_cast<int64_t>(k->start - baseCuptiTs);
                         out.durationNs = static_cast<int64_t>(k->end - k->start);
+                        out.dynShared = k->dynamicSharedMemory;
+                        out.staticShared = k->staticSharedMemory;
+                        out.numRegs = k->registersPerThread;
+
                         out.hasDetails = false;
 
-
-                        // JOIN callback metadata by correlationId
-                        std::cout << "[BufferCompleted] Processing kernel record with CorrID " << k->correlationId << std::endl;
                         const uint64_t corr = k->correlationId;
                         {
                             std::lock_guard lk(backend->metaMu_);
@@ -172,18 +173,19 @@ namespace gpufl {
                                     out.hasDetails = true;
                                     out.gridX = m.gridX; out.gridY = m.gridY; out.gridZ = m.gridZ;
                                     out.blockX = m.blockX; out.blockY = m.blockY; out.blockZ = m.blockZ;
-                                    out.dynShared = m.dynShared;
-                                    out.staticShared = m.staticShared;
-                                    out.localBytes = m.localBytes;
+                                    out.localBytes = static_cast<int>(k->localMemoryPerThread);
                                     out.constBytes = m.constBytes;
-                                    out.numRegs = m.numRegs;
                                     out.occupancy = m.occupancy;
                                     out.maxActiveBlocks = m.maxActiveBlocks;
-                                    std::cout << "[BufferCompleted] Found metadata for CorrID " << corr
-                                              << " with occupancy=" << out.occupancy << std::endl;
+                                    if (backend->GetOptions().enable_debug_output) {
+                                        std::cout << "[BufferCompleted] Found metadata for CorrID " << corr
+                                                  << " with occupancy=" << out.occupancy << std::endl;
+                                    }
                                 } else {
-                                    std::cout << "[BufferCompleted] Found metadata for CorrID " << corr
-                                              << " but hasDetails=false" << std::endl;
+                                    if (backend->GetOptions().enable_debug_output) {
+                                        std::cout << "[BufferCompleted] Found metadata for CorrID " << corr
+                                                  << " but hasDetails=false" << std::endl;
+                                    }
                                 }
 
                                 backend->metaByCorr_.erase(it);
@@ -294,69 +296,21 @@ namespace gpufl {
                 meta.blockY = params->blockDim.y;
                 meta.blockZ = params->blockDim.z;
                 meta.dynShared = static_cast<int>(params->sharedMem);
-
-                cudaFuncAttributes attrs{};
-                if (cudaFuncGetAttributes(&attrs, params->func) ==
-                    cudaSuccess) {
-                    meta.numRegs = attrs.numRegs;
-                    meta.staticShared = static_cast<int>(attrs.sharedSizeBytes);
-                    meta.localBytes = static_cast<int>(attrs.localSizeBytes);
-                    meta.constBytes = static_cast<int>(attrs.constSizeBytes);
-
-                    int dev = 0;
-                    cudaGetDevice(&dev);
-                    const auto &prop = cuda::getDevicePropsCached(dev);
-
-                    const int blockSize =
-                            meta.blockX * meta.blockY * meta.blockZ;
-
-                    std::cout << "Block Size = " << blockSize << std::endl;
-                    cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-                        &meta.maxActiveBlocks, params->func, blockSize,
-                        meta.dynShared);
-                    std::cout << "prop.maxThreadsPerMultiProcessor = " << prop.maxThreadsPerMultiProcessor << std::endl;
-
-                    std::cout << "prop.warpSize = " << prop.warpSize << std::endl;
-                    std::cout << "cbInfo->correlationId = " << cbInfo->correlationId << ", hasDetails = " << meta.hasDetails << std::endl;
-
-                    if (prop.maxThreadsPerMultiProcessor > 0 && prop.warpSize >
-                        0 && blockSize > 0) {
-                        const int activeWarps =
-                                meta.maxActiveBlocks * (
-                                    blockSize / prop.warpSize);
-                        const int maxWarps =
-                                prop.maxThreadsPerMultiProcessor / prop.
-                                warpSize;
-                        meta.occupancy = (maxWarps > 0)
-                                             ? static_cast<float>(activeWarps) /
-                                               static_cast<float>(maxWarps)
-                                             : 0.0f;
-                        std::cout << "Calculated occupancy = " << meta.occupancy << std::endl;
-                    }
-                }
             }
 
-            // Store by correlationId - atomically insert to prevent race with BufferCompleted
-            {
-                std::lock_guard<std::mutex> lk(backend->metaMu_);
-                auto& existing = backend->metaByCorr_[cbInfo->correlationId];
+            std::lock_guard<std::mutex> lk(backend->metaMu_);
+            auto& existing = backend->metaByCorr_[cbInfo->correlationId];
 
-                // If the existing entry has details, but the new one (e.g. from Driver API) does not,
-                // KEEP the existing one. Do not overwrite it.
-                if (existing.hasDetails && !meta.hasDetails) {
-                    if (backend->GetOptions().enable_debug_output) {
-                        std::cout << "[DEBUG-CALLBACK] Skipping overwrite of rich metadata for CorrID "
-                                  << cbInfo->correlationId << " by Driver API." << std::endl;
-                    }
-                } else {
-                    // Otherwise (it's new, or the new one has details and the old one didn't), update it.
-                    existing = meta;
-
-                    if (meta.hasDetails) {
-                        std::cout << "[ENTER] Stored metadata for CorrID " << cbInfo->correlationId
-                                  << " with occupancy=" << meta.occupancy << std::endl;
-                    }
+            // If the existing entry has details, but the new one (e.g. from Driver API) does not,
+            // KEEP the existing one. Do not overwrite it.
+            if (existing.hasDetails && !meta.hasDetails) {
+                if (backend->GetOptions().enable_debug_output) {
+                    std::cout << "[DEBUG-CALLBACK] Skipping overwrite of rich metadata for CorrID "
+                              << cbInfo->correlationId << " by Driver API." << std::endl;
                 }
+            } else {
+                // Otherwise (it's new, or the new one has details and the old one didn't), update it.
+                existing = meta;
             }
         } else if (cbInfo->callbackSite == CUPTI_API_EXIT) {
             const int64_t t = detail::getTimestampNs();

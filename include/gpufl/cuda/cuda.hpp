@@ -50,15 +50,6 @@ namespace gpufl::cuda {
 
     const cudaDeviceProp& getDevicePropsCached(int deviceId);
 
-    template <typename T> inline const cudaFuncAttributes& get_kernel_static_attrs(T kernel) {
-        static const cudaFuncAttributes attrs = [kernel](){
-            cudaFuncAttributes a = {};
-            cudaFuncGetAttributes(&a, kernel);
-            return a;
-        }();
-        return attrs;
-    }
-
 }
 #else
 #endif
