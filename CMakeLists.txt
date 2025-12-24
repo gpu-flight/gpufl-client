@@ -64,9 +64,38 @@ if(GPUFL_ENABLE_NVIDIA)
         if(CUDAToolkit_FOUND)
             set(GPUFL_HAS_CUDA 1)
             target_sources(gpufl PRIVATE
-                include/gpufl/cuda/cuda.cpp)
+                include/gpufl/cuda/cuda.cpp
+                include/gpufl/cuda/monitor.cpp
+                include/gpufl/cuda/cupti_backend.cpp)
             target_compile_definitions(gpufl PUBLIC GPUFL_HAS_CUDA=1)
             target_link_libraries(gpufl PRIVATE CUDA::cudart)
+
+            # --------------------------------------------------------
+            # CUPTI Support (Added)
+            # --------------------------------------------------------
+            if (TARGET CUDA::cupti)
+                target_link_libraries(gpufl PRIVATE CUDA::cupti)
+                target_compile_definitions(gpufl PUBLIC GPUFL_HAS_CUPTI=1)
+                message(STATUS "Found CUPTI via CUDAToolkit target")
+            else()
+                # Fallback: Manual search if the target is missing
+                find_library(CUPTI_LIBRARY NAMES cupti
+                    HINTS "${CUDAToolkit_LIBRARY_ROOT}/extras/CUPTI/lib64"
+                    "${CUDAToolkit_LIBRARY_ROOT}/extras/CUPTI/lib"
+                    "$ENV{CUDA_PATH}/extras/CUPTI/lib64"
+                )
+                find_path(CUPTI_INCLUDE_DIR NAMES cupti.h
+                    HINTS "${CUDAToolkit_LIBRARY_ROOT}/extras/CUPTI/include"
+                    "$ENV{CUDA_PATH}/extras/CUPTI/include"
+                )
+
+                if(CUPTI_LIBRARY AND CUPTI_INCLUDE_DIR)
+                    target_link_libraries(gpufl PRIVATE ${CUPTI_LIBRARY})
+                    target_include_directories(gpufl PRIVATE ${CUPTI_INCLUDE_DIR})
+                    target_compile_definitions(gpufl PUBLIC GPUFL_HAS_CUPTI=1)
+                    message(STATUS "Found CUPTI manually: ${CUPTI_LIBRARY}")
+                endif()
+            endif()
         endif()
     endif()
     #

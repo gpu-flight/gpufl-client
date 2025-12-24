@@ -5,8 +5,15 @@
 #include <memory>
 #include <string>
 #include <atomic>
+#include "gpufl/core/monitor.hpp"
 
 namespace gpufl {
+    enum MetricFlags {
+        METRIC_NONE = 0,
+        METRIC_SYSTEM = 1 << 0, // PCIe, Power, Temps
+        METRIC_KERNEL = 1 << 1,
+        METRIC_ALL = 0xFFFFFFFF
+    };
     enum class BackendKind { Auto, Nvidia, Amd, None };
     static std::atomic<int> g_systemSampleRateMs{0};
 
@@ -15,6 +22,8 @@ namespace gpufl {
         std::string logPath = "";     // if empty, will default to "<app>.log"
         int systemSampleRateMs = 0;
         BackendKind backend = BackendKind::Auto;
+        bool enableKernelDetails = false;
+        bool enableDebugOutput = false;
     };
 
     struct BackendProbeResult {
@@ -51,17 +60,17 @@ namespace gpufl {
         uint64_t scopeId_;
     };
 
-    inline void monitor(const std::string& name, const std::function<void()> &fn, const std::string& tag = "") {
-        ScopedMonitor monitor(name, tag);
+    inline void monitor(const std::string& name, const std::function<void()> &fn) {
+        ScopedRange r(name.c_str());
         fn();
     }
 } // namespace gpufl
 
 #define GFL_SCOPE(name) \
-    if(gpufl::ScopedMonitor _gpufl_scope{name}; true)
+    if(gpufl::ScopedRange _gpufl_scope{name}; true)
 
 #define GFL_SCOPE_TAGGED(name, tag) \
-    if (gpufl::ScopedMonitor _gpufl_scope{name, tag}; true)
+    if (gpufl::ScopedRange _gpufl_scope{name}; true)
 
 #define GFL_SYSTEM_START(name) ::gpufl::systemStart(name)
 #define GFL_SYSTEM_STOP(name)  ::gpufl::systemStop(name)

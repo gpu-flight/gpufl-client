@@ -138,6 +138,8 @@ namespace gpufl {
         ensureOpenLocked();
         if (!stream_.good()) return;
 
+        // Debug output removed - enable in MonitorOptions if needed
+
         const size_t bytesToWrite = line.size() + 1; // + '\n'
         if (opt_.rotateBytes > 0 && (currentBytes_ + bytesToWrite) > opt_.rotateBytes) {
             rotateLocked();

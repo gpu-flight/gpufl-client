@@ -75,12 +75,7 @@ gpufl::monitor("data-load", [&]{
 });
 ```
 
-- CUDA kernel macro with auto-timing (synchronous for now):
-
-```cpp
-GFL_LAUNCH(MyKernel, grid, block, sharedMemBytes, stream, arg1, arg2);
-// Also available: GFL_LAUNCH_TAGGED("tag", MyKernel, ...)
-```
+**Note:** CUDA kernel monitoring is now automatic via CUPTI event collection. No manual kernel launch macros are required.
 
 ## Public API (summary)
 

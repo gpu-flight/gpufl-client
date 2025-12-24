@@ -3,7 +3,6 @@
 #include "gpufl/gpufl.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/cuda/cuda.hpp"
-#include "gpufl/cuda/launch.hpp"
 
 // A simple kernel to test
 __global__ void vector_add(const float* a, const float* b, float* c, int n) {
@@ -15,8 +14,12 @@ __global__ void vector_add(const float* a, const float* b, float* c, int n) {
 
 int main() {
     // [2] Initialize GPUFL
-    gpufl::init({"OccupancyTest", "gpufl_test.log", 10});
-
+    if (!gpufl::init({"OccupancyTest", "gpufl_test.log", 10})) {
+        std::cerr << "ERROR: Failed to initialize GPUFL" << std::endl;
+        return 1;
+    }
+    std::cout << "GPUFL initialized successfully" << std::endl;
+    gpufl::systemStart();
     const int N = 1000000;
     const int bytes = N * sizeof(float);
 
@@ -31,11 +34,12 @@ int main() {
     {
         int threads = 256;
         int blocks = (N + threads - 1) / threads;
-        
+
         std::cout << "Launching Kernel with 256 threads (Expect High Occupancy)..." << std::endl;
-        
-        // Use GFL_LAUNCH instead of <<<>>>
-        GFL_LAUNCH(vector_add, blocks, threads, 0, 0, d_a, d_b, d_c, N);
+
+        // Use standard <<<>>>
+        vector_add<<<blocks, threads>>>(d_a, d_b, d_c, N);
+        cudaDeviceSynchronize();
     }
 
     // --- Test 2: Low Occupancy (Tiny Block Size) ---
@@ -43,15 +47,16 @@ int main() {
     {
         int threads = 32;
         int blocks = (N + threads - 1) / threads;
-        
+
         std::cout << "Launching Kernel with 32 threads (Expect Lower Occupancy)..." << std::endl;
-        
-        GFL_LAUNCH_TAGGED("inefficient_launch", vector_add, blocks, threads, 0, 0, d_a, d_b, d_c, N);
+
+        vector_add<<<blocks, threads>>>(d_a, d_b, d_c, N);
+        cudaDeviceSynchronize();
     }
 
     // [3] Shutdown
     gpufl::shutdown();
-    
+
     cudaFree(d_a); cudaFree(d_b); cudaFree(d_c);
     std::cout << "Done! Check gpufl_test.log for 'occupancy' fields." << std::endl;
     return 0;

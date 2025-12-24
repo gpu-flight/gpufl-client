@@ -1,6 +1,6 @@
---extra-index-url https://download.pytorch.org/whl/cu128
+--extra-index-url https://download.pytorch.org/whl/cu131
 
-numba>=0.56.0
+numba>=0.59.0
 numpy>=1.21.0
 torch
 torchvision

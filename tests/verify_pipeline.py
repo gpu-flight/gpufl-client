@@ -19,6 +19,7 @@ def test_pipeline():
         print("2. Initializing GPUFL...")
         # Passing 0 for interval
         res = gfl.init("CI_Test_App", log_base_path, 5)
+        print(f"   Result: {res}")
         print("3. Running Scope...")
         with gfl.Scope("ci_scope_01", "test_tag"):
             time.sleep(0.1)

@@ -3,11 +3,13 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <iostream>
 
 #include "gpufl/core/events.hpp"
 #include "gpufl/core/runtime.hpp"
 #include "gpufl/core/logger.hpp"
 #include "gpufl/core/common.hpp"
+#include "gpufl/core/monitor.hpp"
 #include "gpufl/backends/host_collector.hpp"
 
 #if GPUFL_HAS_CUDA || defined(__CUDACC__)
@@ -88,7 +90,13 @@ namespace gpufl {
     }
 
     bool init(const InitOptions& opts) {
+        if (opts.enableDebugOutput) {
+            std::cout << "[GPUFL] Initializing..." << std::endl;
+        }
         if (runtime()) {
+            if (opts.enableDebugOutput) {
+                std::cout << "[GPUFL] Runtime already exists, shutting down first..." << std::endl;
+            }
             shutdown();
         }
 
@@ -108,34 +116,60 @@ namespace gpufl {
 
         g_systemSampleRateMs.store(opts.systemSampleRateMs, std::memory_order_relaxed);
 
+        if (opts.enableDebugOutput) {
+            std::cout << "[GPUFL] Opening log file: " << logPath << std::endl;
+        }
         if (!rt->logger->open(logOpts)) {
+            std::cerr << "[GPUFL] ERROR: Failed to open logger at: " << logPath << std::endl;
             return false;
         }
 
+        set_runtime(std::move(rt));
+        rt = nullptr; // rt is now moved
+
+        if (opts.enableDebugOutput) {
+            std::cout << "[GPUFL] Initializing Monitor (CUPTI)..." << std::endl;
+        }
+        MonitorOptions mOpts;
+        mOpts.collect_kernel_details = opts.enableKernelDetails;
+        mOpts.enable_debug_output = opts.enableDebugOutput;
+        Monitor::Initialize(mOpts);
+        if (opts.enableDebugOutput) {
+            std::cout << "[GPUFL] Starting Monitor..." << std::endl;
+        }
+        Monitor::Start();
+        if (opts.enableDebugOutput) {
+            std::cout << "[GPUFL] Monitor started" << std::endl;
+        }
+
+        Runtime* rt_ptr = runtime();
+
         // Runtime backend selection
         std::string backendReason;
-        rt->collector = createCollector_(opts.backend, &backendReason);
+        rt_ptr->collector = createCollector_(opts.backend, &backendReason);
 
         // init event with inventory (optional)
         InitEvent ie;
         ie.pid = detail::getPid();
-        ie.app = rt->appName;
+        ie.app = rt_ptr->appName;
         ie.logPath = logPath;
         ie.tsNs = detail::getTimestampNs();
         // Collector may be unavailable on systems without NVML/ROCm. Guard usage.
-        if (rt->collector) {
-            ie.devices = rt->collector->sampleAll();
+        if (rt_ptr->collector) {
+            ie.devices = rt_ptr->collector->sampleAll();
         }
-        ie.host = rt->hostCollector->sample();
+        ie.host = rt_ptr->hostCollector->sample();
 
-        rt->logger->logInit(ie);
+        rt_ptr->logger->logInit(ie);
 
         // Start sampler if enabled and collector exists
-        if (opts.systemSampleRateMs > 0 && rt->collector) {
-            rt->sampler.start(rt->appName, rt->logger, rt->collector, opts.systemSampleRateMs, rt->appName);
+        if (opts.systemSampleRateMs > 0 && rt_ptr->collector) {
+            rt_ptr->sampler.start(rt_ptr->appName, rt_ptr->logger, rt_ptr->collector, opts.systemSampleRateMs, rt_ptr->appName);
         }
 
-        set_runtime(std::move(rt));
+        if (opts.enableDebugOutput) {
+            std::cout << "[GPUFL] Initialization complete!" << std::endl;
+        }
         return true;
     }
 
@@ -159,6 +193,7 @@ namespace gpufl {
     }
 
     void systemStop(std::string name) {
+        Monitor::Stop();
         Runtime* rt = runtime();
         if (!rt || !rt->logger) return;
 
@@ -175,6 +210,7 @@ namespace gpufl {
     }
 
     void shutdown() {
+        Monitor::Shutdown();
         Runtime* rt = runtime();
         if (!rt) return;
 
