@@ -6,7 +6,6 @@
 #include "gpufl/core/logger.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/runtime.hpp"
-#include "gpufl/cuda/cuda.hpp"
 
 #include <cuda_runtime.h>
 #include <iostream>
@@ -59,6 +58,7 @@ namespace gpufl {
                         be.app = rt->appName;
                         be.name = rec.name;
                         be.tsNs = rec.cpuStartNs;
+                        be.corrId = rec.corrId;
                         if (rec.hasDetails) {
                             be.grid = "(" + std::to_string(rec.gridX) + "," + std::to_string(rec.gridY) + "," + std::to_string(rec.gridZ) + ")";
                             be.block = "(" + std::to_string(rec.blockX) + "," + std::to_string(rec.blockY) + "," + std::to_string(rec.blockZ) + ")";
@@ -75,6 +75,7 @@ namespace gpufl {
                         KernelEndEvent ee;
                         ee.pid = detail::getPid();
                         ee.app = rt->appName;
+                        ee.corrId = rec.corrId;
                         ee.name = rec.name;
                         ee.tsNs = rec.cpuStartNs + durationNs;
                         rt->logger->logKernelEnd(ee);

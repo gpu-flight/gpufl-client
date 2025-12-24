@@ -2,7 +2,6 @@
 #include <cuda_runtime.h>
 #include "gpufl/gpufl.hpp"
 #include "gpufl/core/common.hpp"
-#include "gpufl/cuda/cuda.hpp"
 
 // A simple kernel to test
 __global__ void vector_add(const float* a, const float* b, float* c, int n) {

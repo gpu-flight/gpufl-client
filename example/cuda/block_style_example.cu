@@ -2,7 +2,6 @@
 #include <cuda_runtime.h>
 #include "gpufl/gpufl.hpp"
 #include "gpufl/core/common.hpp"
-#include "gpufl/cuda/cuda.hpp"
 #include "gpufl/core/monitor.hpp"
 
 __global__

@@ -1,7 +1,6 @@
 #include "gpufl/core/sampler.hpp"
 #include "gpufl/core/logger.hpp"
 #include "gpufl/core/common.hpp"
-#include "gpufl/cuda/cuda.hpp"
 
 namespace gpufl {
     Sampler::Sampler() = default;
@@ -61,15 +60,8 @@ namespace gpufl {
             e.devices = collector_->sampleAll();
             logger_->logSystemSample(e);
 
-#if GPUFL_HAS_CUDA
-            cuda::processPendingKernels();
-#endif
 
             std::this_thread::sleep_for(std::chrono::milliseconds(intervalMs_));
         }
-
-#if GPUFL_HAS_CUDA
-        cuda::freeEventPool();
-#endif
     }
 }

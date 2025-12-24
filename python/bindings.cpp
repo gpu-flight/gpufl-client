@@ -3,7 +3,6 @@
 #include <pybind11/stl.h>
 #include "gpufl/gpufl.hpp"
 #if GPUFL_HAS_CUDA
-#include "gpufl/cuda/cuda.hpp"
 #endif
 
 namespace py = pybind11;

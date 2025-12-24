@@ -31,6 +31,7 @@ namespace gpufl {
         int numRegs;
         float occupancy;
         int maxActiveBlocks;
+        unsigned int corrId;
     };
 
     struct LaunchMeta {

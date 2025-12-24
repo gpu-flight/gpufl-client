@@ -109,14 +109,14 @@ namespace gpufl::nvidia {
             if (nvmlDeviceGetCurrentClocksThrottleReasons(dev, &reasons) == NVML_SUCCESS) {
                 // Check for Power Cap (0x0000000000000004 usually, but check nvml.h constant)
                 // NVML_CLOCKS_THROTTLE_REASON_SW_POWER_CAP
-                s.throttlePower = (reasons & 0x04) != 0;
+                s.throttlePower = (reasons & 0x0000000000000004ULL) != 0;
 
                 // Check for Thermal (Hardware Slowdown or Thermal Caps)
                 // NVML_CLOCKS_THROTTLE_REASON_HW_SLOWDOWN | SW_THERMAL | HW_THERMAL
                 bool therm = false;
-                if (reasons & 0x08) therm = true; // HW_SLOWDOWN (High Temp)
-                if (reasons & 0x20) therm = true; // SW_THERMAL
-                if (reasons & 0x40) therm = true; // HW_THERMAL
+                if (reasons & 0x0000000000000008ULL) therm = true;
+                if (reasons & 0x0000000000000020ULL) therm = true;
+                if (reasons & 0x0000000000000040ULL) therm = true;
                 s.throttleThermal = therm;
             } else {
                 s.throttlePower = false;

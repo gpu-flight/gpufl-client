@@ -57,7 +57,6 @@ namespace gpufl {
         int pid = 0;
         std::string app;
         std::string name;
-        std::string tag;
 
         int64_t tsNs = 0;
         int64_t durationNs = 0;
@@ -72,15 +71,16 @@ namespace gpufl {
         std::string cudaError;
         float occupancy = 0.0f;
         int maxActiveBlocks = 0;
+        unsigned int corrId = 0;
     };
 
     struct KernelEndEvent {
         int pid = 0;
         std::string app;
         std::string name;
-        std::string tag;
         int64_t tsNs = 0;
         std::string cudaError;
+        unsigned int corrId = 0;
     };
 
     struct KernelSampleEvent {

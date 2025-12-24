@@ -3,7 +3,6 @@
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/trace_type.hpp"
 #include "gpufl/core/debug_logger.hpp"
-#include "gpufl/cuda/cuda.hpp"
 
 #include <iostream>
 #include <cstring>
@@ -90,7 +89,7 @@ namespace gpufl {
         if (!initialized_) return;
         active_.store(true);
 
-        if (CUptiResult res = cuptiActivityEnable(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL); res != CUPTI_SUCCESS) {
+        if (const CUptiResult res = cuptiActivityEnable(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL); res != CUPTI_SUCCESS) {
             // Fallback to legacy if concurrent fails
             cuptiActivityEnable(CUPTI_ACTIVITY_KIND_KERNEL);
         }
@@ -154,8 +153,9 @@ namespace gpufl {
 
                         out.hasDetails = false;
 
-                        const uint64_t corr = k->correlationId;
                         {
+                            const uint64_t corr = k->correlationId;
+                            out.corrId = corr;
                             std::lock_guard lk(backend->metaMu_);
                             if (auto it = backend->metaByCorr_.find(corr); it != backend->metaByCorr_.end()) {
                                 const LaunchMeta &m = it->second;
