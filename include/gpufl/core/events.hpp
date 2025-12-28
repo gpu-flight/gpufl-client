@@ -73,6 +73,7 @@ namespace gpufl {
         int pid = 0;
         std::string app;
         std::string name;
+        std::string platform;
         std::string sessionId;
         int32_t deviceId = 0;
 
