@@ -78,6 +78,7 @@ namespace gpufl::nvidia {
 
             s.name = name;
             s.uuid = uuid;
+            s.vendor = "NVIDIA";
             s.pciBusId = static_cast<int>(pci.bus);
 
             if (nvmlDeviceGetMemoryInfo(dev, &mem) == NVML_SUCCESS) {

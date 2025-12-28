@@ -27,6 +27,7 @@ namespace gpufl {
         int deviceId = 0;
         std::string name;
         std::string uuid;
+        std::string vendor;
         int pciBusId = 0;
 
         size_t freeMiB = 0;

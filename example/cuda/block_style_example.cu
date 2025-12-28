@@ -35,11 +35,11 @@ int main() {
     opts.logPath = "gfl_block.log";
     opts.systemSampleRateMs = 10;
     opts.enableKernelDetails = true;
+    opts.samplingAutoStart = true;
     if (!gpufl::init(opts)) {
         std::cerr << "Failed to initialize gpufl" << std::endl;
         return 1;
     }
-    gpufl::systemStart();
 
     std::cout << "=== GPUFl Block-Style API Demo ===" << std::endl;
     std::cout << "Logs: " << opts.logPath << "\n" << std::endl;
@@ -154,7 +154,6 @@ int main() {
     cudaFree(d_a);
     cudaFree(d_b);
     cudaFree(d_c);
-    gpufl::systemStop();
 
     gpufl::shutdown();
 

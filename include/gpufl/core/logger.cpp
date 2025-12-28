@@ -62,6 +62,7 @@ namespace gpufl {
                 << "\"id\":" << dev.deviceId
                 << ",\"name\":\"" << jsonEscape(dev.name) << "\""
                 << ",\"uuid\":\"" << jsonEscape(dev.uuid) << "\""
+                << ",\"vendor\":\"" << jsonEscape(dev.vendor) << "\""
                 << ",\"pci_bus\":" << dev.pciBusId
                 << ",\"used_mib\":" << dev.usedMiB
                 << ",\"free_mib\":" << dev.freeMiB

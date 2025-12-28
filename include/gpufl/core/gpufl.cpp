@@ -160,6 +160,18 @@ namespace gpufl {
         rt_ptr->logger->logInit(ie);
 
         // Start sampler if enabled and collector exists
+        if (opts.samplingAutoStart && rt_ptr->logger) {
+            SystemStartEvent e;
+            e.pid = gpufl::detail::getPid();
+            e.app = rt_ptr->appName;
+            e.name = "sampling_start";
+            e.sessionId = rt_ptr->sessionId;
+            e.tsNs = gpufl::detail::getTimestampNs();
+            if (rt_ptr->collector) e.devices = rt_ptr->collector->sampleAll();
+            if (rt_ptr->hostCollector) e.host = rt_ptr->hostCollector->sample();
+            rt_ptr->logger->logSystemStart(e);
+
+        }
         if (opts.samplingAutoStart && opts.systemSampleRateMs > 0 && rt_ptr->collector) {
             rt_ptr->sampler.start(rt_ptr->appName, rt_ptr->sessionId, rt_ptr->logger, rt_ptr->collector, opts.systemSampleRateMs, rt_ptr->appName);
         }
@@ -176,6 +188,7 @@ namespace gpufl {
             e.pid = gpufl::detail::getPid();
             e.app = rt->appName;
             e.name = std::move(name);
+            e.sessionId = rt->sessionId;
             e.tsNs = gpufl::detail::getTimestampNs();
             if (rt->collector) e.devices = rt->collector->sampleAll();
             if (rt->hostCollector) e.host = rt->hostCollector->sample();
@@ -210,6 +223,18 @@ namespace gpufl {
         if (!rt) return;
 
         rt->sampler.stop();
+
+        if (g_opts.samplingAutoStart && rt->collector) {
+            SystemStopEvent e;
+            e.pid = gpufl::detail::getPid();
+            e.app = rt->appName;
+            e.sessionId = rt->sessionId;
+            e.name = "sampling_end";
+            e.tsNs = gpufl::detail::getTimestampNs();
+            if (rt->collector) e.devices = rt->collector->sampleAll();
+            if (rt->hostCollector) e.host = rt->hostCollector->sample();
+            rt->logger->logSystemStop(e);
+        }
 
         ShutdownEvent se;
         se.pid = detail::getPid();
