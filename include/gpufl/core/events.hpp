@@ -81,6 +81,7 @@ namespace gpufl {
 
         std::string grid;
         std::string block;
+        bool hasDetails;
         int dynSharedBytes = 0;
         int numRegs = 0;
         std::size_t staticSharedBytes = 0;
