@@ -54,6 +54,7 @@ namespace gpufl {
                 if (rt && rt->logger) {
                     if (rec.type == TraceType::KERNEL) {
                         KernelBeginEvent be;
+                        be.hasDetails = rec.hasDetails;
                         be.deviceId = rec.deviceId;
                         be.sessionId = rt->sessionId;
                         be.pid = detail::getPid();
