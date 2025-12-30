@@ -38,20 +38,20 @@ namespace gpufl {
             if (!GetSystemTimes(&idle, &kernel, &user)) return 0.0;
 
             auto toU64 = [](const FILETIME& ft) {
-                return (uint64_t)ft.dwLowDateTime | ((uint64_t)ft.dwHighDateTime << 32);
+                return static_cast<uint64_t>(ft.dwLowDateTime) | (static_cast<uint64_t>(ft.dwHighDateTime) << 32);
             };
 
-            uint64_t curIdle = toU64(idle);
-            uint64_t curKernel = toU64(kernel);
-            uint64_t curUser = toU64(user);
+            const uint64_t curIdle = toU64(idle);
+            const uint64_t curKernel = toU64(kernel);
+            const uint64_t curUser = toU64(user);
 
-            uint64_t diffIdle = curIdle - prevIdleTime_;
-            uint64_t diffKernel = curKernel - prevKernelTime_;
-            uint64_t diffUser = curUser - prevUserTime_;
+            const uint64_t diffIdle = curIdle - prevIdleTime_;
+            const uint64_t diffKernel = curKernel - prevKernelTime_;
+            const uint64_t diffUser = curUser - prevUserTime_;
 
             // On Windows, KernelTime includes IdleTime.
             // Total = (Kernel - Idle) + User + Idle  => Kernel + User
-            uint64_t totalSys = diffKernel + diffUser;
+            const uint64_t totalSys = diffKernel + diffUser;
 
             // However, since Kernel includes Idle, the non-idle kernel time is (Kernel - Idle).
             // Active = (diffKernel - diffIdle) + diffUser
@@ -62,8 +62,8 @@ namespace gpufl {
                  // Active part is Total - Idle part
                  // Since Kernel includes Idle, 'totalSys' is the total wall time.
                  // The 'Idle' variable is the idle component of Kernel.
-                 uint64_t active = totalSys - diffIdle;
-                 percent = (double)active / (double)totalSys * 100.0;
+                 const uint64_t active = totalSys - diffIdle;
+                 percent = static_cast<double>(active) / static_cast<double>(totalSys) * 100.0;
             }
 
             prevIdleTime_ = curIdle;
@@ -73,7 +73,7 @@ namespace gpufl {
             return percent;
         }
 
-        void sampleRam(HostSample& s) {
+        static void sampleRam(HostSample& s) {
             MEMORYSTATUSEX memInfo;
             memInfo.dwLength = sizeof(MEMORYSTATUSEX);
             if (GlobalMemoryStatusEx(&memInfo)) {
