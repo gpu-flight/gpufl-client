@@ -2,18 +2,11 @@
 
 #include <cstdint>
 #include <functional>
-#include <memory>
 #include <string>
 #include <atomic>
 #include "gpufl/core/monitor.hpp"
 
 namespace gpufl {
-    enum MetricFlags {
-        METRIC_NONE = 0,
-        METRIC_SYSTEM = 1 << 0, // PCIe, Power, Temps
-        METRIC_KERNEL = 1 << 1,
-        METRIC_ALL = 0xFFFFFFFF
-    };
     enum class BackendKind { Auto, Nvidia, Amd, None };
     static std::atomic<int> g_systemSampleRateMs{0};
 
@@ -63,16 +56,20 @@ namespace gpufl {
     };
 
     inline void monitor(const std::string& name, const std::function<void()> &fn) {
-        ScopedRange r(name.c_str());
+        ScopedMonitor r(name);
+        fn();
+    }
+    inline void monitor(const std::string& name, const std::string& tag, const std::function<void()> &fn) {
+        ScopedMonitor r(name, tag);
         fn();
     }
 } // namespace gpufl
 
 #define GFL_SCOPE(name) \
-    if(gpufl::ScopedRange _gpufl_scope{name}; true)
+    if(gpufl::ScopedMonitor _gpufl_scope{name}; true)
 
 #define GFL_SCOPE_TAGGED(name, tag) \
-    if (gpufl::ScopedRange _gpufl_scope{name}; true)
+    if (gpufl::ScopedMonitor+ _gpufl_scope{name, tag}; true)
 
 #define GFL_SYSTEM_START(name) ::gpufl::systemStart(name)
 #define GFL_SYSTEM_STOP(name)  ::gpufl::systemStop(name)

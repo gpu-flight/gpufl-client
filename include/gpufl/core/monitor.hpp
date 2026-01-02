@@ -11,6 +11,33 @@ namespace gpufl {
         bool enable_debug_output = false;
     };
 
+    enum class MonitorMode : unsigned int {
+        None = 0,
+        Monitoring = 1 << 0,
+        Profiling = 1 << 1,
+
+        Default = Monitoring
+    };
+
+    inline constexpr MonitorMode operator|(MonitorMode lhs, MonitorMode rhs) {
+        using T = std::underlying_type_t<MonitorMode>;
+        return static_cast<MonitorMode>(static_cast<T>(lhs) | static_cast<T>(rhs));
+    }
+
+    inline constexpr MonitorMode operator&(MonitorMode lhs, MonitorMode rhs) {
+        using T = std::underlying_type_t<MonitorMode>;
+        return static_cast<MonitorMode>(static_cast<T>(lhs) & static_cast<T>(rhs));
+    }
+
+    inline constexpr MonitorMode& operator|=(MonitorMode& lhs, MonitorMode rhs) {
+        lhs = lhs | rhs;
+        return lhs;
+    }
+
+    inline constexpr bool hasFlag(MonitorMode value, MonitorMode flag) {
+        return (static_cast<unsigned int>(value) & static_cast<unsigned int>(flag)) != 0;
+    }
+
     /**
      * @brief The central monitoring engine.
      */
@@ -52,25 +79,14 @@ namespace gpufl {
         static void RecordStart(const char* name, cudaStream_t stream, TraceType type, void** outHandle);
         static void RecordStop(void* handle, cudaStream_t stream);
 
+        /**
+         * @brief Profiler Scope Control
+         */
+        static void BeginProfilerScope(const char* name);
+        static void EndProfilerScope(const char* name);
+
     private:
         Monitor() = delete;
-    };
-
-    /**
-     * @brief RAII helper for manual range monitoring.
-     */
-    class ScopedRange {
-    public:
-        explicit ScopedRange(const char* name) {
-            Monitor::PushRange(name);
-        }
-
-        ~ScopedRange() {
-            Monitor::PopRange();
-        }
-
-        ScopedRange(const ScopedRange&) = delete;
-        ScopedRange& operator=(const ScopedRange&) = delete;
     };
 
 }

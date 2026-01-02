@@ -36,6 +36,7 @@ int main() {
     opts.systemSampleRateMs = 10;
     opts.enableKernelDetails = true;
     opts.samplingAutoStart = true;
+    opts.enableDebugOutput = true;
     if (!gpufl::init(opts)) {
         std::cerr << "Failed to initialize gpufl" << std::endl;
         return 1;
@@ -90,7 +91,7 @@ int main() {
     std::cout << "Using ScopedRange (RAII object)..." << std::endl;
 
     {
-        gpufl::ScopedRange range("training-epoch-1");
+        gpufl::ScopedMonitor range("training-epoch-1");
 
         vectorAdd<<<grid, block>>>(d_a, d_b, d_c, n);
         cudaDeviceSynchronize();

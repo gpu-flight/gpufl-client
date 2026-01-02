@@ -92,7 +92,7 @@ namespace gpufl {
         std::string cudaError;
         float occupancy = 0.0f;
         int maxActiveBlocks = 0;
-        unsigned int corrId = 0;
+        int32_t corrId = 0;
     };
 
     struct KernelEndEvent {
@@ -102,7 +102,22 @@ namespace gpufl {
         std::string name;
         int64_t tsNs = 0;
         std::string cudaError;
-        unsigned int corrId = 0;
+        int32_t corrId = 0;
+    };
+
+    struct ProfileSampleEvent {
+        int pid = 0;
+        std::string app;
+        std::string sessionId;
+
+        int64_t tsNs = 0;
+        int32_t deviceId = 0;
+        int32_t corrId = 0;
+        uint32_t samplesCount = 0;
+        uint32_t stallReason = 0; // CUPTI enum
+
+        std::string sourceFile;
+        uint32_t sourceLine = 0;
     };
 
     struct ScopeBeginEvent {

@@ -15,25 +15,28 @@ namespace gpufl {
         virtual ~IMonitorBackend() = default;
 
         /**
-         * @brief Initialize the monitoring backend with given options.
+         * @brief initialize the monitoring backend with given options.
          * @param opts Configuration options for monitoring
          */
-        virtual void Initialize(const MonitorOptions& opts) = 0;
+        virtual void initialize(const MonitorOptions& opts) = 0;
 
         /**
-         * @brief Shutdown the monitoring backend and release resources.
+         * @brief shutdown the monitoring backend and release resources.
          */
-        virtual void Shutdown() = 0;
+        virtual void shutdown() = 0;
 
         /**
-         * @brief Start active monitoring/tracing.
+         * @brief start active monitoring/tracing.
          */
-        virtual void Start() = 0;
+        virtual void start() = 0;
 
         /**
-         * @brief Stop active monitoring/tracing.
+         * @brief stop active monitoring/tracing.
          */
-        virtual void Stop() = 0;
+        virtual void stop() = 0;
+
+        virtual void onScopeStart(const char* name) {}
+        virtual void onScopeStop(const char* name) {}
     };
 
 } // namespace gpufl
