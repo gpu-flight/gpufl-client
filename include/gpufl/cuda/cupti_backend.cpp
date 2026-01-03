@@ -491,11 +491,12 @@ namespace gpufl {
                             } else {
                                 // Fallback to PC offset if source not found
                                 uint64_t pcOffset = pc->pcOffset; // Copy to avoid packed field binding issue
+                                uint32_t sourceLocId = pc->sourceLocatorId; // Copy to avoid packed field binding issue
                                 std::snprintf(out.sourceFile, sizeof(out.sourceFile), "PC:0x%llx",
                                             (unsigned long long)pcOffset);
                                 GFL_LOG_DEBUG("[PC_SAMPLING] Got sample: PC=0x", std::hex, pcOffset, std::dec,
                                              " samples=", out.samplesCount, " stallReason=", out.stallReason,
-                                             " corrId=", out.corrId, " (sourceLocatorId=", pc->sourceLocatorId, " not found)");
+                                             " corrId=", out.corrId, " (sourceLocatorId=", sourceLocId, " not found)");
                             }
                         }
 
