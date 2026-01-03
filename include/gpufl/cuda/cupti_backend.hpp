@@ -5,9 +5,13 @@
 
 #include <cuda_runtime.h>
 #include <cupti.h>
+#include <cupti_pcsampling.h>
 #include <atomic>
 #include <mutex>
 #include <unordered_map>
+
+#include "gpufl/gpufl.hpp"
+#include "gpufl/core/debug_logger.hpp"
 
 namespace gpufl {
 
@@ -31,8 +35,15 @@ namespace gpufl {
         int constBytes;
         int numRegs;
         float occupancy;
+
         int maxActiveBlocks;
         unsigned int corrId;
+
+        uint32_t sourceLine;
+        char sourceFile[256];
+        uint32_t samplesCount;
+        uint32_t stallReason;
+        char deviceName[64];
     };
 
     struct LaunchMeta {
@@ -47,6 +58,11 @@ namespace gpufl {
         char name[128]{};
     };
 
+    struct SourceLocation {
+        std::string fileName;
+        uint32_t lineNumber;
+    };
+
     /**
      * @brief CUPTI-based monitoring backend for NVIDIA GPUs.
      *
@@ -58,17 +74,36 @@ namespace gpufl {
         CuptiBackend() = default;
         ~CuptiBackend() override = default;
 
-        void Initialize(const MonitorOptions& opts) override;
-        void Shutdown() override;
+        void initialize(const MonitorOptions& opts) override;
+        void shutdown() override;
 
         static CUptiResult (*get_value())(CUpti_ActivityKind);
 
-        void Start() override;
-        void Stop() override;
+        void start() override;
 
-        bool IsActive() const { return active_.load(); }
-        const MonitorOptions& GetOptions() const { return opts_; }
-        CUpti_SubscriberHandle GetSubscriber() const { return subscriber_; }
+        bool isMonitoringMode() const;
+
+        bool isProfilingMode() const;
+
+        void stop() override;
+
+        bool isActive() const { return active_.load(); }
+        const MonitorOptions& getOptions() const { return opts_; }
+        CUpti_SubscriberHandle getSubscriber() const { return subscriber_; }
+
+        void onScopeStart(const char *name) override {
+            GFL_LOG_DEBUG("onScopeStart");
+            if (isProfilingMode()) {
+                startPCSampling();
+            }
+        }
+
+        void onScopeStop(const char *name) override {
+            GFL_LOG_DEBUG("onScopeStop");
+            if (isProfilingMode()) {
+                stopAndCollectPCSampling();
+            }
+        }
 
     private:
         // CUPTI callback functions
@@ -81,8 +116,28 @@ namespace gpufl {
         bool initialized_{false};
         MonitorOptions opts_;
 
+        MonitorMode mode_ = MonitorMode::Monitoring | MonitorMode::Profiling; // enable both Monitoring and Profiling by default.
+
         std::mutex metaMu_;
         std::unordered_map<uint64_t, LaunchMeta> metaByCorr_;
+
+        static std::mutex sourceMapMu_;
+        static std::unordered_map<uint32_t, SourceLocation> sourceMap_;
+
+        std::string cachedDeviceName_ = "Unknown Device";
+        CUcontext ctx_ = nullptr; // context for the profiler.
+
+        // PC Sampling method tracking
+        enum class PCSamplingMethod {
+            None,           // PC Sampling not available or not initialized
+            ActivityAPI,    // Using CUPTI Activity API (older GPUs)
+            SamplingAPI     // Using PC Sampling API (newer GPUs, Windows skips GetData)
+        };
+        PCSamplingMethod pcSamplingMethod_ = PCSamplingMethod::None;
+
+        void enableProfilingFeatures();
+        void startPCSampling();
+        void stopAndCollectPCSampling() const;
     };
 
 } // namespace gpufl

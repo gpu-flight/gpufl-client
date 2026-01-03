@@ -104,6 +104,16 @@ namespace gpufl {
                         if (rt->collector) ee.devices = rt->collector->sampleAll();
                         if (rt->hostCollector) ee.host = rt->hostCollector->sample();
                         rt->logger->logScopeEnd(ee);
+                    } else if (rec.type == TraceType::PC_SAMPLE) {
+                        ProfileSampleEvent pe;
+                        pe.pid = detail::getPid();
+                        pe.app = rt->appName;
+                        pe.sessionId = rt->sessionId;
+                        pe.tsNs = rec.cpuStartNs;
+                        pe.samplesCount = rec.samplesCount;
+                        pe.stallReason = rec.stallReason;
+                        pe.deviceId = rec.deviceId;
+                        rt->logger->logProfileSample(pe);
                     }
                 }
 
@@ -143,7 +153,7 @@ namespace gpufl {
 #endif
 
         if (g_backend) {
-            g_backend->Initialize(opts);
+            g_backend->initialize(opts);
         }
 
         g_collectorRunning.store(true);
@@ -154,7 +164,7 @@ namespace gpufl {
         if (!g_initialized.exchange(false)) return;
 
         if (g_backend) {
-            g_backend->Shutdown();
+            g_backend->shutdown();
         }
 
         g_collectorRunning.store(false);
@@ -167,11 +177,11 @@ namespace gpufl {
     }
 
     void Monitor::Start() {
-        if (g_backend) g_backend->Start();
+        if (g_backend) g_backend->start();
     }
 
     void Monitor::Stop() {
-        if (g_backend) g_backend->Stop();
+        if (g_backend) g_backend->stop();
     }
 
     void Monitor::PushRange(const char* name) {
@@ -217,4 +227,15 @@ namespace gpufl {
         delete rec;
     }
 
+    void Monitor::BeginProfilerScope(const char *name) {
+        if (g_backend) {
+            g_backend->onScopeStart(name);
+        }
+    }
+
+    void Monitor::EndProfilerScope(const char *name) {
+        if (g_backend) {
+            g_backend->onScopeStop(name);
+        }
+    }
 }

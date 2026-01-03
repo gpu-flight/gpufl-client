@@ -4,6 +4,7 @@
 namespace gpufl {
     enum class TraceType : uint8_t {
         KERNEL,
+        PC_SAMPLE,
         RANGE
     };
 }

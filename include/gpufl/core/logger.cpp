@@ -346,6 +346,25 @@ namespace gpufl {
         chanScope_->write(oss.str());
     }
 
+    void Logger::logProfileSample(const ProfileSampleEvent& e) const {
+        if (!chanScope_) return;
+        std::ostringstream oss;
+        oss << "{"
+            << "\"type\":\"profile_sample\""
+            << ",\"pid\":" << e.pid
+            << ",\"app\":\"" << jsonEscape(e.app) << "\""
+            << ",\"session_id\":\"" << jsonEscape(e.sessionId) << "\""
+            << ",\"ts_ns\":" << e.tsNs
+            << ",\"device_id\":" << e.deviceId
+            << ",\"corr_id\":" << e.corrId
+            << ",\"sample_count\":" << e.samplesCount
+            << ",\"stall_reason\":" << e.stallReason
+            << ",\"source_file\":\"" << jsonEscape(e.sourceFile) << "\""
+            << ",\"source_line\":" << e.sourceLine
+            << "}";
+        chanScope_->write(oss.str());
+    }
+
     void Logger::logSystemSample(const SystemSampleEvent& e) const {
         if (!chanSystem_) return;
         std::ostringstream oss;

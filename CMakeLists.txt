@@ -69,7 +69,7 @@ if(GPUFL_ENABLE_NVIDIA)
                 include/gpufl/cuda/monitor.cpp
                 include/gpufl/cuda/cupti_backend.cpp)
             target_compile_definitions(gpufl PUBLIC GPUFL_HAS_CUDA=1)
-            target_link_libraries(gpufl PRIVATE CUDA::cudart)
+            target_link_libraries(gpufl PRIVATE CUDA::cudart CUDA::cuda_driver)
 
             # --------------------------------------------------------
             # CUPTI Support (Added)

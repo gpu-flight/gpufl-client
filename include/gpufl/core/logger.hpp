@@ -40,6 +40,8 @@ namespace gpufl {
         void logScopeBegin(const ScopeBeginEvent& e) const;
         void logScopeEnd(const ScopeEndEvent& e) const;
 
+        void logProfileSample(const ProfileSampleEvent& e) const;
+
         // System channel
         void logSystemStart(const SystemStartEvent& e) const;
         void logSystemStop(const SystemStopEvent& e) const;

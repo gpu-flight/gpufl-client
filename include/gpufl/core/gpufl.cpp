@@ -270,6 +270,9 @@ namespace gpufl {
 
         if (rt->hostCollector) e.host = rt->hostCollector->sample();
         rt->logger->logScopeBegin(e);
+
+        // profiling
+        Monitor::BeginProfilerScope(name_.c_str());
     }
 
     ScopedMonitor::~ScopedMonitor() {
@@ -288,5 +291,7 @@ namespace gpufl {
         if (rt->hostCollector) e.host = rt->hostCollector->sample();
 
         rt->logger->logScopeEnd(e);
+
+        Monitor::EndProfilerScope(name_.c_str());
     }
 } // namespace gpufl
