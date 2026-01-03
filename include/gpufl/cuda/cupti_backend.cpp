@@ -5,6 +5,7 @@
 #include "gpufl/core/debug_logger.hpp"
 
 #include <cupti_pcsampling.h>
+#include <cstring>
 
 #include "gpufl/backends/nvidia/cuda_collector.hpp"
 
@@ -268,7 +269,8 @@ namespace gpufl {
                                     (unsigned long long)pcRec.pcOffset);
 
                         g_monitorBuffer.Push(rec);
-                        GFL_LOG_DEBUG("[PC_SAMPLING] Pushed sample: PC=0x", std::hex, pcRec.pcOffset, std::dec,
+                        uint64_t pcOffset = pcRec.pcOffset; // Copy to avoid packed field binding issue
+                        GFL_LOG_DEBUG("[PC_SAMPLING] Pushed sample: PC=0x", std::hex, pcOffset, std::dec,
                                      " samples=", totalSamples, " stallReason=", mainReason);
                     }
                 }
@@ -408,7 +410,8 @@ namespace gpufl {
                 const CUptiResult st = cuptiActivityGetNextRecord(
                     buffer, validSize, &record);
                 if (st == CUPTI_SUCCESS) {
-                    GFL_LOG_DEBUG("[CUPTI] Got activity record kind=", record->kind);
+                    CUpti_ActivityKind recKind = record->kind; // Copy to avoid packed field binding issue
+                    GFL_LOG_DEBUG("[CUPTI] Got activity record kind=", recKind);
 
                     const auto *k = reinterpret_cast<const
                         CUpti_ActivityKernel9 *>(record);
@@ -487,9 +490,10 @@ namespace gpufl {
                                              " corrId=", out.corrId);
                             } else {
                                 // Fallback to PC offset if source not found
+                                uint64_t pcOffset = pc->pcOffset; // Copy to avoid packed field binding issue
                                 std::snprintf(out.sourceFile, sizeof(out.sourceFile), "PC:0x%llx",
-                                            (unsigned long long)pc->pcOffset);
-                                GFL_LOG_DEBUG("[PC_SAMPLING] Got sample: PC=0x", std::hex, pc->pcOffset, std::dec,
+                                            (unsigned long long)pcOffset);
+                                GFL_LOG_DEBUG("[PC_SAMPLING] Got sample: PC=0x", std::hex, pcOffset, std::dec,
                                              " samples=", out.samplesCount, " stallReason=", out.stallReason,
                                              " corrId=", out.corrId, " (sourceLocatorId=", pc->sourceLocatorId, " not found)");
                             }
