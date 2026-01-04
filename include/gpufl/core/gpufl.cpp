@@ -13,6 +13,7 @@
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/backends/host_collector.hpp"
 #include "../backends/nvidia/cuda_collector.hpp"
+#include "gpufl/core/scope_registry.hpp"
 #if GPUFL_HAS_CUDA || defined(__CUDACC__)
   #include <cuda_runtime.h>
 #endif
@@ -26,7 +27,8 @@
 #endif
 
 namespace gpufl {
-    struct InitOptions;
+    std::atomic<int> g_systemSampleRateMs{0};
+    InitOptions g_opts;
 
     static std::string defaultLogPath_(const std::string& app) {
         return app + ".log";
@@ -263,7 +265,6 @@ namespace gpufl {
 
         Runtime* rt = runtime();
         if (!rt || !rt->logger) return;
-
         ScopeBeginEvent e;
         e.pid = pid_;
         e.app = rt->appName;
@@ -272,20 +273,28 @@ namespace gpufl {
         e.tag = tag_;
         e.tsNs = startTs_;
         e.scopeId = scopeId_;
-        e.scopeDepth = g_threadScopeStack.size();
-        if (!g_threadScopeStack.empty()) {
+
+        auto& stack = getThreadScopeStack();
+
+        e.scopeDepth = stack.size();
+        if (!stack.empty()) {
             std::string fullPath;
-            for (size_t i = 0; i < gpufl::g_threadScopeStack.size(); ++i) {
+            for (size_t i = 0; i < stack.size(); ++i) {
                 if (i > 0) fullPath += "|";
-                fullPath += gpufl::g_threadScopeStack[i];
+                fullPath += stack[i];
             }
             e.userScope = fullPath + "|" + name_;
         } else {
             e.userScope = name_;
         }
-        g_threadScopeStack.push_back(name_);
+        stack.push_back(name_);
 
-        if (rt->hostCollector) e.host = rt->hostCollector->sample();
+        if (rt->hostCollector) {
+            e.host = rt->hostCollector->sample();
+        }
+        if (rt->collector) {
+            e.devices = rt->collector->sampleAll();
+        }
         rt->logger->logScopeBegin(e);
 
         // profiling
@@ -296,9 +305,6 @@ namespace gpufl {
         const Runtime* rt = runtime();
         if (!rt || !rt->logger) return;
 
-        if (!g_threadScopeStack.empty()) {
-            g_threadScopeStack.pop_back();
-        }
         ScopeEndEvent e;
         e.pid = pid_;
         e.app = rt->appName;
@@ -307,19 +313,30 @@ namespace gpufl {
         e.tag = tag_;
         e.tsNs = detail::getTimestampNs();
         e.scopeId = scopeId_;
-        e.scopeDepth = g_threadScopeStack.size();
-        if (!g_threadScopeStack.empty()) {
+
+        auto& stack = getThreadScopeStack();
+
+        if (!stack.empty()) {
+            stack.pop_back();
+        }
+        e.scopeDepth = stack.size();
+        if (!stack.empty()) {
             std::string fullPath;
-            for (size_t i = 0; i < gpufl::g_threadScopeStack.size(); ++i) {
+            for (size_t i = 0; i < stack.size(); ++i) {
                 if (i > 0) fullPath += "|";
-                fullPath += gpufl::g_threadScopeStack[i];
+                fullPath += stack[i];
             }
             e.userScope = fullPath + "|" + name_;
         } else {
             e.userScope = name_;
         }
 
-        if (rt->hostCollector) e.host = rt->hostCollector->sample();
+        if (rt->hostCollector) {
+            e.host = rt->hostCollector->sample();
+        }
+        if (rt->collector) {
+            e.devices = rt->collector->sampleAll();
+        }
 
         rt->logger->logScopeEnd(e);
 

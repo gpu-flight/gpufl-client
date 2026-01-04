@@ -9,7 +9,6 @@
 #include "scope_registry.hpp"
 
 namespace gpufl {
-    inline thread_local std::vector<std::string> g_threadScopeStack;
 
     namespace detail {
 

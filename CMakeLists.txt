@@ -44,6 +44,7 @@ target_sources(gpufl PRIVATE
     include/gpufl/core/common.cpp
     include/gpufl/core/debug_logger.cpp
     include/gpufl/core/stack_trace.cpp
+    include/gpufl/core/scope_registry.cpp
 )
 
 set(GPUFL_HAS_CUDA 0)

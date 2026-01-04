@@ -55,6 +55,7 @@ namespace gpufl {
                 Runtime* rt = runtime();
                 if (rt && rt->logger) {
                     if (rec.type == TraceType::KERNEL) {
+
                         std::string stackTrace = StackRegistry::instance().get(rec.stackId);
 
                         KernelBeginEvent be;
@@ -88,6 +89,7 @@ namespace gpufl {
                         ee.app = rt->appName;
                         ee.sessionId = rt->sessionId;
                         ee.name = rec.name;
+                        ee.corrId = rec.corrId;
                         ee.tsNs = rec.cpuStartNs + durationNs;
                         ee.scopeDepth = rec.scopeDepth;
                         ee.userScope = rec.userScope;

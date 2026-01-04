@@ -447,6 +447,7 @@ namespace gpufl {
                                 const LaunchMeta &m = it->second;
 
                                 out.scopeDepth = m.scopeDepth;
+                                out.stackId = m.stackId;
                                 std::copy(std::begin(m.userScope), std::end(m.userScope), std::begin(out.userScope));
 
                                 if (m.hasDetails) {
@@ -594,14 +595,15 @@ namespace gpufl {
             } else {
                 meta.stackId = 0;
             }
-            if (!gpufl::g_threadScopeStack.empty()) {
+            auto& stack = getThreadScopeStack();
+            if (!stack.empty()) {
                 std::string fullPath;
-                for (size_t i = 0; i < gpufl::g_threadScopeStack.size(); ++i) {
+                for (size_t i = 0; i < stack.size(); ++i) {
                     if (i > 0) fullPath += "|";
-                    fullPath += gpufl::g_threadScopeStack[i];
+                    fullPath += stack[i];
                 }
                 std::snprintf(meta.userScope, sizeof(meta.userScope), "%s", fullPath.c_str());
-                meta.scopeDepth = gpufl::g_threadScopeStack.size();
+                meta.scopeDepth = stack.size();
             } else {
                 std::snprintf(meta.userScope, sizeof(meta.userScope), "global");
                 meta.scopeDepth = 0;
