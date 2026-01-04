@@ -8,7 +8,6 @@
 
 namespace gpufl {
     enum class BackendKind { Auto, Nvidia, Amd, None };
-    static std::atomic<int> g_systemSampleRateMs{0};
 
     struct InitOptions {
         std::string appName = "gpufl";
@@ -27,7 +26,9 @@ namespace gpufl {
         std::string reason;
     };
 
-    static InitOptions g_opts;
+    extern std::atomic<int> g_systemSampleRateMs;
+    extern InitOptions g_opts;
+
     BackendProbeResult probeNvml();
     BackendProbeResult probeRocm();
 

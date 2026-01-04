@@ -27,7 +27,8 @@
 #endif
 
 namespace gpufl {
-    struct InitOptions;
+    std::atomic<int> g_systemSampleRateMs{0};
+    InitOptions g_opts;
 
     static std::string defaultLogPath_(const std::string& app) {
         return app + ".log";
@@ -264,7 +265,6 @@ namespace gpufl {
 
         Runtime* rt = runtime();
         if (!rt || !rt->logger) return;
-        auto& stack = getThreadScopeStack();
         ScopeBeginEvent e;
         e.pid = pid_;
         e.app = rt->appName;
@@ -273,18 +273,25 @@ namespace gpufl {
         e.tag = tag_;
         e.tsNs = startTs_;
         e.scopeId = scopeId_;
-        e.scopeDepth = stack.size();
-        if (!stack.empty()) {
-            std::string fullPath;
-            for (size_t i = 0; i < stack.size(); ++i) {
-                if (i > 0) fullPath += "|";
-                fullPath += stack[i];
+
+        {
+            std::lock_guard<std::mutex> lock(gpufl::getScopeMutex());
+            auto& stack = getScopeStack();
+
+            e.scopeDepth = stack.size();
+            if (!stack.empty()) {
+                std::string fullPath;
+                for (size_t i = 0; i < stack.size(); ++i) {
+                    if (i > 0) fullPath += "|";
+                    fullPath += stack[i];
+                }
+                e.userScope = fullPath + "|" + name_;
+            } else {
+                e.userScope = name_;
             }
-            e.userScope = fullPath + "|" + name_;
-        } else {
-            e.userScope = name_;
+            std::cout << "[DEBUG] Pushing to stack..." << std::endl;
+            stack.push_back(name_);
         }
-        stack.push_back(name_);
 
         if (rt->hostCollector) {
             e.host = rt->hostCollector->sample();
@@ -300,10 +307,6 @@ namespace gpufl {
         const Runtime* rt = runtime();
         if (!rt || !rt->logger) return;
 
-        auto& stack = getThreadScopeStack();
-        if (!stack.empty()) {
-            stack.pop_back();
-        }
         ScopeEndEvent e;
         e.pid = pid_;
         e.app = rt->appName;
@@ -312,17 +315,26 @@ namespace gpufl {
         e.tag = tag_;
         e.tsNs = detail::getTimestampNs();
         e.scopeId = scopeId_;
-        e.scopeDepth = stack.size();
-        if (!stack.empty()) {
-            std::string fullPath;
-            for (size_t i = 0; i < stack.size(); ++i) {
-                if (i > 0) fullPath += "|";
-                fullPath += stack[i];
+        {
+            std::lock_guard<std::mutex> lock(gpufl::getScopeMutex());
+            auto& stack = getScopeStack();
+
+            if (!stack.empty()) {
+                stack.pop_back();
             }
-            e.userScope = fullPath + "|" + name_;
-        } else {
-            e.userScope = name_;
+            e.scopeDepth = stack.size();
+            if (!stack.empty()) {
+                std::string fullPath;
+                for (size_t i = 0; i < stack.size(); ++i) {
+                    if (i > 0) fullPath += "|";
+                    fullPath += stack[i];
+                }
+                e.userScope = fullPath + "|" + name_;
+            } else {
+                e.userScope = name_;
+            }
         }
+
 
         if (rt->hostCollector) {
             e.host = rt->hostCollector->sample();

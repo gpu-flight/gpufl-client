@@ -595,7 +595,7 @@ namespace gpufl {
             } else {
                 meta.stackId = 0;
             }
-            auto& stack = getThreadScopeStack();
+            auto& stack = getScopeStack();
             if (!stack.empty()) {
                 std::string fullPath;
                 for (size_t i = 0; i < stack.size(); ++i) {
