@@ -280,6 +280,7 @@ namespace gpufl {
             << ",\"has_details\":" << std::boolalpha << e.hasDetails
             << ",\"device_id\":\"" << e.deviceId << "\""
             << ",\"ts_ns\":" << e.tsNs
+            << ",\"stack_trace\":\"" << jsonEscape(e.stackTrace) << "\""
             << ",\"user_scope\":\"" << jsonEscape(e.userScope) << "\""
             << ",\"scope_depth\":" << e.scopeDepth
             << ",\"duration_ns\":" << e.durationNs
@@ -308,6 +309,7 @@ namespace gpufl {
             << ",\"session_id\":\"" << jsonEscape(e.sessionId) << "\""
             << ",\"name\":\"" << jsonEscape(e.name) << "\""
             << ",\"ts_ns\":" << e.tsNs
+            << ",\"stack_trace\":\"" << jsonEscape(e.stackTrace) << "\""
             << ",\"user_scope\":\"" << jsonEscape(e.userScope) << "\""
             << ",\"scope_depth\":" << e.scopeDepth
             << ",\"corr_id\":" << e.corrId

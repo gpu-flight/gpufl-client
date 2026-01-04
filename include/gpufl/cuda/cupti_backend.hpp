@@ -47,6 +47,8 @@ namespace gpufl {
 
         char userScope[256]{};
         int scopeDepth{};
+
+        size_t stackId{};
     };
 
     struct LaunchMeta {
@@ -61,6 +63,7 @@ namespace gpufl {
         char name[128]{};
         char userScope[256]{};
         int scopeDepth{};
+        size_t stackId{};
     };
 
     struct SourceLocation {
@@ -86,9 +89,9 @@ namespace gpufl {
 
         void start() override;
 
-        bool isMonitoringMode() const;
+        bool isMonitoringMode() override;
 
-        bool isProfilingMode() const;
+        bool isProfilingMode() override;
 
         void stop() override;
 
@@ -121,7 +124,7 @@ namespace gpufl {
         bool initialized_{false};
         MonitorOptions opts_;
 
-        MonitorMode mode_ = MonitorMode::Monitoring | MonitorMode::Profiling; // enable both Monitoring and Profiling by default.
+        MonitorMode mode_ = MonitorMode::Monitoring; // enable Monitoring by default.
 
         std::mutex metaMu_;
         std::unordered_map<uint64_t, LaunchMeta> metaByCorr_;

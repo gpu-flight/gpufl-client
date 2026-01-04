@@ -35,6 +35,10 @@ namespace gpufl {
          */
         virtual void stop() = 0;
 
+        virtual bool isMonitoringMode() = 0;
+
+        virtual bool isProfilingMode() = 0;
+
         virtual void onScopeStart(const char* name) {}
         virtual void onScopeStop(const char* name) {}
     };

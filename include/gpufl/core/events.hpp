@@ -96,6 +96,8 @@ namespace gpufl {
 
         std::string userScope;
         int scopeDepth = 0;
+
+        std::string stackTrace;
     };
 
     struct KernelEndEvent {
@@ -109,6 +111,8 @@ namespace gpufl {
 
         std::string userScope;
         int scopeDepth = 0;
+
+        std::string stackTrace;
     };
 
     struct ProfileSampleEvent {

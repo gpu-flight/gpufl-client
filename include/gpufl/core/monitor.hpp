@@ -7,8 +7,10 @@
 namespace gpufl {
 
     struct MonitorOptions {
-        bool collect_kernel_details = false;
-        bool enable_debug_output = false;
+        bool collectKernelDetails = false;
+        bool enableDebugOutput = false;
+        bool enableStackTrace = false;
+        bool isProfiling = false;
     };
 
     enum class MonitorMode : unsigned int {
