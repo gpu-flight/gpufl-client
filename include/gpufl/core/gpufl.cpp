@@ -274,25 +274,20 @@ namespace gpufl {
         e.tsNs = startTs_;
         e.scopeId = scopeId_;
 
-        {
-            std::lock_guard<std::mutex> lock(gpufl::getScopeMutex());
-            auto& stack = getScopeStack();
+        auto& stack = getThreadScopeStack();
 
-            e.scopeDepth = stack.size();
-            if (!stack.empty()) {
-                std::string fullPath;
-                for (size_t i = 0; i < stack.size(); ++i) {
-                    if (i > 0) fullPath += "|";
-                    fullPath += stack[i];
-                }
-                e.userScope = fullPath + "|" + name_;
-            } else {
-                e.userScope = name_;
+        e.scopeDepth = stack.size();
+        if (!stack.empty()) {
+            std::string fullPath;
+            for (size_t i = 0; i < stack.size(); ++i) {
+                if (i > 0) fullPath += "|";
+                fullPath += stack[i];
             }
-            std::cout << "[DEBUG] Pushing to stack..." << std::endl;
-            stack.push_back(name_);
-            std::cout << "[DEBUG] Stack push complete." << std::endl;
+            e.userScope = fullPath + "|" + name_;
+        } else {
+            e.userScope = name_;
         }
+        stack.push_back(name_);
 
         if (rt->hostCollector) {
             e.host = rt->hostCollector->sample();
@@ -318,26 +313,23 @@ namespace gpufl {
         e.tag = tag_;
         e.tsNs = detail::getTimestampNs();
         e.scopeId = scopeId_;
-        {
-            std::lock_guard<std::mutex> lock(gpufl::getScopeMutex());
-            auto& stack = getScopeStack();
 
-            if (!stack.empty()) {
-                stack.pop_back();
-            }
-            e.scopeDepth = stack.size();
-            if (!stack.empty()) {
-                std::string fullPath;
-                for (size_t i = 0; i < stack.size(); ++i) {
-                    if (i > 0) fullPath += "|";
-                    fullPath += stack[i];
-                }
-                e.userScope = fullPath + "|" + name_;
-            } else {
-                e.userScope = name_;
-            }
+        auto& stack = getThreadScopeStack();
+
+        if (!stack.empty()) {
+            stack.pop_back();
         }
-
+        e.scopeDepth = stack.size();
+        if (!stack.empty()) {
+            std::string fullPath;
+            for (size_t i = 0; i < stack.size(); ++i) {
+                if (i > 0) fullPath += "|";
+                fullPath += stack[i];
+            }
+            e.userScope = fullPath + "|" + name_;
+        } else {
+            e.userScope = name_;
+        }
 
         if (rt->hostCollector) {
             e.host = rt->hostCollector->sample();

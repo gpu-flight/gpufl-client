@@ -4,6 +4,5 @@
 #include <mutex>
 
 namespace gpufl {
-    std::vector<std::string>& getScopeStack();
-    std::mutex& getScopeMutex();
+    std::vector<std::string>& getThreadScopeStack();
 }
