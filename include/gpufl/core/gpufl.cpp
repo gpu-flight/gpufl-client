@@ -125,8 +125,13 @@ namespace gpufl {
 
         GFL_LOG_DEBUG("Initializing Monitor (CUPTI)...");
         MonitorOptions mOpts;
-        mOpts.collect_kernel_details = opts.enableKernelDetails;
-        mOpts.enable_debug_output = opts.enableDebugOutput;
+        mOpts.collectKernelDetails = opts.enableKernelDetails;
+        mOpts.enableDebugOutput = opts.enableDebugOutput;
+        mOpts.isProfiling = opts.enableProfiling;
+        if (mOpts.isProfiling) {
+            mOpts.collectKernelDetails = true; // if profiling is on, then it should be true.
+        }
+        mOpts.enableStackTrace = opts.enableStackTrace;
         Monitor::Initialize(mOpts);
 
         GFL_LOG_DEBUG("Starting Monitor...");
@@ -269,7 +274,12 @@ namespace gpufl {
         e.scopeId = scopeId_;
         e.scopeDepth = g_threadScopeStack.size();
         if (!g_threadScopeStack.empty()) {
-            e.userScope = g_threadScopeStack.back();
+            std::string fullPath;
+            for (size_t i = 0; i < gpufl::g_threadScopeStack.size(); ++i) {
+                if (i > 0) fullPath += "|";
+                fullPath += gpufl::g_threadScopeStack[i];
+            }
+            e.userScope = fullPath + "|" + name_;
         } else {
             e.userScope = name_;
         }
@@ -299,7 +309,12 @@ namespace gpufl {
         e.scopeId = scopeId_;
         e.scopeDepth = g_threadScopeStack.size();
         if (!g_threadScopeStack.empty()) {
-            e.userScope = g_threadScopeStack.back();
+            std::string fullPath;
+            for (size_t i = 0; i < gpufl::g_threadScopeStack.size(); ++i) {
+                if (i > 0) fullPath += "|";
+                fullPath += gpufl::g_threadScopeStack[i];
+            }
+            e.userScope = fullPath + "|" + name_;
         } else {
             e.userScope = name_;
         }

@@ -9,6 +9,8 @@
 
 #include "gpufl/backends/nvidia/cuda_collector.hpp"
 #include "gpufl/core/scope_registry.hpp"
+#include "gpufl/core/stack_registry.hpp"
+#include "gpufl/core/stack_trace.hpp"
 
 #define CUPTI_CHECK(call) \
     do { \
@@ -58,7 +60,10 @@ namespace gpufl {
 
     void CuptiBackend::initialize(const MonitorOptions &opts) {
         opts_ = opts;
-        DebugLogger::setEnabled(opts_.enable_debug_output);
+        if (opts_.isProfiling) {
+            mode_ |= MonitorMode::Profiling;
+        }
+        DebugLogger::setEnabled(opts_.enableDebugOutput);
 
         g_activeBackend.store(this, std::memory_order_release);
         GFL_LOG_DEBUG("Subscribing to CUPTI...");
@@ -141,12 +146,12 @@ namespace gpufl {
         GFL_LOG_DEBUG("Backend started. Mode bitmask: ", static_cast<int>(mode_));
     }
 
-    bool CuptiBackend::isMonitoringMode() const {
+    bool CuptiBackend::isMonitoringMode() {
         return hasFlag(mode_, MonitorMode::Monitoring) ||
                          hasFlag(mode_, MonitorMode::Profiling);
     }
 
-    bool CuptiBackend::isProfilingMode() const {
+    bool CuptiBackend::isProfilingMode() {
         return hasFlag(mode_, MonitorMode::Profiling);
     }
 
@@ -582,18 +587,27 @@ namespace gpufl {
             if (!nm) nm = "kernel_launch";
             std::snprintf(meta.name, sizeof(meta.name), "%s", nm);
 
+            if (backend->getOptions().enableStackTrace) {
+                const std::string trace = gpufl::core::GetCallStack(2);
+                const std::string cleanTrace = detail::sanitizeStackTrace(trace);
+                meta.stackId = gpufl::StackRegistry::instance().getOrRegister(cleanTrace);
+            } else {
+                meta.stackId = 0;
+            }
             if (!gpufl::g_threadScopeStack.empty()) {
-                const std::string& currentScope = gpufl::g_threadScopeStack.back();
-                std::snprintf(meta.userScope, sizeof(meta.userScope), "%s", currentScope.c_str());
-
-                // Optional: Capture Depth
+                std::string fullPath;
+                for (size_t i = 0; i < gpufl::g_threadScopeStack.size(); ++i) {
+                    if (i > 0) fullPath += "|";
+                    fullPath += gpufl::g_threadScopeStack[i];
+                }
+                std::snprintf(meta.userScope, sizeof(meta.userScope), "%s", fullPath.c_str());
                 meta.scopeDepth = gpufl::g_threadScopeStack.size();
             } else {
-                std::snprintf(meta.userScope, sizeof(meta.name), "%s", nm);
+                std::snprintf(meta.userScope, sizeof(meta.userScope), "global");
                 meta.scopeDepth = 0;
             }
 
-            if (backend->getOptions().collect_kernel_details &&
+            if (backend->getOptions().collectKernelDetails &&
                 domain == CUPTI_CB_DOMAIN_RUNTIME_API &&
                 cbid == CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_v7000 &&
                 cbInfo->functionParams != nullptr) {

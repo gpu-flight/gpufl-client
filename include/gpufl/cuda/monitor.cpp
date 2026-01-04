@@ -16,6 +16,8 @@
 #include <stack>
 #include <chrono>
 
+#include "gpufl/core/stack_registry.hpp"
+
 namespace gpufl {
 
     // Global Ring Buffer for MPSC trace delivery
@@ -53,6 +55,8 @@ namespace gpufl {
                 Runtime* rt = runtime();
                 if (rt && rt->logger) {
                     if (rec.type == TraceType::KERNEL) {
+                        std::string stackTrace = StackRegistry::instance().get(rec.stackId);
+
                         KernelBeginEvent be;
                         be.platform = "cuda";
                         be.hasDetails = rec.hasDetails;
@@ -65,6 +69,7 @@ namespace gpufl {
                         be.userScope = rec.userScope;
                         be.scopeDepth = rec.scopeDepth;
                         be.corrId = rec.corrId;
+                        be.stackTrace = stackTrace;
                         if (rec.hasDetails) {
                             be.grid = "(" + std::to_string(rec.gridX) + "," + std::to_string(rec.gridY) + "," + std::to_string(rec.gridZ) + ")";
                             be.block = "(" + std::to_string(rec.blockX) + "," + std::to_string(rec.blockY) + "," + std::to_string(rec.blockZ) + ")";
@@ -86,6 +91,7 @@ namespace gpufl {
                         ee.tsNs = rec.cpuStartNs + durationNs;
                         ee.scopeDepth = rec.scopeDepth;
                         ee.userScope = rec.userScope;
+                        ee.stackTrace = stackTrace;
                         rt->logger->logKernelEnd(ee);
                     } else if (rec.type == TraceType::RANGE) {
                         ScopeBeginEvent be;
@@ -147,7 +153,7 @@ namespace gpufl {
     void Monitor::Initialize(const MonitorOptions& opts) {
         if (g_initialized.exchange(true)) return;
 
-        DebugLogger::setEnabled(opts.enable_debug_output);
+        DebugLogger::setEnabled(opts.enableDebugOutput);
 
 #if defined(GPUFL_HAS_CUDA)
         g_backend = std::make_unique<CuptiBackend>();

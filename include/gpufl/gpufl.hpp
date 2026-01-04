@@ -18,6 +18,8 @@ namespace gpufl {
         bool samplingAutoStart = false;
         bool enableKernelDetails = false;
         bool enableDebugOutput = false;
+        bool enableProfiling = true;
+        bool enableStackTrace = true;
     };
 
     struct BackendProbeResult {
