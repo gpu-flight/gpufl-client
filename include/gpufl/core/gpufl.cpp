@@ -291,10 +291,13 @@ namespace gpufl {
             }
             std::cout << "[DEBUG] Pushing to stack..." << std::endl;
             stack.push_back(name_);
+            std::cout << "[DEBUG] Stack push complete." << std::endl;
         }
 
         if (rt->hostCollector) {
             e.host = rt->hostCollector->sample();
+        }
+        if (rt->collector) {
             e.devices = rt->collector->sampleAll();
         }
         rt->logger->logScopeBegin(e);
@@ -338,6 +341,8 @@ namespace gpufl {
 
         if (rt->hostCollector) {
             e.host = rt->hostCollector->sample();
+        }
+        if (rt->collector) {
             e.devices = rt->collector->sampleAll();
         }
 
