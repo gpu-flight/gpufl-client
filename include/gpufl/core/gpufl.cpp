@@ -285,7 +285,10 @@ namespace gpufl {
         }
         g_threadScopeStack.push_back(name_);
 
-        if (rt->hostCollector) e.host = rt->hostCollector->sample();
+        if (rt->hostCollector) {
+            e.host = rt->hostCollector->sample();
+            e.devices = rt->collector->sampleAll();
+        }
         rt->logger->logScopeBegin(e);
 
         // profiling
@@ -319,7 +322,10 @@ namespace gpufl {
             e.userScope = name_;
         }
 
-        if (rt->hostCollector) e.host = rt->hostCollector->sample();
+        if (rt->hostCollector) {
+            e.host = rt->hostCollector->sample();
+            e.devices = rt->collector->sampleAll();
+        }
 
         rt->logger->logScopeEnd(e);
 
