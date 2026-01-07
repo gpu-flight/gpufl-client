@@ -58,6 +58,22 @@ namespace gpufl {
     std::mutex CuptiBackend::sourceMapMu_;
     std::unordered_map<uint32_t, SourceLocation> CuptiBackend::sourceMap_;
 
+    static int GetMaxThreadsPerSM(int deviceId) {
+        static std::mutex mu;
+        static std::unordered_map<int, int> cache;
+
+        std::lock_guard<std::mutex> lock(mu);
+        if (cache.find(deviceId) == cache.end()) {
+            cudaDeviceProp prop{};
+            if (cudaGetDeviceProperties(&prop, deviceId) == cudaSuccess) {
+                cache[deviceId] = prop.maxThreadsPerMultiProcessor;
+            } else {
+                return 2048; // Fallback for most modern architecture
+            }
+        }
+        return cache[deviceId];
+    }
+
     void CuptiBackend::initialize(const MonitorOptions &opts) {
         opts_ = opts;
         if (opts_.isProfiling) {
@@ -627,6 +643,38 @@ namespace gpufl {
                 meta.blockY = params->blockDim.y;
                 meta.blockZ = params->blockDim.z;
                 meta.dynShared = static_cast<int>(params->sharedMem);
+
+                // occupancy calculation
+                {
+                    int deviceId = 0;
+                    cudaGetDevice(&deviceId); // Get current device for this thread
+
+                    int maxActiveBlocks = 0;
+                    int blockSize = meta.blockX * meta.blockY * meta.blockZ;
+
+                    // Ask the driver: "Given this function pointer and block size, how many blocks fit?"
+                    cudaError_t err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                        &maxActiveBlocks,
+                        params->func, // The kernel function pointer
+                        blockSize,
+                        meta.dynShared
+                    );
+
+                    if (err == cudaSuccess) {
+                        int maxThreadsPerSM = GetMaxThreadsPerSM(deviceId);
+
+                        // Theoretical Occupancy = (Active Warps) / (Max Warps)
+                        if (maxThreadsPerSM > 0) {
+                            meta.occupancy = static_cast<float>(maxActiveBlocks * blockSize) / static_cast<float>(maxThreadsPerSM);
+                        }
+                        meta.maxActiveBlocks = maxActiveBlocks;
+
+                        GFL_LOG_DEBUG("Occupancy: ", meta.occupancy * 100.0f, "% (", maxActiveBlocks, " blocks/SM)");
+                    } else {
+                        meta.occupancy = 0.0f;
+                        meta.maxActiveBlocks = 0;
+                    }
+                }
             }
 
             std::lock_guard<std::mutex> lk(backend->metaMu_);
