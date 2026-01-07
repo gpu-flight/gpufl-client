@@ -23,6 +23,8 @@ namespace gpufl {
         cudaEvent_t startEvent;
         cudaEvent_t stopEvent;
         int64_t cpuStartNs;
+        int64_t apiStartNs;
+        int64_t apiExitNs;
         int64_t durationNs;
 
         // Detailed metrics (optional)

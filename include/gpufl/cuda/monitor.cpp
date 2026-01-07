@@ -58,7 +58,7 @@ namespace gpufl {
 
                         std::string stackTrace = StackRegistry::instance().get(rec.stackId);
 
-                        KernelBeginEvent be;
+                        KernelEvent be;
                         be.platform = "cuda";
                         be.hasDetails = rec.hasDetails;
                         be.deviceId = rec.deviceId;
@@ -66,7 +66,10 @@ namespace gpufl {
                         be.pid = detail::getPid();
                         be.app = rt->appName;
                         be.name = rec.name;
-                        be.tsNs = rec.cpuStartNs;
+                        be.startNs = rec.cpuStartNs;
+                        be.endNs = rec.cpuStartNs + durationNs;
+                        be.apiStartNs = rec.apiStartNs;
+                        be.apiExitNs = rec.apiExitNs;
                         be.userScope = rec.userScope;
                         be.scopeDepth = rec.scopeDepth;
                         be.corrId = rec.corrId;
@@ -82,19 +85,8 @@ namespace gpufl {
                             be.occupancy = rec.occupancy;
                             be.maxActiveBlocks = rec.maxActiveBlocks;
                         }
-                        rt->logger->logKernelBegin(be);
+                        rt->logger->logKernelEvent(be);
 
-                        KernelEndEvent ee;
-                        ee.pid = detail::getPid();
-                        ee.app = rt->appName;
-                        ee.sessionId = rt->sessionId;
-                        ee.name = rec.name;
-                        ee.corrId = rec.corrId;
-                        ee.tsNs = rec.cpuStartNs + durationNs;
-                        ee.scopeDepth = rec.scopeDepth;
-                        ee.userScope = rec.userScope;
-                        ee.stackTrace = stackTrace;
-                        rt->logger->logKernelEnd(ee);
                     } else if (rec.type == TraceType::RANGE) {
                         ScopeBeginEvent be;
                         be.pid = detail::getPid();

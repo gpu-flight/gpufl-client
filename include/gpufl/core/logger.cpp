@@ -267,11 +267,11 @@ namespace gpufl {
 
     // --- Specific Event Channels ---
 
-    void Logger::logKernelBegin(const KernelBeginEvent& e) const {
+    void Logger::logKernelEvent(const KernelEvent& e) const {
         if (!chanKernel_) return;
         std::ostringstream oss;
         oss << "{"
-            << "\"type\":\"kernel_start\""
+            << "\"type\":\"kernel_event\""
             << ",\"pid\":" << e.pid
             << ",\"app\":\"" << jsonEscape(e.app) << "\""
             << ",\"session_id\":\"" << jsonEscape(e.sessionId) << "\""
@@ -279,11 +279,13 @@ namespace gpufl {
             << ",\"platform\":\"" << jsonEscape(e.platform) << "\""
             << ",\"has_details\":" << std::boolalpha << e.hasDetails
             << ",\"device_id\":\"" << e.deviceId << "\""
-            << ",\"ts_ns\":" << e.tsNs
             << ",\"stack_trace\":\"" << jsonEscape(e.stackTrace) << "\""
             << ",\"user_scope\":\"" << jsonEscape(e.userScope) << "\""
             << ",\"scope_depth\":" << e.scopeDepth
-            << ",\"duration_ns\":" << e.durationNs
+            << ",\"start_ns\":" << e.startNs
+            << ",\"end_ns\":" << e.endNs
+            << ",\"api_start_ns\":" << e.apiStartNs
+            << ",\"api_exit_ns\":" << e.apiExitNs
             << ",\"grid\":\"" << jsonEscape(e.grid) << "\""
             << ",\"block\":\"" << jsonEscape(e.block) << "\""
             << ",\"dyn_shared_bytes\":" << e.dynSharedBytes
@@ -293,25 +295,6 @@ namespace gpufl {
             << ",\"const_bytes\":" << e.constBytes
             << ",\"occupancy\":" << e.occupancy
             << ",\"max_active_blocks\":" << e.maxActiveBlocks
-            << ",\"corr_id\":" << e.corrId
-            << ",\"cuda_error\":\"" << jsonEscape(e.cudaError) << "\""
-            << "}";
-        chanKernel_->write(oss.str());
-    }
-
-    void Logger::logKernelEnd(const KernelEndEvent& e) const {
-        if (!chanKernel_) return;
-        std::ostringstream oss;
-        oss << "{"
-            << "\"type\":\"kernel_end\""
-            << ",\"pid\":" << e.pid
-            << ",\"app\":\"" << jsonEscape(e.app) << "\""
-            << ",\"session_id\":\"" << jsonEscape(e.sessionId) << "\""
-            << ",\"name\":\"" << jsonEscape(e.name) << "\""
-            << ",\"ts_ns\":" << e.tsNs
-            << ",\"stack_trace\":\"" << jsonEscape(e.stackTrace) << "\""
-            << ",\"user_scope\":\"" << jsonEscape(e.userScope) << "\""
-            << ",\"scope_depth\":" << e.scopeDepth
             << ",\"corr_id\":" << e.corrId
             << ",\"cuda_error\":\"" << jsonEscape(e.cudaError) << "\""
             << "}";
