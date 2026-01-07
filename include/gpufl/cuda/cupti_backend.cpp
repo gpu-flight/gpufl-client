@@ -449,6 +449,8 @@ namespace gpufl {
                                 out.scopeDepth = m.scopeDepth;
                                 out.stackId = m.stackId;
                                 std::copy(std::begin(m.userScope), std::end(m.userScope), std::begin(out.userScope));
+                                out.apiStartNs = m.apiEnterNs;
+                                out.apiExitNs = m.apiExitNs;
 
                                 if (m.hasDetails) {
                                     out.hasDetails = true;

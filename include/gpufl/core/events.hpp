@@ -70,7 +70,7 @@ namespace gpufl {
         int64_t tsNs = 0;
     };
 
-    struct KernelBeginEvent {
+    struct KernelEvent {
         int pid = 0;
         std::string app;
         std::string name;
@@ -78,8 +78,10 @@ namespace gpufl {
         std::string sessionId;
         int32_t deviceId = 0;
 
-        int64_t tsNs = 0;
-        int64_t durationNs = 0;
+        int64_t startNs = 0;
+        int64_t endNs = 0;
+        int64_t apiStartNs = 0;
+        int64_t apiExitNs = 0;
 
         std::string grid;
         std::string block;
@@ -92,21 +94,6 @@ namespace gpufl {
         std::string cudaError;
         float occupancy = 0.0f;
         int maxActiveBlocks = 0;
-        int32_t corrId = 0;
-
-        std::string userScope;
-        int scopeDepth = 0;
-
-        std::string stackTrace;
-    };
-
-    struct KernelEndEvent {
-        int pid = 0;
-        std::string app;
-        std::string sessionId;
-        std::string name;
-        int64_t tsNs = 0;
-        std::string cudaError;
         int32_t corrId = 0;
 
         std::string userScope;
