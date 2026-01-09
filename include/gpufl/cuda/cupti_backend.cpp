@@ -644,17 +644,23 @@ namespace gpufl {
             } else {
                 meta.stackId = 0;
             }
+
             auto& stack = getThreadScopeStack();
+
             if (!stack.empty()) {
                 std::string fullPath;
                 for (size_t i = 0; i < stack.size(); ++i) {
                     if (i > 0) fullPath += "|";
                     fullPath += stack[i];
                 }
+                fullPath += "|";
+                fullPath += meta.name;
                 std::snprintf(meta.userScope, sizeof(meta.userScope), "%s", fullPath.c_str());
                 meta.scopeDepth = stack.size();
             } else {
-                std::snprintf(meta.userScope, sizeof(meta.userScope), "global");
+                std::string fullPath = "global|";
+                fullPath += meta.name;
+                std::snprintf(meta.userScope, sizeof(meta.userScope), "%s", fullPath.c_str());
                 meta.scopeDepth = 0;
             }
 

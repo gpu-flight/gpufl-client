@@ -7,14 +7,15 @@ from rich.panel import Panel
 from rich.layout import Layout
 
 class GpuFlightSession:
-    def __init__(self, log_dir: str, session_id: str = None):
+    def __init__(self, log_dir: str, session_id: str = None, log_prefix: str = "gfl_block", max_stack_depth: int = 5):
         self.log_dir = Path(log_dir)
         self.console = Console()
+        self.max_stack_depth = max_stack_depth
 
         # 1. Load DataFrames
-        self.kernels = self._load_log(f"gfl_block.log.kernel.0.log")
-        self.scopes = self._load_log(f"gfl_block.log.scope.0.log")
-        self.system = self._load_log(f"gfl_block.log.system.0.log")
+        self.kernels = self._load_log(f"{log_prefix}.kernel.0.log")
+        self.scopes = self._load_log(f"{log_prefix}.scope.0.log")
+        self.system = self._load_log(f"{log_prefix}.system.0.log")
 
         # 2. Filter by Session ID if provided (or pick the latest)
         if session_id:
@@ -91,37 +92,82 @@ class GpuFlightSession:
 
         self.console.print(Panel(stats, title="[bold]GPUFlight Session Report[/bold]", subtitle=self.kernels.iloc[0]['app']))
 
-    def inspect_hotspots(self, top_n=5):
-        """Identify the most expensive kernels"""
+    def inspect_hotspots(self, top_n=5, max_stack_depth=None):
+        """Identify the most expensive kernels and show their stack traces"""
         if self.kernels.empty:
             self.console.print("[yellow]No kernel data to analyze hotspots.[/yellow]")
             return
 
-        # Group by Kernel Name
-        summary = self.kernels.groupby('name').agg(
+        depth = max_stack_depth or self.max_stack_depth
+
+        # Group by Kernel Name and Stack Trace
+        # We include stack_trace in groupby to see hotspots per call site
+        group_cols = ['name']
+        if 'stack_trace' in self.kernels.columns:
+            group_cols.append('stack_trace')
+
+        summary = self.kernels.groupby(group_cols).agg(
             count=('name', 'count'),
             total_time_ms=('duration_ms', 'sum'),
             avg_time_ms=('duration_ms', 'mean'),
             max_time_ms=('duration_ms', 'max'),
-            avg_occupancy=('occupancy', 'mean')
+            avg_occupancy=('occupancy', 'mean'),
+            grid=('grid', 'first'),
+            block=('block', 'first'),
+            dyn_shared=('dyn_shared_bytes', 'first'),
+            static_shared=('static_shared_bytes', 'first'),
+            num_regs=('num_regs', 'first'),
+            local_bytes=('local_bytes', 'first'),
+            const_bytes=('const_bytes', 'first')
         ).sort_values('total_time_ms', ascending=False).head(top_n)
 
         table = Table(title=f"🔥 Top {top_n} Kernel Hotspots (Time Consuming)")
-        table.add_column("Kernel Name", style="cyan", no_wrap=True)
+        table.add_column("Kernel Name / Stack Trace", style="cyan", no_wrap=False)
         table.add_column("Calls", justify="right")
         table.add_column("Total Time", justify="right", style="green")
-        table.add_column("Avg Time", justify="right")
         table.add_column("Occupancy", justify="right", style="magenta")
+        table.add_column("Grid/Block", justify="center")
+        table.add_column("Resources (Reg/SMem/DMem/LMem/CMem)", justify="left")
 
-        for name, row in summary.iterrows():
+        for (name, *rest), row in summary.iterrows():
+            stack_trace = rest[0] if rest else None
+            
             # Clean up C++ Mangled names if possible
-            clean_name = name[:40] + "..." if len(name) > 40 else name
+            clean_name = name[:60] + "..." if len(name) > 60 else name
+            
+            # Format display: Kernel Name followed by visualized stack
+            display_content = f"[bold]{clean_name}[/bold]"
+            
+            if stack_trace and isinstance(stack_trace, str):
+                frames = stack_trace.split('|')
+                # Left most is top stack
+                limited_frames = frames[:depth]
+                stack_viz = ""
+                for i, frame in enumerate(limited_frames):
+                    indent = "  " * i
+                    prefix = "└─ " if i > 0 else "Top: "
+                    stack_viz += f"\n{indent}{prefix}[dim]{frame}[/dim]"
+                
+                if len(frames) > depth:
+                    stack_viz += f"\n  {'  ' * depth}[dim]... ({len(frames) - depth} more levels)[/dim]"
+                
+                display_content += stack_viz
+
+            resource_str = (
+                f"Reg: {row['num_regs']} | "
+                f"SMem: {row['static_shared']} | "
+                f"DMem: {row['dyn_shared']} | "
+                f"LMem: {row['local_bytes']} | "
+                f"CMem: {row['const_bytes']}"
+            )
+
             table.add_row(
-                clean_name,
+                display_content,
                 str(row['count']),
                 f"{row['total_time_ms']:.2f} ms",
-                f"{row['avg_time_ms']:.3f} ms",
-                f"{row['avg_occupancy']*100:.1f}%"
+                f"{row['avg_occupancy']*100:.1f}%",
+                f"{row['grid']}\n{row['block']}",
+                resource_str
             )
 
         self.console.print(table)
@@ -138,7 +184,7 @@ class GpuFlightSession:
             gpu_time_ms=('duration_ms', 'sum'),
             avg_queue_ms=('queue_latency_ms', 'mean'),
             cpu_overhead_ms=('cpu_overhead_ms', 'sum')
-        ).sort_values('gpu_time_ms', ascending=False)
+        ).sort_index()
 
         table = Table(title="📂 Scope Analysis (Hierarchical)")
         table.add_column("Scope / Phase", style="bold white")

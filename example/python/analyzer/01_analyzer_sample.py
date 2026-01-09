@@ -6,20 +6,9 @@ import os
 # However, the analyzer expects "gfl_block.log.kernel.0.log" etc.
 # Let's try to copy them for the sample to work.
 
-def prepare_logs():
-    mapping = {
-        "stress.kernel.0.log": "gfl_block.log.kernel.0.log",
-        "stress.scope.0.log": "gfl_block.log.scope.0.log",
-        "stress.system.0.log": "gfl_block.log.system.0.log"
-    }
-    for src, dst in mapping.items():
-        if os.path.exists(src) and not os.path.exists(dst):
-            import shutil
-            shutil.copy(src, dst)
-
-prepare_logs()
-
-analyzer = GpuFlightSession("./")
+# The GpuFlightSession now supports log_prefix parameter.
+# We can use "stress" as prefix since we have stress.kernel.0.log etc.
+analyzer = GpuFlightSession("./", log_prefix="stress", max_stack_depth=5)
 
 analyzer.print_summary()
 
