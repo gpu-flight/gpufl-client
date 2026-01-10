@@ -104,4 +104,5 @@ endif()
 include(GoogleTest)
 gtest_discover_tests(gpufl_tests
     DISCOVERY_TIMEOUT 20
+    DISCOVERY_MODE PRE_TEST  # Defer test discovery to runtime to avoid DLL issues on Windows
 )
