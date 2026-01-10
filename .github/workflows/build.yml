@@ -69,6 +69,7 @@ jobs:
         run: |
           if [ "${{ runner.os }}" == "Windows" ]; then
              export PATH="$PATH:$CUDA_PATH/extras/CUPTI/lib64"
+             echo "Added CUPTI to PATH: $CUDA_PATH/extras/CUPTI/lib64"
           fi
           
           cmake -B build_tests -S . \
