@@ -61,19 +61,15 @@ target_link_libraries(check_conflict PRIVATE
 # Properties
 set_target_properties(gfl_block_example PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
-        CUDA_ARCHITECTURES "native"
 )
 set_target_properties(system_monitor PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
-        CUDA_ARCHITECTURES "native"
 )
 set_target_properties(test_occupancy PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
-    CUDA_ARCHITECTURES "native"
 )
 set_target_properties(check_conflict PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
-    CUDA_ARCHITECTURES "native"
 )
 
 # Platform Specifics

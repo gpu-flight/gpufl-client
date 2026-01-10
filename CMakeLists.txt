@@ -6,6 +6,13 @@ project(gpufl_client
     DESCRIPTION "Header-only GPU monitoring client library"
 )
 
+# -----------------------
+# CUDA Architectures (CI Friendly)
+# -----------------------
+if(NOT CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES "all-major")
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
