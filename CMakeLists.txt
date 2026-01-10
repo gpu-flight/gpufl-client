@@ -56,6 +56,17 @@ set(GPUFL_HAS_ROCM 0)
 # -----------------------
 if(GPUFL_ENABLE_NVIDIA)
     target_compile_definitions(gpufl PUBLIC GPUFL_ENABLE_NVIDIA=1)
+else()
+    target_compile_definitions(gpufl PUBLIC GPUFL_ENABLE_NVIDIA=0)
+endif()
+
+if(GPUFL_ENABLE_AMD)
+    target_compile_definitions(gpufl PUBLIC GPUFL_ENABLE_AMD=1)
+else()
+    target_compile_definitions(gpufl PUBLIC GPUFL_ENABLE_AMD=0)
+endif()
+
+if(GPUFL_ENABLE_NVIDIA)
     #
     # CUDA capability: only if CUDA toolkit is available
     #
@@ -70,7 +81,6 @@ if(GPUFL_ENABLE_NVIDIA)
                 include/gpufl/backends/nvidia/cuda_collector.cpp
                 include/gpufl/cuda/monitor.cpp
                 include/gpufl/cuda/cupti_backend.cpp)
-            target_compile_definitions(gpufl PUBLIC GPUFL_HAS_CUDA=1)
             target_link_libraries(gpufl PRIVATE CUDA::cudart CUDA::cuda_driver)
 
             # --------------------------------------------------------
@@ -78,7 +88,7 @@ if(GPUFL_ENABLE_NVIDIA)
             # --------------------------------------------------------
             if (TARGET CUDA::cupti)
                 target_link_libraries(gpufl PRIVATE CUDA::cupti)
-                target_compile_definitions(gpufl PUBLIC GPUFL_HAS_CUPTI=1)
+                set(GPUFL_HAS_CUPTI 1)
                 message(STATUS "Found CUPTI via CUDAToolkit target")
             else()
                 # Fallback: Manual search if the target is missing
@@ -95,7 +105,7 @@ if(GPUFL_ENABLE_NVIDIA)
                 if(CUPTI_LIBRARY AND CUPTI_INCLUDE_DIR)
                     target_link_libraries(gpufl PRIVATE ${CUPTI_LIBRARY})
                     target_include_directories(gpufl PRIVATE ${CUPTI_INCLUDE_DIR})
-                    target_compile_definitions(gpufl PUBLIC GPUFL_HAS_CUPTI=1)
+                    set(GPUFL_HAS_CUPTI 1)
                     message(STATUS "Found CUPTI manually: ${CUPTI_LIBRARY}")
                 endif()
             endif()
@@ -118,7 +128,6 @@ if(GPUFL_ENABLE_NVIDIA)
 
         if(NVML_DLL_DIR)
             set(GPUFL_HAS_NVML 1)
-            target_compile_definitions(gpufl PUBLIC GPUFL_HAS_NVML=1)
 
             # If you still want link-time import lib, only do it when DLL exists:
             find_library(NVML_LIBRARY NAMES nvml nvidia-ml
@@ -134,10 +143,16 @@ if(GPUFL_ENABLE_NVIDIA)
 
         if(NVML_LIBRARY)
             set(GPUFL_HAS_NVML 1)
-            target_compile_definitions(gpufl PUBLIC GPUFL_HAS_NVML=1)
             target_link_libraries(gpufl PRIVATE ${NVML_LIBRARY})
         endif()
     endif()
+
+    # Apply definitions to public interface so tests inherit them
+    target_compile_definitions(gpufl PUBLIC 
+        GPUFL_HAS_CUDA=${GPUFL_HAS_CUDA}
+        GPUFL_HAS_NVML=${GPUFL_HAS_NVML}
+        GPUFL_HAS_CUPTI=${GPUFL_HAS_CUPTI}
+    )
 
     #
     # Only compile NVML collector if NVML is actually available
