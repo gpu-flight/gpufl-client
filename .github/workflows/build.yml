@@ -19,6 +19,7 @@ jobs:
       CMAKE_ARGS: >-
         -DGPUFL_ENABLE_NVIDIA=ON
         -DGPUFL_ENABLE_AMD=OFF
+        -DBUILD_TESTING=OFF  
 
     steps:
       - uses: actions/checkout@v4
@@ -66,9 +67,17 @@ jobs:
       - name: Run C++ Unit Tests
         shell: bash
         run: |
-          cmake -B build -S . -DGPUFL_ENABLE_NVIDIA=ON -DBUILD_PYTHON=OFF
-          cmake --build build --target gpufl_tests
-          ctest --test-dir build --output-on-failure
+          if [ "${{ runner.os }}" == "Windows" ]; then
+             export PATH="$PATH:$CUDA_PATH/extras/CUPTI/lib64"
+          fi
+          
+          cmake -B build_tests -S . \
+            -DGPUFL_ENABLE_NVIDIA=ON \
+            -DBUILD_PYTHON=OFF \
+            -DBUILD_TESTING=ON
+          
+          cmake --build build_tests --target gpufl_tests
+          ctest --test-dir build_tests --output-on-failure
 
       - name: Run Python Unit Tests
         shell: bash

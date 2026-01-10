@@ -184,7 +184,8 @@ if(GPUFL_ENABLE_NVIDIA)
     # -----------------------
     # Unit Tests
     # -----------------------
-    if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+    option(BUILD_TESTING "Build the testing tree." ON)
+    if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR AND BUILD_TESTING)
         enable_testing()
         add_subdirectory(tests)
     endif()
