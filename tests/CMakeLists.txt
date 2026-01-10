@@ -119,9 +119,13 @@ endif()
 
 # 7. Register with CTest
 include(GoogleTest)
-# Use gtest_add_tests instead of gtest_discover_tests on Windows to avoid DLL issues during test discovery
+# On Windows, skip automatic test discovery entirely and just run the test executable
+# This avoids DLL dependency issues during the build phase
 if(WIN32)
-    gtest_add_tests(TARGET gpufl_tests)
+    add_test(NAME gpufl_tests COMMAND gpufl_tests)
+    set_tests_properties(gpufl_tests PROPERTIES
+        ENVIRONMENT "PATH=${CUDAToolkit_BIN_DIR};$ENV{PATH}"
+    )
 else()
     gtest_discover_tests(gpufl_tests
         DISCOVERY_TIMEOUT 20
