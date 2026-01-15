@@ -145,6 +145,9 @@ namespace gpufl {
         // Runtime backend selection
         std::string backendReason;
         rt_ptr->collector = createCollector_(opts.backend, &backendReason);
+        if (!rt_ptr->collector) {
+            GFL_LOG_ERROR("Failed to initialize GPU backend: ", backendReason);
+        }
 
         // init event with inventory (optional)
         InitEvent ie;
@@ -182,6 +185,8 @@ namespace gpufl {
         if (opts.samplingAutoStart && opts.systemSampleRateMs > 0 && rt_ptr->collector) {
             rt_ptr->sampler.start(rt_ptr->appName, rt_ptr->sessionId, rt_ptr->logger, rt_ptr->collector, opts.systemSampleRateMs, rt_ptr->appName);
         }
+
+        //std::atexit(shutdown);
 
         GFL_LOG_DEBUG("Initialization complete!");
         return true;
@@ -252,6 +257,8 @@ namespace gpufl {
 
         rt->logger->close();
         set_runtime(nullptr);
+
+        GFL_LOG_DEBUG("Shutdown complete!");
     }
 
     // ---- ScopedMonitor ----

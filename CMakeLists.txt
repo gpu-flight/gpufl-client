@@ -146,11 +146,22 @@ if(GPUFL_ENABLE_NVIDIA)
             endif()
         endif()
     else()
-        find_library(NVML_LIBRARY NAMES nvidia-ml)
+        find_library(NVML_LIBRARY NAMES nvidia-ml
+                HINTS
+                "${CUDAToolkit_LIBRARY_ROOT}/stubs"
+                "${CUDAToolkit_ROOT}/targets/x86_64-linux/lib/stubs"
+                "${CUDAToolkit_ROOT}/lib64/stubs"
+                "$ENV{CUDA_PATH}/targets/x86_64-linux/lib/stubs"
+                "/usr/local/cuda-13.1/targets/x86_64-linux/lib/stubs"
+                "/usr/lib/wsl/lib"  # Common location for WSL2 users
+        )
 
         if(NVML_LIBRARY)
             set(GPUFL_HAS_NVML 1)
             target_link_libraries(gpufl PRIVATE ${NVML_LIBRARY})
+            message(STATUS "Found NVML (Linux): ${NVML_LIBRARY}")
+        else()
+            message(WARNING "NVML not found! GPUFL_HAS_NVML will be 0. (Check CUDA Toolkit 'stubs' folder)")
         endif()
     endif()
 

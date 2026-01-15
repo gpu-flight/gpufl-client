@@ -158,19 +158,27 @@ namespace gpufl {
 
     void Logger::LogChannel::write(const std::string& line) {
         std::lock_guard<std::mutex> lk(mu_);
-        if (!opened_) return;
+        if (!opened_) {
+            GFL_LOG_ERROR("Write failed: Channel '", name_, "' is not opened");
+            return;
+        }
 
         ensureOpenLocked();
-        if (!stream_.good()) return;
-
-        // Debug output removed - enable in MonitorOptions if needed
+        if (!stream_.good()) {
+            GFL_LOG_ERROR("[GPUFL-DEBUG] Write failed: Stream bad for '", name_, "' (Check Permissions/Path)");
+            return;
+        }
 
         const size_t bytesToWrite = line.size() + 1; // + '\n'
         if (opt_.rotateBytes > 0 && (currentBytes_ + bytesToWrite) > opt_.rotateBytes) {
             rotateLocked();
-            if (!stream_.good()) return;
+            if (!stream_.good()) {
+                GFL_LOG_ERROR("[GPUFL-DEBUG] Write failed: Stream bad for '", name_, "' (Check Permissions/Path)");
+                return;
+            }
         }
-
+        GFL_LOG_DEBUG("[GPUFL-DEBUG] Writing to '", name_, "' (", bytesToWrite, " bytes)");
+        GFL_LOG_DEBUG("[GPUFL-DEBUG] ", line);
         stream_.write(line.data(), static_cast<std::streamsize>(line.size()));
         stream_.put('\n');
         currentBytes_ += bytesToWrite;
@@ -179,8 +187,6 @@ namespace gpufl {
             stream_.flush();
         }
     }
-
-    // --- Logger Implementation ---
 
     Logger::Logger() = default;
     Logger::~Logger() { close(); }

@@ -137,3 +137,20 @@ The Python tests use `pytest` and verify the analyzer and visualization logic us
 ### Running Tests (CLion)
 - The `gpufl_tests` target will appear in your run configurations.
 - You can run individual tests or the entire suite using the built-in GoogleTest runner.
+
+## 🔧 Linux Configuration (Required for CUPTI)
+
+To allow non-root users to profile GPU kernels (using CUPTI/PC Sampling) on Linux, you must relax the NVIDIA driver security restrictions. Without this, `gpufl` may fail to capture kernel activity.
+
+1. **Create a configuration file:**
+   ```bash
+   sudo nano /etc/modprobe.d/nvidia-profiler.conf
+
+2. **Add the following line:**
+    ```bash
+   options nvidia NVreg_RestrictProfilingToAdminUsers=0
+   
+3. **Apply changes and reboot:**
+    ```bash
+    sudo update-initramfs -u
+    sudo reboot
