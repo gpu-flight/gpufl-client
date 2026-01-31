@@ -32,24 +32,6 @@
     } while(0)
 
 namespace gpufl {
-#pragma pack(push, 8)
-    struct CUpti_PCSamplingGetDataParams_NEW {
-        size_t size;               // [0-8]
-        void* pPriv;               // [8-16]
-        CUcontext ctx;             // [16-24]
-        void* pcSamplingData;      // [24-32]
-        size_t pcSamplingDataSize; // [32-40]
-    };
-
-    // LAYOUT B: Legacy CUDA (Pre-11.3)
-    // Context is at Offset 8. Size is 24.
-    // ** CRITICAL **: If we don't use this layout, the driver reads NULL from pPriv and crashes.
-    struct CUpti_PCSamplingGetDataParams_OLD {
-        size_t size;            // [0-8]
-        CUcontext ctx;          // [8-16]  <-- Context MUST be here for old drivers
-        void* pcSamplingData;   // [16-24]
-    };
-#pragma pack(pop)
     std::atomic<gpufl::CuptiBackend*> g_activeBackend{nullptr};
 
     // External ring buffer (defined in monitor.cpp)
@@ -90,7 +72,7 @@ namespace gpufl {
         );
 
         if (err == cudaSuccess) {
-            int maxThreadsPerSM = GetMaxThreadsPerSM(deviceId);
+            const int maxThreadsPerSM = GetMaxThreadsPerSM(deviceId);
 
             // Theoretical Occupancy = (Active Warps) / (Max Warps)
             if (maxThreadsPerSM > 0) {

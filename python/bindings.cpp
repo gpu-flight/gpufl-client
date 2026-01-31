@@ -44,7 +44,8 @@ PYBIND11_MODULE(_gpufl_client, m) {
                  int system_sample_rate_ms,
                  bool enable_kernel_details,
                  bool enable_debug_output,
-                 bool enable_stack_trace)->bool {
+                 bool enable_stack_trace,
+                 bool enable_profiling)->bool {
 
         gpufl::InitOptions opts;
         opts.appName = app_name;
@@ -54,6 +55,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
         opts.enableKernelDetails = enable_kernel_details;
         opts.enableDebugOutput = enable_debug_output;
         opts.enableStackTrace = enable_stack_trace;
+        opts.enableProfiling = enable_profiling;
 
         return gpufl::init(opts);
     }, py::arg("app_name"),
@@ -62,7 +64,8 @@ PYBIND11_MODULE(_gpufl_client, m) {
        py::arg("system_sample_rate_ms") = 50,
        py::arg("enable_kernel_details") = true,
        py::arg("enable_debug_output") = false,
-       py::arg("enable_stack_trace") = true);
+       py::arg("enable_stack_trace") = true,
+       py::arg("enable_profiling") = false);
 
     m.def("system_start", [](std::string name) { gpufl::systemStart(std::move(name)); },
         py::arg("name") = "system");

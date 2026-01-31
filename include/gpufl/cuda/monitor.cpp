@@ -135,7 +135,9 @@ namespace gpufl {
             // Periodic activity flush
             static auto lastFlush = std::chrono::steady_clock::now();
             if (std::chrono::steady_clock::now() - lastFlush > std::chrono::milliseconds(100)) {
-                cuptiActivityFlushAll(0);
+                if (g_initialized.load() && g_backend) {
+                    cuptiActivityFlushAll(0);
+                }
                 lastFlush = std::chrono::steady_clock::now();
             }
         }
