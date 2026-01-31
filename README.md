@@ -52,6 +52,8 @@ session.inspect_scopes()
 session.inspect_hotspots(top_n=5, max_stack_depth=5)
 ```
 
+![Analyzer example output](images/Screenshot1.png)
+
 ### 2. Visualization (Timeline)
 The `viz` module provides interactive `matplotlib` plots to correlate kernel execution with system metrics.
 
@@ -137,6 +139,7 @@ The Python tests use `pytest` and verify the analyzer and visualization logic us
 ### Running Tests (CLion)
 - The `gpufl_tests` target will appear in your run configurations.
 - You can run individual tests or the entire suite using the built-in GoogleTest runner.
+
 
 ## 🔧 Linux Configuration (Required for CUPTI)
 

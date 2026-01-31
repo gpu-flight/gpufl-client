@@ -6,7 +6,6 @@
 
 #if GPUFL_ENABLE_NVIDIA && GPUFL_HAS_NVML
 #include <nvml.h>
-#include <map>
 
 namespace gpufl::nvidia {
     struct NvLinkState {
