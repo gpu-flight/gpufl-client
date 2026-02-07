@@ -7,6 +7,7 @@
 #include <cupti.h>
 #include <cupti_pcsampling.h>
 #include <atomic>
+#include <list>
 #include <mutex>
 #include <unordered_map>
 
@@ -130,6 +131,10 @@ namespace gpufl {
 
         std::mutex metaMu_;
         std::unordered_map<uint64_t, LaunchMeta> metaByCorr_;
+        std::mutex deviceMu_;
+        std::list<uint64_t> deviceOrder_;
+        std::unordered_map<uint64_t, std::pair<int32_t, std::list<uint64_t>::iterator>> deviceByCorr_;
+        static constexpr size_t kDeviceCorrMax = 4096;
 
         static std::mutex sourceMapMu_;
         static std::unordered_map<uint32_t, SourceLocation> sourceMap_;
@@ -144,6 +149,12 @@ namespace gpufl {
             SamplingAPI     // Using PC Sampling API (newer GPUs, Windows skips GetData)
         };
         PCSamplingMethod pcSamplingMethod_ = PCSamplingMethod::None;
+        bool pcSamplingConfigured_ = false;
+        bool pcSamplingStarted_ = false;
+
+        // PC Sampling data buffer for SamplingAPI
+        std::vector<CUpti_PCSamplingPCData> pcDataBuffer_;
+        CUpti_PCSamplingData samplingDataBuffer_;
 
         void enableProfilingFeatures();
         void startPCSampling();

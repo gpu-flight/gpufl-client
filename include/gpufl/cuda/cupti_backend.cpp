@@ -5,7 +5,9 @@
 #include "gpufl/core/debug_logger.hpp"
 
 #include <cupti_pcsampling.h>
+#include <cstdio>
 #include <cstring>
+#include <vector>
 
 #include "gpufl/backends/nvidia/cuda_collector.hpp"
 #include "gpufl/core/scope_registry.hpp"
@@ -203,8 +205,19 @@ namespace gpufl {
             return;
         }
 
-        enableProfilingFeatures();
+        // Only configure PC sampling once
+        if (!pcSamplingConfigured_) {
+            enableProfilingFeatures();
+            pcSamplingConfigured_ = true;
+        }
 
+        if (!this->ctx_) {
+            cuCtxGetCurrent(&this->ctx_);
+            if (!this->ctx_) {
+                cudaFree(nullptr);
+                cuCtxGetCurrent(&this->ctx_);
+            }
+        }
         if (!this->ctx_) {
             GFL_LOG_ERROR("[GPUFL] Cannot start PC Sampling: ctx_ is NULL!");
             return;
@@ -215,18 +228,29 @@ namespace gpufl {
         CUpti_PCSamplingStartParams startParams = {};
         startParams.size = sizeof(CUpti_PCSamplingStartParams);
         startParams.ctx = this->ctx_;
+        startParams.pPriv = nullptr;
+
         CUptiResult res = cuptiPCSamplingStart(&startParams);
         if (res == CUPTI_ERROR_INVALID_OPERATION) {
-            // This is fine! It means Enable() implicitly started the sampler.
-            GFL_LOG_DEBUG("[GPUFL] PC Sampling already active (Implicit Start).");
+            // This is fine! It means Enable() implicitly started the sampler, or it's already running
+            GFL_LOG_DEBUG("[GPUFL] PC Sampling already active (Implicit Start or already started).");
+            pcSamplingStarted_ = true;
         } else if (res == CUPTI_ERROR_NOT_SUPPORTED || res == CUPTI_ERROR_LEGACY_PROFILER_NOT_SUPPORTED) {
-            GFL_LOG_DEBUG("[GPUFL] PC Sampling not supported on this GPU/configuration.");
+            GFL_LOG_ERROR("[GPUFL] PC Sampling not supported on this GPU/configuration.");
+            pcSamplingStarted_ = false;
+            return;
         } else if (res != CUPTI_SUCCESS) {
             const char* err; cuptiGetResultString(res, &err);
             GFL_LOG_ERROR("[GPUFL] cuptiPCSamplingStart failed: ", err, " (Code: ", res, ")");
+            pcSamplingStarted_ = false;
+            return;
         } else {
             GFL_LOG_DEBUG("[GPUFL] >>> PC Sampling STARTED (Scope Begin) <<<");
+            pcSamplingStarted_ = true;
         }
+
+        // Ensure kernels are launched after Start
+        cudaDeviceSynchronize();
     }
 
     static bool IsContextValid(CUcontext ctx) {
@@ -240,6 +264,12 @@ namespace gpufl {
             return;
         }
 
+        // Check if PC sampling was actually started
+        if (!pcSamplingStarted_) {
+            GFL_LOG_DEBUG("[GPUFL] Skipping Stop - PC Sampling was never started");
+            return;
+        }
+
         if (!this->ctx_ || !IsContextValid(this->ctx_)) {
             GFL_LOG_ERROR("[GPUFL] Aborting PC Sampling: Context invalid.");
             return;
@@ -247,103 +277,148 @@ namespace gpufl {
 
         GFL_LOG_DEBUG("[GPUFL] <<< PC Sampling STOPPING (Scope End) >>>");
 
+        // Ensure all kernels have completed before stopping
+        cudaError_t syncErr = cudaDeviceSynchronize();
+        if (syncErr != cudaSuccess) {
+            GFL_LOG_ERROR("[GPUFL] cudaDeviceSynchronize failed: ", cudaGetErrorString(syncErr));
+        }
+
+        // Verify context is still valid
+        CUcontext currentCtx = nullptr;
+        CUresult ctxRes = cuCtxGetCurrent(&currentCtx);
+        if (ctxRes != CUDA_SUCCESS || currentCtx != this->ctx_) {
+            GFL_LOG_ERROR("[GPUFL] Context mismatch or invalid! stored=", (void*)this->ctx_,
+                         " current=", (void*)currentCtx, " cuResult=", ctxRes);
+            // Try to use current context
+            if (currentCtx) {
+                const_cast<CuptiBackend*>(this)->ctx_ = currentCtx;
+            }
+        }
+
         // Stop PC Sampling
         CUpti_PCSamplingStopParams stopParams = {};
         stopParams.size = sizeof(CUpti_PCSamplingStopParams);
         stopParams.ctx = this->ctx_;
-        cuptiPCSamplingStop(&stopParams);
+        stopParams.pPriv = nullptr;  // Ensure pPriv is initialized
 
-        // Disable PC Sampling
-        CUpti_PCSamplingDisableParams disableParams = {};
-        disableParams.size = sizeof(CUpti_PCSamplingDisableParams);
-        disableParams.ctx = this->ctx_;
-        cuptiPCSamplingDisable(&disableParams);
+        // WORKAROUND: cuptiPCSamplingStop causes segfaults on RTX 3090 (Ampere) and newer GPUs
+        // The PC Sampling API appears to have reliability issues with Start/Stop on these architectures.
+        // Skip Stop/Disable entirely to avoid crashes. The sampling will remain active but won't crash.
+        GFL_LOG_DEBUG("[GPUFL] Skipping cuptiPCSamplingStop (causes crashes on RTX 3090/Ampere+)");
+        GFL_LOG_DEBUG("[GPUFL] PC Sampling data collection not fully supported on this GPU architecture");
+        GFL_LOG_DEBUG("[GPUFL] Kernel monitoring continues to work normally");
+
+        // Since Stop/Disable crash, we can't collect PC sampling data safely on this GPU.
+        // Kernel monitoring via Activity API continues to work normally.
+        // PC sampling feature is disabled for RTX 3090 (Ampere) and newer architectures.
     }
 
     void CuptiBackend::enableProfilingFeatures() {
-        GFL_LOG_DEBUG("Configuring PC Sampling...");
-        CUptiResult pcRes = cuptiActivityEnable(CUPTI_ACTIVITY_KIND_PC_SAMPLING);
-        if (pcRes == CUPTI_SUCCESS) {
-            cuptiActivityEnable(CUPTI_ACTIVITY_KIND_SOURCE_LOCATOR);
-            GFL_LOG_DEBUG("PC Sampling activities enabled (Activity API)");
-        } else {
-            GFL_LOG_DEBUG("PC Sampling Activity API not supported on this GPU (legacy profiler)");
-            GFL_LOG_DEBUG("Note: Newer GPUs require Profiling API instead of Activity API for PC Sampling");
-            const char* err;
-            cuptiGetResultString(pcRes, &err);
-            GFL_LOG_ERROR("Failed to enable PC Sampling activities: ", err);
+        GFL_LOG_DEBUG("Configuring PC Sampling using Profiling API...");
 
+        if (!this->ctx_) {
+            cuCtxGetCurrent(&this->ctx_);
             if (!this->ctx_) {
+                cudaFree(nullptr); // Force init
                 cuCtxGetCurrent(&this->ctx_);
-                if (!this->ctx_) {
-                    cudaFree(nullptr); // Force init
-                    cuCtxGetCurrent(&this->ctx_);
-                }
-                if (!this->ctx_) {
-                    CUdevice dev; cuDeviceGet(&dev, 0);
-                    cuDevicePrimaryCtxRetain(&this->ctx_, dev);
-                    cuCtxPushCurrent(this->ctx_);
-                }
             }
-
             if (!this->ctx_) {
-                GFL_LOG_ERROR("[FATAL] No Context for Profiling.");
-                return;
+                CUdevice dev; cuDeviceGet(&dev, 0);
+                cuDevicePrimaryCtxRetain(&this->ctx_, dev);
+                cuCtxPushCurrent(this->ctx_);
             }
+        }
 
-            CUdevice dev; cuCtxGetDevice(&dev);
-            char nameBuf[256];
-            if (cuDeviceGetName(nameBuf, sizeof(nameBuf), dev) == CUDA_SUCCESS) {
-                this->cachedDeviceName_ = std::string(nameBuf);
-            }
+        if (!this->ctx_) {
+            GFL_LOG_ERROR("[FATAL] No Context for Profiling.");
+            return;
+        }
 
-            CUpti_PCSamplingConfigurationInfo configInfo[3] = {};
+        CUdevice dev; cuCtxGetDevice(&dev);
+        char nameBuf[256];
+        if (cuDeviceGetName(nameBuf, sizeof(nameBuf), dev) == CUDA_SUCCESS) {
+            this->cachedDeviceName_ = std::string(nameBuf);
+        }
 
-            configInfo[0].attributeType = CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_COLLECTION_MODE;
-            configInfo[0].attributeData.collectionModeData.collectionMode = CUPTI_PC_SAMPLING_COLLECTION_MODE_CONTINUOUS;
+        CUpti_PCSamplingConfigurationInfo configInfo[3] = {};
 
-            configInfo[1].attributeType = CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_SAMPLING_PERIOD;
-            configInfo[1].attributeData.samplingPeriodData.samplingPeriod = 20;
+        configInfo[0].attributeType = CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_COLLECTION_MODE;
+        configInfo[0].attributeData.collectionModeData.collectionMode = CUPTI_PC_SAMPLING_COLLECTION_MODE_CONTINUOUS;
 
-            configInfo[2].attributeType = CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_SCRATCH_BUFFER_SIZE;
-            configInfo[2].attributeData.scratchBufferSizeData.scratchBufferSize = 4 * 1024 * 1024;
+        configInfo[1].attributeType = CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_SAMPLING_PERIOD;
+        configInfo[1].attributeData.samplingPeriodData.samplingPeriod = 5;  // 2^5 = 32 cycles (more frequent sampling)
 
-            CUpti_PCSamplingConfigurationInfoParams configParams = {};
-            configParams.size = sizeof(CUpti_PCSamplingConfigurationInfoParams);
-            configParams.ctx = this->ctx_;
-            configParams.numAttributes = 3;
-            configParams.pPCSamplingConfigurationInfo = configInfo;
+        configInfo[2].attributeType = CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_SCRATCH_BUFFER_SIZE;
+        configInfo[2].attributeData.scratchBufferSizeData.scratchBufferSize = 4 * 1024 * 1024;
 
-            CUptiResult configRes = cuptiPCSamplingSetConfigurationAttribute(&configParams);
-            if (configRes != CUPTI_SUCCESS) {
-                const char* err; cuptiGetResultString(configRes, &err);
-                GFL_LOG_ERROR("Config Failed: ", err);
-            }
+        CUpti_PCSamplingConfigurationInfoParams configParams = {};
+        configParams.size = sizeof(CUpti_PCSamplingConfigurationInfoParams);
+        configParams.ctx = this->ctx_;
+        configParams.numAttributes = 3;
+        configParams.pPCSamplingConfigurationInfo = configInfo;
 
-            CUpti_PCSamplingConfigurationInfo startStopInfo = {};
-            startStopInfo.attributeType = CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_ENABLE_START_STOP_CONTROL;
-            startStopInfo.attributeData.enableStartStopControlData.enableStartStopControl = true;
+        CUptiResult configRes = cuptiPCSamplingSetConfigurationAttribute(&configParams);
+        if (configRes != CUPTI_SUCCESS) {
+            const char* err; cuptiGetResultString(configRes, &err);
+            GFL_LOG_ERROR("Config Failed: ", err);
+        }
 
-            configParams.numAttributes = 1;
-            configParams.pPCSamplingConfigurationInfo = &startStopInfo;
-            cuptiPCSamplingSetConfigurationAttribute(&configParams);
+        CUpti_PCSamplingConfigurationInfo startStopInfo = {};
+        startStopInfo.attributeType = CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_ENABLE_START_STOP_CONTROL;
+        startStopInfo.attributeData.enableStartStopControlData.enableStartStopControl = true;
 
-            CUpti_PCSamplingEnableParams enableParams = {};
-            enableParams.size = sizeof(CUpti_PCSamplingEnableParams);
-            enableParams.ctx = this->ctx_;
-            CUptiResult enableRes = cuptiPCSamplingEnable(&enableParams);
-            if (enableRes == CUPTI_ERROR_NOT_SUPPORTED || enableRes == CUPTI_ERROR_LEGACY_PROFILER_NOT_SUPPORTED) {
-                GFL_LOG_DEBUG("[GPUFL] PC Sampling not supported on this GPU (newer GPUs require Profiling API)");
-            } else if (enableRes != CUPTI_SUCCESS) {
-                const char* err; cuptiGetResultString(enableRes, &err);
-                GFL_LOG_ERROR("[GPUFL] cuptiPCSamplingEnable FAILED: ", err, " (Code: ", enableRes, ")");
-                GFL_LOG_ERROR("[GPUFL]   PC Sampling will not work. Possible causes:");
-                GFL_LOG_ERROR("[GPUFL]   - GPU does not support PC Sampling (compute capability < 5.2)");
-                GFL_LOG_ERROR("[GPUFL]   - CUPTI permissions issue");
-                GFL_LOG_ERROR("[GPUFL]   - Driver/CUPTI version mismatch");
-            } else {
-                GFL_LOG_DEBUG("[GPUFL] PC Sampling ENABLED successfully for ctx=", (void*)this->ctx_);
-            }
+        configParams.numAttributes = 1;
+        configParams.pPCSamplingConfigurationInfo = &startStopInfo;
+        cuptiPCSamplingSetConfigurationAttribute(&configParams);
+
+        // Configure the data buffer for PC sampling collection
+        const size_t maxPcs = 10000;
+        const_cast<CuptiBackend*>(this)->pcDataBuffer_.resize(maxPcs);
+        std::memset(const_cast<CuptiBackend*>(this)->pcDataBuffer_.data(), 0, sizeof(CUpti_PCSamplingPCData) * maxPcs);
+
+        for (auto& pc : const_cast<CuptiBackend*>(this)->pcDataBuffer_) {
+            pc.size = sizeof(CUpti_PCSamplingPCData);
+        }
+
+        const_cast<CuptiBackend*>(this)->samplingDataBuffer_ = {};
+        const_cast<CuptiBackend*>(this)->samplingDataBuffer_.size = sizeof(CUpti_PCSamplingData);
+        const_cast<CuptiBackend*>(this)->samplingDataBuffer_.collectNumPcs = maxPcs;
+        const_cast<CuptiBackend*>(this)->samplingDataBuffer_.pPcData = const_cast<CuptiBackend*>(this)->pcDataBuffer_.data();
+
+        CUpti_PCSamplingConfigurationInfo dataBufferInfo = {};
+        dataBufferInfo.attributeType = CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_SAMPLING_DATA_BUFFER;
+        dataBufferInfo.attributeData.samplingDataBufferData.samplingDataBuffer = &const_cast<CuptiBackend*>(this)->samplingDataBuffer_;
+
+        configParams.numAttributes = 1;
+        configParams.pPCSamplingConfigurationInfo = &dataBufferInfo;
+        GFL_LOG_DEBUG("[GPUFL] Configuring data buffer: address=",
+                     (void*)&const_cast<CuptiBackend*>(this)->samplingDataBuffer_,
+                     " pPcData=", (void*)const_cast<CuptiBackend*>(this)->samplingDataBuffer_.pPcData,
+                     " collectNumPcs=", maxPcs);
+
+        CUptiResult bufferRes = cuptiPCSamplingSetConfigurationAttribute(&configParams);
+        if (bufferRes != CUPTI_SUCCESS) {
+            const char* err; cuptiGetResultString(bufferRes, &err);
+            GFL_LOG_ERROR("Data Buffer Config Failed: ", err, " (Code: ", bufferRes, ")");
+        } else {
+            GFL_LOG_DEBUG("[GPUFL] PC Sampling data buffer configured successfully");
+        }
+
+        CUpti_PCSamplingEnableParams enableParams = {};
+        enableParams.size = sizeof(CUpti_PCSamplingEnableParams);
+        enableParams.ctx = this->ctx_;
+        CUptiResult enableRes = cuptiPCSamplingEnable(&enableParams);
+        if (enableRes == CUPTI_ERROR_NOT_SUPPORTED || enableRes == CUPTI_ERROR_LEGACY_PROFILER_NOT_SUPPORTED) {
+            GFL_LOG_DEBUG("[GPUFL] PC Sampling not supported on this GPU (newer GPUs require Profiling API)");
+        } else if (enableRes != CUPTI_SUCCESS) {
+            const char* err; cuptiGetResultString(enableRes, &err);
+            GFL_LOG_ERROR("[GPUFL] cuptiPCSamplingEnable FAILED: ", err, " (Code: ", enableRes, ")");
+            GFL_LOG_ERROR("[GPUFL]   PC Sampling will not work. Possible causes:");
+            GFL_LOG_ERROR("[GPUFL]   - GPU does not support PC Sampling (compute capability < 5.2)");
+            GFL_LOG_ERROR("[GPUFL]   - CUPTI permissions issue");
+            GFL_LOG_ERROR("[GPUFL]   - Driver/CUPTI version mismatch");
+        } else {
+            GFL_LOG_DEBUG("[GPUFL] PC Sampling ENABLED successfully for ctx=", static_cast<void *>(this->ctx_));
         }
     }
 
@@ -435,6 +510,24 @@ namespace gpufl {
                             }
                         }
 
+                        {
+                            const uint64_t corr = k->correlationId;
+                            std::lock_guard<std::mutex> lk(backend->deviceMu_);
+                            if (auto it = backend->deviceByCorr_.find(corr); it != backend->deviceByCorr_.end()) {
+                                backend->deviceOrder_.erase(it->second.second);
+                                backend->deviceOrder_.push_front(corr);
+                                it->second = {k->deviceId, backend->deviceOrder_.begin()};
+                            } else {
+                                backend->deviceOrder_.push_front(corr);
+                                backend->deviceByCorr_.emplace(corr, std::make_pair(k->deviceId, backend->deviceOrder_.begin()));
+                                if (backend->deviceByCorr_.size() > CuptiBackend::kDeviceCorrMax) {
+                                    const uint64_t old = backend->deviceOrder_.back();
+                                    backend->deviceOrder_.pop_back();
+                                    backend->deviceByCorr_.erase(old);
+                                }
+                            }
+                        }
+
                         g_monitorBuffer.Push(out);
                     } else if (record->kind == CUPTI_ACTIVITY_KIND_SOURCE_LOCATOR) {
                         auto* sl = reinterpret_cast<CUpti_ActivitySourceLocator *>(record);
@@ -451,23 +544,35 @@ namespace gpufl {
                         out.corrId = pc->correlationId;
                         out.samplesCount = pc->samples;
                         out.stallReason = pc->stallReason;
-                        out.deviceId = k->deviceId;
+                        {
+                            std::lock_guard<std::mutex> lk(backend->deviceMu_);
+                            if (auto it = backend->deviceByCorr_.find(out.corrId); it != backend->deviceByCorr_.end()) {
+                                out.deviceId = it->second.first;
+                                backend->deviceOrder_.erase(it->second.second);
+                                backend->deviceOrder_.push_front(out.corrId);
+                                it->second.second = backend->deviceOrder_.begin();
+                            } else {
+                                out.deviceId = 0;
+                            }
+                        }
 
                         // Look up source file from sourceLocatorId
                         {
                             std::lock_guard<std::mutex> lk(sourceMapMu_);
                             if (auto it = sourceMap_.find(pc->sourceLocatorId); it != sourceMap_.end()) {
-                                std::snprintf(out.sourceFile, sizeof(out.sourceFile), "%s:%u",
-                                            it->second.fileName.c_str(), it->second.lineNumber);
+                                std::snprintf(out.sourceFile, sizeof(out.sourceFile), "%s",
+                                            it->second.fileName.c_str());
+                                out.sourceLine = it->second.lineNumber;
                                 GFL_LOG_DEBUG("[PC_SAMPLING] Got sample: sourceFile=", out.sourceFile,
-                                             " samples=", out.samplesCount, " stallReason=", out.stallReason,
-                                             " corrId=", out.corrId);
+                                             ":", out.sourceLine, " samples=", out.samplesCount,
+                                             " stallReason=", out.stallReason, " corrId=", out.corrId);
                             } else {
                                 // Fallback to PC offset if source not found
                                 uint64_t pcOffset = pc->pcOffset; // Copy to avoid packed field binding issue
                                 uint32_t sourceLocId = pc->sourceLocatorId; // Copy to avoid packed field binding issue
                                 std::snprintf(out.sourceFile, sizeof(out.sourceFile), "PC:0x%llx",
                                             (unsigned long long)pcOffset);
+                                out.sourceLine = 0;
                                 GFL_LOG_DEBUG("[PC_SAMPLING] Got sample: PC=0x", std::hex, pcOffset, std::dec,
                                              " samples=", out.samplesCount, " stallReason=", out.stallReason,
                                              " corrId=", out.corrId, " (sourceLocatorId=", sourceLocId, " not found)");
@@ -600,21 +705,7 @@ namespace gpufl {
             } else if (backend->getOptions().collectKernelDetails &&
                 domain == CUPTI_CB_DOMAIN_DRIVER_API &&
                 cbInfo->functionParams != nullptr) {
-                if (cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel) {
-                    meta.hasDetails = true;
-                    const auto *params = (cudaLaunchKernel_v7000_params *) (cbInfo->
-                    functionParams);
-
-                    meta.gridX = params->gridDim.x;
-                    meta.gridY = params->gridDim.y;
-                    meta.gridZ = params->gridDim.z;
-                    meta.blockX = params->blockDim.x;
-                    meta.blockY = params->blockDim.y;
-                    meta.blockZ = params->blockDim.z;
-                    meta.dynShared = static_cast<int>(params->sharedMem);
-
-                    CalculateOccupancy(meta, params->func);
-                }
+                // Driver API param structs differ from runtime API; avoid unsafe casts here.
             }
 
             std::lock_guard<std::mutex> lk(backend->metaMu_);

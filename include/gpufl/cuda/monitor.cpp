@@ -8,6 +8,7 @@
 #include "gpufl/core/runtime.hpp"
 
 #include <cuda_runtime.h>
+#include <cstdio>
 #include <iostream>
 #include <mutex>
 #include <thread>
@@ -116,6 +117,8 @@ namespace gpufl {
                         pe.samplesCount = rec.samplesCount;
                         pe.stallReason = rec.stallReason;
                         pe.deviceId = rec.deviceId;
+                        pe.sourceFile = rec.sourceFile;
+                        pe.sourceLine = rec.sourceLine;
                         rt->logger->logProfileSample(pe);
                     }
                 }
@@ -204,7 +207,7 @@ namespace gpufl {
 
     void Monitor::RecordStart(const char* name, const cudaStream_t stream, const TraceType type, void** outHandle) {
         auto* rec = new ActivityRecord();
-        strncpy(rec->name, name, 127);
+        std::snprintf(rec->name, sizeof(rec->name), "%s", name ? name : "");
         rec->type = type;
         rec->stream = stream;
         rec->cpuStartNs = detail::getTimestampNs();

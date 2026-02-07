@@ -37,6 +37,8 @@ int main() {
     opts.enableKernelDetails = true;
     opts.samplingAutoStart = true;
     opts.enableDebugOutput = true;
+    opts.enableProfiling = true;
+
     if (!gpufl::init(opts)) {
         std::cerr << "Failed to initialize gpufl" << std::endl;
         return 1;

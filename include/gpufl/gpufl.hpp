@@ -72,7 +72,7 @@ namespace gpufl {
     if(gpufl::ScopedMonitor _gpufl_scope{name}; true)
 
 #define GFL_SCOPE_TAGGED(name, tag) \
-    if (gpufl::ScopedMonitor+ _gpufl_scope{name, tag}; true)
+    if (gpufl::ScopedMonitor _gpufl_scope{name, tag}; true)
 
 #define GFL_SYSTEM_START(name) ::gpufl::systemStart(name)
 #define GFL_SYSTEM_STOP(name)  ::gpufl::systemStop(name)
