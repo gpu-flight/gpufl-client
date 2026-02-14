@@ -1,6 +1,6 @@
 #include "gpufl/core/monitor.hpp"
 #include "gpufl/core/monitor_backend.hpp"
-#include "gpufl/cuda/cupti_backend.hpp"
+#include "gpufl/backends/nvidia/cupti_backend.hpp"
 #include "gpufl/core/ring_buffer.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/logger.hpp"
@@ -116,6 +116,14 @@ namespace gpufl {
                         pe.samplesCount = rec.samplesCount;
                         pe.stallReason = rec.stallReason;
                         pe.deviceId = rec.deviceId;
+                        pe.corrId = static_cast<int32_t>(rec.corrId);
+                        pe.sourceFile = rec.sourceFile;
+                        pe.reasonName = rec.reasonName;
+                        pe.functionName = rec.functionName;
+                        pe.sourceLine = rec.sourceLine;
+                        pe.metricName = rec.metricName;
+                        pe.metricValue = rec.metricValue;
+                        pe.pcOffset = rec.pcOffset;
                         rt->logger->logProfileSample(pe);
                     }
                 }

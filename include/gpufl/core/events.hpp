@@ -76,7 +76,7 @@ namespace gpufl {
         std::string name;
         std::string platform;
         std::string sessionId;
-        int32_t deviceId = 0;
+        uint32_t deviceId = 0;
 
         int64_t startNs = 0;
         int64_t endNs = 0;
@@ -94,7 +94,7 @@ namespace gpufl {
         std::string cudaError;
         float occupancy = 0.0f;
         int maxActiveBlocks = 0;
-        int32_t corrId = 0;
+        unsigned int corrId = 0;
 
         std::string userScope;
         int scopeDepth = 0;
@@ -108,13 +108,20 @@ namespace gpufl {
         std::string sessionId;
 
         int64_t tsNs = 0;
-        int32_t deviceId = 0;
+        uint32_t deviceId = 0;
         int32_t corrId = 0;
         uint32_t samplesCount = 0;
         uint32_t stallReason = 0; // CUPTI enum
+        std::string reasonName;
 
         std::string sourceFile;
+        std::string functionName;
         uint32_t sourceLine = 0;
+        
+        // SASS Metrics
+        std::string metricName;
+        uint64_t metricValue = 0;
+        uint32_t pcOffset = 0;
     };
 
     struct ScopeBeginEvent {

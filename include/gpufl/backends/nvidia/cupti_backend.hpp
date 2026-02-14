@@ -13,10 +13,12 @@
 #include "gpufl/gpufl.hpp"
 #include "gpufl/core/debug_logger.hpp"
 
+#include <cupti_sass_metrics.h>
+
 namespace gpufl {
 
     struct ActivityRecord {
-        int32_t deviceId;
+        uint32_t deviceId;
         char name[128];
         TraceType type;
         cudaStream_t stream;
@@ -41,11 +43,18 @@ namespace gpufl {
         int maxActiveBlocks;
         unsigned int corrId;
 
-        uint32_t sourceLine;
         char sourceFile[256];
+        uint32_t sourceLine;
+        char functionName[256];
         uint32_t samplesCount;
         uint32_t stallReason;
-        char deviceName[64];
+        std::string reasonName;
+        char deviceName[64]{};
+
+        // SASS Metrics support
+        uint32_t pcOffset;
+        uint64_t metricValue;
+        char metricName[64];
 
         char userScope[256]{};
         int scopeDepth{};
@@ -66,11 +75,6 @@ namespace gpufl {
         char userScope[256]{};
         int scopeDepth{};
         size_t stackId{};
-    };
-
-    struct SourceLocation {
-        std::string fileName;
-        uint32_t lineNumber;
     };
 
     /**
@@ -112,6 +116,7 @@ namespace gpufl {
             GFL_LOG_DEBUG("onScopeStop");
             if (isProfilingMode()) {
                 stopAndCollectPCSampling();
+                stopAndCollectSassMetrics();
             }
         }
 
@@ -119,7 +124,7 @@ namespace gpufl {
         // CUPTI callback functions
         static void CUPTIAPI BufferRequested(uint8_t **buffer, size_t *size, size_t *maxNumRecords);
         static void CUPTIAPI BufferCompleted(CUcontext context, uint32_t streamId, uint8_t *buffer, size_t size, size_t validSize);
-        static void CUPTIAPI GflCallback(void *userdata, CUpti_CallbackDomain domain, CUpti_CallbackId cbid, CUpti_CallbackData *cbInfo);
+        static void CUPTIAPI GflCallback(void *userdata, CUpti_CallbackDomain domain, CUpti_CallbackId cbid, const void *cbdata);
 
         CUpti_SubscriberHandle subscriber_{};
         std::atomic<bool> active_{false};
@@ -131,11 +136,15 @@ namespace gpufl {
         std::mutex metaMu_;
         std::unordered_map<uint64_t, LaunchMeta> metaByCorr_;
 
-        static std::mutex sourceMapMu_;
-        static std::unordered_map<uint32_t, SourceLocation> sourceMap_;
-
         std::string cachedDeviceName_ = "Unknown Device";
         CUcontext ctx_ = nullptr; // context for the profiler.
+
+        struct CubinInfo {
+            std::vector<uint8_t> data;
+            uint64_t crc;
+        };
+        std::mutex cubinMu_;
+        std::unordered_map<uint64_t, CubinInfo> cubinByCrc_;
 
         // PC Sampling method tracking
         enum class PCSamplingMethod {
@@ -148,6 +157,24 @@ namespace gpufl {
         void enableProfilingFeatures();
         void startPCSampling();
         void stopAndCollectPCSampling() const;
+        void stopAndCollectSassMetrics() const;
+
+        struct SassMetricsBuffers {
+            CUpti_SassMetrics_Config* config;
+            CUpti_SassMetrics_Data* data;
+            size_t numMetrics;
+        };
+        SassMetricsBuffers* sassMetricsBuffers_ = nullptr;
+
+        struct PCSamplingBuffers {
+            CUpti_PCSamplingData* data;
+            CUpti_PCSamplingPCData* pcRecords;
+        };
+        PCSamplingBuffers* pcSamplingBuffers_ = nullptr;
+        std::atomic<int> pcSamplingRefCount_{0};
+
+        mutable std::mutex stallReasonMu_;
+        mutable std::unordered_map<uint32_t, std::string> stallReasonMap_;
     };
 
 } // namespace gpufl
