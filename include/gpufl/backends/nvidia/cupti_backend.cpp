@@ -70,7 +70,7 @@ namespace gpufl {
         int blockSize = meta.blockX * meta.blockY * meta.blockZ;
 
         // Ask the driver: "Given this function pointer and block size, how many blocks fit?"
-        cudaError_t err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        const cudaError_t err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
             &maxActiveBlocks,
             funcPtr, // The kernel function pointer
             blockSize,
@@ -393,12 +393,12 @@ namespace gpufl {
                             } else {
                                 std::snprintf(out.functionName, sizeof(out.functionName), "unknown");
                             }
-
                             // Source Correlation
                             {
                                 std::lock_guard<std::mutex> lk(const_cast<CuptiBackend*>(this)->cubinMu_);
                                 auto it = cubinByCrc_.find(pc.cubinCrc);
                                 if (it != cubinByCrc_.end()) {
+                                    GFL_LOG_DEBUG("start getting source correlation");
                                     auto sourceCorr = nvidia::CuptiSass::sampleSourceCorrelation(
                                         it->second.data.data(),
                                         it->second.data.size(),
@@ -408,6 +408,7 @@ namespace gpufl {
                                     if (!sourceCorr.fileName.empty()) {
                                         std::snprintf(out.sourceFile, sizeof(out.sourceFile), "%s", sourceCorr.fileName.c_str());
                                         out.sourceLine = sourceCorr.lineNumber;
+                                        std :: cout << "sourceFile is " << sourceCorr.fileName << std :: endl;
                                     }
                                 }
                             }
