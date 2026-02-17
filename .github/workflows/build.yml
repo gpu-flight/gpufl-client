@@ -77,6 +77,18 @@ jobs:
             -DBUILD_TESTING=ON
           
           cmake --build build_tests --target gpufl_tests
+          
+          # Use CUDA stubs if real libcuda.so.1/libnvidia-ml.so.1 are missing (common in CI)
+          export LD_LIBRARY_PATH="${CUDA_HOME}/targets/x86_64-linux/lib/stubs:${LD_LIBRARY_PATH}"
+          
+          # Symlink stubs to the expected version names if needed (libcuda.so -> libcuda.so.1)
+          if [ ! -f "${CUDA_HOME}/targets/x86_64-linux/lib/stubs/libcuda.so.1" ]; then
+            ln -s libcuda.so "${CUDA_HOME}/targets/x86_64-linux/lib/stubs/libcuda.so.1"
+          fi
+          if [ ! -f "${CUDA_HOME}/targets/x86_64-linux/lib/stubs/libnvidia-ml.so.1" ]; then
+            ln -s libnvidia-ml.so "${CUDA_HOME}/targets/x86_64-linux/lib/stubs/libnvidia-ml.so.1"
+          fi
+          
           ctest --test-dir build_tests --output-on-failure --verbose --timeout 60
 
       - name: Run Python Unit Tests
