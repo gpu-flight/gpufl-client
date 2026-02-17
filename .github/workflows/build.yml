@@ -71,18 +71,27 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          # Use CUDA stubs if real libcuda.so.1/libnvidia-ml.so.1 are missing (common in CI)
-          # We must set this BEFORE cmake/build because gtest_discover_tests runs the executable
+          # 1. Gather relevant library directories for the CUDA Toolkit
+          # For CUDA 12+, common directories are:
+          #   - lib64/stubs: for libcuda.so, libnvidia-ml.so
+          #   - lib64: for libcudart.so, libcupti.so, libnvrtc.so
           STUBS_DIR="${CUDA_HOME}/targets/x86_64-linux/lib/stubs"
-          export LD_LIBRARY_PATH="${STUBS_DIR}:${LD_LIBRARY_PATH}"
+          LIBS_DIR="${CUDA_HOME}/targets/x86_64-linux/lib"
           
-          # Symlink stubs to the expected version names if needed (libcuda.so -> libcuda.so.1)
-          if [ ! -f "${STUBS_DIR}/libcuda.so.1" ]; then
-            ln -s libcuda.so "${STUBS_DIR}/libcuda.so.1"
-          fi
-          if [ ! -f "${STUBS_DIR}/libnvidia-ml.so.1" ]; then
-            ln -s libnvidia-ml.so "${STUBS_DIR}/libnvidia-ml.so.1"
-          fi
+          # Add both to LD_LIBRARY_PATH
+          export LD_LIBRARY_PATH="${STUBS_DIR}:${LIBS_DIR}:${LD_LIBRARY_PATH}"
+          
+          # 2. Symlink stubs to versioned names (e.g. libcuda.so -> libcuda.so.1)
+          # Many binaries expect .so.1 which is only created by the driver installer.
+          for lib in libcuda libnvidia-ml libnvrtc; do
+            if [ -f "${STUBS_DIR}/${lib}.so" ] && [ ! -f "${STUBS_DIR}/${lib}.so.1" ]; then
+              ln -s "${lib}.so" "${STUBS_DIR}/${lib}.so.1"
+            fi
+          done
+
+          # Debug: check what libraries are found
+          echo "LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
+          ls -l "${STUBS_DIR}"/libcuda.so* "${STUBS_DIR}"/libnvidia-ml.so* || true
 
           cmake -B build_tests -S . \
             -DGPUFL_ENABLE_NVIDIA=ON \
