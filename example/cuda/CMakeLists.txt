@@ -31,6 +31,10 @@ add_executable(gfl_block_example block_style_example.cu)
 add_executable(system_monitor system_monitor.cu)
 add_executable(check_conflict check_conflict.cu)
 add_executable(check_device check_device.cu)
+add_executable(cupti_pc_sampling cupti_pc_sampling.cu)
+
+target_compile_options(gfl_block_example PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
 
 target_link_libraries(test_occupancy PRIVATE
     gpufl::gpufl
@@ -65,6 +69,11 @@ target_link_libraries(check_device PRIVATE
         CUDA::nvml
         CUDA::cupti
 )
+target_link_libraries(cupti_pc_sampling PRIVATE
+    gpufl::gpufl
+    CUDA::cudart
+    CUDA::cupti
+)
 
 # Properties
 set_target_properties(gfl_block_example PROPERTIES
@@ -81,6 +90,9 @@ set_target_properties(check_conflict PROPERTIES
 )
 set_target_properties(check_device PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
+)
+set_target_properties(cupti_pc_sampling PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
 )
 
 # Platform Specifics
@@ -138,7 +150,7 @@ if(WIN32)
         # Handle case where GLOB returns multiple versions; just take the first one
         list(GET CUPTI_DLL_LIST 0 CUPTI_DLL_TO_COPY)
 
-        foreach(TARGET_NAME test_occupancy system_monitor gfl_block_example)
+        foreach(TARGET_NAME test_occupancy system_monitor gfl_block_example cupti_pc_sampling)
             add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${CUPTI_DLL_TO_COPY}"

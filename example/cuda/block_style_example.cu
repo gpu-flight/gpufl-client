@@ -24,7 +24,11 @@ __global__
 void vectorScale(int* a, int scale, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
-        a[idx] *= scale;
+        int val = a[idx];
+        for (int i = 0; i < 2048; ++i) {
+            val = val * scale + i;
+        }
+        a[idx] = val;
     }
 }
 
@@ -45,7 +49,7 @@ int main() {
     std::cout << "=== GPUFl Block-Style API Demo ===" << std::endl;
     std::cout << "Logs: " << opts.logPath << "\n" << std::endl;
 
-    const int n = 1024 * 1024;
+    const int n = 1 << 22; // 4M elements
     const size_t bytes = n * sizeof(int);
 
     // Allocate memory
@@ -68,88 +72,15 @@ int main() {
     dim3 grid(4);
     dim3 block(256);
 
-    // ========================================================================
-    // GFL_SCOPE - Block-style (most like Scala)
-    // ========================================================================
-    std::cout << "Using GFL_SCOPE (block-style)..." << std::endl;
-
-    GFL_SCOPE("computation-phase-1") {
-        // You can have multiple kernel launches inside the scope
-        vectorAdd<<<grid, block>>>(d_a, d_b, d_c, n);
-        cudaDeviceSynchronize();
-
-        vectorMul<<<grid, block>>>(d_a, d_b, d_c, n);
-        cudaDeviceSynchronize();
-    }
-    // Automatically logs scope_end when block exits
-
-    std::cout << "   ✓ Scope automatically closed\n" << std::endl;
-
-    // ========================================================================
-    // ScopedRange RAII object
-    // ========================================================================
-    std::cout << "Using ScopedRange (RAII object)..." << std::endl;
-
-    {
-        gpufl::ScopedMonitor range("training-epoch-1");
-
-        vectorAdd<<<grid, block>>>(d_a, d_b, d_c, n);
-        cudaDeviceSynchronize();
-
-        vectorMul<<<grid, block>>>(d_a, d_b, d_c, n);
-        cudaDeviceSynchronize();
-
-        // Range automatically ends when going out of scope
-    }
-
-    std::cout << "   ✓ Range destroyed, scope logged\n" << std::endl;
-
-    // ========================================================================
-    // Method 4: Lambda-based functional style
-    // ========================================================================
-    std::cout << "4. Using monitor() lambda wrapper..." << std::endl;
-
-    gpufl::monitor("functional-style", [&]() {
-        vectorAdd<<<grid, block>>>(d_a, d_b, d_c, n);
-        cudaDeviceSynchronize();
-    });
-
-    std::cout << "   ✓ Lambda executed and monitored\n" << std::endl;
-
-    // ========================================================================
-    // Method 5: Automatic Kernel Monitoring (CUPTI)
-    // ========================================================================
-    std::cout << "5. Automatic Kernel Monitoring (CUPTI)..." << std::endl;
-    std::cout << "   (No macros needed, just standard kernel launches)" << std::endl;
-
-    vectorAdd<<<grid, block>>>(d_a, d_b, d_c, n);
-    cudaDeviceSynchronize();
-
-    std::cout << "   ✓ Kernel launched and automatically timed by CUPTI\n" << std::endl;
-
-    // ========================================================================
-    // Method 6: Nested scopes
-    // ========================================================================
-    std::cout << "6. Using nested scopes..." << std::endl;
-
-    GFL_SCOPE("outer-scope") {
-        vectorScale<<<grid, block>>>(d_a, 3, n);
-        cudaDeviceSynchronize();
-
-        GFL_SCOPE("inner-scope") {
-            vectorAdd<<<grid, block>>>(d_a, d_b, d_c, n);
-            cudaDeviceSynchronize();
+    std::cout << "Running heavy monitored scope..." << std::endl;
+    GFL_SCOPE("heavy-scope") {
+        for (int i = 0; i < 2000; ++i) {
+            vectorScale<<<grid, block>>>(d_a, 3, n);
         }
-
-        vectorMul<<<grid, block>>>(d_a, d_b, d_c, n);
         cudaDeviceSynchronize();
     }
 
-    std::cout << "   ✓ Nested scopes properly tracked\n" << std::endl;
-
-    // ========================================================================
     // Cleanup
-    // ========================================================================
     delete[] h_a;
     delete[] h_b;
     cudaFree(d_a);

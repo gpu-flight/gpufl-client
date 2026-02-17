@@ -31,10 +31,10 @@ jobs:
 
       # Install CUDA Toolkit (provides CUDA_PATH)
       - name: Install CUDA Toolkit
-        uses: Jimver/cuda-toolkit@v0.2.29
+        uses: Jimver/cuda-toolkit@v0.2.30
         id: cuda-toolkit
         with:
-          cuda: '12.8.0' # currently it does not match the version in the workflow since it is not yet released. We can update it later.
+          cuda: '13.1.0'
           method: 'network'
           use-github-cache: false
 
@@ -71,12 +71,40 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
+          # 1. Prepare a local writable directory for CUDA stubs
+          # We cannot write to the system CUDA directory (Permission denied).
+          LOCAL_STUBS_DIR="${GITHUB_WORKSPACE}/local_cuda_stubs"
+          mkdir -p "${LOCAL_STUBS_DIR}"
+
+          # 2. Gather relevant library directories for the CUDA Toolkit
+          STUBS_DIR="${CUDA_HOME}/targets/x86_64-linux/lib/stubs"
+          LIBS_DIR="${CUDA_HOME}/targets/x86_64-linux/lib"
+          
+          # 3. Create versioned symlinks in the LOCAL directory
+          # Many binaries expect .so.1 which is only created by the driver installer.
+          for lib in libcuda libnvidia-ml libnvrtc; do
+            if [ -f "${STUBS_DIR}/${lib}.so" ]; then
+              # Symlink the original stub to our local dir
+              ln -sf "${STUBS_DIR}/${lib}.so" "${LOCAL_STUBS_DIR}/${lib}.so"
+              # Create the versioned symlink in our local dir
+              ln -sf "${lib}.so" "${LOCAL_STUBS_DIR}/${lib}.so.1"
+            fi
+          done
+
+          # 4. Add local stubs and toolkit libs to LD_LIBRARY_PATH
+          export LD_LIBRARY_PATH="${LOCAL_STUBS_DIR}:${LIBS_DIR}:${LD_LIBRARY_PATH}"
+          
+          # Debug: check what libraries are found
+          echo "LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
+          ls -l "${LOCAL_STUBS_DIR}" || true
+
           cmake -B build_tests -S . \
             -DGPUFL_ENABLE_NVIDIA=ON \
             -DBUILD_PYTHON=OFF \
             -DBUILD_TESTING=ON
           
           cmake --build build_tests --target gpufl_tests
+          
           ctest --test-dir build_tests --output-on-failure --verbose --timeout 60
 
       - name: Run Python Unit Tests

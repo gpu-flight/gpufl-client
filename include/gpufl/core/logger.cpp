@@ -177,8 +177,6 @@ namespace gpufl {
                 return;
             }
         }
-        GFL_LOG_DEBUG("[GPUFL-DEBUG] Writing to '", name_, "' (", bytesToWrite, " bytes)");
-        GFL_LOG_DEBUG("[GPUFL-DEBUG] ", line);
         stream_.write(line.data(), static_cast<std::streamsize>(line.size()));
         stream_.put('\n');
         currentBytes_ += bytesToWrite;
@@ -355,10 +353,22 @@ namespace gpufl {
             << ",\"session_id\":\"" << jsonEscape(e.sessionId) << "\""
             << ",\"ts_ns\":" << e.tsNs
             << ",\"device_id\":" << e.deviceId
-            << ",\"corr_id\":" << e.corrId
-            << ",\"sample_count\":" << e.samplesCount
-            << ",\"stall_reason\":" << e.stallReason
-            << ",\"source_file\":\"" << jsonEscape(e.sourceFile) << "\""
+            << ",\"corr_id\":" << e.corrId;
+
+        if (e.samplesCount > 0) {
+            oss << ",\"sample_count\":" << e.samplesCount
+                << ",\"stall_reason\":" << e.stallReason
+                << ",\"reason_name\":\"" << jsonEscape(e.reasonName) << "\"";
+        }
+
+        if (!e.metricName.empty()) {
+            oss << ",\"metric_name\":\"" << jsonEscape(e.metricName) << "\""
+                << ",\"metric_value\":" << e.metricValue
+                << ",\"pc_offset\":\"0x" << std::hex << e.pcOffset << std::dec << "\"";
+        }
+
+        oss << ",\"source_file\":\"" << jsonEscape(e.sourceFile) << "\""
+            << ",\"function_name\":\"" << jsonEscape(e.functionName) << "\""
             << ",\"source_line\":" << e.sourceLine
             << "}";
         chanScope_->write(oss.str());

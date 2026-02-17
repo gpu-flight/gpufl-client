@@ -29,7 +29,9 @@ option(BUILD_PYTHON "Build Python bindings" OFF)
 # -----------------------
 # Library target
 # -----------------------
-add_library(gpufl STATIC)
+add_library(gpufl STATIC
+        include/gpufl/backends/nvidia/sampler/cupti_sass.cpp
+        include/gpufl/backends/nvidia/sampler/cupti_sass.hpp)
 add_library(gpufl::gpufl ALIAS gpufl)
 
 target_include_directories(gpufl
@@ -87,7 +89,7 @@ if(GPUFL_ENABLE_NVIDIA)
             target_sources(gpufl PRIVATE
                 include/gpufl/backends/nvidia/cuda_collector.cpp
                 include/gpufl/cuda/monitor.cpp
-                include/gpufl/cuda/cupti_backend.cpp)
+                include/gpufl/backends/nvidia/cupti_backend.cpp)
             target_link_libraries(gpufl PRIVATE CUDA::cudart CUDA::cuda_driver)
 
             # --------------------------------------------------------

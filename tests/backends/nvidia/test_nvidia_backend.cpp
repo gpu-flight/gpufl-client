@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 #include "common/test_utils.hpp"
-#include "gpufl/cuda/cupti_backend.hpp"
+#include "gpufl/backends/nvidia/cupti_backend.hpp"
 
 #if GPUFL_ENABLE_NVIDIA && GPUFL_HAS_CUPTI
 
