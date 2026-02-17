@@ -71,27 +71,32 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          # 1. Gather relevant library directories for the CUDA Toolkit
-          # For CUDA 12+, common directories are:
-          #   - lib64/stubs: for libcuda.so, libnvidia-ml.so
-          #   - lib64: for libcudart.so, libcupti.so, libnvrtc.so
+          # 1. Prepare a local writable directory for CUDA stubs
+          # We cannot write to the system CUDA directory (Permission denied).
+          LOCAL_STUBS_DIR="${GITHUB_WORKSPACE}/local_cuda_stubs"
+          mkdir -p "${LOCAL_STUBS_DIR}"
+
+          # 2. Gather relevant library directories for the CUDA Toolkit
           STUBS_DIR="${CUDA_HOME}/targets/x86_64-linux/lib/stubs"
           LIBS_DIR="${CUDA_HOME}/targets/x86_64-linux/lib"
           
-          # Add both to LD_LIBRARY_PATH
-          export LD_LIBRARY_PATH="${STUBS_DIR}:${LIBS_DIR}:${LD_LIBRARY_PATH}"
-          
-          # 2. Symlink stubs to versioned names (e.g. libcuda.so -> libcuda.so.1)
+          # 3. Create versioned symlinks in the LOCAL directory
           # Many binaries expect .so.1 which is only created by the driver installer.
           for lib in libcuda libnvidia-ml libnvrtc; do
-            if [ -f "${STUBS_DIR}/${lib}.so" ] && [ ! -f "${STUBS_DIR}/${lib}.so.1" ]; then
-              ln -s "${lib}.so" "${STUBS_DIR}/${lib}.so.1"
+            if [ -f "${STUBS_DIR}/${lib}.so" ]; then
+              # Symlink the original stub to our local dir
+              ln -sf "${STUBS_DIR}/${lib}.so" "${LOCAL_STUBS_DIR}/${lib}.so"
+              # Create the versioned symlink in our local dir
+              ln -sf "${lib}.so" "${LOCAL_STUBS_DIR}/${lib}.so.1"
             fi
           done
 
+          # 4. Add local stubs and toolkit libs to LD_LIBRARY_PATH
+          export LD_LIBRARY_PATH="${LOCAL_STUBS_DIR}:${LIBS_DIR}:${LD_LIBRARY_PATH}"
+          
           # Debug: check what libraries are found
           echo "LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
-          ls -l "${STUBS_DIR}"/libcuda.so* "${STUBS_DIR}"/libnvidia-ml.so* || true
+          ls -l "${LOCAL_STUBS_DIR}" || true
 
           cmake -B build_tests -S . \
             -DGPUFL_ENABLE_NVIDIA=ON \
