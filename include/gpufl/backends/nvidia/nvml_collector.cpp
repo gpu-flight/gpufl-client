@@ -92,8 +92,11 @@ namespace gpufl::nvidia {
                 s.memUtil = static_cast<int>(util.memory);
             }
 
-            if (nvmlDeviceGetTemperature(dev, NVML_TEMPERATURE_GPU, &tempC) == NVML_SUCCESS) {
-                s.tempC = static_cast<int>(tempC);
+            nvmlTemperature_t tempInfo{};
+            tempInfo.version = nvmlTemperature_v1;
+            tempInfo.sensorType = NVML_TEMPERATURE_GPU;
+            if (nvmlDeviceGetTemperatureV(dev, &tempInfo) == NVML_SUCCESS) {
+                s.tempC = static_cast<int>(tempInfo.temperature);
             }
 
             if (nvmlDeviceGetPowerUsage(dev, &powerMilliW) == NVML_SUCCESS) {
@@ -107,18 +110,14 @@ namespace gpufl::nvidia {
 
             // Throttle Reasons
             unsigned long long reasons = 0;
-            if (nvmlDeviceGetCurrentClocksThrottleReasons(dev, &reasons) == NVML_SUCCESS) {
-                // Check for Power Cap (0x0000000000000004 usually, but check nvml.h constant)
-                // NVML_CLOCKS_THROTTLE_REASON_SW_POWER_CAP
-                s.throttlePower = (reasons & 0x0000000000000004ULL) != 0;
+            if (nvmlDeviceGetCurrentClocksEventReasons(dev, &reasons) == NVML_SUCCESS) {
+                // Check for Power Cap
+                // nvmlClocksEventReasonSwPowerCap usually 0x0000000000000004ULL
+                s.throttlePower = (reasons & nvmlClocksEventReasonSwPowerCap) != 0;
 
-                // Check for Thermal (Hardware Slowdown or Thermal Caps)
-                // NVML_CLOCKS_THROTTLE_REASON_HW_SLOWDOWN | SW_THERMAL | HW_THERMAL
-                bool therm = false;
-                if (reasons & 0x0000000000000008ULL) therm = true;
-                if (reasons & 0x0000000000000020ULL) therm = true;
-                if (reasons & 0x0000000000000040ULL) therm = true;
-                s.throttleThermal = therm;
+                // Check for Thermal (Software Thermal Slowdown)
+                // nvmlClocksEventReasonSwThermalSlowdown usually 0x0000000000000020ULL
+                s.throttleThermal = (reasons & nvmlClocksEventReasonSwThermalSlowdown) != 0;
             } else {
                 s.throttlePower = false;
                 s.throttleThermal = false;
