@@ -88,6 +88,8 @@ if(GPUFL_ENABLE_NVIDIA)
             set(GPUFL_HAS_CUDA 1)
             target_sources(gpufl PRIVATE
                 include/gpufl/backends/nvidia/cuda_collector.cpp
+                include/gpufl/backends/nvidia/cupti_utils.cpp
+                include/gpufl/backends/nvidia/cupti_handlers.cpp
                 include/gpufl/cuda/monitor.cpp
                 include/gpufl/backends/nvidia/cupti_backend.cpp)
             target_link_libraries(gpufl PRIVATE CUDA::cudart CUDA::cuda_driver)
