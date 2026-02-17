@@ -85,8 +85,6 @@ namespace gpufl {
                 meta.occupancy = static_cast<float>(maxActiveBlocks * blockSize) / static_cast<float>(maxThreadsPerSM);
             }
             meta.maxActiveBlocks = maxActiveBlocks;
-
-            GFL_LOG_DEBUG("Occupancy: ", meta.occupancy * 100.0f, "% (", maxActiveBlocks, " blocks/SM)");
         } else {
             meta.occupancy = 0.0f;
             meta.maxActiveBlocks = 0;
@@ -98,6 +96,7 @@ namespace gpufl {
         if (opts_.isProfiling) {
             mode_ |= MonitorMode::Profiling;
         }
+
         DebugLogger::setEnabled(opts_.enableDebugOutput);
 
         g_activeBackend.store(this, std::memory_order_release);
@@ -112,10 +111,13 @@ namespace gpufl {
         );
         GFL_LOG_DEBUG("CUPTI subscription successful");
 
+        CUPTI_CHECK(cuptiEnableCallback(1, subscriber_, CUPTI_CB_DOMAIN_RESOURCE, CUPTI_CBID_RESOURCE_MODULE_LOADED));
+        CUPTI_CHECK(cuptiEnableCallback(1, subscriber_, CUPTI_CB_DOMAIN_RESOURCE, CUPTI_CBID_RESOURCE_MODULE_PROFILED));
+
         // Enable resource domain immediately to catch context creation
-        cuptiEnableDomain(1, subscriber_, CUPTI_CB_DOMAIN_RESOURCE);
-        cuptiEnableDomain(1, subscriber_, CUPTI_CB_DOMAIN_RUNTIME_API);
-        cuptiEnableDomain(1, subscriber_, CUPTI_CB_DOMAIN_DRIVER_API);
+        CUPTI_CHECK(cuptiEnableDomain(1, subscriber_, CUPTI_CB_DOMAIN_RESOURCE));
+        CUPTI_CHECK(cuptiEnableDomain(1, subscriber_, CUPTI_CB_DOMAIN_RUNTIME_API));
+        CUPTI_CHECK(cuptiEnableDomain(1, subscriber_, CUPTI_CB_DOMAIN_DRIVER_API));
 
         CUptiResult resCb = cuptiActivityRegisterCallbacks(BufferRequested, BufferCompleted);
         if (resCb != CUPTI_SUCCESS) {
@@ -446,11 +448,11 @@ namespace gpufl {
             return;
         }
 
+        // Allocate memory for records
         size_t nRecords = props.numOfPatchedInstructionRecords;
         size_t nInstances = props.numOfInstances;
-
-        CUpti_SassMetrics_Data* data = static_cast<CUpti_SassMetrics_Data*>(std::calloc(nRecords, sizeof(CUpti_SassMetrics_Data)));
-        CUpti_SassMetrics_InstanceValue* instances = static_cast<CUpti_SassMetrics_InstanceValue*>(std::calloc(nRecords * nInstances, sizeof(CUpti_SassMetrics_InstanceValue)));
+        auto* data = static_cast<CUpti_SassMetrics_Data*>(std::calloc(nRecords, sizeof(CUpti_SassMetrics_Data)));
+        auto* instances = static_cast<CUpti_SassMetrics_InstanceValue*>(std::calloc(nRecords * nInstances, sizeof(CUpti_SassMetrics_InstanceValue)));
 
         for (size_t i = 0; i < nRecords; ++i) {
             data[i].structSize = sizeof(CUpti_SassMetrics_Data);
@@ -463,60 +465,51 @@ namespace gpufl {
         flushParams.numOfInstances = nInstances;
         flushParams.pMetricsData = data;
 
-        CUptiResult res = cuptiSassMetricsFlushData(&flushParams);
-        if (res != CUPTI_SUCCESS) {
-             const char* err; cuptiGetResultString(res, &err);
-             GFL_LOG_ERROR("[SASS Metrics] cuptiSassMetricsFlushData FAILED: ", err);
-        } else {
-            GFL_LOG_DEBUG("[SASS Metrics] Flushed ", nRecords, " SASS records.");
+        if (cuptiSassMetricsFlushData(&flushParams) == CUPTI_SUCCESS) {
             for (size_t i = 0; i < nRecords; ++i) {
-                for (size_t j = 0; j < nInstances; ++j) {
-                    CUpti_SassMetrics_InstanceValue& iv = data[i].pInstanceValues[j];
-                    if (iv.value > 0) {
+                // Correlation using your 13.1 specific struct
+                CUpti_GetSassToSourceCorrelationParams corrParams = {sizeof(CUpti_GetSassToSourceCorrelationParams)};
+
+                // Find the cubin in your map using the CRC
+                std::lock_guard<std::mutex> lk(const_cast<CuptiBackend*>(this)->cubinMu_);
+                auto it = cubinByCrc_.find(data[i].cubinCrc);
+
+                if (it != cubinByCrc_.end()) {
+                    corrParams.cubin = it->second.data.data();
+                    corrParams.cubinSize = it->second.data.size();
+                    corrParams.functionName = data[i].functionName;
+                    corrParams.pcOffset = data[i].pcOffset;
+
+                    // Perform the offline correlation
+                    CUptiResult res = cuptiGetSassToSourceCorrelation(&corrParams);
+                    if (res == CUPTI_SUCCESS) {
                         ActivityRecord out{};
                         out.type = TraceType::PC_SAMPLE;
-                        out.cpuStartNs = detail::getTimestampNs();
-                        cuptiGetDeviceId(this->ctx_, &out.deviceId);
-                        out.pcOffset = data[i].pcOffset;
-                        out.metricValue = iv.value;
-                        std::snprintf(out.functionName, sizeof(out.functionName), "%s", data[i].functionName ? data[i].functionName : "unknown");
+                        out.sourceLine = corrParams.lineNumber;
+                        std::strncpy(out.sourceFile, corrParams.fileName, sizeof(out.sourceFile) - 1);
 
-                        // Try to find metric name
-                        std::snprintf(out.metricName, sizeof(out.metricName), "sass_metric_%lu", iv.metricId);
-                        if (sassMetricsBuffers_) {
-                            for (size_t k = 0; k < sassMetricsBuffers_->numMetrics; ++k) {
-                                if (sassMetricsBuffers_->config[k].metricId == iv.metricId) {
-                                    // In a real scenario we'd store the name in SassMetricsBuffers
-                                    std::snprintf(out.metricName, sizeof(out.metricName), "smsp__sass_inst_executed");
-                                    break;
-                                }
-                            }
+
+                        if (corrParams.lineNumber == 0) {
+                            // This is where you detect the "0" result
+                            GFL_LOG_DEBUG("Correlation successful, but Line Number is 0. Check for -lineinfo.");
+                        } else {
+                            std::snprintf(out.sourceFile, sizeof(out.sourceFile), "%s", corrParams.fileName);
+                            out.sourceLine = corrParams.lineNumber;
                         }
 
-                        // Source Correlation
-                        {
-                            std::lock_guard<std::mutex> lk(const_cast<CuptiBackend*>(this)->cubinMu_);
-                            auto it = cubinByCrc_.find(data[i].cubinCrc);
-                            if (it != cubinByCrc_.end()) {
-                                auto sourceCorr = nvidia::CuptiSass::sampleSourceCorrelation(
-                                    it->second.data.data(),
-                                    it->second.data.size(),
-                                    out.functionName,
-                                    out.pcOffset
-                                );
-                                if (!sourceCorr.fileName.empty()) {
-                                    std::snprintf(out.sourceFile, sizeof(out.sourceFile), "%s", sourceCorr.fileName.c_str());
-                                    out.sourceLine = sourceCorr.lineNumber;
-                                }
-                            }
-                        }
+                        // Cleanup strings allocated by CUPTI
+                        std::free(corrParams.fileName);
+                        std::free(corrParams.dirName);
 
                         g_monitorBuffer.Push(out);
+                    } else {
+                        const char* errStr;
+                        cuptiGetResultString(res, &errStr);
+                        GFL_LOG_ERROR("Correlation failed with error: ", errStr);
                     }
                 }
             }
         }
-
         std::free(instances);
         std::free(data);
     }
@@ -620,7 +613,7 @@ namespace gpufl {
             pcSamplingBuffers_->data->pPcData = pcSamplingBuffers_->pcRecords;
         }
 
-        CUpti_PCSamplingConfigurationInfo configInfo[10] = {};
+        CUpti_PCSamplingConfigurationInfo configInfo[7] = {};
         configInfo[0].attributeType = CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_COLLECTION_MODE;
         configInfo[0].attributeData.collectionModeData.collectionMode = CUPTI_PC_SAMPLING_COLLECTION_MODE_KERNEL_SERIALIZED;
 
@@ -642,13 +635,10 @@ namespace gpufl {
         configInfo[6].attributeType = CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_OUTPUT_DATA_FORMAT;
         configInfo[6].attributeData.outputDataFormatData.outputDataFormat = CUPTI_PC_SAMPLING_OUTPUT_DATA_FORMAT_PARSED;
 
-        configInfo[7].attributeType = CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_SOURCE_REPORTING;
-        configInfo[7].attributeData.invalidData.data[0] = 1; // union field for source reporting might not exist in old headers
-
         CUpti_PCSamplingConfigurationInfoParams configParams = {};
-        configParams.size = sizeof(CUpti_PCSamplingConfigurationInfoParams);
+        configParams.size = CUpti_PCSamplingConfigurationInfoParamsSize;
         configParams.ctx = this->ctx_;
-        configParams.numAttributes = 8;
+        configParams.numAttributes = 7;
         configParams.pPCSamplingConfigurationInfo = configInfo;
 
         CUptiResult configRes = cuptiPCSamplingSetConfigurationAttribute(&configParams);
@@ -682,7 +672,6 @@ namespace gpufl {
             return;
         }
 
-        GFL_LOG_DEBUG("[CUPTI] BufferCompleted validSize=", validSize);
         CUpti_Activity *record = nullptr;
 
         static int64_t baseCpuNs = detail::getTimestampNs();
@@ -695,10 +684,9 @@ namespace gpufl {
                     buffer, validSize, &record);
                 if (st == CUPTI_SUCCESS) {
                     CUpti_ActivityKind recKind = record->kind; // Copy to avoid packed field binding issue
-                    GFL_LOG_DEBUG("[CUPTI] Got activity record kind=", recKind);
 
                     const auto *k = reinterpret_cast<const
-                        CUpti_ActivityKernel9 *>(record);
+                        CUpti_ActivityKernel11 *>(record);
 
                     if (record->kind == CUPTI_ACTIVITY_KIND_KERNEL ||
                         record->kind == CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL) {
@@ -735,16 +723,11 @@ namespace gpufl {
                                     out.constBytes = m.constBytes;
                                     out.occupancy = m.occupancy;
                                     out.maxActiveBlocks = m.maxActiveBlocks;
-                                    GFL_LOG_DEBUG("[BufferCompleted] Found metadata for CorrID ", corr,
-                                                  " with occupancy=", out.occupancy);
-                                } else {
-                                    GFL_LOG_DEBUG("[BufferCompleted] Found metadata for CorrID ", corr,
-                                                  " but hasDetails=false");
                                 }
 
                                 backend->metaByCorr_.erase(it);
                             } else {
-                                GFL_LOG_DEBUG("[BufferCompleted] No metadata found for CorrID ", corr);
+                                //GFL_LOG_DEBUG("[BufferCompleted] No metadata found for CorrID ", corr);
                             }
                         }
 
@@ -781,37 +764,55 @@ namespace gpufl {
         if (!cbdata) return;
 
         auto *backend = static_cast<CuptiBackend *>(userdata);
-        if (!backend || !backend->isActive()) return;
+        if (!backend) return;
 
-        if (domain == CUPTI_CB_DOMAIN_RESOURCE && cbid == CUPTI_CBID_RESOURCE_CONTEXT_CREATED) {
-            auto *resData = static_cast<const CUpti_ResourceData *>(cbdata);
-            GFL_LOG_DEBUG("[DEBUG-CALLBACK] Context Created! Enabling Runtime/Driver domains...");
-            cuptiEnableDomain(1, backend->getSubscriber(), CUPTI_CB_DOMAIN_RUNTIME_API);
-            cuptiEnableDomain(1, backend->getSubscriber(), CUPTI_CB_DOMAIN_DRIVER_API);
-            return;
+        if (domain == CUPTI_CB_DOMAIN_RUNTIME_API || domain == CUPTI_CB_DOMAIN_DRIVER_API) {
+            auto *cbInfo = static_cast<const CUpti_CallbackData *>(cbdata);
+            // implement later
         }
 
-        if (domain == CUPTI_CB_DOMAIN_RESOURCE && cbid == CUPTI_CBID_RESOURCE_MODULE_LOADED) {
+        if (cbid == CUPTI_CBID_RESOURCE_MODULE_PROFILED) {
             auto *modData = static_cast<const CUpti_ModuleResourceData *>(cbdata);
+            if (modData->cubinSize > 0) {
+                // This is where you finally get your non-zero size
+
+                GFL_LOG_DEBUG("[DEBUG-CALLBACK] cubin = ", modData->pCubin);
+                GFL_LOG_DEBUG("[DEBUG-CALLBACK] cubinSize = ", modData->cubinSize);
+            }
+        }
+
+        if (domain == CUPTI_CB_DOMAIN_RESOURCE) {
+            if (cbid != CUPTI_CBID_RESOURCE_MODULE_LOADED &&
+              cbid != CUPTI_CBID_RESOURCE_MODULE_PROFILED) {
+                        return;
+              }
+            auto *modData = static_cast<const CUpti_ModuleResourceData *>(cbdata);
+            // Try to get cubin from pCubin first
+            const void* cubinPtr = nullptr;
+            size_t cubinSize = 0;
+
             if (modData && modData->pCubin && modData->cubinSize > 0) {
                 CUpti_GetCubinCrcParams params = {CUpti_GetCubinCrcParamsSize};
-                params.cubinSize = modData->cubinSize;
-                params.cubin = modData->pCubin;
+                cubinPtr = modData->pCubin;
+                cubinSize = modData->cubinSize;
+                params.cubinSize = cubinSize;
+                params.cubin = cubinPtr;
+                GFL_LOG_DEBUG("Attempting CRC for Cubin at ", cubinPtr, " Size: ", cubinSize);
                 if (cuptiGetCubinCrc(&params) == CUPTI_SUCCESS) {
                     std::lock_guard<std::mutex> lk(backend->cubinMu_);
                     auto& info = backend->cubinByCrc_[params.cubinCrc];
                     info.crc = params.cubinCrc;
-                    info.data.assign(reinterpret_cast<const uint8_t *>(modData->pCubin), reinterpret_cast<const uint8_t *>(modData->pCubin) + modData->cubinSize);
-                    GFL_LOG_DEBUG("[DEBUG-CALLBACK] Module Loaded: CRC=", params.cubinCrc, " Size=", modData->cubinSize);
+                    info.data.assign(reinterpret_cast<const uint8_t *>(cubinPtr),
+                                   reinterpret_cast<const uint8_t *>(cubinPtr) + cubinSize);
+                    GFL_LOG_DEBUG("[DEBUG-CALLBACK] Cubin SUCCESSFULLY stored: CRC=", params.cubinCrc, " Size=", cubinSize, " bytes ✓✓✓");
+                } else {
+                    GFL_LOG_ERROR("[DEBUG-CALLBACK] Failed to compute CRC for cubin");
                 }
             }
             return;
         }
 
-        if (!backend->isActive()) {
-            GFL_LOG_DEBUG("[DEBUG-CALLBACK] Backend not active, skipping callback.");
-            return;
-        };
+        if (!backend->isActive()) return;
         if (domain == CUPTI_CB_DOMAIN_STATE) return;
 
         // Only care about runtime/driver API for launch metadata
@@ -836,10 +837,6 @@ namespace gpufl {
                 cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel_ptsz) {
                 isKernelLaunch = true;
             }
-        }
-        if (isKernelLaunch) {
-            GFL_LOG_DEBUG("[DEBUG-CALLBACK] >>> KERNEL LAUNCH DETECTED <<< (CorrID ",
-                          cbInfo->correlationId, ")");
         }
 
         if (!isKernelLaunch) return;

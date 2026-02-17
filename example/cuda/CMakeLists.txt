@@ -33,6 +33,9 @@ add_executable(check_conflict check_conflict.cu)
 add_executable(check_device check_device.cu)
 add_executable(cupti_pc_sampling cupti_pc_sampling.cu)
 
+target_compile_options(gfl_block_example PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
+
 target_link_libraries(test_occupancy PRIVATE
     gpufl::gpufl
     CUDA::cupti
