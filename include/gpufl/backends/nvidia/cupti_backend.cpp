@@ -46,6 +46,160 @@ namespace gpufl {
     // External ring buffer (defined in monitor.cpp)
     extern RingBuffer<ActivityRecord, 1024> g_monitorBuffer;
 
+    static void CalculateOccupancy(LaunchMeta& meta, const void* funcPtr);
+
+    class ResourceHandler : public ICuptiHandler {
+    public:
+        explicit ResourceHandler(CuptiBackend* backend) : backend_(backend) {}
+        
+        const char* getName() const override { return "ResourceHandler"; }
+
+        bool shouldHandle(CUpti_CallbackDomain domain, CUpti_CallbackId cbid) const override {
+            return domain == CUPTI_CB_DOMAIN_RESOURCE;
+        }
+
+        void handle(CUpti_CallbackDomain domain, CUpti_CallbackId cbid, const void* cbdata) override {
+            if (cbid == CUPTI_CBID_RESOURCE_MODULE_PROFILED) {
+                auto *modData = static_cast<const CUpti_ModuleResourceData *>(cbdata);
+                if (modData->cubinSize > 0) {
+                    GFL_LOG_DEBUG("[DEBUG-CALLBACK] cubin = ", modData->pCubin);
+                    GFL_LOG_DEBUG("[DEBUG-CALLBACK] cubinSize = ", modData->cubinSize);
+                }
+            }
+
+            if (cbid == CUPTI_CBID_RESOURCE_MODULE_LOADED || cbid == CUPTI_CBID_RESOURCE_MODULE_PROFILED) {
+                auto *modData = static_cast<const CUpti_ModuleResourceData *>(cbdata);
+                const void* cubinPtr = nullptr;
+                size_t cubinSize = 0;
+
+                if (modData && modData->pCubin && modData->cubinSize > 0) {
+                    CUpti_GetCubinCrcParams params = {CUpti_GetCubinCrcParamsSize};
+                    cubinPtr = modData->pCubin;
+                    cubinSize = modData->cubinSize;
+                    params.cubinSize = cubinSize;
+                    params.cubin = cubinPtr;
+                    GFL_LOG_DEBUG("Attempting CRC for Cubin at ", cubinPtr, " Size: ", cubinSize);
+                    if (cuptiGetCubinCrc(&params) == CUPTI_SUCCESS) {
+                        std::lock_guard<std::mutex> lk(backend_->cubinMu_);
+                        auto& info = backend_->cubinByCrc_[params.cubinCrc];
+                        info.crc = params.cubinCrc;
+                        info.data.assign(reinterpret_cast<const uint8_t *>(cubinPtr),
+                                       reinterpret_cast<const uint8_t *>(cubinPtr) + cubinSize);
+                        GFL_LOG_DEBUG("[DEBUG-CALLBACK] Cubin SUCCESSFULLY stored: CRC=", params.cubinCrc, " Size=", cubinSize, " bytes ✓✓✓");
+                    } else {
+                        GFL_LOG_ERROR("[DEBUG-CALLBACK] Failed to compute CRC for cubin");
+                    }
+                }
+            }
+        }
+    private:
+        CuptiBackend* backend_;
+    };
+
+    class KernelLaunchHandler : public ICuptiHandler {
+    public:
+        explicit KernelLaunchHandler(CuptiBackend* backend) : backend_(backend) {}
+        
+        const char* getName() const override { return "KernelLaunchHandler"; }
+
+        bool shouldHandle(CUpti_CallbackDomain domain, CUpti_CallbackId cbid) const override {
+            return domain == CUPTI_CB_DOMAIN_RUNTIME_API || domain == CUPTI_CB_DOMAIN_DRIVER_API;
+        }
+
+        void handle(CUpti_CallbackDomain domain, CUpti_CallbackId cbid, const void* cbdata) override {
+            if (!backend_->isActive()) return;
+
+            auto *cbInfo = static_cast<const CUpti_CallbackData *>(cbdata);
+            bool isKernelLaunch = false;
+
+            if (domain == CUPTI_CB_DOMAIN_RUNTIME_API) {
+                if (cbid == CUPTI_RUNTIME_TRACE_CBID_cudaLaunch_v3020 ||
+                    cbid == CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_v7000) {
+                    isKernelLaunch = true;
+                }
+            } else if (domain == CUPTI_CB_DOMAIN_DRIVER_API) {
+                if (cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunch ||
+                    cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchGrid ||
+                    cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchGridAsync ||
+                    cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel ||
+                    cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel_ptsz) {
+                    isKernelLaunch = true;
+                }
+            }
+
+            if (!isKernelLaunch) return;
+
+            if (cbInfo->callbackSite == CUPTI_API_ENTER) {
+                LaunchMeta meta{};
+                meta.apiEnterNs = detail::getTimestampNs();
+
+                const char *nm = cbInfo->symbolName ? cbInfo->symbolName : cbInfo->functionName;
+                if (!nm) nm = "kernel_launch";
+                std::snprintf(meta.name, sizeof(meta.name), "%s", nm);
+
+                if (backend_->getOptions().enableStackTrace) {
+                    const std::string trace = gpufl::core::GetCallStack(2);
+                    const std::string cleanTrace = detail::sanitizeStackTrace(trace);
+                    meta.stackId = gpufl::StackRegistry::instance().getOrRegister(cleanTrace);
+                } else {
+                    meta.stackId = 0;
+                }
+
+                auto& stack = getThreadScopeStack();
+                if (!stack.empty()) {
+                    std::string fullPath;
+                    for (size_t i = 0; i < stack.size(); ++i) {
+                        if (i > 0) fullPath += "|";
+                        fullPath += stack[i];
+                    }
+                    fullPath += "|";
+                    fullPath += meta.name;
+                    std::snprintf(meta.userScope, sizeof(meta.userScope), "%s", fullPath.c_str());
+                    meta.scopeDepth = stack.size();
+                } else {
+                    std::string fullPath = "global|";
+                    fullPath += meta.name;
+                    std::snprintf(meta.userScope, sizeof(meta.userScope), "%s", fullPath.c_str());
+                    meta.scopeDepth = 0;
+                }
+
+                if (backend_->getOptions().collectKernelDetails && cbInfo->functionParams != nullptr) {
+                    if ((domain == CUPTI_CB_DOMAIN_RUNTIME_API && cbid == CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_v7000) ||
+                        (domain == CUPTI_CB_DOMAIN_DRIVER_API && cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel)) {
+                        meta.hasDetails = true;
+                        const auto *params = (cudaLaunchKernel_v7000_params *) (cbInfo->functionParams);
+                        meta.gridX = params->gridDim.x;
+                        meta.gridY = params->gridDim.y;
+                        meta.gridZ = params->gridDim.z;
+                        meta.blockX = params->blockDim.x;
+                        meta.blockY = params->blockDim.y;
+                        meta.blockZ = params->blockDim.z;
+                        meta.dynShared = static_cast<int>(params->sharedMem);
+                        CalculateOccupancy(meta, params->func);
+                    }
+                }
+
+                std::lock_guard<std::mutex> lk(backend_->metaMu_);
+                auto& existing = backend_->metaByCorr_[cbInfo->correlationId];
+                if (existing.hasDetails && !meta.hasDetails) {
+                    GFL_LOG_DEBUG("[DEBUG-CALLBACK] Skipping overwrite of rich metadata for CorrID ",
+                                  cbInfo->correlationId, " by Driver API.");
+                } else {
+                    existing = meta;
+                }
+            } else if (cbInfo->callbackSite == CUPTI_API_EXIT) {
+                const int64_t t = detail::getTimestampNs();
+                std::lock_guard<std::mutex> lk(backend_->metaMu_);
+                auto it = backend_->metaByCorr_.find(cbInfo->correlationId);
+                if (it != backend_->metaByCorr_.end()) {
+                    it->second.apiExitNs = t;
+                }
+            }
+        }
+    private:
+        CuptiBackend* backend_;
+    };
+
     static int GetMaxThreadsPerSM(int deviceId) {
         static std::mutex mu;
         static std::unordered_map<int, int> cache;
@@ -100,6 +254,11 @@ namespace gpufl {
         DebugLogger::setEnabled(opts_.enableDebugOutput);
 
         g_activeBackend.store(this, std::memory_order_release);
+
+        // Internal handler registration
+        registerHandler(std::make_shared<ResourceHandler>(this));
+        registerHandler(std::make_shared<KernelLaunchHandler>(this));
+        
         GFL_LOG_DEBUG("Subscribing to CUPTI...");
         CUPTI_CHECK_RETURN(
             cuptiSubscribe(&subscriber_, reinterpret_cast<CUpti_CallbackFunc>(GflCallback), this),
@@ -281,6 +440,12 @@ namespace gpufl {
             cuptiActivityDisable(CUPTI_ACTIVITY_KIND_KERNEL);
             cuptiActivityDisable(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL);
         }
+    }
+
+    void CuptiBackend::registerHandler(std::shared_ptr<ICuptiHandler> handler) {
+        if (!handler) return;
+        std::lock_guard<std::mutex> lk(handlerMu_);
+        handlers_.push_back(handler);
     }
 
     void CuptiBackend::startPCSampling() {
@@ -757,7 +922,7 @@ namespace gpufl {
         free(buffer);
     }
 
-    void CUPTIAPI CuptiBackend::GflCallback(void *userdata,
+    void CuptiBackend::GflCallback(void *userdata,
                                             CUpti_CallbackDomain domain,
                                             CUpti_CallbackId cbid,
                                             const void *cbdata) {
@@ -766,174 +931,24 @@ namespace gpufl {
         auto *backend = static_cast<CuptiBackend *>(userdata);
         if (!backend) return;
 
-        if (domain == CUPTI_CB_DOMAIN_RUNTIME_API || domain == CUPTI_CB_DOMAIN_DRIVER_API) {
-            auto *cbInfo = static_cast<const CUpti_CallbackData *>(cbdata);
-            // implement later
+        std::vector<std::shared_ptr<ICuptiHandler>> handlers;
+        {
+            std::lock_guard<std::mutex> lk(backend->handlerMu_);
+            handlers = backend->handlers_;
         }
 
-        if (cbid == CUPTI_CBID_RESOURCE_MODULE_PROFILED) {
-            auto *modData = static_cast<const CUpti_ModuleResourceData *>(cbdata);
-            if (modData->cubinSize > 0) {
-                // This is where you finally get your non-zero size
+        bool apiHandled = false;
 
-                GFL_LOG_DEBUG("[DEBUG-CALLBACK] cubin = ", modData->pCubin);
-                GFL_LOG_DEBUG("[DEBUG-CALLBACK] cubinSize = ", modData->cubinSize);
-            }
-        }
-
-        if (domain == CUPTI_CB_DOMAIN_RESOURCE) {
-            if (cbid != CUPTI_CBID_RESOURCE_MODULE_LOADED &&
-              cbid != CUPTI_CBID_RESOURCE_MODULE_PROFILED) {
-                        return;
-              }
-            auto *modData = static_cast<const CUpti_ModuleResourceData *>(cbdata);
-            // Try to get cubin from pCubin first
-            const void* cubinPtr = nullptr;
-            size_t cubinSize = 0;
-
-            if (modData && modData->pCubin && modData->cubinSize > 0) {
-                CUpti_GetCubinCrcParams params = {CUpti_GetCubinCrcParamsSize};
-                cubinPtr = modData->pCubin;
-                cubinSize = modData->cubinSize;
-                params.cubinSize = cubinSize;
-                params.cubin = cubinPtr;
-                GFL_LOG_DEBUG("Attempting CRC for Cubin at ", cubinPtr, " Size: ", cubinSize);
-                if (cuptiGetCubinCrc(&params) == CUPTI_SUCCESS) {
-                    std::lock_guard<std::mutex> lk(backend->cubinMu_);
-                    auto& info = backend->cubinByCrc_[params.cubinCrc];
-                    info.crc = params.cubinCrc;
-                    info.data.assign(reinterpret_cast<const uint8_t *>(cubinPtr),
-                                   reinterpret_cast<const uint8_t *>(cubinPtr) + cubinSize);
-                    GFL_LOG_DEBUG("[DEBUG-CALLBACK] Cubin SUCCESSFULLY stored: CRC=", params.cubinCrc, " Size=", cubinSize, " bytes ✓✓✓");
-                } else {
-                    GFL_LOG_ERROR("[DEBUG-CALLBACK] Failed to compute CRC for cubin");
+        for (auto& handler : handlers) {
+            if (handler->shouldHandle(domain, cbid)) {
+                if (domain == CUPTI_CB_DOMAIN_RUNTIME_API || domain == CUPTI_CB_DOMAIN_DRIVER_API) {
+                    if (apiHandled) {
+                        GFL_LOG_DEBUG("[CUPTI] Skipping redundant API handler: ", handler->getName());
+                        continue;
+                    }
+                    apiHandled = true;
                 }
-            }
-            return;
-        }
-
-        if (!backend->isActive()) return;
-        if (domain == CUPTI_CB_DOMAIN_STATE) return;
-
-        // Only care about runtime/driver API for launch metadata
-        if (domain != CUPTI_CB_DOMAIN_RUNTIME_API && domain !=
-            CUPTI_CB_DOMAIN_DRIVER_API) return;
-
-        auto *cbInfo = static_cast<const CUpti_CallbackData *>(cbdata);
-
-        bool isKernelLaunch = false;
-
-        if (domain == CUPTI_CB_DOMAIN_RUNTIME_API) {
-            if (cbid == CUPTI_RUNTIME_TRACE_CBID_cudaLaunch_v3020 ||
-                cbid == CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_v7000) {
-                isKernelLaunch = true;
-            }
-        } else {
-            // DRIVER API
-            if (cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunch ||
-                cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchGrid ||
-                cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchGridAsync ||
-                cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel ||
-                cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel_ptsz) {
-                isKernelLaunch = true;
-            }
-        }
-
-        if (!isKernelLaunch) return;
-
-        if (cbInfo->callbackSite == CUPTI_API_ENTER) {
-            LaunchMeta meta{};
-            meta.apiEnterNs = detail::getTimestampNs();
-
-            const char *nm = cbInfo->symbolName
-                                 ? cbInfo->symbolName
-                                 : cbInfo->functionName;
-            if (!nm) nm = "kernel_launch";
-            std::snprintf(meta.name, sizeof(meta.name), "%s", nm);
-
-            if (backend->getOptions().enableStackTrace) {
-                const std::string trace = gpufl::core::GetCallStack(2);
-                const std::string cleanTrace = detail::sanitizeStackTrace(trace);
-                meta.stackId = gpufl::StackRegistry::instance().getOrRegister(cleanTrace);
-            } else {
-                meta.stackId = 0;
-            }
-
-            auto& stack = getThreadScopeStack();
-
-            if (!stack.empty()) {
-                std::string fullPath;
-                for (size_t i = 0; i < stack.size(); ++i) {
-                    if (i > 0) fullPath += "|";
-                    fullPath += stack[i];
-                }
-                fullPath += "|";
-                fullPath += meta.name;
-                std::snprintf(meta.userScope, sizeof(meta.userScope), "%s", fullPath.c_str());
-                meta.scopeDepth = stack.size();
-            } else {
-                std::string fullPath = "global|";
-                fullPath += meta.name;
-                std::snprintf(meta.userScope, sizeof(meta.userScope), "%s", fullPath.c_str());
-                meta.scopeDepth = 0;
-            }
-
-            if (backend->getOptions().collectKernelDetails &&
-                domain == CUPTI_CB_DOMAIN_RUNTIME_API &&
-                cbid == CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_v7000 &&
-                cbInfo->functionParams != nullptr) {
-                meta.hasDetails = true;
-
-                const auto *params = (cudaLaunchKernel_v7000_params *) (cbInfo->
-                    functionParams);
-
-                meta.gridX = params->gridDim.x;
-                meta.gridY = params->gridDim.y;
-                meta.gridZ = params->gridDim.z;
-                meta.blockX = params->blockDim.x;
-                meta.blockY = params->blockDim.y;
-                meta.blockZ = params->blockDim.z;
-                meta.dynShared = static_cast<int>(params->sharedMem);
-
-                CalculateOccupancy(meta, params->func);
-            } else if (backend->getOptions().collectKernelDetails &&
-                domain == CUPTI_CB_DOMAIN_DRIVER_API &&
-                cbInfo->functionParams != nullptr) {
-                if (cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel) {
-                    meta.hasDetails = true;
-                    const auto *params = (cudaLaunchKernel_v7000_params *) (cbInfo->
-                    functionParams);
-
-                    meta.gridX = params->gridDim.x;
-                    meta.gridY = params->gridDim.y;
-                    meta.gridZ = params->gridDim.z;
-                    meta.blockX = params->blockDim.x;
-                    meta.blockY = params->blockDim.y;
-                    meta.blockZ = params->blockDim.z;
-                    meta.dynShared = static_cast<int>(params->sharedMem);
-
-                    CalculateOccupancy(meta, params->func);
-                }
-            }
-
-            std::lock_guard<std::mutex> lk(backend->metaMu_);
-            auto& existing = backend->metaByCorr_[cbInfo->correlationId];
-
-            // If the existing entry has details, but the new one (e.g. from Driver API) does not,
-            // KEEP the existing one. Do not overwrite it.
-            if (existing.hasDetails && !meta.hasDetails) {
-                GFL_LOG_DEBUG("[DEBUG-CALLBACK] Skipping overwrite of rich metadata for CorrID ",
-                              cbInfo->correlationId, " by Driver API.");
-            } else {
-                // Otherwise (it's new, or the new one has details and the old one didn't), update it.
-                existing = meta;
-            }
-        } else if (cbInfo->callbackSite == CUPTI_API_EXIT) {
-            const int64_t t = detail::getTimestampNs();
-            std::lock_guard<std::mutex> lk(backend->metaMu_);
-            auto it = backend->metaByCorr_.find(cbInfo->correlationId);
-            if (it != backend->metaByCorr_.end()) {
-                it->second.apiExitNs = t;
+                handler->handle(domain, cbid, cbdata);
             }
         }
     }
