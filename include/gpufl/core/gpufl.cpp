@@ -130,6 +130,7 @@ namespace gpufl {
         mOpts.collectKernelDetails = opts.enableKernelDetails;
         mOpts.enableDebugOutput = opts.enableDebugOutput;
         mOpts.isProfiling = opts.enableProfiling;
+        mOpts.kernelSampleRateMs = opts.kernelSampleRateMs;
         if (mOpts.isProfiling) {
             mOpts.collectKernelDetails = true; // if profiling is on, then it should be true.
         }

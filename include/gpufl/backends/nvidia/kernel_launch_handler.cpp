@@ -1,4 +1,4 @@
-#include "gpufl/backends/nvidia/cupti_handlers.hpp"
+#include "gpufl/backends/nvidia/kernel_launch_handler.hpp"
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/common.hpp"
@@ -9,79 +9,27 @@
 
 namespace gpufl {
 
-    // --- ResourceHandler ---
-
-    ResourceHandler::ResourceHandler(CuptiBackend* backend) : backend_(backend) {}
-
-    bool ResourceHandler::shouldHandle(CUpti_CallbackDomain domain, CUpti_CallbackId cbid) const {
-        return domain == CUPTI_CB_DOMAIN_RESOURCE;
-    }
-
-    void ResourceHandler::handle(CUpti_CallbackDomain domain, CUpti_CallbackId cbid, const void* cbdata) {
-        if (cbid == CUPTI_CBID_RESOURCE_MODULE_PROFILED) {
-            auto *modData = static_cast<const CUpti_ModuleResourceData *>(cbdata);
-            if (modData->cubinSize > 0) {
-                GFL_LOG_DEBUG("[DEBUG-CALLBACK] cubin = ", modData->pCubin);
-                GFL_LOG_DEBUG("[DEBUG-CALLBACK] cubinSize = ", modData->cubinSize);
-            }
-        }
-
-        if (cbid == CUPTI_CBID_RESOURCE_MODULE_LOADED || cbid == CUPTI_CBID_RESOURCE_MODULE_PROFILED) {
-            auto *modData = static_cast<const CUpti_ModuleResourceData *>(cbdata);
-            const void* cubinPtr = nullptr;
-            size_t cubinSize = 0;
-
-            if (modData && modData->pCubin && modData->cubinSize > 0) {
-                CUpti_GetCubinCrcParams params = {CUpti_GetCubinCrcParamsSize};
-                cubinPtr = modData->pCubin;
-                cubinSize = modData->cubinSize;
-                params.cubinSize = cubinSize;
-                params.cubin = cubinPtr;
-                GFL_LOG_DEBUG("Attempting CRC for Cubin at ", cubinPtr, " Size: ", cubinSize);
-                if (cuptiGetCubinCrc(&params) == CUPTI_SUCCESS) {
-                    std::lock_guard<std::mutex> lk(backend_->cubinMu_);
-                    auto& info = backend_->cubinByCrc_[params.cubinCrc];
-                    info.crc = params.cubinCrc;
-                    info.data.assign(reinterpret_cast<const uint8_t *>(cubinPtr),
-                                   reinterpret_cast<const uint8_t *>(cubinPtr) + cubinSize);
-                    GFL_LOG_DEBUG("[DEBUG-CALLBACK] Cubin SUCCESSFULLY stored: CRC=", params.cubinCrc, " Size=", cubinSize, " bytes ✓✓✓");
-                } else {
-                    GFL_LOG_ERROR("[DEBUG-CALLBACK] Failed to compute CRC for cubin");
-                }
-            }
-        }
-    }
-
-    // --- KernelLaunchHandler ---
-
     KernelLaunchHandler::KernelLaunchHandler(CuptiBackend* backend) : backend_(backend) {}
 
     bool KernelLaunchHandler::shouldHandle(CUpti_CallbackDomain domain, CUpti_CallbackId cbid) const {
-        return domain == CUPTI_CB_DOMAIN_RUNTIME_API || domain == CUPTI_CB_DOMAIN_DRIVER_API;
+        if (domain == CUPTI_CB_DOMAIN_RUNTIME_API) {
+            return cbid == CUPTI_RUNTIME_TRACE_CBID_cudaLaunch_v3020 ||
+                   cbid == CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_v7000;
+        }
+        if (domain == CUPTI_CB_DOMAIN_DRIVER_API) {
+            return cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunch ||
+                   cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchGrid ||
+                   cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchGridAsync ||
+                   cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel ||
+                   cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel_ptsz;
+        }
+        return false;
     }
 
     void KernelLaunchHandler::handle(CUpti_CallbackDomain domain, CUpti_CallbackId cbid, const void* cbdata) {
         if (!backend_->isActive()) return;
 
         auto *cbInfo = static_cast<const CUpti_CallbackData *>(cbdata);
-        bool isKernelLaunch = false;
-
-        if (domain == CUPTI_CB_DOMAIN_RUNTIME_API) {
-            if (cbid == CUPTI_RUNTIME_TRACE_CBID_cudaLaunch_v3020 ||
-                cbid == CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_v7000) {
-                isKernelLaunch = true;
-            }
-        } else if (domain == CUPTI_CB_DOMAIN_DRIVER_API) {
-            if (cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunch ||
-                cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchGrid ||
-                cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchGridAsync ||
-                cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel ||
-                cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel_ptsz) {
-                isKernelLaunch = true;
-            }
-        }
-
-        if (!isKernelLaunch) return;
 
         if (cbInfo->callbackSite == CUPTI_API_ENTER) {
             LaunchMeta meta{};

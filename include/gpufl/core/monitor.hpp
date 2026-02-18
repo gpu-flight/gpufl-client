@@ -11,6 +11,7 @@ namespace gpufl {
         bool enableDebugOutput = false;
         bool enableStackTrace = false;
         bool isProfiling = false;
+        int kernelSampleRateMs = 0;
     };
 
     enum class MonitorMode : unsigned int {

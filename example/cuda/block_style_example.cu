@@ -37,7 +37,8 @@ int main() {
     gpufl::InitOptions opts;
     opts.appName = "block_style_demo";
     opts.logPath = "gfl_block.log";
-    opts.systemSampleRateMs = 10;
+    opts.systemSampleRateMs = 50;
+    opts.kernelSampleRateMs = 50;
     opts.enableKernelDetails = true;
     opts.samplingAutoStart = true;
     opts.enableDebugOutput = true;

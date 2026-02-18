@@ -283,6 +283,7 @@ namespace gpufl {
             << ",\"platform\":\"" << jsonEscape(e.platform) << "\""
             << ",\"has_details\":" << std::boolalpha << e.hasDetails
             << ",\"device_id\":\"" << e.deviceId << "\""
+            << ",\"stream_id\":\"" << e.streamId << "\""
             << ",\"stack_trace\":\"" << jsonEscape(e.stackTrace) << "\""
             << ",\"user_scope\":\"" << jsonEscape(e.userScope) << "\""
             << ",\"scope_depth\":" << e.scopeDepth
@@ -301,6 +302,10 @@ namespace gpufl {
             << ",\"max_active_blocks\":" << e.maxActiveBlocks
             << ",\"corr_id\":" << e.corrId
             << ",\"cuda_error\":\"" << jsonEscape(e.cudaError) << "\""
+            << ",\"bytes\":" << e.bytes
+            << ",\"copy_kind\":\"" << jsonEscape(e.copyKind) << "\""
+            << ",\"src_kind\":\"" << jsonEscape(e.srcKind) << "\""
+            << ",\"dst_kind\":\"" << jsonEscape(e.dstKind) << "\""
             << "}";
         chanKernel_->write(oss.str());
     }

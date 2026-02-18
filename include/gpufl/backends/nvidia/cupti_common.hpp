@@ -50,6 +50,12 @@ namespace gpufl {
         int scopeDepth{};
 
         size_t stackId{};
+
+        // Memcpy / Memset specific
+        uint64_t bytes;
+        uint32_t copyKind; // CUpti_ActivityMemcpyKind
+        uint32_t srcKind;  // CUpti_ActivityMemoryKind
+        uint32_t dstKind;  // CUpti_ActivityMemoryKind
     };
 
     struct LaunchMeta {

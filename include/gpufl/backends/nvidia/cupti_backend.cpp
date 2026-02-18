@@ -1,5 +1,7 @@
 #include "gpufl/backends/nvidia/cupti_backend.hpp"
-#include "gpufl/backends/nvidia/cupti_handlers.hpp"
+#include "gpufl/backends/nvidia/resource_handler.hpp"
+#include "gpufl/backends/nvidia/kernel_launch_handler.hpp"
+#include "gpufl/backends/nvidia/mem_transfer_handler.hpp"
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
 #include "gpufl/core/ring_buffer.hpp"
 #include "gpufl/core/common.hpp"
@@ -65,6 +67,7 @@ namespace gpufl {
         // Internal handler registration
         registerHandler(std::make_shared<ResourceHandler>(this));
         registerHandler(std::make_shared<KernelLaunchHandler>(this));
+        registerHandler(std::make_shared<MemTransferHandler>(this));
         
         GFL_LOG_DEBUG("Subscribing to CUPTI...");
         CUPTI_CHECK_RETURN(
@@ -200,6 +203,10 @@ namespace gpufl {
 
         if (isMonitoringMode()) {
             CUPTI_CHECK(cuptiActivityEnable(CUPTI_ACTIVITY_KIND_KERNEL));
+            CUPTI_CHECK(cuptiActivityEnable(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL));
+            CUPTI_CHECK(cuptiActivityEnable(CUPTI_ACTIVITY_KIND_MEMCPY));
+            CUPTI_CHECK(cuptiActivityEnable(CUPTI_ACTIVITY_KIND_MEMCPY2));
+            CUPTI_CHECK(cuptiActivityEnable(CUPTI_ACTIVITY_KIND_MEMSET));
         }
 
         if (isProfilingMode()) {
@@ -246,6 +253,9 @@ namespace gpufl {
         if (isMonitoringMode()) {
             cuptiActivityDisable(CUPTI_ACTIVITY_KIND_KERNEL);
             cuptiActivityDisable(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL);
+            cuptiActivityDisable(CUPTI_ACTIVITY_KIND_MEMCPY);
+            cuptiActivityDisable(CUPTI_ACTIVITY_KIND_MEMCPY2);
+            cuptiActivityDisable(CUPTI_ACTIVITY_KIND_MEMSET);
         }
     }
 
@@ -659,8 +669,21 @@ namespace gpufl {
                     if (record->kind == CUPTI_ACTIVITY_KIND_KERNEL ||
                         record->kind == CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL) {
 
+                        // Kernel Sampling
+                        if (backend->opts_.kernelSampleRateMs > 0) {
+                            uint64_t intervalNs = static_cast<uint64_t>(backend->opts_.kernelSampleRateMs) * 1000000ULL;
+                            uint64_t lastTs = backend->lastKernelEndTs_.load(std::memory_order_relaxed);
+                            if (k->start < lastTs + intervalNs) {
+                                // Skip this kernel
+                                if (cuptiActivityGetNextRecord(buffer, validSize, &record) != CUPTI_SUCCESS) break;
+                                continue;
+                            }
+                            backend->lastKernelEndTs_.store(k->start, std::memory_order_relaxed);
+                        }
+
                         ActivityRecord out{};
                         out.deviceId = k->deviceId;
+                        out.stream = reinterpret_cast<cudaStream_t>(static_cast<uintptr_t>(k->streamId));
                         out.type = TraceType::KERNEL;
                         std::snprintf(out.name, sizeof(out.name), "%s", (k->name ? k->name : "kernel"));
                         out.cpuStartNs = baseCpuNs + static_cast<int64_t>(k->start - baseCuptiTs);
@@ -699,6 +722,62 @@ namespace gpufl {
                             }
                         }
 
+                        g_monitorBuffer.Push(out);
+                    } else if (record->kind == CUPTI_ACTIVITY_KIND_MEMCPY ||
+                               record->kind == CUPTI_ACTIVITY_KIND_MEMCPY2) {
+                        const auto *m = reinterpret_cast<const CUpti_ActivityMemcpy *>(record);
+                        ActivityRecord out{};
+                        out.deviceId = m->deviceId;
+                        out.stream = reinterpret_cast<cudaStream_t>(static_cast<uintptr_t>(m->streamId));
+                        out.type = TraceType::MEMCPY;
+                        out.corrId = m->correlationId;
+                        out.cpuStartNs = baseCpuNs + static_cast<int64_t>(m->start - baseCuptiTs);
+                        out.durationNs = static_cast<int64_t>(m->end - m->start);
+                        out.bytes = m->bytes;
+                        out.copyKind = m->copyKind;
+                        out.srcKind = m->srcKind;
+                        out.dstKind = m->dstKind;
+                        std::snprintf(out.name, sizeof(out.name), "memcpy");
+
+                        // Correlation with API if available
+                        {
+                            std::lock_guard lk(backend->metaMu_);
+                            if (auto it = backend->metaByCorr_.find(out.corrId); it != backend->metaByCorr_.end()) {
+                                const LaunchMeta &meta = it->second;
+                                out.scopeDepth = meta.scopeDepth;
+                                out.stackId = meta.stackId;
+                                std::copy(std::begin(meta.userScope), std::end(meta.userScope), std::begin(out.userScope));
+                                out.apiStartNs = meta.apiEnterNs;
+                                out.apiExitNs = meta.apiExitNs;
+                                backend->metaByCorr_.erase(it);
+                            }
+                        }
+                        g_monitorBuffer.Push(out);
+                    } else if (record->kind == CUPTI_ACTIVITY_KIND_MEMSET) {
+                        const auto *m = reinterpret_cast<const CUpti_ActivityMemset *>(record);
+                        ActivityRecord out{};
+                        out.deviceId = m->deviceId;
+                        out.stream = reinterpret_cast<cudaStream_t>(static_cast<uintptr_t>(m->streamId));
+                        out.type = TraceType::MEMSET;
+                        out.corrId = m->correlationId;
+                        out.cpuStartNs = baseCpuNs + static_cast<int64_t>(m->start - baseCuptiTs);
+                        out.durationNs = static_cast<int64_t>(m->end - m->start);
+                        out.bytes = m->bytes;
+                        std::snprintf(out.name, sizeof(out.name), "memset");
+
+                        // Correlation with API if available
+                        {
+                            std::lock_guard lk(backend->metaMu_);
+                            if (auto it = backend->metaByCorr_.find(out.corrId); it != backend->metaByCorr_.end()) {
+                                const LaunchMeta &meta = it->second;
+                                out.scopeDepth = meta.scopeDepth;
+                                out.stackId = meta.stackId;
+                                std::copy(std::begin(meta.userScope), std::end(meta.userScope), std::begin(out.userScope));
+                                out.apiStartNs = meta.apiEnterNs;
+                                out.apiExitNs = meta.apiExitNs;
+                                backend->metaByCorr_.erase(it);
+                            }
+                        }
                         g_monitorBuffer.Push(out);
                     } else if (record->kind == CUPTI_ACTIVITY_KIND_PC_SAMPLING) {
                         auto* pc = reinterpret_cast<CUpti_ActivityPCSampling3 *>(record);
@@ -742,15 +821,15 @@ namespace gpufl {
 
         bool apiHandled = false;
 
-        for (auto& handler : handlers) {
+        for (const auto& handler : handlers) {
             if (handler->shouldHandle(domain, cbid)) {
                 if (domain == CUPTI_CB_DOMAIN_RUNTIME_API || domain == CUPTI_CB_DOMAIN_DRIVER_API) {
                     if (apiHandled) {
-                        GFL_LOG_DEBUG("[CUPTI] Skipping redundant API handler: ", handler->getName());
                         continue;
                     }
                     apiHandled = true;
                 }
+                GFL_LOG_DEBUG("Calling handler: ", handler->getName());
                 handler->handle(domain, cbid, cbdata);
             }
         }

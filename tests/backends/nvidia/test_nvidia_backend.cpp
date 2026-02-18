@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "common/test_utils.hpp"
 #include "gpufl/backends/nvidia/cupti_backend.hpp"
+#include "gpufl/backends/nvidia/kernel_launch_handler.hpp"
 
 #if GPUFL_ENABLE_NVIDIA && GPUFL_HAS_CUPTI
 
@@ -103,6 +104,20 @@ TEST_F(CuptiBackendTest, DynamicHandler) {
     EXPECT_GE(mock->callCount, 0); 
     
     backend.stop();
+    backend.shutdown();
+}
+
+TEST_F(CuptiBackendTest, KernelSamplingRate) {
+    gpufl::MonitorOptions opts;
+    opts.kernelSampleRateMs = 100;
+    
+    gpufl::CuptiBackend backend;
+    backend.initialize(opts);
+    
+    // We can't easily trigger multiple Activity records here without real GPU and timing
+    // but we can verify that the option is correctly set in the backend.
+    EXPECT_EQ(backend.getOptions().kernelSampleRateMs, 100);
+    
     backend.shutdown();
 }
 

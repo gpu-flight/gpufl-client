@@ -6,6 +6,8 @@ namespace gpufl {
         KERNEL,
         PC_SAMPLE,
         SASS_METRIC,
-        RANGE
+        RANGE,
+        MEMCPY,
+        MEMSET
     };
 }

@@ -30,6 +30,36 @@ namespace gpufl {
     static std::atomic<bool> g_collectorRunning{false};
     static thread_local std::stack<void*> g_rangeStack;
 
+    static std::string MemcpyKindToString(uint32_t kind) {
+        switch (kind) {
+            case CUPTI_ACTIVITY_MEMCPY_KIND_HTOD: return "HtoD";
+            case CUPTI_ACTIVITY_MEMCPY_KIND_DTOH: return "DtoH";
+            case CUPTI_ACTIVITY_MEMCPY_KIND_HTOA: return "HtoA";
+            case CUPTI_ACTIVITY_MEMCPY_KIND_ATOH: return "AtoH";
+            case CUPTI_ACTIVITY_MEMCPY_KIND_ATOA: return "AtoA";
+            case CUPTI_ACTIVITY_MEMCPY_KIND_ATOD: return "AtoD";
+            case CUPTI_ACTIVITY_MEMCPY_KIND_DTOA: return "DtoA";
+            case CUPTI_ACTIVITY_MEMCPY_KIND_DTOD: return "DtoD";
+            case CUPTI_ACTIVITY_MEMCPY_KIND_HTOH: return "HtoH";
+            case CUPTI_ACTIVITY_MEMCPY_KIND_PTOP: return "PtoP";
+            default: return "Unknown";
+        }
+    }
+
+    static std::string MemoryKindToString(uint32_t kind) {
+        switch (kind) {
+            case CUPTI_ACTIVITY_MEMORY_KIND_UNKNOWN: return "Unknown";
+            case CUPTI_ACTIVITY_MEMORY_KIND_PAGEABLE: return "Pageable";
+            case CUPTI_ACTIVITY_MEMORY_KIND_PINNED: return "Pinned";
+            case CUPTI_ACTIVITY_MEMORY_KIND_DEVICE: return "Device";
+            case CUPTI_ACTIVITY_MEMORY_KIND_ARRAY: return "Array";
+            case CUPTI_ACTIVITY_MEMORY_KIND_MANAGED: return "Managed";
+            case CUPTI_ACTIVITY_MEMORY_KIND_DEVICE_STATIC: return "DeviceStatic";
+            case CUPTI_ACTIVITY_MEMORY_KIND_MANAGED_STATIC: return "ManagedStatic";
+            default: return "Unknown";
+        }
+    }
+
     void CollectorLoop() {
         auto processNext = []() -> bool {
             ActivityRecord rec{};
@@ -51,10 +81,9 @@ namespace gpufl {
                     durationNs = static_cast<int64_t>(durationMs * 1e6);
                 }
 
-                // Log to system
                 Runtime* rt = runtime();
                 if (rt && rt->logger) {
-                    if (rec.type == TraceType::KERNEL) {
+                    if (rec.type == TraceType::KERNEL || rec.type == TraceType::MEMCPY || rec.type == TraceType::MEMSET) {
 
                         std::string stackTrace = StackRegistry::instance().get(rec.stackId);
 
@@ -62,6 +91,7 @@ namespace gpufl {
                         be.platform = "cuda";
                         be.hasDetails = rec.hasDetails;
                         be.deviceId = rec.deviceId;
+                        be.streamId = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(rec.stream));
                         be.sessionId = rt->sessionId;
                         be.pid = detail::getPid();
                         be.app = rt->appName;
@@ -74,7 +104,8 @@ namespace gpufl {
                         be.scopeDepth = rec.scopeDepth;
                         be.corrId = rec.corrId;
                         be.stackTrace = stackTrace;
-                        if (rec.hasDetails) {
+
+                        if (rec.type == TraceType::KERNEL && rec.hasDetails) {
                             be.grid = "(" + std::to_string(rec.gridX) + "," + std::to_string(rec.gridY) + "," + std::to_string(rec.gridZ) + ")";
                             be.block = "(" + std::to_string(rec.blockX) + "," + std::to_string(rec.blockY) + "," + std::to_string(rec.blockZ) + ")";
                             be.dynSharedBytes = rec.dynShared;
@@ -84,7 +115,15 @@ namespace gpufl {
                             be.constBytes = rec.constBytes;
                             be.occupancy = rec.occupancy;
                             be.maxActiveBlocks = rec.maxActiveBlocks;
+                        } else if (rec.type == TraceType::MEMCPY) {
+                            be.bytes = rec.bytes;
+                            be.copyKind = MemcpyKindToString(rec.copyKind);
+                            be.srcKind = MemoryKindToString(rec.srcKind);
+                            be.dstKind = MemoryKindToString(rec.dstKind);
+                        } else if (rec.type == TraceType::MEMSET) {
+                            be.bytes = rec.bytes;
                         }
+
                         rt->logger->logKernelEvent(be);
 
                     } else if (rec.type == TraceType::RANGE) {
