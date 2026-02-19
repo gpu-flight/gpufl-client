@@ -77,6 +77,7 @@ namespace gpufl {
         std::string platform;
         std::string sessionId;
         uint32_t deviceId = 0;
+        uint32_t streamId = 0;
 
         int64_t startNs = 0;
         int64_t endNs = 0;
@@ -100,6 +101,12 @@ namespace gpufl {
         int scopeDepth = 0;
 
         std::string stackTrace;
+
+        // Memcpy / Memset details
+        uint64_t bytes = 0;
+        std::string copyKind;
+        std::string srcKind;
+        std::string dstKind;
     };
 
     struct ProfileSampleEvent {

@@ -34,6 +34,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
         .def_readwrite("logPath", &gpufl::InitOptions::logPath)
 		.def_readwrite("samplingAutoStart", &gpufl::InitOptions::samplingAutoStart)
         .def_readwrite("systemSampleRateMs", &gpufl::InitOptions::systemSampleRateMs)
+        .def_readwrite("kernelSampleRateMs", &gpufl::InitOptions::kernelSampleRateMs)
         .def_readwrite("enableKernelDetails", &gpufl::InitOptions::enableKernelDetails)
         .def_readwrite("enableDebugOutput", &gpufl::InitOptions::enableDebugOutput)
         .def_readwrite("enableStackTrace", &gpufl::InitOptions::enableStackTrace);
@@ -42,6 +43,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
                  std::string log_path,
 				 bool sampling_auto_start,
                  int system_sample_rate_ms,
+                 int kernel_sample_rate_ms,
                  bool enable_kernel_details,
                  bool enable_debug_output,
                  bool enable_stack_trace,
@@ -52,6 +54,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
         opts.logPath = log_path;
 		opts.samplingAutoStart = sampling_auto_start;
         opts.systemSampleRateMs = system_sample_rate_ms;
+        opts.kernelSampleRateMs = kernel_sample_rate_ms;
         opts.enableKernelDetails = enable_kernel_details;
         opts.enableDebugOutput = enable_debug_output;
         opts.enableStackTrace = enable_stack_trace;
@@ -62,6 +65,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
        py::arg("log_path") = "",
 	   py::arg("sampling_auto_start") = true,
        py::arg("system_sample_rate_ms") = 50,
+       py::arg("kernel_sample_rate_ms") = 0,
        py::arg("enable_kernel_details") = true,
        py::arg("enable_debug_output") = false,
        py::arg("enable_stack_trace") = true,

@@ -89,7 +89,9 @@ if(GPUFL_ENABLE_NVIDIA)
             target_sources(gpufl PRIVATE
                 include/gpufl/backends/nvidia/cuda_collector.cpp
                 include/gpufl/backends/nvidia/cupti_utils.cpp
-                include/gpufl/backends/nvidia/cupti_handlers.cpp
+                include/gpufl/backends/nvidia/resource_handler.cpp
+                include/gpufl/backends/nvidia/kernel_launch_handler.cpp
+                include/gpufl/backends/nvidia/mem_transfer_handler.cpp
                 include/gpufl/cuda/monitor.cpp
                 include/gpufl/backends/nvidia/cupti_backend.cpp)
             target_link_libraries(gpufl PRIVATE CUDA::cudart CUDA::cuda_driver)

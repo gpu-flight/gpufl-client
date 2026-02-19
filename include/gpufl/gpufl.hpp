@@ -13,6 +13,7 @@ namespace gpufl {
         std::string appName = "gpufl";
         std::string logPath = "";     // if empty, will default to "<app>.log"
         int systemSampleRateMs = 0; // currently less than 50-100 would not be effective.
+        int kernelSampleRateMs = 0;
         BackendKind backend = BackendKind::Auto;
         bool samplingAutoStart = false;
         bool enableKernelDetails = false;

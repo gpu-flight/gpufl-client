@@ -70,6 +70,7 @@ namespace gpufl {
     private:
         friend class ResourceHandler;
         friend class KernelLaunchHandler;
+        friend class MemTransferHandler;
 
         // CUPTI callback functions
         static void CUPTIAPI BufferRequested(uint8_t **buffer, size_t *size, size_t *maxNumRecords);
@@ -128,6 +129,8 @@ namespace gpufl {
 
         std::vector<std::shared_ptr<ICuptiHandler>> handlers_;
         std::mutex handlerMu_;
+
+        std::atomic<uint64_t> lastKernelEndTs_{0};
     };
 
 } // namespace gpufl
