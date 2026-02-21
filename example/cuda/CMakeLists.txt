@@ -32,9 +32,18 @@ add_executable(system_monitor system_monitor.cu)
 add_executable(check_conflict check_conflict.cu)
 add_executable(check_device check_device.cu)
 add_executable(cupti_pc_sampling cupti_pc_sampling.cu)
+add_executable(test_sass_metrics test_sass_metrics.cu)
+add_executable(test_sass_cubin test_sass_cubin.cu)
+add_executable(list_sass_metrics list_sass_metrics.cu)
+add_executable(vector_add_benchmark vector_add_benchmark.cu)
+add_executable(cupti_basic cupti_basic.cu)
 
 target_compile_options(gfl_block_example PRIVATE
-        $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
+        $<$<COMPILE_LANGUAGE:CUDA>:
+        -lineinfo
+        -gencode=arch=compute_86,code=sm_86     # embeds cubin
+        -gencode=arch=compute_86,code=compute_86
+        >)
 
 target_link_libraries(test_occupancy PRIVATE
     gpufl::gpufl
@@ -75,6 +84,40 @@ target_link_libraries(cupti_pc_sampling PRIVATE
     CUDA::cupti
 )
 
+target_link_libraries(test_sass_metrics PRIVATE
+    gpufl::gpufl
+    CUDA::cudart
+    CUDA::cupti
+)
+
+target_link_libraries(test_sass_cubin PRIVATE
+    gpufl::gpufl
+    CUDA::cudart
+    CUDA::cupti
+)
+
+target_link_libraries(list_sass_metrics PRIVATE
+    CUDA::cudart
+    CUDA::cupti
+)
+
+target_link_libraries(vector_add_benchmark PRIVATE
+    CUDA::cudart
+)
+
+
+target_compile_options(cupti_basic PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:
+        -lineinfo
+        -gencode=arch=compute_86,code=sm_86     # embeds cubin
+        -gencode=arch=compute_86,code=compute_86
+        >)
+target_link_libraries(cupti_basic PRIVATE
+        gpufl::gpufl
+        CUDA::cudart
+        CUDA::cupti
+)
+
 # Properties
 set_target_properties(gfl_block_example PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
@@ -92,6 +135,22 @@ set_target_properties(check_device PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
 )
 set_target_properties(cupti_pc_sampling PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+)
+
+set_target_properties(test_sass_metrics PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+)
+
+set_target_properties(test_sass_cubin PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+)
+
+set_target_properties(list_sass_metrics PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+)
+
+set_target_properties(vector_add_benchmark PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
 )
 
@@ -150,7 +209,7 @@ if(WIN32)
         # Handle case where GLOB returns multiple versions; just take the first one
         list(GET CUPTI_DLL_LIST 0 CUPTI_DLL_TO_COPY)
 
-        foreach(TARGET_NAME test_occupancy system_monitor gfl_block_example cupti_pc_sampling)
+        foreach(TARGET_NAME test_occupancy system_monitor gfl_block_example cupti_pc_sampling test_sass_metrics test_sass_cubin list_sass_metrics vector_add_benchmark)
             add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${CUPTI_DLL_TO_COPY}"
