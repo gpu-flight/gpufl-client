@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.31)
 
 project(gpufl_client
     VERSION 0.1.0
-    LANGUAGES CXX CUDA
+    LANGUAGES CXX
     DESCRIPTION "Header-only GPU monitoring client library"
 )
 
@@ -60,6 +60,7 @@ target_sources(gpufl PRIVATE
 set(GPUFL_HAS_CUDA 0)
 set(GPUFL_HAS_NVML 0)
 set(GPUFL_HAS_ROCM 0)
+set(GPUFL_HAS_CUPTI 0)
 
 # -----------------------
 # Backends
