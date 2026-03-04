@@ -29,12 +29,12 @@ jobs:
         env:
           CIBW_ENVIRONMENT_LINUX: "CUDA_HOME=/usr/local/cuda CMAKE_ARGS='-DGPUFL_ENABLE_NVIDIA=ON -DGPUFL_ENABLE_AMD=OFF'"
           CIBW_BEFORE_ALL_LINUX: >-
-            yum install -y yum-utils libcurl-devel &&
-            yum-config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo &&
-            yum install -y cuda-nvcc-12-4 cuda-cudart-devel-12-4 libcupti-devel-12-4
-          CIBW_MANYLINUX_X86_64_IMAGE: manylinux2014
+            dnf install -y libcurl-devel &&
+            curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo > /etc/yum.repos.d/cuda.repo &&
+            dnf install -y cuda-nvcc-12-4 cuda-cudart-devel-12-4 libcupti-devel-12-4
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
           CIBW_BUILD: "cp312-* cp313-*"
-          CIBW_REPAIR_WHEEL_COMMAND_LINUX: "auditwheel repair --plat manylinux2014_x86_64 -w {dest_dir} {wheel}"
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: "auditwheel repair --plat manylinux_2_28_x86_64 -w {dest_dir} {wheel}"
 
       - uses: actions/upload-artifact@v4
         with:
