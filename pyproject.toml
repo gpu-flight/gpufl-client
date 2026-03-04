@@ -52,7 +52,11 @@ skip = "pp* cp36* cp37* cp38* cp39* cp310* cp311*"
 build-verbosity = 1
 
 [tool.cibuildwheel.linux]
-before-all = "yum install -y libcurl-devel || apk add curl-dev || apt-get install -y libcurl4-openssl-dev"
+before-all = """
+yum install -y yum-utils libcurl-devel &&
+yum-config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo &&
+yum install -y cuda-nvcc-12-4 cuda-cudart-devel-12-4 libcupti-devel-12-4
+"""
 environment = { CMAKE_ARGS="-DGPUFL_ENABLE_NVIDIA=ON -DGPUFL_ENABLE_AMD=OFF -DBUILD_PYTHON=ON", CUDA_HOME="/usr/local/cuda" }
 
 [tool.cibuildwheel.windows]

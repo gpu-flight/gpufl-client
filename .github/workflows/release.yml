@@ -17,14 +17,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install CUDA (Linux)
-        if: runner.os == 'Linux'
-        uses: Jimver/cuda-toolkit@v0.2.30
-        with:
-          cuda: '12.4.1'
-          method: 'network'
-          sub-packages: '["nvcc", "cudart-dev", "cupti-dev"]'
-
       - name: Install CUDA (Windows)
         if: runner.os == 'Windows'
         uses: Jimver/cuda-toolkit@v0.2.30
@@ -36,7 +28,10 @@ jobs:
         uses: pypa/cibuildwheel@v2.22.0
         env:
           CIBW_ENVIRONMENT_LINUX: "CUDA_HOME=/usr/local/cuda CMAKE_ARGS='-DGPUFL_ENABLE_NVIDIA=ON -DGPUFL_ENABLE_AMD=OFF'"
-          CIBW_BEFORE_ALL_LINUX: "yum install -y libcurl-devel"
+          CIBW_BEFORE_ALL_LINUX: >-
+            yum install -y yum-utils libcurl-devel &&
+            yum-config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo &&
+            yum install -y cuda-nvcc-12-4 cuda-cudart-devel-12-4 libcupti-devel-12-4
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux2014
           CIBW_BUILD: "cp312-* cp313-*"
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: "auditwheel repair --plat manylinux2014_x86_64 -w {dest_dir} {wheel}"
