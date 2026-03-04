@@ -1,0 +1,1 @@
+python -m pip install . -v -C cmake.define.BUILD_PYTHON=ON -C cmake.define.GPUFL_ENABLE_CUDA=ON -C cmake.define.GPUFL_ENABLE_NVML=ON

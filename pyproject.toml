@@ -1,0 +1,60 @@
+[build-system]
+requires = ["scikit-build-core", "pybind11", "cmake", "ninja"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "gpufl"
+version = "0.1.0.dev"
+description = "GPU Monitoring Client"
+readme = "README.md"
+authors = [
+    { name = "Myoungho Shin", email = "myounghoshin84@gmail.com" },
+]
+requires-python = ">=3.12"
+dependencies = []
+
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: C++",
+    "Topic :: System :: Monitoring",
+]
+
+[project.urls]
+Homepage = "https://github.com/gpufl/gpufl-client"
+Issues = "https://github.com/gpufl/gpufl-client/issues"
+
+[project.optional-dependencies]
+numba = ["numba", "numpy"]
+viz = [
+    "pandas>=1.5",
+    "matplotlib>=3.7"
+]
+analyzer = [
+    "pandas >= 1.5",
+    "rich"
+]
+
+[tool.scikit-build]
+cmake.args = ["-DCMAKE_BUILD_TYPE=Release", "--log-level=STATUS"]
+cmake.define = { BUILD_PYTHON = "ON", BUILD_GPUFL_EXAMPLE = "OFF" }
+cmake.build-type = "Release"
+cmake.verbose = true
+logging.level = "INFO"
+ninja.make-fallback = true
+wheel.packages = ["python/gpufl"]
+
+[tool.cibuildwheel]
+build-frontend = "build"
+skip = "pp* cp36* cp37* cp38* cp39* cp310* cp311*"
+build-verbosity = 1
+
+[tool.cibuildwheel.linux]
+before-all = "yum install -y libcurl-devel || apk add curl-dev || apt-get install -y libcurl4-openssl-dev"
+environment = { CMAKE_ARGS="-DGPUFL_ENABLE_NVIDIA=ON -DGPUFL_ENABLE_AMD=OFF -DBUILD_PYTHON=ON", CUDA_HOME="/usr/local/cuda" }
+
+[tool.cibuildwheel.windows]
+before-build = "pip install scikit-build-core pybind11 cmake ninja"
+environment = { CMAKE_ARGS="-DGPUFL_ENABLE_NVIDIA=ON -DGPUFL_ENABLE_AMD=OFF -DBUILD_PYTHON=ON" }

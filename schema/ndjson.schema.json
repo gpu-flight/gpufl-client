@@ -1,0 +1,133 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.org/gpufl/ndjson.schema.json",
+  "title": "GPUFL NDJSON Event Schema",
+  "description": "Schema for GPUFl newline-delimited JSON events. Validate each line independently against this schema.",
+  "type": "object",
+  "oneOf": [
+    { "$ref": "#/definitions/initEvent" },
+    { "$ref": "#/definitions/scopeBeginEvent" },
+    { "$ref": "#/definitions/scopeSampleEvent" },
+    { "$ref": "#/definitions/scopeEndEvent" },
+    { "$ref": "#/definitions/kernelEvent" },
+    { "$ref": "#/definitions/shutdownEvent" }
+  ],
+  "definitions": {
+    "pid": { "type": "integer", "minimum": 0 },
+    "app": { "type": "string", "minLength": 1 },
+    "name": { "type": "string", "minLength": 1 },
+    "tag": { "type": "string" },
+    "ts": { "type": "integer", "minimum": 0 },
+    "memorySnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "device": { "type": "integer", "minimum": 0 },
+        "used_mib": { "type": "integer", "minimum": 0 },
+        "free_mib": { "type": "integer", "minimum": 0 },
+        "total_mib": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["device", "used_mib", "free_mib", "total_mib"]
+    },
+    "memoryArray": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/memorySnapshot" }
+    },
+    "int3": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": { "type": "integer", "minimum": 0 }
+    },
+    "initEvent": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "type": { "const": "init" },
+        "pid": { "$ref": "#/definitions/pid" },
+        "app": { "$ref": "#/definitions/app" },
+        "logPath": { "type": "string" },
+        "ts_ns": { "$ref": "#/definitions/ts" }
+      },
+      "required": ["type", "pid", "app", "ts_ns"]
+    },
+    "scopeBeginEvent": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "type": { "const": "scope_begin" },
+        "pid": { "$ref": "#/definitions/pid" },
+        "app": { "$ref": "#/definitions/app" },
+        "name": { "$ref": "#/definitions/name" },
+        "tag": { "$ref": "#/definitions/tag" },
+        "ts_ns": { "$ref": "#/definitions/ts" },
+        "memory": { "$ref": "#/definitions/memoryArray" }
+      },
+      "required": ["type", "pid", "app", "name", "ts_ns"]
+    },
+    "scopeSampleEvent": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "type": { "const": "scope_sample" },
+        "pid": { "$ref": "#/definitions/pid" },
+        "app": { "$ref": "#/definitions/app" },
+        "name": { "$ref": "#/definitions/name" },
+        "tag": { "$ref": "#/definitions/tag" },
+        "ts_ns": { "$ref": "#/definitions/ts" },
+        "memory": { "$ref": "#/definitions/memoryArray" }
+      },
+      "required": ["type", "pid", "app", "name", "ts_ns"]
+    },
+    "scopeEndEvent": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "type": { "const": "scope_end" },
+        "pid": { "$ref": "#/definitions/pid" },
+        "app": { "$ref": "#/definitions/app" },
+        "name": { "$ref": "#/definitions/name" },
+        "tag": { "$ref": "#/definitions/tag" },
+        "ts_start_ns": { "$ref": "#/definitions/ts" },
+        "ts_end_ns": { "$ref": "#/definitions/ts" },
+        "duration_ns": { "$ref": "#/definitions/ts" },
+        "memory": { "$ref": "#/definitions/memoryArray" }
+      },
+      "required": ["type", "pid", "app", "name", "ts_start_ns", "ts_end_ns", "duration_ns"]
+    },
+    "kernelEvent": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "type": { "const": "kernel" },
+        "pid": { "$ref": "#/definitions/pid" },
+        "app": { "$ref": "#/definitions/app" },
+        "kernel": { "type": "string", "minLength": 1 },
+        "ts_start_ns": { "$ref": "#/definitions/ts" },
+        "ts_end_ns": { "$ref": "#/definitions/ts" },
+        "duration_ns": { "$ref": "#/definitions/ts" },
+        "grid": { "$ref": "#/definitions/int3" },
+        "block": { "$ref": "#/definitions/int3" },
+        "shared_mem_bytes": { "type": "integer", "minimum": 0 },
+        "cuda_error": { "type": "string" },
+        "tag": { "$ref": "#/definitions/tag" }
+      },
+      "required": [
+        "type", "pid", "app", "kernel",
+        "ts_start_ns", "ts_end_ns", "duration_ns",
+        "grid", "block", "shared_mem_bytes", "cuda_error"
+      ]
+    },
+    "shutdownEvent": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "type": { "const": "shutdown" },
+        "pid": { "$ref": "#/definitions/pid" },
+        "app": { "$ref": "#/definitions/app" },
+        "ts_ns": { "$ref": "#/definitions/ts" }
+      },
+      "required": ["type", "pid", "app", "ts_ns"]
+    }
+  }
+}

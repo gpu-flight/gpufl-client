@@ -1,0 +1,7 @@
+--extra-index-url https://download.pytorch.org/whl/cu131
+
+numba>=0.63.1
+numpy>=1.21.0
+torch
+torchvision
+torchaudio

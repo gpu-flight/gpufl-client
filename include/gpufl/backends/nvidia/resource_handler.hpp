@@ -1,0 +1,25 @@
+#pragma once
+
+#include "gpufl/backends/nvidia/cupti_backend.hpp"
+#include "gpufl/backends/nvidia/cupti_common.hpp"
+
+namespace gpufl {
+
+class ResourceHandler : public ICuptiHandler {
+   public:
+    explicit ResourceHandler(CuptiBackend* backend);
+
+    const char* getName() const override { return "ResourceHandler"; }
+    bool shouldHandle(CUpti_CallbackDomain domain,
+                      CUpti_CallbackId cbid) const override;
+    void handle(CUpti_CallbackDomain domain, CUpti_CallbackId cbid,
+                const void* cbdata) override;
+    std::vector<CUpti_CallbackDomain> requiredDomains() const override;
+    std::vector<std::pair<CUpti_CallbackDomain, CUpti_CallbackId>>
+    requiredCallbacks() const override;
+
+   private:
+    CuptiBackend* backend_;
+};
+
+}  // namespace gpufl
