@@ -54,7 +54,7 @@ build-verbosity = 1
 [tool.cibuildwheel.linux]
 before-all = """
 curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo > /etc/yum.repos.d/cuda.repo &&
-dnf install -y --nogpgcheck cuda-nvcc-12-4 cuda-cudart-devel-12-4 libcupti-devel-12-4
+dnf install -y --nogpgcheck cuda-nvcc-12-4 cuda-cudart-devel-12-4 cuda-cupti-12-4
 """
 environment = { CMAKE_ARGS="-DGPUFL_ENABLE_NVIDIA=ON -DGPUFL_ENABLE_AMD=OFF -DBUILD_PYTHON=ON", CUDA_HOME="/usr/local/cuda" }
 
