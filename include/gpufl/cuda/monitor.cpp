@@ -377,4 +377,16 @@ void Monitor::EndProfilerScope(const char* name) {
         g_backend->OnScopeStop(name);
     }
 }
+
+void Monitor::BeginPerfScope(const char* name) {
+    if (auto* b = g_backend.get()) b->OnPerfScopeStart(name);
+}
+
+void Monitor::EndPerfScope(const char* name) {
+    if (auto* b = g_backend.get()) b->OnPerfScopeStop(name);
+}
+
+IMonitorBackend* Monitor::GetBackend() {
+    return g_backend.get();
+}
 }  // namespace gpufl

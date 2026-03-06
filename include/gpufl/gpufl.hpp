@@ -22,6 +22,7 @@ struct InitOptions {
     bool enable_debug_output = false;
     bool enable_profiling = true;
     bool enable_stack_trace = true;
+    bool enable_perf_scope = false;
 };
 
 struct BackendProbeResult {
@@ -46,7 +47,10 @@ void shutdown();
 
 class ScopedMonitor {
    public:
-    explicit ScopedMonitor(std::string name, std::string tag = "");
+    explicit ScopedMonitor(std::string name, std::string tag, bool deep_profiling);
+    explicit ScopedMonitor(std::string name, std::string tag);
+    explicit ScopedMonitor(std::string name, bool deep_profiling);
+    explicit ScopedMonitor(std::string name);
     ~ScopedMonitor();
 
     ScopedMonitor(const ScopedMonitor&) = delete;
@@ -56,8 +60,8 @@ class ScopedMonitor {
     std::string name_;
     std::string tag_;
     int pid_{0};
-    int64_t start_ts_{0};
-    uint64_t scope_id_;
+    int64_t start_ns_{0};
+    uint64_t scope_id_{};
 };
 
 inline void monitor(const std::string& name, const std::function<void()>& fn) {
@@ -73,8 +77,8 @@ inline void monitor(const std::string& name, const std::string& tag,
 
 #define GFL_SCOPE(name) if (gpufl::ScopedMonitor _gpufl_scope{name}; true)
 
-#define GFL_SCOPE_TAGGED(name, tag) \
-    if (gpufl::ScopedMonitor + _gpufl_scope{name, tag}; true)
+#define GFL_SCOPE_TAGGED(name, tag, deep_profiling) \
+    if (gpufl::ScopedMonitor _gpufl_scope{name, tag}; true)
 
 #define GFL_SYSTEM_START(name) ::gpufl::systemStart(name)
 #define GFL_SYSTEM_STOP(name) ::gpufl::systemStop(name)

@@ -66,6 +66,7 @@ except ImportError as e:
             self.enable_debug_output = False
             self.enable_profiling = True
             self.enable_stack_trace = True
+            self.enable_perf_scope = False
 
     class Scope:
         def __init__(self, *args): pass
