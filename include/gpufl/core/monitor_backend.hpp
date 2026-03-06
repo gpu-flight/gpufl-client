@@ -1,5 +1,8 @@
 #pragma once
 
+#include <optional>
+
+#include "gpufl/core/events.hpp"
 #include "gpufl/core/monitor.hpp"
 
 namespace gpufl {
@@ -41,6 +44,10 @@ class IMonitorBackend {
 
     virtual void OnScopeStart(const char* name) {}
     virtual void OnScopeStop(const char* name) {}
+
+    virtual void OnPerfScopeStart(const char* name) {}
+    virtual void OnPerfScopeStop(const char* name) {}
+    virtual std::optional<PerfMetricEvent> TakeLastPerfEvent() { return std::nullopt; }
 };
 
 }  // namespace gpufl

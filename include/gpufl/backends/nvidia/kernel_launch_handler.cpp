@@ -15,6 +15,18 @@ extern RingBuffer<ActivityRecord, 1024> g_monitorBuffer;
 }
 
 namespace gpufl {
+namespace {
+const char* CallbackSiteName(CUpti_ApiCallbackSite site) {
+    switch (site) {
+        case CUPTI_API_ENTER:
+            return "ENTER";
+        case CUPTI_API_EXIT:
+            return "EXIT";
+        default:
+            return "UNKNOWN";
+    }
+}
+}  // namespace
 
 KernelLaunchHandler::KernelLaunchHandler(CuptiBackend* backend)
     : backend_(backend) {}
@@ -49,6 +61,10 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
     if (!backend_->IsActive()) return;
 
     auto* cbInfo = static_cast<const CUpti_CallbackData*>(cbdata);
+    if (!cbInfo) {
+        GFL_LOG_ERROR("[KernelLaunchHandler] cbInfo is null");
+        return;
+    }
 
     if (cbInfo->callbackSite == CUPTI_API_ENTER) {
         LaunchMeta meta{};
@@ -94,6 +110,11 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
                  cbid == CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_v7000) ||
                 (domain == CUPTI_CB_DOMAIN_DRIVER_API &&
                  cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel)) {
+                GFL_LOG_DEBUG("[KernelLaunchHandler] details path domain=",
+                              static_cast<int>(domain), " cbid=",
+                              static_cast<int>(cbid), " corr=",
+                              cbInfo->correlationId, " params=",
+                              cbInfo->functionParams);
                 meta.has_details = true;
                 const auto* params =
                     (cudaLaunchKernel_v7000_params*)(cbInfo->functionParams);
@@ -125,12 +146,19 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
         if (it != backend_->meta_by_corr_.end()) {
             it->second.api_exit_ns = t;
         }
+
     }
 }
 
 bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
                                                int64_t baseCpuNs,
                                                uint64_t baseCuptiTs) {
+    if (!record) {
+        GFL_LOG_ERROR("[KernelLaunchHandler] null activity record");
+        return false;
+    }
+    GFL_LOG_DEBUG("[KernelLaunchHandler] activity begin kind=",
+                  static_cast<int>(record->kind));
     if (record->kind != CUPTI_ACTIVITY_KIND_KERNEL &&
         record->kind != CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL) {
         return false;
@@ -145,6 +173,9 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
         uint64_t lastTs =
             backend_->last_kernel_end_ts_.load(std::memory_order_relaxed);
         if (k->start < lastTs + intervalNs) {
+            GFL_LOG_DEBUG("[KernelLaunchHandler] activity throttled corr=",
+                          k->correlationId, " start=", k->start, " last=",
+                          lastTs, " intervalNs=", intervalNs);
             return true;  // within throttle window — consume but do not emit
         }
         backend_->last_kernel_end_ts_.store(k->start, std::memory_order_relaxed);
@@ -173,6 +204,9 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
     {
         const uint64_t corr = k->correlationId;
         out.corr_id = corr;
+        GFL_LOG_DEBUG("[KernelLaunchHandler] activity kernel corr=", corr,
+                      " device=", k->deviceId, " stream=", k->streamId,
+                      " start=", k->start, " end=", k->end);
         std::lock_guard lk(backend_->meta_mu_);
         if (auto it = backend_->meta_by_corr_.find(corr);
             it != backend_->meta_by_corr_.end()) {
@@ -276,6 +310,9 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
     }
 
     g_monitorBuffer.Push(out);
+    GFL_LOG_DEBUG("[KernelLaunchHandler] activity pushed corr=", out.corr_id,
+                  " duration_ns=", out.duration_ns, " has_details=",
+                  out.has_details);
     return true;
 }
 

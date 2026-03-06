@@ -42,6 +42,7 @@ class Logger {
     void logScopeEnd(const ScopeEndEvent& e) const;
 
     void logProfileSample(const ProfileSampleEvent& e) const;
+    void logPerfMetricEvent(const PerfMetricEvent& e) const;
 
     // System channel
     void logSystemStart(const SystemStartEvent& e) const;

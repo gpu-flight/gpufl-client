@@ -5,7 +5,13 @@
 #include <cupti_sass_metrics.h>
 #include <cupti_target.h>
 
+#if GPUFL_HAS_PERFWORKS
+#include <cupti_range_profiler.h>
+#include <nvperf_host.h>          // NVPW_CounterDataBuilder_* (counter data prefix)
+#endif
+
 #include <cstring>
+#include <exception>
 #include <set>
 
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
@@ -32,7 +38,6 @@
 namespace gpufl {
 std::atomic<gpufl::CuptiBackend*> g_activeBackend{nullptr};
 
-// External ring buffer (defined in monitor.cpp)
 extern RingBuffer<ActivityRecord, 1024> g_monitorBuffer;
 
 void CuptiBackend::initialize(const MonitorOptions& opts) {
@@ -78,11 +83,8 @@ void CuptiBackend::initialize(const MonitorOptions& opts) {
     CUptiResult resCb =
         cuptiActivityRegisterCallbacks(BufferRequested, BufferCompleted);
     if (resCb != CUPTI_SUCCESS) {
-        const char* errStr = nullptr;
-        cuptiGetResultString(resCb, &errStr);
         GFL_LOG_ERROR("FATAL: Failed to register activity callbacks.");
-        GFL_LOG_ERROR("Error: ", (errStr ? errStr : "unknown"), " (Code ",
-                      resCb, ")");
+        LogCuptiErrorIfFailed("CUPTI", "cuptiActivityRegisterCallbacks", resCb);
 
         initialized_ = false;
         return;
@@ -94,6 +96,31 @@ void CuptiBackend::initialize(const MonitorOptions& opts) {
 
 void CuptiBackend::shutdown() {
     if (!initialized_) return;
+
+#if GPUFL_HAS_PERFWORKS
+    if (range_profiler_object_) {
+        CUpti_RangeProfiler_Disable_Params p = {
+            CUpti_RangeProfiler_Disable_Params_STRUCT_SIZE};
+        p.pRangeProfilerObject = range_profiler_object_;
+        LogCuptiErrorIfFailed("RangeProfiler", "cuptiRangeProfilerDisable",
+                              cuptiRangeProfilerDisable(&p));
+        range_profiler_object_ = nullptr;
+    }
+    if (perf_host_object_) {
+        CUpti_Profiler_Host_Deinitialize_Params hdp = {
+            CUpti_Profiler_Host_Deinitialize_Params_STRUCT_SIZE};
+        hdp.pHostObject = perf_host_object_;
+        cuptiProfilerHostDeinitialize(&hdp);
+        perf_host_object_ = nullptr;
+    }
+    if (perf_session_active_) {
+        CUpti_Profiler_DeInitialize_Params dp = {
+            CUpti_Profiler_DeInitialize_Params_STRUCT_SIZE};
+        LogCuptiErrorIfFailed("Perfworks", "cuptiProfilerDeInitialize",
+                              cuptiProfilerDeInitialize(&dp));
+        perf_session_active_ = false;
+    }
+#endif
 
     cuptiActivityFlushAll(1);
 
@@ -131,16 +158,7 @@ void CuptiBackend::start() {
     CUPTI_CHECK(cuptiActivityEnable(CUPTI_ACTIVITY_KIND_SOURCE_LOCATOR));
 
     if (IsProfilingMode()) {
-        // Ensure context is initialized
-        if (!this->ctx_) {
-            cuCtxGetCurrent(&this->ctx_);
-            if (!this->ctx_) {
-                cudaFree(nullptr);  // Force init
-                cuCtxGetCurrent(&this->ctx_);
-            }
-        }
-
-        if (this->ctx_) {
+        if (EnsureCudaContext(&this->ctx_)) {
             EnableSassMetrics();
         }
     }
@@ -156,17 +174,13 @@ void CuptiBackend::start() {
     }
 
     if (IsProfilingMode()) {
-        // STRATEGY 1: Try Activity API first (works on older GPUs)
-        CUptiResult pcRes =
-            cuptiActivityEnable(CUPTI_ACTIVITY_KIND_PC_SAMPLING);
+        CUptiResult pcRes = cuptiActivityEnable(CUPTI_ACTIVITY_KIND_PC_SAMPLING);
         if (pcRes == CUPTI_SUCCESS) {
             pc_sampling_method_ = PCSamplingMethod::ActivityAPI;
             GFL_LOG_DEBUG(
                 "[PC Sampling] Using Activity API "
                 "(CUPTI_ACTIVITY_KIND_PC_SAMPLING)");
         } else if (pcRes == CUPTI_ERROR_LEGACY_PROFILER_NOT_SUPPORTED) {
-            // STRATEGY 2: Fallback to PC Sampling API (works on newer GPUs like
-            // RTX 40xx/50xx)
             GFL_LOG_DEBUG(
                 "[PC Sampling] Activity API not supported, trying PC Sampling "
                 "API...");
@@ -178,12 +192,16 @@ void CuptiBackend::start() {
                 "[PC Sampling] Enabled SOURCE_LOCATOR activity kind for "
                 "Sampling API.");
         } else {
-            const char* err;
-            cuptiGetResultString(pcRes, &err);
-            GFL_LOG_ERROR("[PC Sampling] Failed to enable: ", err);
+            LogCuptiErrorIfFailed("PC Sampling", "cuptiActivityEnable(PC_SAMPLING)", pcRes);
             pc_sampling_method_ = PCSamplingMethod::None;
         }
     }
+
+#if GPUFL_HAS_PERFWORKS
+    if (opts_.enable_perf_scope && !perf_session_active_) {
+        InitPerfworksSession();
+    }
+#endif
 
     active_.store(true);
     GFL_LOG_DEBUG("Backend started. Mode bitmask: ", static_cast<int>(mode_));
@@ -215,14 +233,13 @@ void CuptiBackend::stop() {
     }
 }
 
-void CuptiBackend::RegisterHandler(std::shared_ptr<ICuptiHandler> handler) {
+void CuptiBackend::RegisterHandler(const std::shared_ptr<ICuptiHandler>& handler) {
     if (!handler) return;
     std::lock_guard<std::mutex> lk(handler_mu_);
     handlers_.push_back(handler);
 }
 
 void CuptiBackend::StartPcSampling() {
-    // Only use PC Sampling API if Activity API failed
     if (pc_sampling_method_ != PCSamplingMethod::SamplingAPI) {
         return;
     }
@@ -240,31 +257,26 @@ void CuptiBackend::StartPcSampling() {
         return;
     }
 
-    GFL_LOG_DEBUG("[PC Sampling] Starting with ctx=", (void*)this->ctx_);
+    GFL_LOG_DEBUG("[PC Sampling] Starting with ctx=", static_cast<void*>(this->ctx_));
 
     CUpti_PCSamplingStartParams startParams = {};
     startParams.size = sizeof(CUpti_PCSamplingStartParams);
     startParams.ctx = this->ctx_;
     CUptiResult res = cuptiPCSamplingStart(&startParams);
     if (res == CUPTI_ERROR_INVALID_OPERATION) {
-        // This is fine! It means Enable() implicitly started the sampler.
         GFL_LOG_DEBUG("[GPUFL] PC Sampling already active (Implicit Start).");
     } else if (res == CUPTI_ERROR_NOT_SUPPORTED ||
                res == CUPTI_ERROR_LEGACY_PROFILER_NOT_SUPPORTED) {
         GFL_LOG_DEBUG(
             "[GPUFL] PC Sampling not supported on this GPU/configuration.");
     } else if (res != CUPTI_SUCCESS) {
-        const char* err;
-        cuptiGetResultString(res, &err);
-        GFL_LOG_ERROR("[PC Sampling] cuptiPCSamplingStart failed: ", err,
-                      " (Code: ", res, ")");
+        LogCuptiErrorIfFailed("PC Sampling", "cuptiPCSamplingStart", res);
     } else {
         GFL_LOG_DEBUG("[PC Sampling] >>> STARTED (Scope Begin) <<<");
     }
 }
 
 void CuptiBackend::StopAndCollectPcSampling() const {
-    // Only use PC Sampling API if Activity API failed
     if (pc_sampling_method_ != PCSamplingMethod::SamplingAPI) {
         return;
     }
@@ -305,17 +317,13 @@ void CuptiBackend::StopAndCollectPcSampling() const {
     getDataParams.ctx = this->ctx_;
     getDataParams.pcSamplingData = pc_sampling_buffers_->data;
 
-    // Drain loop: CUPTI_ERROR_OUT_OF_MEMORY signals "more data remains",
-    // not a fatal error. Keep calling GetData until all samples are consumed.
     while (true) {
         pc_sampling_buffers_->data->totalNumPcs = 0;
         CUptiResult getRes = cuptiPCSamplingGetData(&getDataParams);
         const bool hasMore = (getRes == CUPTI_ERROR_OUT_OF_MEMORY);
 
         if (getRes != CUPTI_SUCCESS && !hasMore) {
-            const char* err;
-            cuptiGetResultString(getRes, &err);
-            GFL_LOG_ERROR("[PC Sampling] cuptiPCSamplingGetData FAILED: ", err);
+            LogCuptiErrorIfFailed("PC Sampling", "cuptiPCSamplingGetData", getRes);
             break;
         }
 
@@ -334,8 +342,7 @@ void CuptiBackend::StopAndCollectPcSampling() const {
                         if (CUptiResult res =
                                 cuptiGetDeviceId(this->ctx_, &out.device_id);
                             res != CUPTI_SUCCESS) {
-                            GFL_LOG_ERROR("[GPUFL] cuptiGetDeviceId FAILED: ",
-                                          res);
+                            LogCuptiErrorIfFailed("CUPTI", "cuptiGetDeviceId", res);
                         }
                         out.corr_id = pc.correlationId;
                         out.samples_count = pc.stallReason[j].samples;
@@ -369,9 +376,6 @@ void CuptiBackend::StopAndCollectPcSampling() const {
                                                   sizeof(out.source_file), "%s",
                                                   sourceCorr.fileName.c_str());
                                     out.source_line = sourceCorr.lineNumber;
-                                    std ::cout << "sourceFile is "
-                                               << sourceCorr.fileName
-                                               << std ::endl;
                                 }
                             }
                         }
@@ -478,9 +482,9 @@ void CuptiBackend::StopAndCollectSassMetrics() const {
 
                     g_monitorBuffer.Push(out);
                 } else {
-                    const char* errStr;
-                    cuptiGetResultString(res, &errStr);
-                    GFL_LOG_ERROR("Correlation failed with error: ", errStr);
+                    LogCuptiErrorIfFailed("SASS Metrics",
+                                          "cuptiGetSassToSourceCorrelation",
+                                          res);
                 }
             }
         }
@@ -534,44 +538,20 @@ void CuptiBackend::EnableProfilingFeatures() {
     GFL_LOG_DEBUG("Configuring PC Sampling...");
 
     // SamplingAPI Path
-    if (!this->ctx_) {
-        cuCtxGetCurrent(&this->ctx_);
-        if (!this->ctx_) {
-            cudaFree(nullptr);  // Force init
-            cuCtxGetCurrent(&this->ctx_);
-        }
-        if (!this->ctx_) {
-            CUdevice dev;
-            cuDeviceGet(&dev, 0);
-            cuDevicePrimaryCtxRetain(&this->ctx_, dev);
-            cuCtxPushCurrent(this->ctx_);
-        }
-    }
-
-    if (!this->ctx_) {
+    if (!EnsureCudaContext(&this->ctx_)) {
         GFL_LOG_ERROR("[FATAL] No Context for Profiling.");
         return;
     }
 
-    CUdevice dev;
-    cuCtxGetDevice(&dev);
-    char nameBuf[256];
-    if (cuDeviceGetName(nameBuf, sizeof(nameBuf), dev) == CUDA_SUCCESS) {
-        this->cached_device_name_ = std::string(nameBuf);
-    }
+    this->cached_device_name_ = GetCurrentDeviceName();
 
     CUpti_PCSamplingEnableParams enableParams = {};
     enableParams.size = sizeof(CUpti_PCSamplingEnableParams);
     enableParams.ctx = this->ctx_;
     CUptiResult enableRes = cuptiPCSamplingEnable(&enableParams);
 
-    if (enableRes ==
-        7) {  // CUPTI_ERROR_INVALID_OPERATION or CUPTI_ERROR_ALREADY_ENABLED
-        GFL_LOG_DEBUG("[PC Sampling] cuptiPCSamplingEnable: Already enabled.");
-    } else if (enableRes != CUPTI_SUCCESS) {
-        const char* err;
-        cuptiGetResultString(enableRes, &err);
-        GFL_LOG_ERROR("[PC Sampling] cuptiPCSamplingEnable FAILED: ", err);
+    if (LogCuptiErrorIfFailed("PC Sampling", "cuptiPCSamplingEnable",
+                              enableRes)) {
         return;
     }
 
@@ -690,18 +670,13 @@ void CuptiBackend::EnableProfilingFeatures() {
 
     CUptiResult configRes =
         cuptiPCSamplingSetConfigurationAttribute(&configParams);
-    if (configRes != CUPTI_SUCCESS) {
-        const char* err;
-        cuptiGetResultString(configRes, &err);
-        GFL_LOG_ERROR("[PC Sampling] SetConfigurationAttribute Failed: ", err);
-    } else {
+    if (!LogCuptiErrorIfFailed("PC Sampling",
+                               "cuptiPCSamplingSetConfigurationAttribute",
+                               configRes)) {
         GFL_LOG_DEBUG("[PC Sampling] configured and enabled successfully.");
     }
-
-    // Fetch Stall Reasons after enable
 }
 
-// Static callback implementations
 void CUPTIAPI CuptiBackend::BufferRequested(uint8_t** buffer, size_t* size,
                                             size_t* maxNumRecords) {
     *size = 64 * 1024;
@@ -745,8 +720,6 @@ void CUPTIAPI CuptiBackend::BufferCompleted(CUcontext context,
                         break;
                     }
                 }
-                // PC_SAMPLING (Activity API path) — profiling-specific, not
-                // handler-owned
                 if (!handled &&
                     record->kind == CUPTI_ACTIVITY_KIND_PC_SAMPLING) {
                     auto* pc =
@@ -774,6 +747,403 @@ void CUPTIAPI CuptiBackend::BufferCompleted(CUcontext context,
     free(buffer);
 }
 
+#if GPUFL_HAS_PERFWORKS
+namespace {
+  std::vector<const char*> kPerfMetricNames = {
+    "sm__throughput.avg.pct_of_peak_sustained_elapsed",
+    // "l1tex__t_sectors_pipe_lsu_mem_global_op_ld_hit_rate.pct",
+    // "lts__t_sectors_op_read_hit_rate.pct",
+    "dram__bytes_read.sum",
+    "dram__bytes_write.sum",
+    "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active",
+};
+}  // namespace
+
+bool CuptiBackend::InitPerfworksSession() {
+    if (!EnsureCudaContext(&ctx_)) {
+        GFL_LOG_ERROR("[Perfworks] No CUDA context available");
+        return false;
+    }
+
+    // Device-side init must come first — required before host init and
+    // cuptiDeviceGetCounterAvailability on Ampere/Hopper.
+    {
+        CUpti_Profiler_Initialize_Params p = {CUpti_Profiler_Initialize_Params_STRUCT_SIZE};
+        if (LogCuptiErrorIfFailed("Perfworks", "cuptiProfilerInitialize",
+                                  cuptiProfilerInitialize(&p))) {
+            return false;
+        }
+    }
+    if (LogCuptiErrorIfFailed("Perfworks", "cuptiGetDeviceId",
+                              cuptiGetDeviceId(ctx_, &device_id_))) {
+        return false;
+    }
+    chip_name_ = getChipName(device_id_);
+
+    std::vector<uint8_t> counterAvailImage;
+    {
+        CUpti_Profiler_GetCounterAvailability_Params p = {
+            CUpti_Profiler_GetCounterAvailability_Params_STRUCT_SIZE};
+        p.pPriv = nullptr;
+        p.ctx = ctx_;
+        p.pCounterAvailabilityImage = nullptr;
+
+        if (LogCuptiErrorIfFailed(
+                "Perfworks", "cuptiProfilerGetCounterAvailability(first)",
+                cuptiProfilerGetCounterAvailability(&p))) {
+            return false;
+        }
+        counterAvailImage.resize(p.counterAvailabilityImageSize);
+        p.pCounterAvailabilityImage = counterAvailImage.data();
+        if (LogCuptiErrorIfFailed("Perfworks",
+                                  "cuptiProfilerGetCounterAvailability",
+                                  cuptiProfilerGetCounterAvailability(&p))) {
+            return false;
+        }
+    }
+
+    {
+        GFL_LOG_DEBUG("chip_name_ = ", chip_name_);
+        CUpti_Profiler_Host_Initialize_Params hi = {
+            CUpti_Profiler_Host_Initialize_Params_STRUCT_SIZE};
+        hi.profilerType = CUPTI_PROFILER_TYPE_RANGE_PROFILER;
+        hi.pChipName = chip_name_.c_str();
+        hi.pCounterAvailabilityImage = counterAvailImage.data();
+        if (LogCuptiErrorIfFailed("Perfworks", "cuptiProfilerHostInitialize",
+                                  cuptiProfilerHostInitialize(&hi))) {
+            return false;
+        }
+        perf_host_object_ = hi.pHostObject;
+    }
+    {
+        CUpti_Profiler_Host_ConfigAddMetrics_Params am = {
+            CUpti_Profiler_Host_ConfigAddMetrics_Params_STRUCT_SIZE};
+        am.pHostObject = perf_host_object_;
+        am.ppMetricNames = kPerfMetricNames.data();
+        am.numMetrics = kPerfMetricNames.size();
+        if (LogCuptiErrorIfFailed("Perfworks",
+                                  "cuptiProfilerHostConfigAddMetrics",
+                                  cuptiProfilerHostConfigAddMetrics(&am))) {
+            return false;
+        }
+    }
+    {
+        CUpti_Profiler_Host_GetConfigImageSize_Params gs = {
+            CUpti_Profiler_Host_GetConfigImageSize_Params_STRUCT_SIZE};
+        gs.pHostObject = perf_host_object_;
+        if (LogCuptiErrorIfFailed("Perfworks",
+                                  "cuptiProfilerHostGetConfigImageSize",
+                                  cuptiProfilerHostGetConfigImageSize(&gs))) {
+            return false;
+        }
+        perf_config_image_.resize(gs.configImageSize);
+    }
+    {
+        CUpti_Profiler_Host_GetConfigImage_Params gc = {
+            CUpti_Profiler_Host_GetConfigImage_Params_STRUCT_SIZE};
+        gc.pHostObject = perf_host_object_;
+        gc.configImageSize = perf_config_image_.size();
+        gc.pConfigImage = perf_config_image_.data();
+        if (LogCuptiErrorIfFailed("Perfworks",
+                                  "cuptiProfilerHostGetConfigImage",
+                                  cuptiProfilerHostGetConfigImage(&gc))) {
+            return false;
+        }
+    }
+    std::vector<uint8_t> counterDataPrefix;
+    {
+        NVPW_InitializeHost_Params ihp = {NVPW_InitializeHost_Params_STRUCT_SIZE};
+        if (NVPW_InitializeHost(&ihp) != NVPA_STATUS_SUCCESS) {
+            GFL_LOG_ERROR("[Perfworks] NVPW_InitializeHost failed");
+            return false;
+        }
+
+        NVPW_CounterDataBuilder_Create_Params cbcp = {
+            NVPW_CounterDataBuilder_Create_Params_STRUCT_SIZE};
+        cbcp.pChipName = chip_name_.c_str();
+        if (NVPW_CounterDataBuilder_Create(&cbcp) != NVPA_STATUS_SUCCESS) {
+            GFL_LOG_ERROR("[Perfworks] NVPW_CounterDataBuilder_Create failed");
+            return false;
+        }
+        NVPA_CounterDataBuilder* builder = cbcp.pCounterDataBuilder;
+
+        {
+            std::vector<NVPA_RawMetricRequest> reqs(kPerfMetricNames.size());
+            for (int i = 0; i < kPerfMetricNames.size(); ++i) {
+                reqs[i].structSize = NVPA_RAW_METRIC_REQUEST_STRUCT_SIZE;
+                reqs[i].pMetricName = kPerfMetricNames[i];
+                reqs[i].isolated = 1;
+                reqs[i].keepInstances = 1;
+            }
+            NVPW_CounterDataBuilder_AddMetrics_Params amp = {
+                NVPW_CounterDataBuilder_AddMetrics_Params_STRUCT_SIZE};
+            amp.pCounterDataBuilder = builder;
+            amp.pRawMetricRequests = reqs.data();
+            amp.numMetricRequests = kPerfMetricNames.size();
+            NVPW_CounterDataBuilder_AddMetrics(&amp);
+        }
+        {
+            // Two-call pattern: query size then fill
+            NVPW_CounterDataBuilder_GetCounterDataPrefix_Params gcp = {
+                NVPW_CounterDataBuilder_GetCounterDataPrefix_Params_STRUCT_SIZE};
+            gcp.pCounterDataBuilder = builder;
+            gcp.bytesAllocated = 0;
+            gcp.pBuffer = nullptr;
+            NVPW_CounterDataBuilder_GetCounterDataPrefix(&gcp);
+            counterDataPrefix.resize(gcp.bytesCopied);
+            gcp.bytesAllocated = counterDataPrefix.size();
+            gcp.pBuffer = counterDataPrefix.data();
+            NVPW_CounterDataBuilder_GetCounterDataPrefix(&gcp);
+        }
+        {
+            NVPW_CounterDataBuilder_Destroy_Params dp = {
+                NVPW_CounterDataBuilder_Destroy_Params_STRUCT_SIZE};
+            dp.pCounterDataBuilder = builder;
+            NVPW_CounterDataBuilder_Destroy(&dp);
+        }
+    }
+
+    CUpti_Profiler_CounterDataImageOptions cdOpts = {
+        CUpti_Profiler_CounterDataImageOptions_STRUCT_SIZE};
+    cdOpts.pCounterDataPrefix = counterDataPrefix.data();
+    cdOpts.counterDataPrefixSize = counterDataPrefix.size();
+    cdOpts.maxNumRanges = 8;
+    cdOpts.maxNumRangeTreeNodes = 8;
+    cdOpts.maxRangeNameLength = 128;
+
+    {
+        CUpti_RangeProfiler_Enable_Params p = {
+            CUpti_RangeProfiler_Enable_Params_STRUCT_SIZE};
+        p.ctx = ctx_;
+        if (LogCuptiErrorIfFailed("RangeProfiler", "cuptiRangeProfilerEnable",
+                                  cuptiRangeProfilerEnable(&p))) {
+            return false;
+        }
+        range_profiler_object_ = p.pRangeProfilerObject;
+    }
+
+    {
+        CUpti_RangeProfiler_GetCounterDataSize_Params p = {
+            CUpti_RangeProfiler_GetCounterDataSize_Params_STRUCT_SIZE};
+        p.pRangeProfilerObject = range_profiler_object_;
+        p.pMetricNames = kPerfMetricNames.data();
+        p.numMetrics = kPerfMetricNames.size();
+        p.maxNumOfRanges = cdOpts.maxNumRanges;
+        p.maxNumRangeTreeNodes = cdOpts.maxNumRangeTreeNodes;
+        if (LogCuptiErrorIfFailed(
+                "RangeProfiler", "cuptiRangeProfilerGetCounterDataSize",
+                cuptiRangeProfilerGetCounterDataSize(&p))) {
+            return false;
+        }
+        perf_counter_data_image_.resize(p.counterDataSize);
+    }
+    {
+        CUpti_RangeProfiler_CounterDataImage_Initialize_Params p = {
+            CUpti_RangeProfiler_CounterDataImage_Initialize_Params_STRUCT_SIZE};
+        p.pRangeProfilerObject = range_profiler_object_;
+        p.counterDataSize = perf_counter_data_image_.size();
+        p.pCounterData = perf_counter_data_image_.data();
+        if (LogCuptiErrorIfFailed(
+                "RangeProfiler",
+                "cuptiRangeProfilerCounterDataImageInitialize",
+                cuptiRangeProfilerCounterDataImageInitialize(&p))) {
+            return false;
+        }
+    }
+    {
+        CUpti_RangeProfiler_SetConfig_Params p = {
+            CUpti_RangeProfiler_SetConfig_Params_STRUCT_SIZE};
+        p.pRangeProfilerObject = range_profiler_object_;
+        p.configSize = perf_config_image_.size();
+        p.pConfig = perf_config_image_.data();
+        p.counterDataImageSize = perf_counter_data_image_.size();
+        p.pCounterDataImage = perf_counter_data_image_.data();
+        p.range = CUPTI_UserRange;
+        p.replayMode = CUPTI_UserReplay;
+        p.maxRangesPerPass = 1;
+        p.numNestingLevels = 1;
+        p.minNestingLevel = 1;
+        p.passIndex = 0;
+        p.targetNestingLevel = 1;
+        if (LogCuptiErrorIfFailed("RangeProfiler", "cuptiRangeProfilerSetConfig",
+                                  cuptiRangeProfilerSetConfig(&p))) {
+            return false;
+        }
+    }
+
+    perf_session_active_ = true;
+    GFL_LOG_DEBUG("[RangeProfiler] Session initialized for chip: ", chip_name_);
+    return true;
+}
+
+void CuptiBackend::EndPerfPassAndDecode() {
+    // Use CUPTI Profiler Host API (replaces deprecated NVPW_MetricsContext_*)
+    if (!perf_host_object_ || !range_profiler_object_) {
+        GFL_LOG_DEBUG("[RangeProfiler] EndPerfPassAndDecode skipped: profiler object is null");
+        return;
+    }
+    {
+        CUpti_RangeProfiler_DecodeData_Params p = {
+            CUpti_RangeProfiler_DecodeData_Params_STRUCT_SIZE};
+        p.pRangeProfilerObject = range_profiler_object_;
+        if (LogCuptiErrorIfFailed("RangeProfiler", "cuptiRangeProfilerDecodeData",
+                                  cuptiRangeProfilerDecodeData(&p))) {
+            return;
+        }
+        if (p.numOfRangeDropped > 0) {
+            GFL_LOG_DEBUG("[RangeProfiler] Dropped ranges: ", p.numOfRangeDropped);
+        }
+    }
+    size_t numRanges = 0;
+    {
+        CUpti_RangeProfiler_GetCounterDataInfo_Params p = {
+            CUpti_RangeProfiler_GetCounterDataInfo_Params_STRUCT_SIZE};
+        p.pCounterDataImage = perf_counter_data_image_.data();
+        p.counterDataImageSize = perf_counter_data_image_.size();
+        if (LogCuptiErrorIfFailed(
+                "RangeProfiler", "cuptiRangeProfilerGetCounterDataInfo",
+                cuptiRangeProfilerGetCounterDataInfo(&p))) {
+            return;
+        }
+        numRanges = p.numTotalRanges;
+    }
+    if (numRanges == 0) {
+        GFL_LOG_DEBUG("[RangeProfiler] No ranges decoded for this scope");
+        return;
+    }
+
+    std::vector<const char*> metricNames = kPerfMetricNames;
+    std::vector<double> values(kPerfMetricNames.size(), -1.0);
+
+    CUpti_Profiler_Host_EvaluateToGpuValues_Params p = {
+        CUpti_Profiler_Host_EvaluateToGpuValues_Params_STRUCT_SIZE};
+    p.pHostObject = perf_host_object_;
+    p.pCounterDataImage = perf_counter_data_image_.data();
+    p.counterDataImageSize = perf_counter_data_image_.size();
+    p.rangeIndex = numRanges - 1;
+    p.ppMetricNames = metricNames.data();
+    p.numMetrics = metricNames.size();
+    p.pMetricValues = values.data();
+    GFL_LOG_DEBUG("[Perfworks] EvaluateToGpuValues rangeIndex=", p.rangeIndex,
+                  " numMetrics=", p.numMetrics);
+    if (LogCuptiErrorIfFailed("Perfworks",
+                              "cuptiProfilerHostEvaluateToGpuValues",
+                              cuptiProfilerHostEvaluateToGpuValues(&p))) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lk(perf_mu_);
+    perf_last_event_ = PerfMetricEvent{};
+    if (!values.empty() && std::isfinite(values[0])) perf_last_event_.sm_throughput_pct = values[0];
+    if (values.size() > 1) {
+        perf_last_event_.dram_read_bytes =
+            (values[1] >= 0.0) ? static_cast<uint64_t>(values[1]) : 0;
+    }
+    if (values.size() > 2) {
+        perf_last_event_.dram_write_bytes =
+            (values[2] >= 0.0) ? static_cast<uint64_t>(values[2]) : 0;
+    }
+    if (values.size() > 3 && std::isfinite(values[3])) {
+        perf_last_event_.tensor_active_pct = values[3];
+    }
+    perf_has_event_ = true;
+    GFL_LOG_DEBUG("[Perfworks] Decoded metrics and set perf_has_event_=true");
+}
+#endif  // GPUFL_HAS_PERFWORKS
+
+void CuptiBackend::OnPerfScopeStart(const char* name) {
+#if GPUFL_HAS_PERFWORKS
+    if (!opts_.enable_perf_scope) return;
+    GFL_LOG_DEBUG("[RangeProfiler] OnPerfScopeStart name=", (name ? name : "(null)"),
+                  " active=", perf_session_active_);
+    if (!perf_session_active_) {
+        if (!InitPerfworksSession()) {
+            return;
+        }
+    }
+    {
+        CUpti_RangeProfiler_CounterDataImage_Initialize_Params p = {
+            CUpti_RangeProfiler_CounterDataImage_Initialize_Params_STRUCT_SIZE};
+        p.pRangeProfilerObject = range_profiler_object_;
+        p.counterDataSize = perf_counter_data_image_.size();
+        p.pCounterData = perf_counter_data_image_.data();
+        if (LogCuptiErrorIfFailed(
+                "RangeProfiler",
+                "cuptiRangeProfilerCounterDataImageInitialize",
+                cuptiRangeProfilerCounterDataImageInitialize(&p))) {
+            return;
+        }
+    }
+    {
+        CUpti_RangeProfiler_Start_Params p = {
+            CUpti_RangeProfiler_Start_Params_STRUCT_SIZE};
+        p.pRangeProfilerObject = range_profiler_object_;
+        if (LogCuptiErrorIfFailed("RangeProfiler", "cuptiRangeProfilerStart",
+                                  cuptiRangeProfilerStart(&p))) {
+            return;
+        }
+    }
+    {
+        CUpti_RangeProfiler_PushRange_Params p = {
+            CUpti_RangeProfiler_PushRange_Params_STRUCT_SIZE};
+        p.pRangeProfilerObject = range_profiler_object_;
+        p.pRangeName = name;
+        LogCuptiErrorIfFailed("RangeProfiler", "cuptiRangeProfilerPushRange",
+                              cuptiRangeProfilerPushRange(&p));
+    }
+#endif
+}
+
+void CuptiBackend::OnPerfScopeStop(const char* name) {
+#if GPUFL_HAS_PERFWORKS
+    if (!opts_.enable_perf_scope) return;
+    GFL_LOG_DEBUG("[RangeProfiler] OnPerfScopeStop name=", (name ? name : "(null)"),
+                  " active=", perf_session_active_);
+    if (!perf_session_active_) {
+        GFL_LOG_DEBUG("[RangeProfiler] OnPerfScopeStop skipped: session inactive");
+        return;
+    }
+    {
+        CUpti_RangeProfiler_PopRange_Params p = {
+            CUpti_RangeProfiler_PopRange_Params_STRUCT_SIZE};
+        p.pRangeProfilerObject = range_profiler_object_;
+        LogCuptiErrorIfFailed("RangeProfiler", "cuptiRangeProfilerPopRange",
+                              cuptiRangeProfilerPopRange(&p));
+    }
+    {
+        CUpti_RangeProfiler_Stop_Params p = {
+            CUpti_RangeProfiler_Stop_Params_STRUCT_SIZE};
+        p.pRangeProfilerObject = range_profiler_object_;
+        if (LogCuptiErrorIfFailed("RangeProfiler", "cuptiRangeProfilerStop",
+                                  cuptiRangeProfilerStop(&p))) {
+            return;
+        }
+        if (!p.isAllPassSubmitted) {
+            GFL_LOG_DEBUG("[RangeProfiler] Additional replay passes required; "
+                          "metrics may be partial in this run");
+        }
+    }
+    EndPerfPassAndDecode();
+#endif
+}
+
+std::optional<PerfMetricEvent> CuptiBackend::TakeLastPerfEvent() {
+#if GPUFL_HAS_PERFWORKS
+    std::lock_guard<std::mutex> lk(perf_mu_);
+    if (!perf_has_event_) {
+        GFL_LOG_DEBUG("[Perfworks] TakeLastPerfEvent: no event available");
+        return std::nullopt;
+    }
+    perf_has_event_ = false;
+    GFL_LOG_DEBUG("[Perfworks] TakeLastPerfEvent: returning event");
+    return perf_last_event_;
+#else
+    return std::nullopt;
+#endif
+}
+
+// ---- Static callbacks ----
+
 void CuptiBackend::GflCallback(void* userdata, CUpti_CallbackDomain domain,
                                CUpti_CallbackId cbid, const void* cbdata) {
     if (!cbdata) return;
@@ -798,7 +1168,6 @@ void CuptiBackend::GflCallback(void* userdata, CUpti_CallbackDomain domain,
                 }
                 apiHandled = true;
             }
-            GFL_LOG_DEBUG("Calling handler: ", handler->getName());
             handler->handle(domain, cbid, cbdata);
         }
     }

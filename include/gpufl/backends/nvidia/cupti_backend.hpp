@@ -8,8 +8,15 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <string>
 #include <unordered_map>
 #include <vector>
+
+#if GPUFL_HAS_PERFWORKS
+#include <cupti_profiler_host.h>
+#include <cupti_range_profiler.h>
+#endif
 
 #include "gpufl/backends/nvidia/cupti_common.hpp"
 #include "gpufl/core/debug_logger.hpp"
@@ -69,7 +76,7 @@ class CuptiBackend : public IMonitorBackend {
 
     void stop() override;
 
-    void RegisterHandler(std::shared_ptr<ICuptiHandler> handler);
+    void RegisterHandler(const std::shared_ptr<ICuptiHandler>& handler);
 
     bool IsActive() const { return active_.load(); }
     const MonitorOptions& GetOptions() const { return opts_; }
@@ -77,6 +84,8 @@ class CuptiBackend : public IMonitorBackend {
 
     void OnScopeStart(const char* name) override {
         GFL_LOG_DEBUG("OnScopeStart");
+        // Keep deep metrics under perf-scope mode only.
+        if (opts_.enable_perf_scope) return;
         if (IsProfilingMode()) {
             StartPcSampling();
         }
@@ -84,11 +93,17 @@ class CuptiBackend : public IMonitorBackend {
 
     void OnScopeStop(const char* name) override {
         GFL_LOG_DEBUG("OnScopeStop");
+        // Keep deep metrics under perf-scope mode only.
+        if (opts_.enable_perf_scope) return;
         if (IsProfilingMode()) {
             StopAndCollectPcSampling();
             StopAndCollectSassMetrics();
         }
     }
+
+    void OnPerfScopeStart(const char* name) override;
+    void OnPerfScopeStop(const char* name) override;
+    std::optional<PerfMetricEvent> TakeLastPerfEvent() override;
 
    private:
     friend class ResourceHandler;
@@ -159,6 +174,24 @@ class CuptiBackend : public IMonitorBackend {
     std::mutex handler_mu_;
 
     std::atomic<uint64_t> last_kernel_end_ts_{0};
+    uint32_t device_id_ = 0;
+    std::string chip_name_;
+
+#if GPUFL_HAS_PERFWORKS
+    // Perfworks state
+    mutable std::mutex perf_mu_;
+    std::vector<uint8_t> perf_counter_data_image_;
+    std::vector<uint8_t> perf_config_image_;
+    std::vector<uint8_t> perf_scratch_buffer_;
+    bool perf_session_active_ = false;
+    CUpti_RangeProfiler_Object* range_profiler_object_ = nullptr;
+    PerfMetricEvent perf_last_event_;
+    bool perf_has_event_ = false;
+    CUpti_Profiler_Host_Object* perf_host_object_ = nullptr;
+
+    bool InitPerfworksSession();
+    void EndPerfPassAndDecode();
+#endif
 };
 
 }  // namespace gpufl
