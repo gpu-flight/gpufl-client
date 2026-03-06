@@ -61,6 +61,7 @@ set(GPUFL_HAS_CUDA 0)
 set(GPUFL_HAS_NVML 0)
 set(GPUFL_HAS_ROCM 0)
 set(GPUFL_HAS_CUPTI 0)
+set(GPUFL_HAS_PERFWORKS 0)
 
 # -----------------------
 # Backends
@@ -124,6 +125,31 @@ if(GPUFL_ENABLE_NVIDIA)
                     message(STATUS "Found CUPTI manually: ${CUPTI_LIBRARY}")
                 endif()
             endif()
+
+            # --------------------------------------------------------
+            # NVPERF Support (for GFL_PERF_SCOPE hardware counters)
+            # --------------------------------------------------------
+            find_library(NVPERF_HOST_LIBRARY NAMES nvperf_host nvperf_host_static
+                HINTS "${CUDAToolkit_ROOT}/extras/CUPTI/lib64"
+                      "${CUDAToolkit_ROOT}/targets/x86_64-linux/lib"
+                      "$ENV{CUDA_PATH}/extras/CUPTI/lib64"
+                      "$ENV{CUDA_PATH}/targets/x86_64-linux/lib"
+            )
+            find_library(NVPERF_TARGET_LIBRARY NAMES nvperf_target
+                HINTS "${CUDAToolkit_ROOT}/extras/CUPTI/lib64"
+                      "${CUDAToolkit_ROOT}/targets/x86_64-linux/lib"
+                      "$ENV{CUDA_PATH}/extras/CUPTI/lib64"
+                      "$ENV{CUDA_PATH}/targets/x86_64-linux/lib"
+            )
+            if(NVPERF_HOST_LIBRARY AND NVPERF_TARGET_LIBRARY)
+                set(GPUFL_HAS_PERFWORKS 1)
+                target_link_libraries(gpufl PRIVATE
+                    ${NVPERF_HOST_LIBRARY} ${NVPERF_TARGET_LIBRARY})
+                message(STATUS "Found NVPERF: ${NVPERF_HOST_LIBRARY}")
+            else()
+                set(GPUFL_HAS_PERFWORKS 0)
+                message(WARNING "NVPERF not found — GFL_PERF_SCOPE disabled at runtime")
+            endif()
         endif()
     endif()
     #
@@ -178,10 +204,11 @@ if(GPUFL_ENABLE_NVIDIA)
     endif()
 
     # Apply definitions to public interface so tests inherit them
-    target_compile_definitions(gpufl PUBLIC 
+    target_compile_definitions(gpufl PUBLIC
         GPUFL_HAS_CUDA=${GPUFL_HAS_CUDA}
         GPUFL_HAS_NVML=${GPUFL_HAS_NVML}
         GPUFL_HAS_CUPTI=${GPUFL_HAS_CUPTI}
+        GPUFL_HAS_PERFWORKS=${GPUFL_HAS_PERFWORKS}
     )
 
     #

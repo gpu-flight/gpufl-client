@@ -38,6 +38,6 @@ class DebugLogger {
 
 #define GFL_LOG_DEBUG(...) ::gpufl::DebugLogger::log("[GPUFL] ", __VA_ARGS__)
 #define GFL_LOG_ERROR(...) \
-    ::gpufl::DebugLogger::error("[GPUFL-ERROR] ", __VA_ARGS__)
+    ::gpufl::DebugLogger::error("[GPUFL-ERROR] " __FILE__ ":", __LINE__, ": ", __VA_ARGS__)
 
 }  // namespace gpufl

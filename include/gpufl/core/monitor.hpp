@@ -15,6 +15,7 @@ struct MonitorOptions {
     bool is_profiling = false;
     int kernel_sample_rate_ms = 0;
     uint32_t pc_sampling_period = 5000;  // GPU clock cycles between PC samples
+    bool enable_perf_scope = true;      // enable per-scope hardware counters
 };
 
 enum class MonitorMode : unsigned int {
@@ -92,6 +93,17 @@ class Monitor {
      */
     static void BeginProfilerScope(const char* name);
     static void EndProfilerScope(const char* name);
+
+    /**
+     * @brief Hardware counter (Perfworks) scope control
+     */
+    static void BeginPerfScope(const char* name);
+    static void EndPerfScope(const char* name);
+
+    /**
+     * @brief Returns the raw backend pointer (may be null).
+     */
+    static class IMonitorBackend* GetBackend();
 
    private:
     Monitor() = delete;

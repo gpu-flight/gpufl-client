@@ -101,15 +101,14 @@ struct KernelEvent {
     int max_active_blocks = 0;
     unsigned int corr_id = 0;
 
-    // Phase 1a: additional always-on CUPTI fields
-    uint32_t local_mem_total = 0;  // total local mem (bytes) across all threads —
-                                   // register spill indicator
+    uint32_t local_mem_total = 0;
+
     uint8_t cache_config_requested =
-        0;  // L1/shared split requested by the kernel
+        0;
     uint8_t cache_config_executed =
-        0;  // L1/shared split actually applied by hardware
+        0;
     uint32_t shared_mem_executed =
-        0;  // actual shared memory allocated by the driver at runtime
+        0;
 
     std::string user_scope;
     int scope_depth = 0;
@@ -173,7 +172,7 @@ struct ProfileSampleEvent {
     uint32_t device_id = 0;
     int32_t corr_id = 0;
     uint32_t samples_count = 0;
-    uint32_t stall_reason = 0;  // CUPTI enum
+    uint32_t stall_reason = 0;
     std::string reason_name;
 
     std::string source_file;
@@ -249,5 +248,26 @@ struct SystemStopEvent {
 
     HostSample host;
     std::vector<DeviceSample> devices;
+};
+
+struct PerfMetricEvent {
+    int pid = 0;
+    std::string app;
+    std::string session_id;
+    std::string name;      // scope name
+    int64_t start_ns = 0;
+    int64_t end_ns = 0;
+    int device_id = 0;
+
+    // Hardware counters (-1.0 = not available for this GPU/metric)
+    double sm_throughput_pct = -1.0;   // SM active % of peak
+    double l1_hit_rate_pct = -1.0;     // L1 global load hit rate
+    double l2_hit_rate_pct = -1.0;     // L2 read hit rate
+    uint64_t dram_read_bytes = 0;      // DRAM read bytes
+    uint64_t dram_write_bytes = 0;     // DRAM write bytes
+    double tensor_active_pct = -1.0;   // Tensor core active % (-1 if N/A)
+
+    std::string user_scope;
+    int scope_depth = 0;
 };
 }  // namespace gpufl

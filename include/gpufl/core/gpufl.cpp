@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "../backends/nvidia/cuda_collector.hpp"
+#include "gpufl/core/monitor_backend.hpp"
 #include "gpufl/backends/host_collector.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
@@ -143,6 +144,7 @@ bool init(const InitOptions& opts) {
             true;  // if profiling is on, then it should be true.
     }
     mOpts.enable_stack_trace = opts.enable_stack_trace;
+    mOpts.enable_perf_scope = opts.enable_perf_scope;
     Monitor::Initialize(mOpts);
 
     GFL_LOG_DEBUG("Starting Monitor...");
@@ -276,12 +278,20 @@ void shutdown() {
 }
 
 // ---- ScopedMonitor ----
+ ScopedMonitor::ScopedMonitor(std::string name)
+     : ScopedMonitor(std::move(name), "", false) {}
 
 ScopedMonitor::ScopedMonitor(std::string name, std::string tag)
+    : ScopedMonitor(std::move(name), std::move(tag), false) {}
+
+ScopedMonitor::ScopedMonitor(std::string name, bool deep_profiling)
+    : ScopedMonitor(std::move(name), "", deep_profiling) {}
+
+ScopedMonitor::ScopedMonitor(std::string name, std::string tag, bool deep_profiling)
     : name_(std::move(name)),
       tag_(std::move(tag)),
       pid_(detail::GetPid()),
-      start_ts_(detail::GetTimestampNs()),
+      start_ns_(detail::GetTimestampNs()),
       scope_id_(nextScopeId_()) {
     Runtime* rt = runtime();
     if (!rt || !rt->logger) return;
@@ -291,7 +301,7 @@ ScopedMonitor::ScopedMonitor(std::string name, std::string tag)
     e.session_id = rt->session_id;
     e.name = name_;
     e.tag = tag_;
-    e.ts_ns = start_ts_;
+    e.ts_ns = start_ns_;
     e.scope_id = scope_id_;
 
     auto& stack = getThreadScopeStack();
@@ -317,8 +327,13 @@ ScopedMonitor::ScopedMonitor(std::string name, std::string tag)
     }
     rt->logger->logScopeBegin(e);
 
-    // profiling
-    Monitor::BeginProfilerScope(name_.c_str());
+    // Scoped profiling is controlled by runtime options; deep_profiling is
+    // kept only for source compatibility.
+    (void)deep_profiling;
+    if (g_opts.enable_profiling) {
+        Monitor::BeginProfilerScope(name_.c_str());
+        Monitor::BeginPerfScope(name_.c_str());
+    }
 }
 
 ScopedMonitor::~ScopedMonitor() {
@@ -360,6 +375,23 @@ ScopedMonitor::~ScopedMonitor() {
 
     rt->logger->logScopeEnd(e);
 
-    Monitor::EndProfilerScope(name_.c_str());
+    if (g_opts.enable_profiling) {
+        Monitor::EndProfilerScope(name_.c_str());
+        Monitor::EndPerfScope(name_.c_str());// triggers EndPerfPassAndDecode first
+        if (IMonitorBackend* b = Monitor::GetBackend()) {
+            if (auto event_opt = b->TakeLastPerfEvent()) {
+                PerfMetricEvent& pe = *event_opt;
+                pe.pid = pid_;
+                pe.app = rt->app_name;
+                pe.session_id = rt->session_id;
+                pe.name = name_;
+                pe.start_ns = start_ns_;
+                pe.end_ns = detail::GetTimestampNs();
+                rt->logger->logPerfMetricEvent(pe);
+
+                GFL_LOG_DEBUG("Log Perf Metric Event");
+            }
+        }
+    }
 }
 }  // namespace gpufl

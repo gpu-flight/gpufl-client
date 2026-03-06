@@ -46,7 +46,8 @@ PYBIND11_MODULE(_gpufl_client, m) {
         .def_readwrite("enable_kernel_details", &gpufl::InitOptions::enable_kernel_details)
         .def_readwrite("enable_debug_output",   &gpufl::InitOptions::enable_debug_output)
         .def_readwrite("enable_profiling",      &gpufl::InitOptions::enable_profiling)
-        .def_readwrite("enable_stack_trace",    &gpufl::InitOptions::enable_stack_trace);
+        .def_readwrite("enable_stack_trace",    &gpufl::InitOptions::enable_stack_trace)
+        .def_readwrite("enable_perf_scope",     &gpufl::InitOptions::enable_perf_scope);
 
     m.def("init", [](std::string app_name,
                      std::string log_path,
@@ -57,7 +58,8 @@ PYBIND11_MODULE(_gpufl_client, m) {
                      bool enable_kernel_details,
                      bool enable_debug_output,
                      bool enable_profiling,
-                     bool enable_stack_trace) -> bool {
+                     bool enable_stack_trace,
+                     bool enable_perf_scope) -> bool {
 
         gpufl::InitOptions opts;
         opts.app_name              = app_name;
@@ -70,6 +72,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
         opts.enable_debug_output   = enable_debug_output;
         opts.enable_profiling      = enable_profiling;
         opts.enable_stack_trace    = enable_stack_trace;
+        opts.enable_perf_scope     = enable_perf_scope;
 
         return gpufl::init(opts);
     }, py::arg("app_name"),
@@ -81,7 +84,8 @@ PYBIND11_MODULE(_gpufl_client, m) {
        py::arg("enable_kernel_details")  = false,
        py::arg("enable_debug_output")    = false,
        py::arg("enable_profiling")       = true,
-       py::arg("enable_stack_trace")     = true);
+       py::arg("enable_stack_trace")     = true,
+       py::arg("enable_perf_scope")      = false);
 
     m.def("system_start", [](std::string name) { gpufl::systemStart(std::move(name)); },
         py::arg("name") = "system");
