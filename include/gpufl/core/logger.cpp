@@ -1,6 +1,7 @@
 #include "gpufl/core/logger.hpp"
 
 #include <filesystem>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <sstream>
@@ -396,6 +397,29 @@ void Logger::logProfileSample(const ProfileSampleEvent& e) const {
     oss << ",\"source_file\":\"" << jsonEscape(e.source_file) << "\""
         << ",\"function_name\":\"" << jsonEscape(e.function_name) << "\""
         << ",\"source_line\":" << e.source_line << "}";
+    chanScope_->write(oss.str());
+}
+
+void Logger::logPerfMetricEvent(const PerfMetricEvent& e) const {
+    if (!chanScope_) return;
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(4);
+    oss << "{\"type\":\"perf_metric_event\""
+        << ",\"pid\":" << e.pid
+        << ",\"app\":\"" << jsonEscape(e.app) << "\""
+        << ",\"session_id\":\"" << jsonEscape(e.session_id) << "\""
+        << ",\"name\":\"" << jsonEscape(e.name) << "\""
+        << ",\"start_ns\":" << e.start_ns
+        << ",\"end_ns\":" << e.end_ns
+        << ",\"device_id\":" << e.device_id
+        << ",\"sm_throughput_pct\":" << e.sm_throughput_pct
+        << ",\"l1_hit_rate_pct\":" << e.l1_hit_rate_pct
+        << ",\"l2_hit_rate_pct\":" << e.l2_hit_rate_pct
+        << ",\"dram_read_bytes\":" << e.dram_read_bytes
+        << ",\"dram_write_bytes\":" << e.dram_write_bytes
+        << ",\"tensor_active_pct\":" << e.tensor_active_pct
+        << ",\"user_scope\":\"" << jsonEscape(e.user_scope) << "\""
+        << ",\"scope_depth\":" << e.scope_depth << "}";
     chanScope_->write(oss.str());
 }
 
