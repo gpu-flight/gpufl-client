@@ -79,6 +79,8 @@ if(ZLIB_FOUND)
 else()
     message(STATUS "ZLIB not found on system — fetching via FetchContent")
     include(FetchContent)
+    # Suppress zlib's own example / test targets to keep the build clean
+    set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
     FetchContent_Declare(
         zlib
         GIT_REPOSITORY https://github.com/madler/zlib.git
@@ -91,6 +93,12 @@ else()
     target_include_directories(gpufl PRIVATE
         ${zlib_SOURCE_DIR}
         ${zlib_BINARY_DIR}
+    )
+    # zlibstatic must be in the same export set as gpufl — static lib consumers
+    # need to link it transitively, so CMake requires it to be exported too.
+    install(TARGETS zlibstatic
+        EXPORT   gpufl_clientTargets
+        ARCHIVE  DESTINATION ${CMAKE_INSTALL_LIBDIR}
     )
 endif()
 target_sources(gpufl PRIVATE include/gpufl/core/logger/file_compressor.cpp)
