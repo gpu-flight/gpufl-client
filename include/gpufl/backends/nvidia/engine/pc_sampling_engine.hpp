@@ -29,6 +29,7 @@ class PcSamplingEngine final : public IProfilingEngine {
    public:
     PcSamplingEngine() = default;
     ~PcSamplingEngine() override = default;
+    const char* name() const override { return "PcSamplingEngine"; }
 
     bool initialize(const MonitorOptions& opts,
                     const EngineContext& ctx) override;
