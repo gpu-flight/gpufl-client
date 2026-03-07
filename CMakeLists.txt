@@ -49,7 +49,6 @@ set_target_properties(gpufl PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_sources(gpufl PRIVATE
     include/gpufl/core/logger/logger.cpp
     include/gpufl/core/logger/log_rotator.cpp
-    include/gpufl/core/logger/file_compressor.cpp
     include/gpufl/core/model/lifecycle_model.cpp
     include/gpufl/core/model/kernel_event_model.cpp
     include/gpufl/core/model/memcpy_event_model.cpp
@@ -71,9 +70,30 @@ set(GPUFL_HAS_NVML 0)
 set(GPUFL_HAS_ROCM 0)
 set(GPUFL_HAS_CUPTI 0)
 set(GPUFL_HAS_PERFWORKS 0)
-
-find_package(ZLIB REQUIRED)
-target_link_libraries(gpufl PRIVATE ZLIB::ZLIB)
+# ZLIB — try system install first, fall back to FetchContent so every platform
+# (including Windows CI) always gets compression support and .gz output.
+find_package(ZLIB QUIET)
+if(ZLIB_FOUND)
+    message(STATUS "Found system ZLIB: ${ZLIB_LIBRARIES}")
+    target_link_libraries(gpufl PRIVATE ZLIB::ZLIB)
+else()
+    message(STATUS "ZLIB not found on system — fetching via FetchContent")
+    include(FetchContent)
+    FetchContent_Declare(
+        zlib
+        GIT_REPOSITORY https://github.com/madler/zlib.git
+        GIT_TAG        v1.3.1
+    )
+    FetchContent_MakeAvailable(zlib)
+    # FetchContent zlib creates 'zlibstatic'; add its source + binary dirs so
+    # zlib.h and the generated zconf.h are both visible.
+    target_link_libraries(gpufl PRIVATE zlibstatic)
+    target_include_directories(gpufl PRIVATE
+        ${zlib_SOURCE_DIR}
+        ${zlib_BINARY_DIR}
+    )
+endif()
+target_sources(gpufl PRIVATE include/gpufl/core/logger/file_compressor.cpp)
 
 # -----------------------
 # Backends
