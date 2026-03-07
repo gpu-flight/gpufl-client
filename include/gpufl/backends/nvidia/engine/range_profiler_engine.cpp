@@ -55,7 +55,7 @@ void RangeProfilerEngine::shutdown() {
         CUpti_RangeProfiler_Disable_Params p = {
             CUpti_RangeProfiler_Disable_Params_STRUCT_SIZE};
         p.pRangeProfilerObject = range_profiler_object_;
-        LogCuptiErrorIfFailed("RangeProfiler", "cuptiRangeProfilerDisable",
+        LogCuptiErrorIfFailed(this->name(), "cuptiRangeProfilerDisable",
                               cuptiRangeProfilerDisable(&p));
         range_profiler_object_ = nullptr;
     }
@@ -69,7 +69,7 @@ void RangeProfilerEngine::shutdown() {
     if (perf_session_active_) {
         CUpti_Profiler_DeInitialize_Params dp = {
             CUpti_Profiler_DeInitialize_Params_STRUCT_SIZE};
-        LogCuptiErrorIfFailed("Perfworks", "cuptiProfilerDeInitialize",
+        LogCuptiErrorIfFailed(this->name(), "cuptiProfilerDeInitialize",
                               cuptiProfilerDeInitialize(&dp));
         perf_session_active_ = false;
     }
@@ -100,7 +100,7 @@ void RangeProfilerEngine::onPerfScopeStart(const char* name) {
         CUpti_RangeProfiler_Start_Params p = {
             CUpti_RangeProfiler_Start_Params_STRUCT_SIZE};
         p.pRangeProfilerObject = range_profiler_object_;
-        if (LogCuptiErrorIfFailed("RangeProfiler", "cuptiRangeProfilerStart",
+        if (LogCuptiErrorIfFailed(this->name(), "cuptiRangeProfilerStart",
                                   cuptiRangeProfilerStart(&p))) {
             return;
         }
@@ -110,7 +110,7 @@ void RangeProfilerEngine::onPerfScopeStart(const char* name) {
             CUpti_RangeProfiler_PushRange_Params_STRUCT_SIZE};
         p.pRangeProfilerObject = range_profiler_object_;
         p.pRangeName           = name;
-        LogCuptiErrorIfFailed("RangeProfiler", "cuptiRangeProfilerPushRange",
+        LogCuptiErrorIfFailed(this->name(), "cuptiRangeProfilerPushRange",
                               cuptiRangeProfilerPushRange(&p));
     }
 #endif
@@ -128,14 +128,14 @@ void RangeProfilerEngine::onPerfScopeStop(const char* name) {
         CUpti_RangeProfiler_PopRange_Params p = {
             CUpti_RangeProfiler_PopRange_Params_STRUCT_SIZE};
         p.pRangeProfilerObject = range_profiler_object_;
-        LogCuptiErrorIfFailed("RangeProfiler", "cuptiRangeProfilerPopRange",
+        LogCuptiErrorIfFailed(this->name(), "cuptiRangeProfilerPopRange",
                               cuptiRangeProfilerPopRange(&p));
     }
     {
         CUpti_RangeProfiler_Stop_Params p = {
             CUpti_RangeProfiler_Stop_Params_STRUCT_SIZE};
         p.pRangeProfilerObject = range_profiler_object_;
-        if (LogCuptiErrorIfFailed("RangeProfiler", "cuptiRangeProfilerStop",
+        if (LogCuptiErrorIfFailed(this->name(), "cuptiRangeProfilerStop",
                                   cuptiRangeProfilerStop(&p))) {
             return;
         }
@@ -177,14 +177,14 @@ bool RangeProfilerEngine::InitPerfworksSession_() {
     {
         CUpti_Profiler_Initialize_Params p = {
             CUpti_Profiler_Initialize_Params_STRUCT_SIZE};
-        if (LogCuptiErrorIfFailed("Perfworks", "cuptiProfilerInitialize",
+        if (LogCuptiErrorIfFailed(this->name(), "cuptiProfilerInitialize",
                                   cuptiProfilerInitialize(&p))) {
             return false;
         }
     }
 
     if (ctx_.chip_name.empty()) {
-        if (LogCuptiErrorIfFailed("Perfworks", "cuptiGetDeviceId",
+        if (LogCuptiErrorIfFailed(this->name(), "cuptiGetDeviceId",
                                   cuptiGetDeviceId(ctx_.cuda_ctx,
                                                    &ctx_.device_id))) {
             return false;
@@ -220,7 +220,7 @@ bool RangeProfilerEngine::InitPerfworksSession_() {
         hi.profilerType              = CUPTI_PROFILER_TYPE_RANGE_PROFILER;
         hi.pChipName                 = ctx_.chip_name.c_str();
         hi.pCounterAvailabilityImage = counterAvailImage.data();
-        if (LogCuptiErrorIfFailed("Perfworks", "cuptiProfilerHostInitialize",
+        if (LogCuptiErrorIfFailed(this->name(), "cuptiProfilerHostInitialize",
                                   cuptiProfilerHostInitialize(&hi))) {
             return false;
         }
@@ -232,7 +232,7 @@ bool RangeProfilerEngine::InitPerfworksSession_() {
         am.pHostObject    = perf_host_object_;
         am.ppMetricNames  = kPerfMetricNames.data();
         am.numMetrics     = kPerfMetricNames.size();
-        if (LogCuptiErrorIfFailed("Perfworks",
+        if (LogCuptiErrorIfFailed(this->name(),
                                   "cuptiProfilerHostConfigAddMetrics",
                                   cuptiProfilerHostConfigAddMetrics(&am))) {
             return false;
@@ -242,7 +242,7 @@ bool RangeProfilerEngine::InitPerfworksSession_() {
         CUpti_Profiler_Host_GetConfigImageSize_Params gs = {
             CUpti_Profiler_Host_GetConfigImageSize_Params_STRUCT_SIZE};
         gs.pHostObject = perf_host_object_;
-        if (LogCuptiErrorIfFailed("Perfworks",
+        if (LogCuptiErrorIfFailed(this->name(),
                                   "cuptiProfilerHostGetConfigImageSize",
                                   cuptiProfilerHostGetConfigImageSize(&gs))) {
             return false;
@@ -255,7 +255,7 @@ bool RangeProfilerEngine::InitPerfworksSession_() {
         gc.pHostObject      = perf_host_object_;
         gc.configImageSize  = perf_config_image_.size();
         gc.pConfigImage     = perf_config_image_.data();
-        if (LogCuptiErrorIfFailed("Perfworks",
+        if (LogCuptiErrorIfFailed(this->name(),
                                   "cuptiProfilerHostGetConfigImage",
                                   cuptiProfilerHostGetConfigImage(&gc))) {
             return false;
@@ -329,7 +329,7 @@ bool RangeProfilerEngine::InitPerfworksSession_() {
         CUpti_RangeProfiler_Enable_Params p = {
             CUpti_RangeProfiler_Enable_Params_STRUCT_SIZE};
         p.ctx = ctx_.cuda_ctx;
-        if (LogCuptiErrorIfFailed("RangeProfiler", "cuptiRangeProfilerEnable",
+        if (LogCuptiErrorIfFailed(this->name(), "cuptiRangeProfilerEnable",
                                   cuptiRangeProfilerEnable(&p))) {
             return false;
         }
@@ -378,7 +378,7 @@ bool RangeProfilerEngine::InitPerfworksSession_() {
         p.minNestingLevel        = 1;
         p.passIndex              = 0;
         p.targetNestingLevel     = 1;
-        if (LogCuptiErrorIfFailed("RangeProfiler", "cuptiRangeProfilerSetConfig",
+        if (LogCuptiErrorIfFailed(this->name(), "cuptiRangeProfilerSetConfig",
                                   cuptiRangeProfilerSetConfig(&p))) {
             return false;
         }
@@ -400,7 +400,7 @@ void RangeProfilerEngine::EndPerfPassAndDecode_() {
         CUpti_RangeProfiler_DecodeData_Params p = {
             CUpti_RangeProfiler_DecodeData_Params_STRUCT_SIZE};
         p.pRangeProfilerObject = range_profiler_object_;
-        if (LogCuptiErrorIfFailed("RangeProfiler",
+        if (LogCuptiErrorIfFailed(this->name(),
                                   "cuptiRangeProfilerDecodeData",
                                   cuptiRangeProfilerDecodeData(&p))) {
             return;
@@ -416,7 +416,7 @@ void RangeProfilerEngine::EndPerfPassAndDecode_() {
             CUpti_RangeProfiler_GetCounterDataInfo_Params_STRUCT_SIZE};
         p.pCounterDataImage  = perf_counter_data_image_.data();
         p.counterDataImageSize = perf_counter_data_image_.size();
-        if (LogCuptiErrorIfFailed("RangeProfiler",
+        if (LogCuptiErrorIfFailed(this->name(),
                                   "cuptiRangeProfilerGetCounterDataInfo",
                                   cuptiRangeProfilerGetCounterDataInfo(&p))) {
             return;
@@ -442,7 +442,7 @@ void RangeProfilerEngine::EndPerfPassAndDecode_() {
     p.pMetricValues       = values.data();
     GFL_LOG_DEBUG("[RangeProfilerEngine] EvaluateToGpuValues rangeIndex=",
                   p.rangeIndex, " numMetrics=", p.numMetrics);
-    if (LogCuptiErrorIfFailed("Perfworks",
+    if (LogCuptiErrorIfFailed(this->name(),
                               "cuptiProfilerHostEvaluateToGpuValues",
                               cuptiProfilerHostEvaluateToGpuValues(&p))) {
         return;

@@ -13,6 +13,7 @@ class SassMetricsEngine final : public IProfilingEngine {
    public:
     SassMetricsEngine() = default;
     ~SassMetricsEngine() override { shutdown(); }
+    const char* name() const override { return "SassMetricsEngine"; }
 
     bool initialize(const MonitorOptions& opts,
                     const EngineContext& ctx) override;

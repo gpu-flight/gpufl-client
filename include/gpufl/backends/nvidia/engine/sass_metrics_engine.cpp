@@ -41,7 +41,7 @@ void SassMetricsEngine::start() {
     // Initialize profiler device — required before SASS Metrics APIs
     CUpti_Profiler_Initialize_Params p = {
         CUpti_Profiler_Initialize_Params_STRUCT_SIZE};
-    LogCuptiErrorIfFailed("SassMetrics", "cuptiProfilerInitialize",
+    LogCuptiErrorIfFailed(this->name(), "cuptiProfilerInitialize",
                           cuptiProfilerInitialize(&p));
 
     EnableSassMetrics_();
@@ -68,7 +68,7 @@ void SassMetricsEngine::onScopeStop(const char* /*name*/) {
 
 void SassMetricsEngine::EnableSassMetrics_() {
     if (ctx_.chip_name.empty()) {
-        if (LogCuptiErrorIfFailed("SassMetrics", "cuptiGetDeviceId",
+        if (LogCuptiErrorIfFailed(this->name(), "cuptiGetDeviceId",
                                   cuptiGetDeviceId(ctx_.cuda_ctx,
                                                    &ctx_.device_id))) {
             return;
@@ -91,7 +91,7 @@ void SassMetricsEngine::EnableSassMetrics_() {
             CUpti_SassMetrics_GetProperties_Params_STRUCT_SIZE};
         propParams.pChipName   = ctx_.chip_name.c_str();
         propParams.pMetricName = kSassMetricNames[i];
-        if (LogCuptiErrorIfFailed("SassMetrics", "cuptiSassMetricsGetProperties",
+        if (LogCuptiErrorIfFailed(this->name(), "cuptiSassMetricsGetProperties",
                                   cuptiSassMetricsGetProperties(&propParams))) {
             continue;
         }
@@ -177,7 +177,7 @@ void SassMetricsEngine::StopAndCollectSassMetrics_() {
                         if (corrParams.fileName) std::free(corrParams.fileName);
                         if (corrParams.dirName) std::free(corrParams.dirName);
                     } else {
-                        LogCuptiErrorIfFailed("SASS Metrics",
+                        LogCuptiErrorIfFailed(this->name(),
                                               "cuptiGetSassToSourceCorrelation",
                                               res);
                     }
