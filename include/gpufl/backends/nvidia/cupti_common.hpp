@@ -3,6 +3,7 @@
 #include <cuda_runtime.h>
 #include <cupti.h>
 
+#include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
@@ -29,6 +30,15 @@
     } while (0)
 
 namespace gpufl {
+
+/**
+ * @brief Cubin binary data keyed by CRC, shared between CuptiBackend and engines.
+ */
+struct CubinInfo {
+    std::vector<uint8_t> data;
+    uint64_t crc = 0;
+};
+
 struct ActivityRecord {
     uint32_t device_id;
     char name[128];

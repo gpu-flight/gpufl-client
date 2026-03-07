@@ -39,7 +39,7 @@ TEST_F(CuptiBackendTest, Lifecycle) {
 
 TEST_F(CuptiBackendTest, ProfilingMode) {
     gpufl::MonitorOptions opts;
-    opts.is_profiling = true;
+    opts.profiling_engine = gpufl::ProfilingEngine::PcSampling;
 
     gpufl::CuptiBackend backend;
     backend.initialize(opts);

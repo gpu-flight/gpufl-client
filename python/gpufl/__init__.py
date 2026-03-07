@@ -23,7 +23,7 @@ if os.name == 'nt':
 
 # 2. Import C++ Core Bindings
 try:
-    from ._gpufl_client import Scope, init, shutdown, system_start, system_stop, BackendKind, InitOptions
+    from ._gpufl_client import Scope, init, shutdown, system_start, system_stop, BackendKind, InitOptions, ProfilingEngine
 except ImportError as e:
     # We catch ImportError specifically to handle missing libcuda.so.1 or DLLs
     import sys
@@ -54,6 +54,12 @@ except ImportError as e:
         Amd = "Amd"
         None_ = "None"
 
+    class ProfilingEngine:
+        None_          = "None"
+        PcSampling     = "PcSampling"
+        SassMetrics    = "SassMetrics"
+        RangeProfiler  = "RangeProfiler"
+
     class InitOptions:
         def __init__(self):
             self.app_name = "gpufl"
@@ -64,9 +70,8 @@ except ImportError as e:
             self.backend = BackendKind.Auto
             self.enable_kernel_details = False
             self.enable_debug_output = False
-            self.enable_profiling = True
             self.enable_stack_trace = True
-            self.enable_perf_scope = False
+            self.profiling_engine = ProfilingEngine.PcSampling
 
     class Scope:
         def __init__(self, *args): pass
