@@ -26,7 +26,7 @@ struct MonitorOptions {
     bool enable_stack_trace = false;
     int kernel_sample_rate_ms = 0;
     uint32_t pc_sampling_period = 5000;  // GPU clock cycles between PC samples
-    ProfilingEngine profiling_engine = ProfilingEngine::PcSampling;
+    ProfilingEngine profiling_engine = ProfilingEngine::None;
 };
 
 /**
