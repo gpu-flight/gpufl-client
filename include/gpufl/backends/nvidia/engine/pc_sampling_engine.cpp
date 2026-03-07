@@ -63,7 +63,7 @@ void PcSamplingEngine::start() {
         cuptiActivityEnable(CUPTI_ACTIVITY_KIND_SOURCE_LOCATOR);
         GFL_LOG_DEBUG("[PC Sampling] Enabled SOURCE_LOCATOR for Sampling API.");
     } else {
-        LogCuptiErrorIfFailed("PC Sampling",
+        LogCuptiErrorIfFailed(this->name(),
                               "cuptiActivityEnable(PC_SAMPLING)", pcRes);
         pc_sampling_method_ = Method::None;
     }
@@ -102,7 +102,7 @@ void PcSamplingEngine::EnableSamplingFeatures_() {
     enableParams.size = sizeof(CUpti_PCSamplingEnableParams);
     enableParams.ctx  = ctx_.cuda_ctx;
     CUptiResult enableRes = cuptiPCSamplingEnable(&enableParams);
-    if (LogCuptiErrorIfFailed("PC Sampling", "cuptiPCSamplingEnable", enableRes)) {
+    if (LogCuptiErrorIfFailed(this->name(), "cuptiPCSamplingEnable", enableRes)) {
         return;
     }
 
@@ -218,7 +218,7 @@ void PcSamplingEngine::EnableSamplingFeatures_() {
 
     CUptiResult configRes =
         cuptiPCSamplingSetConfigurationAttribute(&configParams);
-    if (!LogCuptiErrorIfFailed("PC Sampling",
+    if (!LogCuptiErrorIfFailed(this->name(),
                                "cuptiPCSamplingSetConfigurationAttribute",
                                configRes)) {
         GFL_LOG_DEBUG("[PC Sampling] configured and enabled successfully.");
@@ -255,7 +255,7 @@ void PcSamplingEngine::StartPcSampling_() {
         GFL_LOG_DEBUG(
             "[GPUFL] PC Sampling not supported on this GPU/configuration.");
     } else if (res != CUPTI_SUCCESS) {
-        LogCuptiErrorIfFailed("PC Sampling", "cuptiPCSamplingStart", res);
+        LogCuptiErrorIfFailed(this->name(), "cuptiPCSamplingStart", res);
     } else {
         GFL_LOG_DEBUG("[PC Sampling] >>> STARTED (Scope Begin) <<<");
     }
@@ -304,7 +304,7 @@ void PcSamplingEngine::StopAndCollectPcSampling_() {
         const bool hasMore = (getRes == CUPTI_ERROR_OUT_OF_MEMORY);
 
         if (getRes != CUPTI_SUCCESS && !hasMore) {
-            LogCuptiErrorIfFailed("PC Sampling", "cuptiPCSamplingGetData",
+            LogCuptiErrorIfFailed(this->name(), "cuptiPCSamplingGetData",
                                   getRes);
             break;
         }
@@ -324,10 +324,12 @@ void PcSamplingEngine::StopAndCollectPcSampling_() {
                         if (CUptiResult res = cuptiGetDeviceId(
                                 ctx_.cuda_ctx, &out.device_id);
                             res != CUPTI_SUCCESS) {
-                            LogCuptiErrorIfFailed("CUPTI", "cuptiGetDeviceId",
+                            LogCuptiErrorIfFailed(this->name(), "cuptiGetDeviceId",
                                                   res);
                         }
                         out.corr_id      = pc.correlationId;
+                        std::snprintf(out.sample_kind, sizeof(out.sample_kind),
+                                      "%s", "pc_sampling");
                         out.samples_count = pc.stallReason[j].samples;
                         out.stall_reason =
                             pc.stallReason[j].pcSamplingStallReasonIndex;

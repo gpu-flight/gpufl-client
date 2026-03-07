@@ -17,6 +17,7 @@ class RangeProfilerEngine final : public IProfilingEngine {
    public:
     RangeProfilerEngine() = default;
     ~RangeProfilerEngine() override { shutdown(); }
+    const char* name() const override { return "RangeProfilerEngine"; }
 
     bool initialize(const MonitorOptions& opts,
                     const EngineContext& ctx) override;
