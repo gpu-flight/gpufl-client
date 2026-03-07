@@ -87,13 +87,17 @@ else()
         GIT_TAG        v1.3.1
     )
     FetchContent_MakeAvailable(zlib)
-    # FetchContent zlib creates 'zlibstatic'; add its source + binary dirs so
-    # zlib.h and the generated zconf.h are both visible.
+    # zlib.h lives in the source dir; zconf.h is generated in the binary dir.
+    # Add both privately to gpufl — consumers never include zlib headers directly.
     target_link_libraries(gpufl PRIVATE zlibstatic)
     target_include_directories(gpufl PRIVATE
         ${zlib_SOURCE_DIR}
         ${zlib_BINARY_DIR}
     )
+    # zlib's own CMakeLists sets INTERFACE_INCLUDE_DIRECTORIES on zlibstatic to
+    # build-directory paths, which CMake forbids in install exports.  Clear them:
+    # gpufl already propagates the paths privately, so consumers don't need them.
+    set_target_properties(zlibstatic PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "")
     # zlibstatic must be in the same export set as gpufl — static lib consumers
     # need to link it transitively, so CMake requires it to be exported too.
     install(TARGETS zlibstatic
