@@ -5,6 +5,8 @@
 #include <cupti_profiler_host.h>
 #include <cupti_profiler_target.h>
 #include <cupti_range_profiler.h>
+#include <nvperf_host.h>   // NVPW_CounterDataBuilder_* — deprecated but still
+                           // required in CUDA ≤13.x; no CUPTI Host equivalent yet
 #endif
 
 #include <cmath>
@@ -258,30 +260,58 @@ bool RangeProfilerEngine::InitPerfworksSession_() {
         }
     }
 
-    // Build counter data prefix using the Cupti Profiler Host API
-    // (replaces the deprecated NVPW_CounterDataBuilder_* path)
+    // Build counter data prefix via NVPW_CounterDataBuilder_*.
+    // TODO: migrate to cuptiProfilerHostGetCounterDataPrefixImage* once the
+    //       CUDA toolkit provides those symbols (not available in CUDA ≤13.x).
     std::vector<uint8_t> counterDataPrefix;
     {
-        CUpti_Profiler_Host_GetCounterDataPrefixImageSize_Params gsp = {
-            CUpti_Profiler_Host_GetCounterDataPrefixImageSize_Params_STRUCT_SIZE};
-        gsp.pHostObject = perf_host_object_;
-        if (LogCuptiErrorIfFailed(
-                "Perfworks",
-                "cuptiProfilerHostGetCounterDataPrefixImageSize",
-                cuptiProfilerHostGetCounterDataPrefixImageSize(&gsp))) {
+        NVPW_InitializeHost_Params ihp = {NVPW_InitializeHost_Params_STRUCT_SIZE};
+        if (NVPW_InitializeHost(&ihp) != NVPA_STATUS_SUCCESS) {
+            GFL_LOG_ERROR("[RangeProfilerEngine] NVPW_InitializeHost failed");
             return false;
         }
-        counterDataPrefix.resize(gsp.counterDataPrefixImageSize);
 
-        CUpti_Profiler_Host_GetCounterDataPrefixImage_Params gip = {
-            CUpti_Profiler_Host_GetCounterDataPrefixImage_Params_STRUCT_SIZE};
-        gip.pHostObject                = perf_host_object_;
-        gip.counterDataPrefixImageSize = counterDataPrefix.size();
-        gip.pCounterDataPrefixImage    = counterDataPrefix.data();
-        if (LogCuptiErrorIfFailed(
-                "Perfworks", "cuptiProfilerHostGetCounterDataPrefixImage",
-                cuptiProfilerHostGetCounterDataPrefixImage(&gip))) {
+        NVPW_CounterDataBuilder_Create_Params cbcp = {
+            NVPW_CounterDataBuilder_Create_Params_STRUCT_SIZE};
+        cbcp.pChipName = ctx_.chip_name.c_str();
+        if (NVPW_CounterDataBuilder_Create(&cbcp) != NVPA_STATUS_SUCCESS) {
+            GFL_LOG_ERROR("[RangeProfilerEngine] NVPW_CounterDataBuilder_Create failed");
             return false;
+        }
+        NVPA_CounterDataBuilder* builder = cbcp.pCounterDataBuilder;
+
+        {
+            std::vector<NVPA_RawMetricRequest> reqs(kPerfMetricNames.size());
+            for (size_t i = 0; i < kPerfMetricNames.size(); ++i) {
+                reqs[i].structSize    = NVPA_RAW_METRIC_REQUEST_STRUCT_SIZE;
+                reqs[i].pMetricName   = kPerfMetricNames[i];
+                reqs[i].isolated      = 1;
+                reqs[i].keepInstances = 1;
+            }
+            NVPW_CounterDataBuilder_AddMetrics_Params amp = {
+                NVPW_CounterDataBuilder_AddMetrics_Params_STRUCT_SIZE};
+            amp.pCounterDataBuilder = builder;
+            amp.pRawMetricRequests  = reqs.data();
+            amp.numMetricRequests   = kPerfMetricNames.size();
+            NVPW_CounterDataBuilder_AddMetrics(&amp);
+        }
+        {
+            NVPW_CounterDataBuilder_GetCounterDataPrefix_Params gcp = {
+                NVPW_CounterDataBuilder_GetCounterDataPrefix_Params_STRUCT_SIZE};
+            gcp.pCounterDataBuilder = builder;
+            gcp.bytesAllocated      = 0;
+            gcp.pBuffer             = nullptr;
+            NVPW_CounterDataBuilder_GetCounterDataPrefix(&gcp);
+            counterDataPrefix.resize(gcp.bytesCopied);
+            gcp.bytesAllocated = counterDataPrefix.size();
+            gcp.pBuffer        = counterDataPrefix.data();
+            NVPW_CounterDataBuilder_GetCounterDataPrefix(&gcp);
+        }
+        {
+            NVPW_CounterDataBuilder_Destroy_Params dp = {
+                NVPW_CounterDataBuilder_Destroy_Params_STRUCT_SIZE};
+            dp.pCounterDataBuilder = builder;
+            NVPW_CounterDataBuilder_Destroy(&dp);
         }
     }
 
