@@ -1,5 +1,7 @@
 #include "gpufl/backends/nvidia/resource_handler.hpp"
 
+#include <cupti_pcsampling.h>
+
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
 #include "gpufl/core/debug_logger.hpp"
 
@@ -49,9 +51,6 @@ void ResourceHandler::handle(CUpti_CallbackDomain domain, CUpti_CallbackId cbid,
                 info.data.assign(
                     static_cast<const uint8_t *>(cubinPtr),
                     static_cast<const uint8_t *>(cubinPtr) + cubinSize);
-                GFL_LOG_DEBUG(
-                    "[DEBUG-CALLBACK] Cubin SUCCESSFULLY stored: CRC=",
-                    params.cubinCrc, " Size=", cubinSize, " bytes ✓✓✓");
             } else {
                 GFL_LOG_ERROR(
                     "[DEBUG-CALLBACK] Failed to compute CRC for cubin");

@@ -55,11 +55,19 @@ def test_pipeline():
 
         categories = ["scope", "system"]
         for cat in categories:
-            expected_name = f"{log_base_name}.{cat}.0.log"
+            expected_name = f"{log_base_name}.{cat}.log"
             full_path = os.path.join(temp_dir, expected_name)
 
             if not os.path.exists(full_path):
+                rotated_pattern = os.path.join(
+                    temp_dir, f"{log_base_name}.{cat}.*.log*"
+                )
+                rotated = sorted(glob.glob(rotated_pattern))
                 print(f"FAILED: Expected log file missing: {expected_name}")
+                if rotated:
+                    print(f"       Rotated files found for {cat}:")
+                    for rp in rotated:
+                        print(f"         - {os.path.basename(rp)}")
                 keep = True
                 raise SystemExit(1)
 

@@ -47,7 +47,15 @@ target_compile_features(gpufl INTERFACE cxx_std_17)
 set_target_properties(gpufl PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 target_sources(gpufl PRIVATE
-    include/gpufl/core/logger.cpp
+    include/gpufl/core/logger/logger.cpp
+    include/gpufl/core/logger/log_rotator.cpp
+    include/gpufl/core/model/lifecycle_model.cpp
+    include/gpufl/core/model/kernel_event_model.cpp
+    include/gpufl/core/model/memcpy_event_model.cpp
+    include/gpufl/core/model/scope_event_model.cpp
+    include/gpufl/core/model/profile_sample_model.cpp
+    include/gpufl/core/model/perf_metric_model.cpp
+    include/gpufl/core/model/system_event_model.cpp
     include/gpufl/core/sampler.cpp
     include/gpufl/core/runtime.cpp
     include/gpufl/core/gpufl.cpp
@@ -62,6 +70,42 @@ set(GPUFL_HAS_NVML 0)
 set(GPUFL_HAS_ROCM 0)
 set(GPUFL_HAS_CUPTI 0)
 set(GPUFL_HAS_PERFWORKS 0)
+# ZLIB — try system install first, fall back to FetchContent so every platform
+# (including Windows CI) always gets compression support and .gz output.
+find_package(ZLIB QUIET)
+if(ZLIB_FOUND)
+    message(STATUS "Found system ZLIB: ${ZLIB_LIBRARIES}")
+    target_link_libraries(gpufl PRIVATE ZLIB::ZLIB)
+else()
+    message(STATUS "ZLIB not found on system — fetching via FetchContent")
+    include(FetchContent)
+    # Suppress zlib's own example / test targets to keep the build clean
+    set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        zlib
+        GIT_REPOSITORY https://github.com/madler/zlib.git
+        GIT_TAG        v1.3.1
+    )
+    FetchContent_MakeAvailable(zlib)
+    # zlib.h lives in the source dir; zconf.h is generated in the binary dir.
+    # Add both privately to gpufl — consumers never include zlib headers directly.
+    target_link_libraries(gpufl PRIVATE zlibstatic)
+    target_include_directories(gpufl PRIVATE
+        ${zlib_SOURCE_DIR}
+        ${zlib_BINARY_DIR}
+    )
+    # zlib's own CMakeLists sets INTERFACE_INCLUDE_DIRECTORIES on zlibstatic to
+    # build-directory paths, which CMake forbids in install exports.  Clear them:
+    # gpufl already propagates the paths privately, so consumers don't need them.
+    set_target_properties(zlibstatic PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "")
+    # zlibstatic must be in the same export set as gpufl — static lib consumers
+    # need to link it transitively, so CMake requires it to be exported too.
+    install(TARGETS zlibstatic
+        EXPORT   gpufl_clientTargets
+        ARCHIVE  DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    )
+endif()
+target_sources(gpufl PRIVATE include/gpufl/core/logger/file_compressor.cpp)
 
 # -----------------------
 # Backends
@@ -96,7 +140,10 @@ if(GPUFL_ENABLE_NVIDIA)
                 include/gpufl/backends/nvidia/kernel_launch_handler.cpp
                 include/gpufl/backends/nvidia/mem_transfer_handler.cpp
                 include/gpufl/cuda/monitor.cpp
-                include/gpufl/backends/nvidia/cupti_backend.cpp)
+                include/gpufl/backends/nvidia/cupti_backend.cpp
+                include/gpufl/backends/nvidia/engine/pc_sampling_engine.cpp
+                include/gpufl/backends/nvidia/engine/sass_metrics_engine.cpp
+                include/gpufl/backends/nvidia/engine/range_profiler_engine.cpp)
             target_link_libraries(gpufl PRIVATE CUDA::cudart CUDA::cuda_driver)
 
             # --------------------------------------------------------
