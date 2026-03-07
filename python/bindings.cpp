@@ -35,6 +35,13 @@ PYBIND11_MODULE(_gpufl_client, m) {
         .value("None",   gpufl::BackendKind::None)
         .export_values();
 
+    py::enum_<gpufl::ProfilingEngine>(m, "ProfilingEngine")
+        .value("None",          gpufl::ProfilingEngine::None)
+        .value("PcSampling",    gpufl::ProfilingEngine::PcSampling)
+        .value("SassMetrics",   gpufl::ProfilingEngine::SassMetrics)
+        .value("RangeProfiler", gpufl::ProfilingEngine::RangeProfiler)
+        .export_values();
+
     py::class_<gpufl::InitOptions>(m, "InitOptions")
         .def(py::init<>())
         .def_readwrite("app_name",              &gpufl::InitOptions::app_name)
@@ -45,10 +52,11 @@ PYBIND11_MODULE(_gpufl_client, m) {
         .def_readwrite("backend",               &gpufl::InitOptions::backend)
         .def_readwrite("enable_kernel_details", &gpufl::InitOptions::enable_kernel_details)
         .def_readwrite("enable_debug_output",   &gpufl::InitOptions::enable_debug_output)
-        .def_readwrite("enable_profiling",      &gpufl::InitOptions::enable_profiling)
         .def_readwrite("enable_stack_trace",    &gpufl::InitOptions::enable_stack_trace)
-        .def_readwrite("enable_perf_scope",     &gpufl::InitOptions::enable_perf_scope);
+        .def_readwrite("profiling_engine",      &gpufl::InitOptions::profiling_engine);
 
+    // Convenience wrapper: accepts either the new profiling_engine enum or the
+    // legacy enable_profiling / enable_perf_scope booleans for source compat.
     m.def("init", [](std::string app_name,
                      std::string log_path,
                      bool sampling_auto_start,
@@ -57,9 +65,11 @@ PYBIND11_MODULE(_gpufl_client, m) {
                      gpufl::BackendKind backend,
                      bool enable_kernel_details,
                      bool enable_debug_output,
+                     // Legacy bool args (deprecated — use profiling_engine)
                      bool enable_profiling,
                      bool enable_stack_trace,
-                     bool enable_perf_scope) -> bool {
+                     bool enable_perf_scope,
+                     gpufl::ProfilingEngine profiling_engine_override) -> bool {
 
         gpufl::InitOptions opts;
         opts.app_name              = app_name;
@@ -70,22 +80,34 @@ PYBIND11_MODULE(_gpufl_client, m) {
         opts.backend               = backend;
         opts.enable_kernel_details = enable_kernel_details;
         opts.enable_debug_output   = enable_debug_output;
-        opts.enable_profiling      = enable_profiling;
         opts.enable_stack_trace    = enable_stack_trace;
-        opts.enable_perf_scope     = enable_perf_scope;
+
+        // If caller explicitly set profiling_engine, use it; otherwise derive
+        // from the legacy bool flags for backward compatibility.
+        if (profiling_engine_override != gpufl::ProfilingEngine::PcSampling) {
+            // Explicit override was provided (anything != the default)
+            opts.profiling_engine = profiling_engine_override;
+        } else if (!enable_profiling) {
+            opts.profiling_engine = gpufl::ProfilingEngine::None;
+        } else if (enable_perf_scope) {
+            opts.profiling_engine = gpufl::ProfilingEngine::RangeProfiler;
+        } else {
+            opts.profiling_engine = gpufl::ProfilingEngine::PcSampling;
+        }
 
         return gpufl::init(opts);
     }, py::arg("app_name"),
-       py::arg("log_path")               = "",
-       py::arg("sampling_auto_start")    = false,
-       py::arg("system_sample_rate_ms")  = 0,
-       py::arg("kernel_sample_rate_ms")  = 0,
-       py::arg("backend")                = gpufl::BackendKind::Auto,
-       py::arg("enable_kernel_details")  = false,
-       py::arg("enable_debug_output")    = false,
-       py::arg("enable_profiling")       = true,
-       py::arg("enable_stack_trace")     = true,
-       py::arg("enable_perf_scope")      = false);
+       py::arg("log_path")                  = "",
+       py::arg("sampling_auto_start")       = false,
+       py::arg("system_sample_rate_ms")     = 0,
+       py::arg("kernel_sample_rate_ms")     = 0,
+       py::arg("backend")                   = gpufl::BackendKind::Auto,
+       py::arg("enable_kernel_details")     = false,
+       py::arg("enable_debug_output")       = false,
+       py::arg("enable_profiling")          = true,
+       py::arg("enable_stack_trace")        = true,
+       py::arg("enable_perf_scope")         = false,
+       py::arg("profiling_engine")          = gpufl::ProfilingEngine::PcSampling);
 
     m.def("system_start", [](std::string name) { gpufl::systemStart(std::move(name)); },
         py::arg("name") = "system");

@@ -47,7 +47,16 @@ target_compile_features(gpufl INTERFACE cxx_std_17)
 set_target_properties(gpufl PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 target_sources(gpufl PRIVATE
-    include/gpufl/core/logger.cpp
+    include/gpufl/core/logger/logger.cpp
+    include/gpufl/core/logger/log_rotator.cpp
+    include/gpufl/core/logger/file_compressor.cpp
+    include/gpufl/core/model/lifecycle_model.cpp
+    include/gpufl/core/model/kernel_event_model.cpp
+    include/gpufl/core/model/memcpy_event_model.cpp
+    include/gpufl/core/model/scope_event_model.cpp
+    include/gpufl/core/model/profile_sample_model.cpp
+    include/gpufl/core/model/perf_metric_model.cpp
+    include/gpufl/core/model/system_event_model.cpp
     include/gpufl/core/sampler.cpp
     include/gpufl/core/runtime.cpp
     include/gpufl/core/gpufl.cpp
@@ -62,6 +71,9 @@ set(GPUFL_HAS_NVML 0)
 set(GPUFL_HAS_ROCM 0)
 set(GPUFL_HAS_CUPTI 0)
 set(GPUFL_HAS_PERFWORKS 0)
+
+find_package(ZLIB REQUIRED)
+target_link_libraries(gpufl PRIVATE ZLIB::ZLIB)
 
 # -----------------------
 # Backends
@@ -96,7 +108,10 @@ if(GPUFL_ENABLE_NVIDIA)
                 include/gpufl/backends/nvidia/kernel_launch_handler.cpp
                 include/gpufl/backends/nvidia/mem_transfer_handler.cpp
                 include/gpufl/cuda/monitor.cpp
-                include/gpufl/backends/nvidia/cupti_backend.cpp)
+                include/gpufl/backends/nvidia/cupti_backend.cpp
+                include/gpufl/backends/nvidia/engine/pc_sampling_engine.cpp
+                include/gpufl/backends/nvidia/engine/sass_metrics_engine.cpp
+                include/gpufl/backends/nvidia/engine/range_profiler_engine.cpp)
             target_link_libraries(gpufl PRIVATE CUDA::cudart CUDA::cuda_driver)
 
             # --------------------------------------------------------

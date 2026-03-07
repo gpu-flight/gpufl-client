@@ -1,7 +1,8 @@
 #include "gpufl/core/sampler.hpp"
 
 #include "gpufl/core/common.hpp"
-#include "gpufl/core/logger.hpp"
+#include "gpufl/core/logger/logger.hpp"
+#include "gpufl/core/model/system_event_model.hpp"
 
 namespace gpufl {
 Sampler::Sampler() = default;
@@ -65,7 +66,7 @@ void Sampler::runLoop_() const {
         e.name = name_;
         e.ts_ns = ts;
         e.devices = collector_->sampleAll();
-        logger_->logSystemSample(e);
+        logger_->write(model::SystemSampleModel(e));
 
         std::this_thread::sleep_until(next_wake_time);
     }

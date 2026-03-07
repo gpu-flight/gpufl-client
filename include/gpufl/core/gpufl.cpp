@@ -11,7 +11,11 @@
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/events.hpp"
-#include "gpufl/core/logger.hpp"
+#include "gpufl/core/logger/logger.hpp"
+#include "gpufl/core/model/lifecycle_model.hpp"
+#include "gpufl/core/model/scope_event_model.hpp"
+#include "gpufl/core/model/perf_metric_model.hpp"
+#include "gpufl/core/model/system_event_model.hpp"
 #include "gpufl/core/monitor.hpp"
 #include "gpufl/core/runtime.hpp"
 #include "gpufl/core/scope_registry.hpp"
@@ -136,15 +140,13 @@ bool init(const InitOptions& opts) {
     GFL_LOG_DEBUG("Initializing Monitor (CUPTI)...");
     MonitorOptions mOpts;
     mOpts.collect_kernel_details = opts.enable_kernel_details;
-    mOpts.enable_debug_output = opts.enable_debug_output;
-    mOpts.is_profiling = opts.enable_profiling;
-    mOpts.kernel_sample_rate_ms = opts.kernel_sample_rate_ms;
-    if (mOpts.is_profiling) {
-        mOpts.collect_kernel_details =
-            true;  // if profiling is on, then it should be true.
+    mOpts.enable_debug_output    = opts.enable_debug_output;
+    mOpts.profiling_engine       = opts.profiling_engine;
+    mOpts.kernel_sample_rate_ms  = opts.kernel_sample_rate_ms;
+    if (mOpts.profiling_engine != ProfilingEngine::None) {
+        mOpts.collect_kernel_details = true;
     }
     mOpts.enable_stack_trace = opts.enable_stack_trace;
-    mOpts.enable_perf_scope = opts.enable_perf_scope;
     Monitor::Initialize(mOpts);
 
     GFL_LOG_DEBUG("Starting Monitor...");
@@ -179,7 +181,7 @@ bool init(const InitOptions& opts) {
     }
     ie.host = rt_ptr->host_collector->sample();
 
-    rt_ptr->logger->logInit(ie);
+    rt_ptr->logger->write(model::InitEventModel(ie));
 
     // Start sampler if enabled and collector exists
     if (opts.sampling_auto_start && rt_ptr->logger) {
@@ -192,7 +194,7 @@ bool init(const InitOptions& opts) {
         if (rt_ptr->collector) e.devices = rt_ptr->collector->sampleAll();
         if (rt_ptr->host_collector)
             e.host = rt_ptr->host_collector->sample();
-        rt_ptr->logger->logSystemStart(e);
+        rt_ptr->logger->write(model::SystemStartModel(e));
     }
     if (opts.sampling_auto_start && opts.system_sample_rate_ms > 0 &&
         rt_ptr->collector) {
@@ -219,7 +221,7 @@ void systemStart(std::string name) {
         e.ts_ns = gpufl::detail::GetTimestampNs();
         if (rt->collector) e.devices = rt->collector->sampleAll();
         if (rt->host_collector) e.host = rt->host_collector->sample();
-        rt->logger->logSystemStart(e);
+        rt->logger->write(model::SystemStartModel(e));
     }
     if (g_opts.system_sample_rate_ms > 0 && rt->collector) {
         rt->sampler.start(rt->app_name, rt->session_id, rt->logger,
@@ -241,7 +243,7 @@ void systemStop(std::string name) {
     e.ts_ns = gpufl::detail::GetTimestampNs();
     if (rt->collector) e.devices = rt->collector->sampleAll();
     if (rt->host_collector) e.host = rt->host_collector->sample();
-    rt->logger->logSystemStop(e);
+    rt->logger->write(model::SystemStopModel(e));
 }
 
 void shutdown() {
@@ -261,7 +263,7 @@ void shutdown() {
         e.ts_ns = gpufl::detail::GetTimestampNs();
         if (rt->collector) e.devices = rt->collector->sampleAll();
         if (rt->host_collector) e.host = rt->host_collector->sample();
-        rt->logger->logSystemStop(e);
+        rt->logger->write(model::SystemStopModel(e));
     }
 
     ShutdownEvent se;
@@ -269,7 +271,7 @@ void shutdown() {
     se.app = rt->app_name;
     se.session_id = rt->session_id;
     se.ts_ns = detail::GetTimestampNs();
-    rt->logger->logShutdown(se);
+    rt->logger->write(model::ShutdownEventModel(se));
 
     rt->logger->close();
     set_runtime(nullptr);
@@ -325,12 +327,11 @@ ScopedMonitor::ScopedMonitor(std::string name, std::string tag, bool deep_profil
     if (rt->collector) {
         e.devices = rt->collector->sampleAll();
     }
-    rt->logger->logScopeBegin(e);
+    rt->logger->write(model::ScopeBeginModel(e));
 
     // Scoped profiling is controlled by runtime options; deep_profiling is
     // kept only for source compatibility.
-    (void)deep_profiling;
-    if (g_opts.enable_profiling) {
+    if (g_opts.profiling_engine != ProfilingEngine::None) {
         Monitor::BeginProfilerScope(name_.c_str());
         Monitor::BeginPerfScope(name_.c_str());
     }
@@ -373,11 +374,11 @@ ScopedMonitor::~ScopedMonitor() {
         e.devices = rt->collector->sampleAll();
     }
 
-    rt->logger->logScopeEnd(e);
+    rt->logger->write(model::ScopeEndModel(e));
 
-    if (g_opts.enable_profiling) {
+    if (g_opts.profiling_engine != ProfilingEngine::None) {
         Monitor::EndProfilerScope(name_.c_str());
-        Monitor::EndPerfScope(name_.c_str());// triggers EndPerfPassAndDecode first
+        Monitor::EndPerfScope(name_.c_str());  // triggers EndPerfPassAndDecode first
         if (IMonitorBackend* b = Monitor::GetBackend()) {
             if (auto event_opt = b->TakeLastPerfEvent()) {
                 PerfMetricEvent& pe = *event_opt;
@@ -387,7 +388,7 @@ ScopedMonitor::~ScopedMonitor() {
                 pe.name = name_;
                 pe.start_ns = start_ns_;
                 pe.end_ns = detail::GetTimestampNs();
-                rt->logger->logPerfMetricEvent(pe);
+                rt->logger->write(model::PerfMetricModel(pe));
 
                 GFL_LOG_DEBUG("Log Perf Metric Event");
             }
