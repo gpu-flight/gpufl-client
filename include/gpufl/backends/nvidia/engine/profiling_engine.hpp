@@ -38,6 +38,7 @@ struct EngineContext {
 class IProfilingEngine {
    public:
     virtual ~IProfilingEngine() = default;
+    virtual const char* name() const = 0;
 
     /**
      * @brief One-time engine initialization after the CUDA context exists.

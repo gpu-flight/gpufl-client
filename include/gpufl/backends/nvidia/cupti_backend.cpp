@@ -141,6 +141,9 @@ CUptiResult (*CuptiBackend::get_value())(CUpti_ActivityKind) {
 
 void CuptiBackend::start() {
     if (!initialized_) return;
+    kernel_activity_seen_.store(0, std::memory_order_relaxed);
+    kernel_activity_emitted_.store(0, std::memory_order_relaxed);
+    kernel_activity_throttled_.store(0, std::memory_order_relaxed);
 
     CUPTI_CHECK(cuptiActivityEnable(CUPTI_ACTIVITY_KIND_SOURCE_LOCATOR));
 
@@ -192,6 +195,14 @@ void CuptiBackend::stop() {
         }
         for (auto k : kinds) cuptiActivityDisable(k);
     }
+
+    const uint64_t seen = kernel_activity_seen_.load(std::memory_order_relaxed);
+    const uint64_t emitted =
+        kernel_activity_emitted_.load(std::memory_order_relaxed);
+    const uint64_t throttled =
+        kernel_activity_throttled_.load(std::memory_order_relaxed);
+    GFL_LOG_DEBUG("[KernelLaunchHandler] activity summary seen=", seen,
+                  " emitted=", emitted, " throttled=", throttled);
 }
 
 void CuptiBackend::RegisterHandler(
@@ -253,6 +264,8 @@ void CUPTIAPI CuptiBackend::BufferCompleted(CUcontext context,
                     ActivityRecord out{};
                     out.type         = TraceType::PC_SAMPLE;
                     out.corr_id      = pc->correlationId;
+                    std::snprintf(out.sample_kind, sizeof(out.sample_kind),
+                                  "%s", "pc_sampling");
                     out.samples_count = pc->samples;
                     out.stall_reason = pc->stallReason;
                     out.device_id    =

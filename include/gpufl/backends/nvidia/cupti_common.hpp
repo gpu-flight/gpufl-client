@@ -75,6 +75,7 @@ struct ActivityRecord {
     char source_file[256];
     uint32_t source_line;
     char function_name[256];
+    char sample_kind[32];
     uint32_t samples_count;
     uint32_t stall_reason;
     std::string reason_name;

@@ -103,6 +103,9 @@ class CuptiBackend : public IMonitorBackend {
     std::mutex handler_mu_;
 
     std::atomic<uint64_t> last_kernel_end_ts_{0};
+    std::atomic<uint64_t> kernel_activity_seen_{0};
+    std::atomic<uint64_t> kernel_activity_emitted_{0};
+    std::atomic<uint64_t> kernel_activity_throttled_{0};
     uint32_t device_id_ = 0;
     std::string chip_name_;
 
