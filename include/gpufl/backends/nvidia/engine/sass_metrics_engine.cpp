@@ -5,16 +5,24 @@
 #include <cupti_profiler_target.h>
 #include <cupti_sass_metrics.h>
 
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
+#include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/ring_buffer.hpp"
 
 namespace gpufl {
 
 extern RingBuffer<ActivityRecord, 1024> g_monitorBuffer;
+namespace {
+std::vector<const char*> kSassMetricNames = {
+    "smsp__sass_inst_executed",
+};
+}
 
 bool SassMetricsEngine::initialize(const MonitorOptions& opts,
                                     const EngineContext& ctx) {
@@ -68,23 +76,29 @@ void SassMetricsEngine::EnableSassMetrics_() {
         ctx_.chip_name = getChipName(ctx_.device_id);
     }
 
-    CUpti_SassMetrics_GetProperties_Params propParams = {
-        CUpti_SassMetrics_GetProperties_Params_STRUCT_SIZE};
-    propParams.pChipName   = ctx_.chip_name.c_str();
-    propParams.pMetricName = "smsp__sass_inst_executed";
-    LogCuptiErrorIfFailed("SassMetrics", "cuptiSassMetricsGetProperties",
-                          cuptiSassMetricsGetProperties(&propParams));
-
+    metric_id_to_name_.clear();
     if (!sass_metrics_buffers_) {
         sass_metrics_buffers_ = new SassMetricsBuffers();
+        sass_metrics_buffers_->numMetrics = kSassMetricNames.size();
         sass_metrics_buffers_->config =
             static_cast<CUpti_SassMetrics_Config*>(
-                std::malloc(sizeof(CUpti_SassMetrics_Config)));
-        sass_metrics_buffers_->config[0].metricId =
-            propParams.metric.metricId;
-        sass_metrics_buffers_->config[0].outputGranularity =
+                std::calloc(sass_metrics_buffers_->numMetrics,
+                            sizeof(CUpti_SassMetrics_Config)));
+    }
+
+    for (size_t i = 0; i < kSassMetricNames.size(); ++i) {
+        CUpti_SassMetrics_GetProperties_Params propParams = {
+            CUpti_SassMetrics_GetProperties_Params_STRUCT_SIZE};
+        propParams.pChipName   = ctx_.chip_name.c_str();
+        propParams.pMetricName = kSassMetricNames[i];
+        if (LogCuptiErrorIfFailed("SassMetrics", "cuptiSassMetricsGetProperties",
+                                  cuptiSassMetricsGetProperties(&propParams))) {
+            continue;
+        }
+        sass_metrics_buffers_->config[i].metricId = propParams.metric.metricId;
+        sass_metrics_buffers_->config[i].outputGranularity =
             CUPTI_SASS_METRICS_OUTPUT_GRANULARITY_GPU;
-        sass_metrics_buffers_->numMetrics = 1;
+        metric_id_to_name_[propParams.metric.metricId] = kSassMetricNames[i];
     }
 
     CUpti_SassMetricsSetConfig_Params setConfigParams = {
@@ -139,47 +153,64 @@ void SassMetricsEngine::StopAndCollectSassMetrics_() {
 
     if (cuptiSassMetricsFlushData(&flushParams) == CUPTI_SUCCESS) {
         for (size_t i = 0; i < nRecords; ++i) {
-            CUpti_GetSassToSourceCorrelationParams corrParams = {
-                sizeof(CUpti_GetSassToSourceCorrelationParams)};
-
+            char srcFile[256]{};
+            uint32_t srcLine = 0;
+            bool hasSource = false;
             if (ctx_.cubin_mu && ctx_.cubin_by_crc) {
                 std::lock_guard<std::mutex> lk(*ctx_.cubin_mu);
                 auto it = ctx_.cubin_by_crc->find(data[i].cubinCrc);
                 if (it != ctx_.cubin_by_crc->end()) {
+                    CUpti_GetSassToSourceCorrelationParams corrParams = {
+                        sizeof(CUpti_GetSassToSourceCorrelationParams)};
                     corrParams.cubin        = it->second.data.data();
                     corrParams.cubinSize    = it->second.data.size();
                     corrParams.functionName = data[i].functionName;
                     corrParams.pcOffset     = data[i].pcOffset;
-
                     CUptiResult res = cuptiGetSassToSourceCorrelation(&corrParams);
                     if (res == CUPTI_SUCCESS) {
-                        ActivityRecord out{};
-                        out.type        = TraceType::PC_SAMPLE;
-                        out.source_line = corrParams.lineNumber;
-                        std::strncpy(out.source_file, corrParams.fileName,
-                                     sizeof(out.source_file) - 1);
-
-                        if (corrParams.lineNumber == 0) {
-                            GFL_LOG_DEBUG(
-                                "Correlation successful, but Line Number is 0. "
-                                "Check for -lineinfo.");
-                        } else {
-                            std::snprintf(out.source_file,
-                                          sizeof(out.source_file), "%s",
+                        if (corrParams.fileName) {
+                            std::snprintf(srcFile, sizeof(srcFile), "%s",
                                           corrParams.fileName);
-                            out.source_line = corrParams.lineNumber;
+                            hasSource = true;
                         }
-
-                        std::free(corrParams.fileName);
-                        std::free(corrParams.dirName);
-
-                        g_monitorBuffer.Push(out);
+                        srcLine = corrParams.lineNumber;
+                        if (corrParams.fileName) std::free(corrParams.fileName);
+                        if (corrParams.dirName) std::free(corrParams.dirName);
                     } else {
-                        LogCuptiErrorIfFailed(
-                            "SASS Metrics",
-                            "cuptiGetSassToSourceCorrelation", res);
+                        LogCuptiErrorIfFailed("SASS Metrics",
+                                              "cuptiGetSassToSourceCorrelation",
+                                              res);
                     }
                 }
+            }
+
+            for (size_t j = 0; j < nInstances; ++j) {
+                const auto& inst = data[i].pInstanceValues[j];
+                ActivityRecord out{};
+                out.type = TraceType::PC_SAMPLE;
+                out.cpu_start_ns = detail::GetTimestampNs();
+                out.device_id = ctx_.device_id;
+                out.pc_offset = data[i].pcOffset;
+                std::snprintf(out.sample_kind, sizeof(out.sample_kind), "%s",
+                              "sass_metric");
+                std::snprintf(out.function_name, sizeof(out.function_name), "%s",
+                              data[i].functionName ? data[i].functionName : "unknown");
+                if (hasSource) {
+                    std::snprintf(out.source_file, sizeof(out.source_file), "%s",
+                                  srcFile);
+                    out.source_line = srcLine;
+                }
+                auto itName = metric_id_to_name_.find(inst.metricId);
+                if (itName != metric_id_to_name_.end()) {
+                    std::snprintf(out.metric_name, sizeof(out.metric_name), "%s",
+                                  itName->second.c_str());
+                } else {
+                    std::snprintf(out.metric_name, sizeof(out.metric_name),
+                                  "metric_%llu",
+                                  static_cast<unsigned long long>(inst.metricId));
+                }
+                out.metric_value = inst.value;
+                g_monitorBuffer.Push(out);
             }
         }
     }

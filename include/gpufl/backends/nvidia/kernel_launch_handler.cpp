@@ -165,8 +165,13 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
     }
 
     const auto* k = reinterpret_cast<const CUpti_ActivityKernel11*>(record);
+    backend_->kernel_activity_seen_.fetch_add(1, std::memory_order_relaxed);
 
-    if (backend_->opts_.kernel_sample_rate_ms > 0) {
+    const bool shouldThrottleKernels =
+        backend_->opts_.kernel_sample_rate_ms > 0 &&
+        backend_->opts_.profiling_engine != ProfilingEngine::PcSampling;
+
+    if (shouldThrottleKernels) {
         uint64_t intervalNs =
             static_cast<uint64_t>(backend_->opts_.kernel_sample_rate_ms) *
             1000000ULL;
@@ -176,6 +181,8 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
             GFL_LOG_DEBUG("[KernelLaunchHandler] activity throttled corr=",
                           k->correlationId, " start=", k->start, " last=",
                           lastTs, " intervalNs=", intervalNs);
+            backend_->kernel_activity_throttled_.fetch_add(
+                1, std::memory_order_relaxed);
             return true;  // within throttle window — consume but do not emit
         }
         backend_->last_kernel_end_ts_.store(k->start, std::memory_order_relaxed);
@@ -310,6 +317,7 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
     }
 
     g_monitorBuffer.Push(out);
+    backend_->kernel_activity_emitted_.fetch_add(1, std::memory_order_relaxed);
     GFL_LOG_DEBUG("[KernelLaunchHandler] activity pushed corr=", out.corr_id,
                   " duration_ns=", out.duration_ns, " has_details=",
                   out.has_details);

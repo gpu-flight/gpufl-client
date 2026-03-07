@@ -243,7 +243,16 @@ void CollectorLoop() {
                     pe.samples_count = rec.samples_count;
                     pe.stall_reason = rec.stall_reason;
                     pe.device_id = rec.device_id;
-                    pe.corr_id = static_cast<int32_t>(rec.corr_id);
+                    pe.corr_id = rec.corr_id;
+                    if (rec.sample_kind[0] != '\0') {
+                        pe.sample_kind = rec.sample_kind;
+                    } else if (rec.metric_name[0] != '\0') {
+                        pe.sample_kind = "sass_metric";
+                    } else if (rec.samples_count > 0) {
+                        pe.sample_kind = "pc_sampling";
+                    } else {
+                        pe.sample_kind = "unknown";
+                    }
                     pe.source_file = rec.source_file;
                     pe.reason_name = rec.reason_name;
                     pe.function_name = rec.function_name;

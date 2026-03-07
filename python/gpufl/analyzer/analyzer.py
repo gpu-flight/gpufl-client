@@ -2,6 +2,7 @@ import re
 import pandas as pd
 import json
 from pathlib import Path
+import gzip
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
@@ -50,9 +51,9 @@ class GpuFlightSession:
         self.max_stack_depth = max_stack_depth
 
         # 1. Load DataFrames
-        self.device = self._load_log(f"{log_prefix}.device.0.log")
-        self.scopes = self._load_log(f"{log_prefix}.scope.0.log")
-        self.system = self._load_log(f"{log_prefix}.system.0.log")
+        self.device = self._load_log(self._resolve_log_path(log_prefix, "device"))
+        self.scopes = self._load_log(self._resolve_log_path(log_prefix, "scope"))
+        self.system = self._load_log(self._resolve_log_path(log_prefix, "system"))
 
         # 2. Split device log by event type
         if not self.device.empty and 'type' in self.device.columns:
@@ -64,28 +65,61 @@ class GpuFlightSession:
             self.memcpy  = pd.DataFrame()
             self.memset  = pd.DataFrame()
 
+        if not self.scopes.empty and 'type' in self.scopes.columns:
+            self.perf = self.scopes[self.scopes['type'] == 'perf_metric_event'].copy()
+        else:
+            self.perf = pd.DataFrame()
+
         # 3. Filter by Session ID if provided (or pick the latest)
         if session_id:
             self.kernels = self.kernels[self.kernels['session_id'] == session_id]
             self.memcpy  = self.memcpy[self.memcpy['session_id'] == session_id]
             self.memset  = self.memset[self.memset['session_id'] == session_id]
+            if not self.perf.empty and 'session_id' in self.perf.columns:
+                self.perf = self.perf[self.perf['session_id'] == session_id]
 
         # 4. Pre-Calculate Metrics (The "Secret Sauce")
         self._enrich_data()
 
-    def _load_log(self, filename):
+    def _resolve_log_path(self, log_prefix: str, channel: str) -> Path | None:
+        """Find a channel log path for current naming + rotation scheme.
+
+        Preferred order:
+        1) <prefix>.<channel>.log
+        2) latest rotated file (<prefix>.<channel>.<N>.log[.gz], lowest N wins)
+        """
+        base = log_prefix[:-4] if log_prefix.endswith(".log") else log_prefix
+
+        active = self.log_dir / f"{base}.{channel}.log"
+        if active.exists():
+            return active
+
+        candidates = list(self.log_dir.glob(f"{base}.{channel}.*.log"))
+        candidates += list(self.log_dir.glob(f"{base}.{channel}.*.log.gz"))
+        indexed: list[tuple[int, Path]] = []
+        for p in candidates:
+            m = re.search(rf"\.{re.escape(channel)}\.(\d+)\.log(?:\.gz)?$", p.name)
+            if m:
+                indexed.append((int(m.group(1)), p))
+        if not indexed:
+            return None
+        indexed.sort(key=lambda t: t[0])
+        return indexed[0][1]
+
+    def _load_log(self, path: Path | None):
         """Efficiently loads JSONL into Pandas"""
-        path = self.log_dir / filename
-        if not path.exists():
+        if path is None or not path.exists():
             return pd.DataFrame()
 
         data = []
-        with open(path, 'r') as f:
+        open_fn = gzip.open if str(path).endswith(".gz") else open
+        with open_fn(path, 'rt') as f:
             for line in f:
                 if line.strip():
                     try:
                         data.append(json.loads(line))
-                    except: pass
+                    except Exception:
+                        pass
         return pd.DataFrame(data)
 
     def _enrich_data(self):
@@ -105,6 +139,113 @@ class GpuFlightSession:
             m['throughput_gbps'] = m['bytes'] / duration_ns  # bytes/ns == GB/s
             m['duration_ms'] = (m['end_ns'] - m['start_ns']) / 1e6
             self.memcpy = m
+
+        if not self.perf.empty:
+            for col in [
+                'start_ns', 'end_ns',
+                'sm_throughput_pct', 'l1_hit_rate_pct', 'l2_hit_rate_pct',
+                'dram_read_bytes', 'dram_write_bytes', 'tensor_active_pct'
+            ]:
+                if col in self.perf.columns:
+                    self.perf[col] = pd.to_numeric(self.perf[col], errors='coerce')
+            if {'start_ns', 'end_ns'}.issubset(self.perf.columns):
+                self.perf['duration_ms'] = (self.perf['end_ns'] - self.perf['start_ns']) / 1e6
+
+    def _resolve_sample_kernel_names(self, samples: pd.DataFrame) -> tuple[dict, int]:
+        """Resolve sample corr_id -> kernel name.
+
+        Matching order:
+        1) Exact corr_id match
+        2) Fallback by function/device + time proximity (kernel interval or nearest midpoint)
+        """
+        if self.kernels.empty or 'corr_id' not in self.kernels.columns:
+            return {}, 0
+
+        required_kernel_cols = {'name', 'start_ns', 'end_ns'}
+        if not required_kernel_cols.issubset(self.kernels.columns):
+            return {}, 0
+
+        kernels = self.kernels.copy()
+        kernels = kernels.dropna(subset=['name', 'start_ns', 'end_ns'])
+        if kernels.empty:
+            return {}, 0
+
+        kernels['corr_id'] = pd.to_numeric(kernels['corr_id'], errors='coerce')
+        kernels['start_ns'] = pd.to_numeric(kernels['start_ns'], errors='coerce')
+        kernels['end_ns'] = pd.to_numeric(kernels['end_ns'], errors='coerce')
+        kernels['mid_ns'] = (kernels['start_ns'] + kernels['end_ns']) / 2.0
+        if 'device_id' in kernels.columns:
+            kernels['device_id_num'] = pd.to_numeric(kernels['device_id'], errors='coerce')
+        else:
+            kernels['device_id_num'] = pd.NA
+
+        samples = samples.copy()
+        if 'corr_id' in samples.columns:
+            samples['corr_id'] = pd.to_numeric(samples['corr_id'], errors='coerce')
+        if 'ts_ns' in samples.columns:
+            samples['ts_ns'] = pd.to_numeric(samples['ts_ns'], errors='coerce')
+        if 'device_id' in samples.columns:
+            samples['device_id_num'] = pd.to_numeric(samples['device_id'], errors='coerce')
+        else:
+            samples['device_id_num'] = pd.NA
+
+        corr_to_name = {}
+        fallback_used = 0
+
+        exact = (
+            kernels.dropna(subset=['corr_id'])
+            .drop_duplicates('corr_id')
+            .set_index('corr_id')['name']
+            .to_dict()
+        )
+
+        sample_keys = (
+            samples.dropna(subset=['corr_id'])
+            .groupby('corr_id', as_index=False)
+            .agg(
+                ts_ns=('ts_ns', 'median'),
+                function_name=('function_name', 'first') if 'function_name' in samples.columns else ('corr_id', 'first'),
+                device_id_num=('device_id_num', 'first'),
+            )
+        )
+
+        for _, s in sample_keys.iterrows():
+            corr_id = s['corr_id']
+            if corr_id in exact:
+                corr_to_name[corr_id] = exact[corr_id]
+                continue
+
+            candidates = kernels
+            fn = s.get('function_name', None)
+            if pd.notna(fn) and str(fn):
+                by_name = candidates[candidates['name'] == str(fn)]
+                if not by_name.empty:
+                    candidates = by_name
+
+            dev = s.get('device_id_num', pd.NA)
+            if pd.notna(dev):
+                by_dev = candidates[candidates['device_id_num'] == dev]
+                if not by_dev.empty:
+                    candidates = by_dev
+
+            if candidates.empty:
+                continue
+
+            ts = s.get('ts_ns', float('nan'))
+            if pd.notna(ts):
+                containing = candidates[(candidates['start_ns'] <= ts) & (ts <= candidates['end_ns'])]
+                choose_from = containing if not containing.empty else candidates
+                deltas = (choose_from['mid_ns'] - ts).abs()
+                idx = deltas.idxmin()
+            else:
+                idx = candidates['end_ns'].idxmax()
+
+            name = candidates.loc[idx, 'name']
+            if pd.notna(name):
+                corr_to_name[corr_id] = str(name)
+                fallback_used += 1
+
+        return corr_to_name, fallback_used
 
     def print_summary(self):
         """Prints an 'Executive Summary' of the session"""
@@ -267,6 +408,10 @@ class GpuFlightSession:
             return
 
         samples = self.scopes[self.scopes['type'] == 'profile_sample'].copy()
+        if 'sample_kind' in samples.columns:
+            samples = samples[samples['sample_kind'] == 'pc_sampling'].copy()
+        elif 'metric_name' in samples.columns:
+            samples = samples[samples['metric_name'].isna()].copy()
         if samples.empty:
             self.console.print("[yellow]No profile_sample events found — enable PC sampling at init.[/yellow]")
             return
@@ -292,10 +437,14 @@ class GpuFlightSession:
         # Pivot: rows = corr_id, columns = reason_name, values = pct
         pivot = stall_agg.pivot_table(index='corr_id', columns='reason_name', values='pct', fill_value=0.0)
 
-        # Join kernel names
-        if not self.kernels.empty and 'corr_id' in self.kernels.columns:
-            kernel_names = self.kernels[['corr_id', 'name']].drop_duplicates('corr_id').set_index('corr_id')
-            pivot = pivot.join(kernel_names, how='left')
+        # Join kernel names (corr_id first, then fallback by function/time)
+        corr_to_name, fallback_used = self._resolve_sample_kernel_names(samples)
+        if corr_to_name:
+            names_df = pd.DataFrame(
+                [(k, v) for k, v in corr_to_name.items()],
+                columns=['corr_id', 'name']
+            ).set_index('corr_id')
+            pivot = pivot.join(names_df, how='left')
             pivot['name'] = pivot['name'].fillna('unknown')
         else:
             pivot['name'] = 'unknown'
@@ -325,6 +474,145 @@ class GpuFlightSession:
             )
 
         self.console.print(table)
+        if fallback_used > 0:
+            self.console.print(
+                f"[yellow]Kernel name fallback used for {fallback_used} corr_id(s) "
+                f"(function/time-based match).[/yellow]"
+            )
+
+    def inspect_profile_samples(self, top_n: int = 10):
+        """Summarize profile_sample records from scope logs.
+
+        Shows top stall reasons by total sample count and, when kernel
+        correlation is available, top kernels by sampled stall pressure.
+        """
+        if self.scopes.empty or 'type' not in self.scopes.columns:
+            self.console.print("[yellow]No scope log data found.[/yellow]")
+            return
+
+        all_samples = self.scopes[self.scopes['type'] == 'profile_sample'].copy()
+        if all_samples.empty:
+            self.console.print("[yellow]No profile_sample events found in scope log.[/yellow]")
+            return
+
+        if 'sample_kind' in all_samples.columns:
+            pc_samples = all_samples[all_samples['sample_kind'] == 'pc_sampling'].copy()
+            sass_samples = all_samples[all_samples['sample_kind'] == 'sass_metric'].copy()
+        else:
+            if 'metric_name' in all_samples.columns:
+                sass_samples = all_samples[all_samples['metric_name'].notna()].copy()
+                pc_samples = all_samples[all_samples['metric_name'].isna()].copy()
+            else:
+                pc_samples = all_samples.copy()
+                sass_samples = pd.DataFrame()
+
+        if 'sample_count' not in pc_samples.columns:
+            pc_samples['sample_count'] = 0
+        pc_samples['sample_count'] = pd.to_numeric(pc_samples['sample_count'], errors='coerce').fillna(0)
+        if 'reason_name' not in pc_samples.columns:
+            if 'stall_reason' in pc_samples.columns:
+                pc_samples['reason_name'] = (
+                    "Stall_" + pd.to_numeric(pc_samples['stall_reason'], errors='coerce')
+                    .fillna(-1).astype(int).astype(str)
+                )
+            else:
+                pc_samples['reason_name'] = "unknown"
+        if float(pc_samples['sample_count'].sum()) <= 0.0:
+            pc_samples = pd.DataFrame()
+
+        if not pc_samples.empty:
+            by_reason = (
+                pc_samples.groupby('reason_name', dropna=False)['sample_count']
+                .sum()
+                .sort_values(ascending=False)
+                .head(top_n)
+            )
+
+            reason_table = Table(title=f"PC Sampling Reasons — Top {top_n}")
+            reason_table.add_column("Reason", style="cyan")
+            reason_table.add_column("Samples", justify="right")
+            total_samples = float(pc_samples['sample_count'].sum()) or 1.0
+            reason_table.add_column("Share", justify="right")
+            for reason, count in by_reason.items():
+                label = str(reason) if pd.notna(reason) and str(reason) else "unknown"
+                reason_table.add_row(label, str(int(count)), f"{(count/total_samples)*100:.1f}%")
+            self.console.print(reason_table)
+
+            if not self.kernels.empty and 'corr_id' in self.kernels.columns and 'corr_id' in pc_samples.columns:
+                sample_corr_ids = set(pc_samples['corr_id'].dropna().tolist())
+                kernel_corr_ids = set(self.kernels['corr_id'].dropna().tolist())
+                overlap_count = len(sample_corr_ids & kernel_corr_ids)
+                if sample_corr_ids and overlap_count == 0:
+                    self.console.print(
+                        "[yellow]No corr_id overlap between profile_sample and kernel_event. "
+                        "Kernel names will appear as 'unknown' (likely kernel throttling).[/yellow]"
+                    )
+
+                corr_to_name, fallback_used = self._resolve_sample_kernel_names(pc_samples)
+                kernel_samples = pc_samples.groupby('corr_id', as_index=False)['sample_count'].sum()
+                if corr_to_name:
+                    map_df = pd.DataFrame(
+                        [(k, v) for k, v in corr_to_name.items()],
+                        columns=['corr_id', 'name']
+                    )
+                    kernel_samples = kernel_samples.merge(map_df, on='corr_id', how='left')
+                if 'name' not in kernel_samples.columns:
+                    kernel_samples['name'] = 'unknown'
+                kernel_samples['name'] = kernel_samples['name'].fillna('unknown')
+                kernel_samples = kernel_samples.sort_values('sample_count', ascending=False).head(top_n)
+
+                kernel_table = Table(title=f"PC Sampling Kernels — Top {top_n}")
+                kernel_table.add_column("Kernel", style="cyan")
+                kernel_table.add_column("Samples", justify="right")
+                for _, row in kernel_samples.iterrows():
+                    kernel_table.add_row(str(row['name']), str(int(row['sample_count'])))
+                self.console.print(kernel_table)
+                if fallback_used > 0:
+                    self.console.print(
+                        f"[yellow]Kernel name fallback used for {fallback_used} corr_id(s) "
+                        f"(function/time-based match).[/yellow]"
+                    )
+        else:
+            self.console.print("[yellow]No pc_sampling records found in profile_sample stream.[/yellow]")
+
+        if not sass_samples.empty:
+            sass = sass_samples.copy()
+            if 'metric_value' in sass.columns:
+                sass['metric_value'] = pd.to_numeric(sass['metric_value'], errors='coerce').fillna(0)
+            else:
+                sass['metric_value'] = 0
+            if 'metric_name' not in sass.columns:
+                sass['metric_name'] = "unknown_metric"
+            if 'function_name' not in sass.columns:
+                sass['function_name'] = "unknown"
+
+            by_metric = (
+                sass.groupby('metric_name', dropna=False)['metric_value']
+                .sum()
+                .sort_values(ascending=False)
+                .head(top_n)
+            )
+            metric_table = Table(title=f"SASS Metrics — Top {top_n}")
+            metric_table.add_column("Metric", style="cyan")
+            metric_table.add_column("Total Value", justify="right")
+            for metric, value in by_metric.items():
+                metric_table.add_row(str(metric), str(int(value)))
+            self.console.print(metric_table)
+
+            by_func = (
+                sass.groupby('function_name', dropna=False)['metric_value']
+                .sum()
+                .sort_values(ascending=False)
+                .head(top_n)
+            )
+            func_table = Table(title=f"SASS Functions — Top {top_n}")
+            func_table.add_column("Function", style="cyan")
+            func_table.add_column("Metric Sum", justify="right")
+            for fn, value in by_func.items():
+                func_table.add_row(str(fn), str(int(value)))
+            self.console.print(func_table)
+        else:
+            self.console.print("[yellow]No sass_metric records found in profile_sample stream.[/yellow]")
 
     def inspect_scopes(self):
         """Analyze time spent in user-defined Scopes (e.g. 'Training_Epoch')"""
@@ -356,4 +644,78 @@ class GpuFlightSession:
                 f"{row['cpu_overhead_ms']:.2f} ms"
             )
 
+        self.console.print(table)
+
+    def inspect_perf_metrics(self, top_n: int = 10):
+        """Summarize perf_metric_event records from scope logs."""
+        if self.perf.empty:
+            self.console.print("[yellow]No perf_metric_event records found in scope log.[/yellow]")
+            return
+
+        p = self.perf.copy()
+        for col in ['sm_throughput_pct', 'l1_hit_rate_pct', 'l2_hit_rate_pct', 'tensor_active_pct']:
+            if col in p.columns:
+                # Backend uses -1.0 sentinel for unavailable counters.
+                p.loc[p[col] < 0, col] = float('nan')
+
+        def avg_if_exists(col: str):
+            return p[col].dropna().mean() if col in p.columns else float('nan')
+
+        def fmt_pct(v):
+            return f"{v:.2f}" if pd.notna(v) else "n/a"
+
+        summary = Table(title="Perf Metrics Summary")
+        summary.add_column("Metric", style="cyan")
+        summary.add_column("Average", justify="right")
+        summary.add_row("SM Throughput (%)", fmt_pct(avg_if_exists('sm_throughput_pct')))
+        summary.add_row("L1 Hit Rate (%)", fmt_pct(avg_if_exists('l1_hit_rate_pct')))
+        summary.add_row("L2 Hit Rate (%)", fmt_pct(avg_if_exists('l2_hit_rate_pct')))
+        summary.add_row("Tensor Active (%)", fmt_pct(avg_if_exists('tensor_active_pct')))
+        if 'dram_read_bytes' in p.columns:
+            summary.add_row("DRAM Read (avg)", _fmt_bytes(p['dram_read_bytes'].dropna().mean()))
+        if 'dram_write_bytes' in p.columns:
+            summary.add_row("DRAM Write (avg)", _fmt_bytes(p['dram_write_bytes'].dropna().mean()))
+        self.console.print(summary)
+
+        if 'name' not in p.columns:
+            return
+
+        for col in [
+            'sm_throughput_pct', 'l1_hit_rate_pct', 'l2_hit_rate_pct',
+            'tensor_active_pct', 'dram_read_bytes', 'dram_write_bytes'
+        ]:
+            if col not in p.columns:
+                p[col] = float('nan')
+
+        agg = p.groupby('name', dropna=False).agg(
+            count=('name', 'count'),
+            sm=('sm_throughput_pct', 'mean'),
+            l1=('l1_hit_rate_pct', 'mean'),
+            l2=('l2_hit_rate_pct', 'mean'),
+            tensor=('tensor_active_pct', 'mean'),
+            dram_r=('dram_read_bytes', 'mean'),
+            dram_w=('dram_write_bytes', 'mean'),
+        ).sort_values('count', ascending=False).head(top_n)
+
+        table = Table(title=f"Perf Metrics by Scope — Top {top_n}")
+        table.add_column("Scope", style="cyan")
+        table.add_column("Events", justify="right")
+        table.add_column("SM%", justify="right")
+        table.add_column("L1%", justify="right")
+        table.add_column("L2%", justify="right")
+        table.add_column("Tensor%", justify="right")
+        table.add_column("DRAM Read", justify="right")
+        table.add_column("DRAM Write", justify="right")
+
+        for scope_name, row in agg.iterrows():
+            table.add_row(
+                str(scope_name),
+                str(int(row['count'])),
+                fmt_pct(row['sm']),
+                fmt_pct(row['l1']),
+                fmt_pct(row['l2']),
+                fmt_pct(row['tensor']),
+                _fmt_bytes(row['dram_r']) if pd.notna(row['dram_r']) else "n/a",
+                _fmt_bytes(row['dram_w']) if pd.notna(row['dram_w']) else "n/a",
+            )
         self.console.print(table)

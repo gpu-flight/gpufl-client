@@ -2,6 +2,9 @@
 
 #include <cupti_sass_metrics.h>
 
+#include <string>
+#include <unordered_map>
+
 #include "gpufl/backends/nvidia/engine/profiling_engine.hpp"
 
 namespace gpufl {
@@ -34,6 +37,7 @@ class SassMetricsEngine final : public IProfilingEngine {
     EngineContext  ctx_;
 
     SassMetricsBuffers* sass_metrics_buffers_ = nullptr;
+    std::unordered_map<uint64_t, std::string> metric_id_to_name_;
 };
 
 }  // namespace gpufl
