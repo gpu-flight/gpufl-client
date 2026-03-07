@@ -170,10 +170,11 @@ struct ProfileSampleEvent {
 
     int64_t ts_ns = 0;
     uint32_t device_id = 0;
-    int32_t corr_id = 0;
+    uint32_t corr_id = 0;
     uint32_t samples_count = 0;
     uint32_t stall_reason = 0;
     std::string reason_name;
+    std::string sample_kind;  // "pc_sampling" | "sass_metric"
 
     std::string source_file;
     std::string function_name;

@@ -15,7 +15,8 @@ std::string ProfileSampleModel::buildJson() const {
         << ",\"session_id\":\"" << jsonEscape(e_.session_id) << "\""
         << ",\"ts_ns\":"         << e_.ts_ns
         << ",\"device_id\":"     << e_.device_id
-        << ",\"corr_id\":"       << e_.corr_id;
+        << ",\"corr_id\":"       << e_.corr_id
+        << ",\"sample_kind\":\"" << jsonEscape(e_.sample_kind) << "\"";
 
     if (e_.samples_count > 0) {
         oss << ",\"sample_count\":" << e_.samples_count

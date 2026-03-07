@@ -20,6 +20,8 @@ namespace gpufl {
 namespace {
 std::vector<const char*> kPerfMetricNames = {
     "sm__throughput.avg.pct_of_peak_sustained_elapsed",
+    "l1tex__t_sector_hit_rate.pct",
+    "lts__t_sector_hit_rate.pct",
     "dram__bytes_read.sum",
     "dram__bytes_write.sum",
     "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active",
@@ -445,19 +447,29 @@ void RangeProfilerEngine::EndPerfPassAndDecode_() {
                               cuptiProfilerHostEvaluateToGpuValues(&p))) {
         return;
     }
+    for (size_t i = 0; i < metricNames.size() && i < values.size(); ++i) {
+        GFL_LOG_DEBUG("[RangeProfilerEngine] metric ", metricNames[i], " = ",
+                      values[i], " finite=", std::isfinite(values[i]));
+    }
 
     std::lock_guard<std::mutex> lk(perf_mu_);
     perf_last_event_ = PerfMetricEvent{};
     if (!values.empty() && std::isfinite(values[0]))
         perf_last_event_.sm_throughput_pct = values[0];
     if (values.size() > 1)
-        perf_last_event_.dram_read_bytes =
-            (values[1] >= 0.0) ? static_cast<uint64_t>(values[1]) : 0;
+        perf_last_event_.l1_hit_rate_pct =
+            std::isfinite(values[1]) ? values[1] : -1.0;
     if (values.size() > 2)
+        perf_last_event_.l2_hit_rate_pct =
+            std::isfinite(values[2]) ? values[2] : -1.0;
+    if (values.size() > 3)
+        perf_last_event_.dram_read_bytes =
+            (values[3] >= 0.0) ? static_cast<uint64_t>(values[3]) : 0;
+    if (values.size() > 4)
         perf_last_event_.dram_write_bytes =
-            (values[2] >= 0.0) ? static_cast<uint64_t>(values[2]) : 0;
-    if (values.size() > 3 && std::isfinite(values[3]))
-        perf_last_event_.tensor_active_pct = values[3];
+            (values[4] >= 0.0) ? static_cast<uint64_t>(values[4]) : 0;
+    if (values.size() > 5 && std::isfinite(values[5]))
+        perf_last_event_.tensor_active_pct = values[5];
     perf_has_event_ = true;
     GFL_LOG_DEBUG("[RangeProfilerEngine] Decoded metrics, perf_has_event_=true");
 }

@@ -328,6 +328,8 @@ void PcSamplingEngine::StopAndCollectPcSampling_() {
                                                   res);
                         }
                         out.corr_id      = pc.correlationId;
+                        std::snprintf(out.sample_kind, sizeof(out.sample_kind),
+                                      "%s", "pc_sampling");
                         out.samples_count = pc.stallReason[j].samples;
                         out.stall_reason =
                             pc.stallReason[j].pcSamplingStallReasonIndex;

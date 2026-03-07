@@ -42,7 +42,7 @@ int main() {
     opts.enable_kernel_details = true;
     opts.sampling_auto_start = true;
     opts.enable_debug_output = true;
-    opts.profiling_engine = gpufl::ProfilingEngine::PcSampling;
+    opts.profiling_engine = gpufl::ProfilingEngine::SassMetrics;
 
     if (!gpufl::init(opts)) {
         std::cerr << "Failed to initialize gpufl" << std::endl;
