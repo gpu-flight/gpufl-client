@@ -13,7 +13,11 @@
 #include "gpufl/backends/nvidia/cupti_backend.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
-#include "gpufl/core/logger.hpp"
+#include "gpufl/core/logger/logger.hpp"
+#include "gpufl/core/model/kernel_event_model.hpp"
+#include "gpufl/core/model/memcpy_event_model.hpp"
+#include "gpufl/core/model/profile_sample_model.hpp"
+#include "gpufl/core/model/scope_event_model.hpp"
 #include "gpufl/core/monitor_backend.hpp"
 #include "gpufl/core/ring_buffer.hpp"
 #include "gpufl/core/runtime.hpp"
@@ -162,7 +166,7 @@ void CollectorLoop() {
                             be.limiting_resource = rec.limiting_resource;
                             be.max_active_blocks = rec.max_active_blocks;
                         }
-                        rt->logger->logKernelEvent(be);
+                        rt->logger->write(model::KernelEventModel(be));
                     } else if (rec.type == TraceType::MEMCPY) {
                         MemcpyEvent be;
                         be.platform = "cuda";
@@ -185,7 +189,7 @@ void CollectorLoop() {
                         be.copy_kind = MemcpyKindToString(rec.copy_kind);
                         be.src_kind = MemoryKindToString(rec.src_kind);
                         be.dst_kind = MemoryKindToString(rec.dst_kind);
-                        rt->logger->logMemcpyEvent(be);
+                        rt->logger->write(model::MemcpyEventModel(be));
                     } else if (rec.type == TraceType::MEMSET) {
                         MemsetEvent be;
                         be.platform = "cuda";
@@ -205,7 +209,7 @@ void CollectorLoop() {
                         be.corr_id = rec.corr_id;
                         be.stack_trace = stack_trace;
                         be.bytes = rec.bytes;
-                        rt->logger->logMemsetEvent(be);
+                        rt->logger->write(model::MemsetEventModel(be));
                     }
 
                 } else if (rec.type == TraceType::RANGE) {
@@ -218,7 +222,7 @@ void CollectorLoop() {
                     if (rt->collector) be.devices = rt->collector->sampleAll();
                     if (rt->host_collector)
                         be.host = rt->host_collector->sample();
-                    rt->logger->logScopeBegin(be);
+                    rt->logger->write(model::ScopeBeginModel(be));
 
                     ScopeEndEvent ee;
                     ee.pid = detail::GetPid();
@@ -229,7 +233,7 @@ void CollectorLoop() {
                     if (rt->collector) ee.devices = rt->collector->sampleAll();
                     if (rt->host_collector)
                         ee.host = rt->host_collector->sample();
-                    rt->logger->logScopeEnd(ee);
+                    rt->logger->write(model::ScopeEndModel(ee));
                 } else if (rec.type == TraceType::PC_SAMPLE) {
                     ProfileSampleEvent pe;
                     pe.pid = detail::GetPid();
@@ -247,7 +251,7 @@ void CollectorLoop() {
                     pe.metric_name = rec.metric_name;
                     pe.metric_value = rec.metric_value;
                     pe.pc_offset = rec.pc_offset;
-                    rt->logger->logProfileSample(pe);
+                    rt->logger->write(model::ProfileSampleModel(pe));
                 }
             }
 

@@ -76,6 +76,7 @@ bool IsContextValid(CUcontext ctx) {
 bool EnsureCudaContext(CUcontext* ctx) {
     if (!ctx) return false;
 
+
     if (*ctx && IsContextValid(*ctx)) {
         return true;
     }

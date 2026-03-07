@@ -20,9 +20,8 @@ struct InitOptions {
     bool sampling_auto_start = false;
     bool enable_kernel_details = false;
     bool enable_debug_output = false;
-    bool enable_profiling = true;
     bool enable_stack_trace = true;
-    bool enable_perf_scope = false;
+    ProfilingEngine profiling_engine = ProfilingEngine::PcSampling;
 };
 
 struct BackendProbeResult {
