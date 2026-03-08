@@ -46,21 +46,32 @@ jobs:
             Write-Host "virtualenv.pyz already cached: $dest"
             exit 0
           }
-          $url = "https://github.com/pypa/get-virtualenv/blob/$version/public/virtualenv.pyz?raw=true"
+          $urls = @(
+            "https://raw.githubusercontent.com/pypa/get-virtualenv/$version/public/virtualenv.pyz",
+            "https://raw.githubusercontent.com/pypa/get-virtualenv/refs/tags/$version/public/virtualenv.pyz",
+            "https://bootstrap.pypa.io/virtualenv.pyz"
+          )
           $max = 6
-          for ($i = 1; $i -le $max; $i++) {
-            try {
-              Write-Host "Downloading virtualenv.pyz (attempt $i/$max)..."
-              Invoke-WebRequest -Uri $url -OutFile $dest -TimeoutSec 120
-              if ((Get-Item $dest).Length -gt 0) {
-                Write-Host "Downloaded: $dest"
-                break
+          $ok = $false
+          foreach ($url in $urls) {
+            for ($i = 1; $i -le $max; $i++) {
+              try {
+                Write-Host "Downloading virtualenv.pyz from $url (attempt $i/$max)..."
+                Invoke-WebRequest -Uri $url -OutFile $dest -TimeoutSec 120 -Headers @{ "User-Agent" = "cibuildwheel-prefetch" }
+                if ((Get-Item $dest).Length -gt 0) {
+                  Write-Host "Downloaded: $dest"
+                  $ok = $true
+                  break
+                }
+              } catch {
+                if (Test-Path $dest) { Remove-Item $dest -Force -ErrorAction SilentlyContinue }
+                if ($i -eq $max) { break }
+                Start-Sleep -Seconds (5 * $i)
               }
-            } catch {
-              if ($i -eq $max) { throw }
-              Start-Sleep -Seconds (5 * $i)
             }
+            if ($ok) { break }
           }
+          if (-not $ok) { throw "Failed to prefetch virtualenv.pyz from all sources." }
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.22.0
