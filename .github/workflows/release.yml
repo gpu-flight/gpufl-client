@@ -17,6 +17,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Cache cibuildwheel downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/cibuildwheel
+            ~/AppData/Local/pypa/cibuildwheel/Cache
+          key: cibw-${{ runner.os }}-${{ hashFiles('.github/workflows/release.yml') }}
+          restore-keys: |
+            cibw-${{ runner.os }}-
+
       - name: Install CUDA (Windows)
         if: runner.os == 'Windows'
         uses: Jimver/cuda-toolkit@v0.2.30
@@ -24,9 +34,38 @@ jobs:
           cuda: '13.1.0'
           method: 'network'
 
+      - name: Prefetch virtualenv.pyz (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = "20.27.1"
+          $cacheDir = Join-Path $env:LOCALAPPDATA "pypa\cibuildwheel\Cache"
+          New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
+          $dest = Join-Path $cacheDir "virtualenv-$version.pyz"
+          if (Test-Path $dest) {
+            Write-Host "virtualenv.pyz already cached: $dest"
+            exit 0
+          }
+          $url = "https://bootstrap.pypa.io/virtualenv/$version/virtualenv.pyz"
+          $max = 6
+          for ($i = 1; $i -le $max; $i++) {
+            try {
+              Write-Host "Downloading virtualenv.pyz (attempt $i/$max)..."
+              Invoke-WebRequest -Uri $url -OutFile $dest -TimeoutSec 120
+              if ((Get-Item $dest).Length -gt 0) {
+                Write-Host "Downloaded: $dest"
+                break
+              }
+            } catch {
+              if ($i -eq $max) { throw }
+              Start-Sleep -Seconds (5 * $i)
+            }
+          }
+
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.22.0
         env:
+          CIBW_VIRTUALENV_VERSION: "20.27.1"
           CIBW_ENVIRONMENT_LINUX: "CUDA_HOME=/usr/local/cuda PATH=/usr/local/cuda/bin:$PATH CMAKE_ARGS='-DGPUFL_ENABLE_NVIDIA=ON -DGPUFL_ENABLE_AMD=OFF -DBUILD_TESTING=OFF'"
           CIBW_BEFORE_ALL_LINUX: >-
             curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo > /etc/yum.repos.d/cuda.repo &&
