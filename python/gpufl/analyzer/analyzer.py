@@ -55,7 +55,27 @@ class GpuFlightSession:
         self.scopes = self._load_log(self._resolve_log_path(log_prefix, "scope"))
         self.system = self._load_log(self._resolve_log_path(log_prefix, "system"))
 
-        # 2. Split device log by event type
+        # 2. Extract session boundaries from device log
+        self.session_start_ns = None
+        self.session_end_ns = None
+        self.static_devices = []
+
+        if not self.device.empty and 'type' in self.device.columns:
+            init_rows = self.device[self.device['type'] == 'init']
+            shutdown_rows = self.device[self.device['type'] == 'shutdown']
+
+            if not init_rows.empty and 'ts_ns' in init_rows.columns:
+                self.session_start_ns = pd.to_numeric(init_rows.iloc[0]['ts_ns'], errors='coerce')
+            if not shutdown_rows.empty and 'ts_ns' in shutdown_rows.columns:
+                self.session_end_ns = pd.to_numeric(shutdown_rows.iloc[-1]['ts_ns'], errors='coerce')
+
+            # Extract static device info from init event
+            if not init_rows.empty and 'cuda_static_devices' in init_rows.columns:
+                static_devs = init_rows.iloc[0].get('cuda_static_devices')
+                if isinstance(static_devs, list):
+                    self.static_devices = static_devs
+
+        # 3. Split device log by event type
         if not self.device.empty and 'type' in self.device.columns:
             self.kernels = self.device[self.device['type'] == 'kernel_event'].copy()
             self.memcpy  = self.device[self.device['type'] == 'memcpy_event'].copy()
@@ -70,7 +90,7 @@ class GpuFlightSession:
         else:
             self.perf = pd.DataFrame()
 
-        # 3. Filter by Session ID if provided (or pick the latest)
+        # 4. Filter by Session ID if provided (or pick the latest)
         if session_id:
             self.kernels = self.kernels[self.kernels['session_id'] == session_id]
             self.memcpy  = self.memcpy[self.memcpy['session_id'] == session_id]
@@ -78,7 +98,7 @@ class GpuFlightSession:
             if not self.perf.empty and 'session_id' in self.perf.columns:
                 self.perf = self.perf[self.perf['session_id'] == session_id]
 
-        # 4. Pre-Calculate Metrics (The "Secret Sauce")
+        # 5. Pre-Calculate Metrics (The "Secret Sauce")
         self._enrich_data()
 
     def _resolve_log_path(self, log_prefix: str, channel: str) -> Path | None:
@@ -253,11 +273,15 @@ class GpuFlightSession:
             self.console.print("[bold red]No kernel data found![/bold red]")
             return
 
-        total_duration = self.kernels['end_ns'].max() - self.kernels['start_ns'].min()
+        # Use session init->shutdown timestamps if available, fall back to kernel span
+        if self.session_start_ns is not None and self.session_end_ns is not None:
+            total_duration = self.session_end_ns - self.session_start_ns
+        else:
+            total_duration = self.kernels['end_ns'].max() - self.kernels['start_ns'].min()
         total_duration_ms = total_duration / 1e6
         gpu_busy_time = self.kernels['duration_ms'].sum()
 
-        # Calculate global GPU Utilization % from logs if available, or estimate
+        # Try to get runtime device stats from system samples
         def get_device_stat(devices, key, agg='mean'):
             if not isinstance(devices, list) or len(devices) == 0:
                 return 0
@@ -265,8 +289,20 @@ class GpuFlightSession:
             if not stats: return 0
             return sum(stats) / len(stats) if agg == 'mean' else max(stats)
 
-        avg_gpu_util = self.system['devices'].apply(lambda x: get_device_stat(x, 'util_gpu')).mean()
-        peak_mem = self.system['devices'].apply(lambda x: get_device_stat(x, 'used_mib', 'max')).max()
+        has_device_stats = False
+        avg_gpu_util = 0.0
+        peak_mem = 0
+
+        if not self.system.empty and 'devices' in self.system.columns:
+            non_empty = self.system[self.system['devices'].apply(
+                lambda x: isinstance(x, list) and len(x) > 0
+            )]
+            if not non_empty.empty:
+                has_device_stats = True
+                avg_gpu_util = non_empty['devices'].apply(
+                    lambda x: get_device_stat(x, 'util_gpu')).mean()
+                peak_mem = non_empty['devices'].apply(
+                    lambda x: get_device_stat(x, 'used_mib', 'max')).max()
 
         # Create Dashboard
         grid = Table.grid(expand=True)
@@ -277,8 +313,21 @@ class GpuFlightSession:
         stats.add_row("Total Duration:", f"[bold cyan]{total_duration_ms/1000:.2f} s[/bold cyan]")
         stats.add_row("Total Kernels:", f"[bold]{len(self.kernels)}[/bold]")
         stats.add_row("GPU Busy Time:", f"[green]{gpu_busy_time/1000:.2f} s[/green]")
-        stats.add_row("Avg GPU Util:", f"[yellow]{avg_gpu_util:.1f}%[/yellow]")
-        stats.add_row("Peak VRAM:", f"[red]{peak_mem} MiB[/red]")
+
+        if has_device_stats:
+            stats.add_row("Avg GPU Util:", f"[yellow]{avg_gpu_util:.1f}%[/yellow]")
+            stats.add_row("Peak VRAM:", f"[red]{peak_mem} MiB[/red]")
+        else:
+            # Show device info from cuda_static_devices instead of misleading zeros
+            if self.static_devices:
+                for dev in self.static_devices:
+                    name = dev.get('name', 'Unknown GPU')
+                    sm_count = dev.get('multi_processor_count', '?')
+                    stats.add_row("Device:", f"[yellow]{name}[/yellow]")
+                    stats.add_row("SMs:", f"[yellow]{sm_count}[/yellow]")
+            else:
+                stats.add_row("Avg GPU Util:", f"[dim]n/a (NVML unavailable)[/dim]")
+                stats.add_row("Peak VRAM:", f"[dim]n/a (NVML unavailable)[/dim]")
 
         self.console.print(Panel(stats, title="[bold]GPUFlight Session Report[/bold]", subtitle=self.kernels.iloc[0]['app']))
 
