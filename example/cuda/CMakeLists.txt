@@ -38,11 +38,19 @@ add_executable(list_sass_metrics list_sass_metrics.cu)
 add_executable(vector_add_benchmark vector_add_benchmark.cu)
 add_executable(cupti_basic cupti_basic.cu)
 add_executable(occupancy_demo occupancy_demo.cu)
+add_executable(sass_divergence_demo sass_divergence_demo.cu)
 
 target_compile_options(gfl_block_example PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:
         -lineinfo
         -gencode=arch=compute_86,code=sm_86     # embeds cubin
+        -gencode=arch=compute_86,code=compute_86
+        >)
+
+target_compile_options(sass_divergence_demo PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:
+        -lineinfo
+        -gencode=arch=compute_86,code=sm_86
         -gencode=arch=compute_86,code=compute_86
         >)
 
@@ -125,6 +133,12 @@ target_link_libraries(occupancy_demo PRIVATE
     CUDA::cudart
 )
 
+target_link_libraries(sass_divergence_demo PRIVATE
+    gpufl::gpufl
+    CUDA::cupti
+    CUDA::cudart
+)
+
 # Properties
 set_target_properties(gfl_block_example PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
@@ -161,6 +175,9 @@ set_target_properties(vector_add_benchmark PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
 )
 set_target_properties(occupancy_demo PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+)
+set_target_properties(sass_divergence_demo PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
 )
 
@@ -219,7 +236,7 @@ if(WIN32)
         # Handle case where GLOB returns multiple versions; just take the first one
         list(GET CUPTI_DLL_LIST 0 CUPTI_DLL_TO_COPY)
 
-        foreach(TARGET_NAME test_occupancy system_monitor gfl_block_example cupti_pc_sampling test_sass_metrics test_sass_cubin list_sass_metrics vector_add_benchmark occupancy_demo)
+        foreach(TARGET_NAME test_occupancy system_monitor gfl_block_example cupti_pc_sampling test_sass_metrics test_sass_cubin list_sass_metrics vector_add_benchmark occupancy_demo sass_divergence_demo)
             add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${CUPTI_DLL_TO_COPY}"
