@@ -21,6 +21,7 @@ extern RingBuffer<ActivityRecord, 1024> g_monitorBuffer;
 namespace {
 std::vector<const char*> kSassMetricNames = {
     "smsp__sass_inst_executed",
+    "smsp__sass_thread_inst_executed",
 };
 }
 
