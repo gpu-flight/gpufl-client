@@ -151,7 +151,7 @@ void PcSamplingEngine::EnableSamplingFeatures_() {
                     free(stallReasonNames[i]);
                 }
             } else {
-                std::cout << "error " << res << std::endl;
+                GFL_LOG_ERROR("[PcSamplingEngine] cuptiPCSamplingGetStallReasons failed: ", res);
             }
             free(stallIndices);
             free(stallReasonNames);

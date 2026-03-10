@@ -203,6 +203,7 @@ bool init(const InitOptions& opts) {
                               opts.system_sample_rate_ms, rt_ptr->app_name);
     }
 
+    // Intentionally disabled — shutdown order must be explicit to avoid CUPTI teardown races
     // std::atexit(shutdown);
 
     GFL_LOG_DEBUG("Initialization complete!");
