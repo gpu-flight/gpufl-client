@@ -81,10 +81,10 @@ inline std::string cudaStaticDevicesToJson(
             << ",\"uuid\":\""          << jsonEscape(d.uuid) << "\""
             << ",\"compute_major\":\"" << d.compute_major    << "\""
             << ",\"compute_minor\":"   << d.compute_minor
-            << ",\"l2_cache_size\":"   << d.l2_cache_size
-            << ",\"shared_mem_per_block\":" << d.shared_mem_per_block
-            << ",\"regs_per_block\":"       << d.regs_per_block
-            << ",\"multi_processor_count\":" << d.multi_processor_count
+            << ",\"l2_cache_size_bytes\":"        << d.l2_cache_size
+            << ",\"shared_mem_per_block_bytes\":"  << d.shared_mem_per_block
+            << ",\"regs_per_block\":"              << d.regs_per_block
+            << ",\"multi_processor_count\":"       << d.multi_processor_count
             << ",\"warp_size\":"       << d.warp_size << "}";
     }
     oss << "]";
