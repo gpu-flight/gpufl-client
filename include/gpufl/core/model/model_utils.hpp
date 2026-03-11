@@ -52,17 +52,17 @@ inline std::string devicesToJson(const std::vector<DeviceSample>& devs) {
             << ",\"used_mib\":"  << d.used_mib
             << ",\"free_mib\":"  << d.free_mib
             << ",\"total_mib\":" << d.total_mib
-            << ",\"util_gpu\":"  << d.gpu_util
-            << ",\"util_mem\":"  << d.mem_util
+            << ",\"util_gpu_pct\":"  << d.gpu_util
+            << ",\"util_mem_pct\":"  << d.mem_util
             << ",\"temp_c\":"    << d.temp_c
             << ",\"power_mw\":"  << d.power_mw
-            << ",\"clk_gfx\":"   << d.clock_gfx
-            << ",\"clk_sm\":"    << d.clock_sm
-            << ",\"clk_mem\":"   << d.clock_mem
+            << ",\"clk_gfx_mhz\":"   << d.clock_gfx
+            << ",\"clk_sm_mhz\":"    << d.clock_sm
+            << ",\"clk_mem_mhz\":"   << d.clock_mem
             << ",\"throttle_pwr\":"   << (d.throttle_power   ? 1 : 0)
             << ",\"throttle_therm\":" << (d.throttle_thermal ? 1 : 0)
-            << ",\"pcie_rx_bw\":" << d.pcie_rx_bps
-            << ",\"pcie_tx_bw\":" << d.pcie_tx_bps << "}";
+            << ",\"pcie_rx_bw_bps\":" << d.pcie_rx_bps
+            << ",\"pcie_tx_bw_bps\":" << d.pcie_tx_bps << "}";
     }
     oss << "]";
     return oss.str();
