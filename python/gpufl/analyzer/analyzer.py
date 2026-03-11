@@ -300,7 +300,7 @@ class GpuFlightSession:
             if not non_empty.empty:
                 has_device_stats = True
                 avg_gpu_util = non_empty['devices'].apply(
-                    lambda x: get_device_stat(x, 'util_gpu')).mean()
+                    lambda x: get_device_stat(x, 'util_gpu_pct')).mean()
                 peak_mem = non_empty['devices'].apply(
                     lambda x: get_device_stat(x, 'used_mib', 'max')).max()
 
