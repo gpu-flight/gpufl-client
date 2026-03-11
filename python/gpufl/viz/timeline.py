@@ -71,15 +71,14 @@ def _explode_device_samples(df, gpu_id=0):
         if found:
             rows.append({
                 "ts_ns": ts,
-                "util_gpu": found.get("util_gpu", 0),
-                "util_mem": found.get("util_mem", 0),
+                "util_gpu_pct": found.get("util_gpu_pct", 0),
+                "util_mem_pct": found.get("util_mem_pct", 0),
                 "used_mib": found.get("used_mib", 0),
                 "temp_c": found.get("temp_c", 0),
                 "power_mw": found.get("power_mw", 0),
-                "clk_sm": found.get("clk_sm", 0),
-                # [NEW] Extract Bandwidth and convert B/s -> GB/s
-                "pcie_rx_gbps": found.get("pcie_rx_bw", 0) / 1e9,
-                "pcie_tx_gbps": found.get("pcie_tx_bw", 0) / 1e9,
+                "clk_sm_mhz": found.get("clk_sm_mhz", 0),
+                "pcie_rx_gbps": found.get("pcie_rx_bw_bps", 0) / 1e9,
+                "pcie_tx_gbps": found.get("pcie_tx_bw_bps", 0) / 1e9,
             })
 
     out = pd.DataFrame(rows)
@@ -272,15 +271,14 @@ def plot_combined_timeline(df, title="GPUFL Timeline"):
     # --- Row 1: GPU Metrics ---
     if not gpu_samples.empty:
         t = gpu_samples["t_s_abs"]
-        ax1.plot(t, gpu_samples["util_gpu"], label="GPU %", color='tab:green')
-        ax1.plot(t, gpu_samples["util_mem"], label="Mem %", color='tab:purple', linestyle="--")
-        
+        ax1.plot(t, gpu_samples["util_gpu_pct"], label="GPU %", color='tab:green')
+        ax1.plot(t, gpu_samples["util_mem_pct"], label="Mem %", color='tab:purple', linestyle="--")
+
         # [NEW] Optional metrics from system log
         if "temp_c" in gpu_samples.columns and gpu_samples["temp_c"].max() > 0:
              ax1.plot(t, gpu_samples["temp_c"], label="Temp (C)", color='tab:red', alpha=0.3)
-        if "clk_sm" in gpu_samples.columns and gpu_samples["clk_sm"].max() > 0:
-             # Scale clock for visibility if needed, or use another axis. Let's just plot it.
-             ax1.plot(t, gpu_samples["clk_sm"] / 10, label="SM Clock (x10 MHz)", color='tab:orange', alpha=0.3)
+        if "clk_sm_mhz" in gpu_samples.columns and gpu_samples["clk_sm_mhz"].max() > 0:
+             ax1.plot(t, gpu_samples["clk_sm_mhz"] / 10, label="SM Clock (x10 MHz)", color='tab:orange', alpha=0.3)
 
         # [NEW] Visualize Kernel Occupancy points on the timeline
         if kernel_data:

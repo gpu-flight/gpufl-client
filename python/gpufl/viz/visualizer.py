@@ -172,7 +172,7 @@ def compare(group_by="app", metric="gpu", **filters):
                 # Normalize time to start at 0 for comparison
                 start_t = s["ts_ns"].min()
                 t_axis = (s["ts_ns"] - start_t) / 1e9
-                plt.plot(t_axis, s["util_gpu"], label=label)
+                plt.plot(t_axis, s["util_gpu_pct"], label=label)
                 has_plot = True
 
         elif metric == "cpu":
