@@ -39,6 +39,8 @@ class SassMetricsEngine final : public IProfilingEngine {
 
     SassMetricsBuffers* sass_metrics_buffers_ = nullptr;
     std::unordered_map<uint64_t, std::string> metric_id_to_name_;
+    bool enabled_ = false;
+    bool config_set_ = false;
 };
 
 }  // namespace gpufl

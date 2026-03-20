@@ -16,6 +16,19 @@
 #include "gpufl/gpufl.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/monitor.hpp"
+static bool CheckCuda(cudaError_t err, const char* call, const char* file,
+                      int line) {
+    if (err == cudaSuccess) return true;
+    std::cerr << "[CUDA ERROR] " << file << ":" << line << " " << call
+              << " failed: " << cudaGetErrorString(err) << " ("
+              << static_cast<int>(err) << ")" << std::endl;
+    return false;
+}
+
+#define CHECK_CUDA(call)                                              \
+    do {                                                              \
+        if (!CheckCuda((call), #call, __FILE__, __LINE__)) return 2; \
+    } while (0)
 
 // ---------------------------------------------------------------------------
 // Kernel 1: No divergence — all threads do the same work.
@@ -134,6 +147,7 @@ int main() {
     opts.app_name = "sass_divergence_demo";
     opts.log_path = "sass_divergence";
     opts.enable_kernel_details = true;
+    opts.enable_debug_output = true;
     opts.sampling_auto_start = true;
     opts.enable_stack_trace = false;
     opts.profiling_engine = gpufl::ProfilingEngine::SassMetrics;
@@ -150,8 +164,8 @@ int main() {
 
     float* d_in;
     float* d_out;
-    cudaMalloc(&d_in, bytes);
-    cudaMalloc(&d_out, bytes);
+    CHECK_CUDA(cudaMalloc(&d_in, bytes));
+    CHECK_CUDA(cudaMalloc(&d_out, bytes));
 
     // Fill input with values in [0, 1)
     float* h_in = new float[n];
@@ -159,7 +173,7 @@ int main() {
     for (int i = 0; i < n; ++i) {
         h_in[i] = (float)rand() / (float)RAND_MAX;
     }
-    cudaMemcpy(d_in, h_in, bytes, cudaMemcpyHostToDevice);
+    CHECK_CUDA(cudaMemcpy(d_in, h_in, bytes, cudaMemcpyHostToDevice));
 
     dim3 block(256);
     dim3 grid((n + block.x - 1) / block.x);
@@ -168,39 +182,44 @@ int main() {
     std::cout << "  [1/5] uniformWork — no divergence" << std::endl;
     GFL_SCOPE("1_uniform_work") {
         uniformWork<<<grid, block>>>(d_out, d_in, n);
-        cudaDeviceSynchronize();
+        CHECK_CUDA(cudaGetLastError());
+        CHECK_CUDA(cudaDeviceSynchronize());
     }
 
     // --- Kernel 2: Even/odd split ---
     std::cout << "  [2/5] branchByWarpLane — 50/50 divergence" << std::endl;
     GFL_SCOPE("2_branch_by_lane") {
         branchByWarpLane<<<grid, block>>>(d_out, d_in, n);
-        cudaDeviceSynchronize();
+        CHECK_CUDA(cudaGetLastError());
+        CHECK_CUDA(cudaDeviceSynchronize());
     }
 
     // --- Kernel 3: Quad split ---
     std::cout << "  [3/5] branchByWarpQuad — 75% threads idle" << std::endl;
     GFL_SCOPE("3_branch_by_quad") {
         branchByWarpQuad<<<grid, block>>>(d_out, d_in, n);
-        cudaDeviceSynchronize();
+        CHECK_CUDA(cudaGetLastError());
+        CHECK_CUDA(cudaDeviceSynchronize());
     }
 
     // --- Kernel 4: Early exit (50% threshold) ---
     std::cout << "  [4/5] earlyExit — data-dependent early return" << std::endl;
     GFL_SCOPE("4_early_exit") {
         earlyExit<<<grid, block>>>(d_out, d_in, 0.5f, n);
-        cudaDeviceSynchronize();
+        CHECK_CUDA(cudaGetLastError());
+        CHECK_CUDA(cudaDeviceSynchronize());
     }
 
     // --- Kernel 5: Data-dependent switch ---
     std::cout << "  [5/5] indirectBranch — 4-way data-dependent" << std::endl;
     GFL_SCOPE("5_indirect_branch") {
         indirectBranch<<<grid, block>>>(d_out, d_in, n);
-        cudaDeviceSynchronize();
+        CHECK_CUDA(cudaGetLastError());
+        CHECK_CUDA(cudaDeviceSynchronize());
     }
 
-    cudaFree(d_in);
-    cudaFree(d_out);
+    CHECK_CUDA(cudaFree(d_in));
+    CHECK_CUDA(cudaFree(d_out));
     delete[] h_in;
 
     gpufl::shutdown();
