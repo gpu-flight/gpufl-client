@@ -23,12 +23,25 @@ std::vector<const char*> kSassMetricNames = {
     "smsp__sass_inst_executed",
     "smsp__sass_thread_inst_executed",
 };
+
+void FreeCuptiCorrelationString(char* s) {
+    if (!s) return;
+#if defined(_WIN32) && defined(_DEBUG)
+    // CUPTI may allocate these with a different CRT heap than the debug app.
+    // Avoid invalid heap-pointer assertions in Debug on Windows.
+    (void)s;
+#else
+    std::free(s);
+#endif
+}
 }
 
 bool SassMetricsEngine::initialize(const MonitorOptions& opts,
                                     const EngineContext& ctx) {
     opts_ = opts;
     ctx_  = ctx;
+    enabled_ = false;
+    config_set_ = false;
     GFL_LOG_DEBUG("[SassMetricsEngine] initialized");
     return true;
 }
@@ -42,8 +55,10 @@ void SassMetricsEngine::start() {
     // Initialize profiler device — required before SASS Metrics APIs
     CUpti_Profiler_Initialize_Params p = {
         CUpti_Profiler_Initialize_Params_STRUCT_SIZE};
-    LogCuptiErrorIfFailed(this->name(), "cuptiProfilerInitialize",
-                          cuptiProfilerInitialize(&p));
+    if (LogCuptiErrorIfFailed(this->name(), "cuptiProfilerInitialize",
+                              cuptiProfilerInitialize(&p))) {
+        return;
+    }
 
     EnableSassMetrics_();
 }
@@ -51,6 +66,22 @@ void SassMetricsEngine::start() {
 void SassMetricsEngine::stop() {}
 
 void SassMetricsEngine::shutdown() {
+    if (enabled_) {
+        CUpti_SassMetricsDisable_Params disableParams = {
+            CUpti_SassMetricsDisable_Params_STRUCT_SIZE};
+        disableParams.ctx = ctx_.cuda_ctx;
+        LogCuptiErrorIfFailed(this->name(), "cuptiSassMetricsDisable",
+                              cuptiSassMetricsDisable(&disableParams));
+    }
+
+    if (config_set_) {
+        CUpti_SassMetricsUnsetConfig_Params unsetParams = {
+            CUpti_SassMetricsUnsetConfig_Params_STRUCT_SIZE};
+        unsetParams.deviceIndex = ctx_.device_id;
+        LogCuptiErrorIfFailed(this->name(), "cuptiSassMetricsUnsetConfig",
+                              cuptiSassMetricsUnsetConfig(&unsetParams));
+    }
+
     if (sass_metrics_buffers_) {
         if (sass_metrics_buffers_->config)
             std::free(sass_metrics_buffers_->config);
@@ -59,9 +90,12 @@ void SassMetricsEngine::shutdown() {
         delete sass_metrics_buffers_;
         sass_metrics_buffers_ = nullptr;
     }
+    enabled_ = false;
+    config_set_ = false;
 }
 
 void SassMetricsEngine::onScopeStop(const char* /*name*/) {
+    if (!enabled_) return;
     StopAndCollectSassMetrics_();
 }
 
@@ -87,6 +121,7 @@ void SassMetricsEngine::EnableSassMetrics_() {
                             sizeof(CUpti_SassMetrics_Config)));
     }
 
+    size_t validConfigs = 0;
     for (size_t i = 0; i < kSassMetricNames.size(); ++i) {
         CUpti_SassMetrics_GetProperties_Params propParams = {
             CUpti_SassMetrics_GetProperties_Params_STRUCT_SIZE};
@@ -100,21 +135,34 @@ void SassMetricsEngine::EnableSassMetrics_() {
         sass_metrics_buffers_->config[i].outputGranularity =
             CUPTI_SASS_METRICS_OUTPUT_GRANULARITY_GPU;
         metric_id_to_name_[propParams.metric.metricId] = kSassMetricNames[i];
+        ++validConfigs;
+    }
+
+    if (validConfigs == 0) {
+        GFL_LOG_ERROR("[SassMetricsEngine] No valid SASS metrics for this GPU");
+        return;
     }
 
     CUpti_SassMetricsSetConfig_Params setConfigParams = {
         CUpti_SassMetricsSetConfig_Params_STRUCT_SIZE};
-    setConfigParams.deviceIndex        = 0;
-    setConfigParams.numOfMetricConfig  = sass_metrics_buffers_->numMetrics;
+    setConfigParams.deviceIndex        = ctx_.device_id;
+    setConfigParams.numOfMetricConfig  = validConfigs;
     setConfigParams.pConfigs           = sass_metrics_buffers_->config;
     CUptiResult res = cuptiSassMetricsSetConfig(&setConfigParams);
     if (res == CUPTI_SUCCESS || res == CUPTI_ERROR_INVALID_OPERATION) {
+        if (res == CUPTI_SUCCESS) config_set_ = true;
+
         CUpti_SassMetricsEnable_Params enableParams = {
             CUpti_SassMetricsEnable_Params_STRUCT_SIZE};
         enableParams.ctx                = ctx_.cuda_ctx;
         enableParams.enableLazyPatching = 1;
-        cuptiSassMetricsEnable(&enableParams);
+        if (LogCuptiErrorIfFailed(this->name(), "cuptiSassMetricsEnable",
+                                  cuptiSassMetricsEnable(&enableParams))) {
+            return;
+        }
+        enabled_ = true;
     } else {
+        LogCuptiErrorIfFailed(this->name(), "cuptiSassMetricsSetConfig", res);
         GFL_LOG_ERROR("[SassMetricsEngine] Failed to enable SASS Metrics");
         return;
     }
@@ -122,7 +170,7 @@ void SassMetricsEngine::EnableSassMetrics_() {
 }
 
 void SassMetricsEngine::StopAndCollectSassMetrics_() {
-    if (!ctx_.cuda_ctx) return;
+    if (!enabled_ || !ctx_.cuda_ctx) return;
 
     CUpti_SassMetricsGetDataProperties_Params props = {
         CUpti_SassMetricsGetDataProperties_Params_STRUCT_SIZE};
@@ -139,6 +187,12 @@ void SassMetricsEngine::StopAndCollectSassMetrics_() {
     auto* instances = static_cast<CUpti_SassMetrics_InstanceValue*>(
         std::calloc(nRecords * nInstances,
                     sizeof(CUpti_SassMetrics_InstanceValue)));
+    if (!data || !instances) {
+        std::free(instances);
+        std::free(data);
+        GFL_LOG_ERROR("[SassMetricsEngine] Failed to allocate metric buffers");
+        return;
+    }
 
     for (size_t i = 0; i < nRecords; ++i) {
         data[i].structSize    = sizeof(CUpti_SassMetrics_Data);
@@ -152,7 +206,8 @@ void SassMetricsEngine::StopAndCollectSassMetrics_() {
     flushParams.numOfInstances               = nInstances;
     flushParams.pMetricsData                 = data;
 
-    if (cuptiSassMetricsFlushData(&flushParams) == CUPTI_SUCCESS) {
+    CUptiResult flushRes = cuptiSassMetricsFlushData(&flushParams);
+    if (flushRes == CUPTI_SUCCESS) {
         for (size_t i = 0; i < nRecords; ++i) {
             char srcFile[256]{};
             uint32_t srcLine = 0;
@@ -175,8 +230,8 @@ void SassMetricsEngine::StopAndCollectSassMetrics_() {
                             hasSource = true;
                         }
                         srcLine = corrParams.lineNumber;
-                        if (corrParams.fileName) std::free(corrParams.fileName);
-                        if (corrParams.dirName) std::free(corrParams.dirName);
+                        FreeCuptiCorrelationString(corrParams.fileName);
+                        FreeCuptiCorrelationString(corrParams.dirName);
                     } else {
                         LogCuptiErrorIfFailed(this->name(),
                                               "cuptiGetSassToSourceCorrelation",
@@ -214,6 +269,9 @@ void SassMetricsEngine::StopAndCollectSassMetrics_() {
                 g_monitorBuffer.Push(out);
             }
         }
+    } else {
+        LogCuptiErrorIfFailed(this->name(), "cuptiSassMetricsFlushData",
+                              flushRes);
     }
     std::free(instances);
     std::free(data);

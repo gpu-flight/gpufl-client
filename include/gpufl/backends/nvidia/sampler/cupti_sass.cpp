@@ -11,6 +11,19 @@
 #include "gpufl/core/debug_logger.hpp"
 
 namespace gpufl::nvidia {
+namespace {
+void FreeCuptiCorrelationString(char* s) {
+    if (!s) return;
+#if defined(_WIN32) && defined(_DEBUG)
+    // CUPTI may allocate these with a different CRT heap than the debug app.
+    // Avoid invalid heap-pointer assertions in Debug on Windows.
+    (void)s;
+#else
+    std::free(s);
+#endif
+}
+}  // namespace
+
 SourceCorrelation CuptiSass::sampleSourceCorrelation(const void* cubin,
                                                      size_t cubinSize,
                                                      const char* functionName,
@@ -34,11 +47,11 @@ SourceCorrelation CuptiSass::sampleSourceCorrelation(const void* cubin,
     SourceCorrelation result = {};
     if (params.fileName) {
         result.fileName = params.fileName;
-        free(params.fileName);
+        FreeCuptiCorrelationString(params.fileName);
     }
     if (params.dirName) {
         result.dirName = params.dirName;
-        free(params.dirName);
+        FreeCuptiCorrelationString(params.dirName);
     }
     result.lineNumber = params.lineNumber;
 
