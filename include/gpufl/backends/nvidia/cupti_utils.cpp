@@ -141,7 +141,7 @@ bool LogCuptiErrorIfFailedImpl(const char* scope, const char* op,
 const char* getChipName(uint32_t deviceId) {
     CUpti_Device_GetChipName_Params chipNameParams = {
         CUpti_Device_GetChipName_Params_STRUCT_SIZE};
-    chipNameParams.deviceIndex = 0;
+    chipNameParams.deviceIndex = deviceId;
     CUptiResult res = cuptiDeviceGetChipName(&chipNameParams);
     if (LogCuptiErrorIfFailed("CUPTI", "cuptiDeviceGetChipName", res)) {
         return "";
