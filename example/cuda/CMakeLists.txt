@@ -235,6 +235,10 @@ if(WIN32)
     if(CUPTI_DLL_FOUND)
         # Handle case where GLOB returns multiple versions; just take the first one
         list(GET CUPTI_DLL_LIST 0 CUPTI_DLL_TO_COPY)
+        get_filename_component(CUPTI_DLL_DIR "${CUPTI_DLL_TO_COPY}" DIRECTORY)
+        file(GLOB NVPERF_DLLS
+            "${CUPTI_DLL_DIR}/nvperf_host*.dll"
+            "${CUPTI_DLL_DIR}/nvperf_target*.dll")
 
         foreach(TARGET_NAME test_occupancy system_monitor gfl_block_example cupti_pc_sampling test_sass_metrics test_sass_cubin list_sass_metrics vector_add_benchmark occupancy_demo sass_divergence_demo)
             add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
@@ -243,6 +247,14 @@ if(WIN32)
                 "$<TARGET_FILE_DIR:${TARGET_NAME}>"
                 COMMENT "Copying ${CUPTI_DLL_TO_COPY} to output directory..."
             )
+            foreach(NVPERF_DLL ${NVPERF_DLLS})
+                add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${NVPERF_DLL}"
+                    "$<TARGET_FILE_DIR:${TARGET_NAME}>"
+                    COMMENT "Copying ${NVPERF_DLL} to output directory..."
+                )
+            endforeach()
         endforeach()
     else()
         message(WARNING "Could NOT find cupti64*.dll automatically.\n"
