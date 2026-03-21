@@ -142,6 +142,7 @@ void CollectorLoop() {
                         // Phase 1a: always-on CUPTI fields (from
                         // CUpti_ActivityKernel11, no details required)
                         be.local_mem_total = rec.local_mem_total;
+                        be.local_mem_per_thread = rec.local_mem_per_thread;
                         be.cache_config_requested = rec.cache_config_requested;
                         be.cache_config_executed = rec.cache_config_executed;
                         be.shared_mem_executed = rec.shared_mem_executed;

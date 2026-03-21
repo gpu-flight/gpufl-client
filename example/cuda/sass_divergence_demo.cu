@@ -11,9 +11,10 @@
 //   4. earlyExit         — variable-length work, some threads bail early
 //   5. indirectBranch    — data-dependent branching (random input)
 
-#include <iostream>
 #include <cuda_runtime.h>
-#include "gpufl/gpufl.hpp"
+
+#include <iostream>
+
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/monitor.hpp"
 static bool CheckCuda(cudaError_t err, const char* call, const char* file,
@@ -34,8 +35,7 @@ static bool CheckCuda(cudaError_t err, const char* call, const char* file,
 // Kernel 1: No divergence — all threads do the same work.
 // Expected: Active/32 = 32.0 everywhere
 // ---------------------------------------------------------------------------
-__global__
-void uniformWork(float* out, const float* in, int n) {
+__global__ void uniformWork(float* out, const float* in, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         float val = in[idx];
@@ -50,8 +50,7 @@ void uniformWork(float* out, const float* in, int n) {
 // Kernel 2: Even/odd divergence — half the warp takes each path.
 // Expected: Active/32 = 16.0 inside each branch
 // ---------------------------------------------------------------------------
-__global__
-void branchByWarpLane(float* out, const float* in, int n) {
+__global__ void branchByWarpLane(float* out, const float* in, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         float val = in[idx];
@@ -74,8 +73,7 @@ void branchByWarpLane(float* out, const float* in, int n) {
 // Kernel 3: Quad divergence — only 1 in 4 threads does real work.
 // Expected: Active/32 = 8.0 in the hot path
 // ---------------------------------------------------------------------------
-__global__
-void branchByWarpQuad(float* out, const float* in, int n) {
+__global__ void branchByWarpQuad(float* out, const float* in, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         float val = in[idx];
@@ -93,8 +91,7 @@ void branchByWarpQuad(float* out, const float* in, int n) {
 // Kernel 4: Early exit — threads with small values bail out early.
 // Divergence depends on data: threads that exit skip the heavy loop.
 // ---------------------------------------------------------------------------
-__global__
-void earlyExit(float* out, const float* in, float threshold, int n) {
+__global__ void earlyExit(float* out, const float* in, float threshold, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         float val = in[idx];
@@ -115,8 +112,7 @@ void earlyExit(float* out, const float* in, float threshold, int n) {
 // Kernel 5: Data-dependent branching — random input drives the branch.
 // Divergence is unpredictable and varies per warp.
 // ---------------------------------------------------------------------------
-__global__
-void indirectBranch(float* out, const float* in, int n) {
+__global__ void indirectBranch(float* out, const float* in, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         float val = in[idx];
@@ -146,6 +142,7 @@ int main() {
     gpufl::InitOptions opts;
     opts.app_name = "sass_divergence_demo";
     opts.log_path = "sass_divergence";
+    opts.system_sample_rate_ms = 50;
     opts.enable_kernel_details = true;
     opts.enable_debug_output = true;
     opts.sampling_auto_start = true;
@@ -227,7 +224,9 @@ int main() {
     std::cout << "\n=== Done ===" << std::endl;
     std::cout << "Logs: " << opts.log_path << ".scope.log" << std::endl;
     std::cout << "Analyze with:" << std::endl;
-    std::cout << "  session = GpuFlightSession('.', log_prefix='sass_divergence')" << std::endl;
+    std::cout
+        << "  session = GpuFlightSession('.', log_prefix='sass_divergence')"
+        << std::endl;
     std::cout << "  session.inspect_profile_samples()" << std::endl;
 
     return 0;
