@@ -204,6 +204,7 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
 
     // Phase 1a: always-on fields from CUpti_ActivityKernel11
     out.local_mem_total = k->localMemoryTotal;
+    out.local_mem_per_thread = k->localMemoryPerThread;  // 0 = no register spill
     out.cache_config_requested = k->cacheConfig.config.requested;
     out.cache_config_executed = k->cacheConfig.config.executed;
     out.shared_mem_executed = k->sharedMemoryExecuted;

@@ -19,7 +19,8 @@ def mock_log_dir(tmp_path):
             "grid": "(1,1,1)", "block": "(256,1,1)", "occupancy": 0.8,
             "user_scope": "global|main_loop|vectorAdd",
             "dyn_shared_bytes": 0, "static_shared_bytes": 100, "num_regs": 32,
-            "local_bytes": 0, "const_bytes": 0
+            "local_bytes": 0, "const_bytes": 0,
+            "local_mem_per_thread_bytes": 0, "local_mem_total_bytes": 0
         },
         {
             "type": "kernel_event", "name": "matrixMul", "device_id": 0, "app": "test_app",
@@ -27,7 +28,8 @@ def mock_log_dir(tmp_path):
             "grid": "(1,1,1)", "block": "(16,16,1)", "occupancy": 0.6,
             "user_scope": "global|main_loop|matrixMul",
             "dyn_shared_bytes": 1024, "static_shared_bytes": 200, "num_regs": 64,
-            "local_bytes": 0, "const_bytes": 128
+            "local_bytes": 0, "const_bytes": 128,
+            "local_mem_per_thread_bytes": 32, "local_mem_total_bytes": 32768
         },
         {
             "type": "memcpy_event", "name": "cudaMemcpy", "device_id": 0, "app": "test_app",

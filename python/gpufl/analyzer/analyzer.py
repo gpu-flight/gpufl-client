@@ -363,6 +363,12 @@ class GpuFlightSession:
             const_bytes=('const_bytes', 'first'),
         )
         for col, alias in [
+            ('local_mem_per_thread_bytes', 'local_mem_per_thread'),
+            ('local_mem_total_bytes',      'local_mem_total'),
+        ]:
+            if col in self.kernels.columns:
+                agg_dict[alias] = (col, 'first')
+        for col, alias in [
             ('reg_occupancy',  'reg_occ'),
             ('smem_occupancy', 'smem_occ'),
             ('warp_occupancy', 'warp_occ'),
@@ -383,7 +389,7 @@ class GpuFlightSession:
         table.add_column("Total Time", justify="right", style="green")
         table.add_column("Occupancy", justify="right", style="magenta")
         table.add_column("Grid/Block", justify="center")
-        table.add_column("Resources (Reg/SMem/DMem/LMem/CMem)", justify="left")
+        table.add_column("Resources (Reg/SMem/DMem/LMem/CMem/Spill)", justify="left")
 
         for (name, *rest), row in summary.iterrows():
             stack_trace = rest[0] if rest else None
@@ -420,16 +426,25 @@ class GpuFlightSession:
             limiting = row.get('limiting', '') if 'limiting' in row.index else ''
             bottleneck_str = f"\n⚑ Bottleneck: {limiting}" if limiting else ""
 
-            static_b = row['static_shared'] if pd.notna(row.get('static_shared')) else 0
-            dyn_b    = row['dyn_shared']    if pd.notna(row.get('dyn_shared'))    else 0
-            local_b  = row['local_bytes']   if pd.notna(row.get('local_bytes'))   else 0
-            const_b  = row['const_bytes']   if pd.notna(row.get('const_bytes'))   else 0
+            static_b        = row['static_shared']      if pd.notna(row.get('static_shared'))      else 0
+            dyn_b           = row['dyn_shared']         if pd.notna(row.get('dyn_shared'))         else 0
+            local_b         = row['local_bytes']        if pd.notna(row.get('local_bytes'))        else 0
+            const_b         = row['const_bytes']        if pd.notna(row.get('const_bytes'))        else 0
+            spill_per_thd   = row.get('local_mem_per_thread', 0) or 0
+            spill_total_kb  = (row.get('local_mem_total', 0) or 0) / 1024
+
+            # Spill line: always show per-thread bytes; show total KB only when >0
+            if spill_per_thd > 0:
+                spill_str = f"\n[red]Spill {spill_per_thd} B/thread · {spill_total_kb:.1f} KB total[/red]"
+            else:
+                spill_str = ""
 
             resource_str = (
                 f"{row['num_regs']} regs"
                 + (f" ({occ_breakdown})" if occ_breakdown else "")
                 + f"\nSMem {static_b} B · DMem {dyn_b} B"
                 + f"\nLMem {local_b} B · CMem {const_b} B"
+                + spill_str
                 + bottleneck_str
             )
 
