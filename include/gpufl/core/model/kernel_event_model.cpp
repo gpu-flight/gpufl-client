@@ -40,10 +40,11 @@ std::string KernelEventModel::buildJson() const {
         << ",\"limiting_resource\":\"" << jsonEscape(e_.limiting_resource) << "\""
         << ",\"max_active_blocks\":"   << e_.max_active_blocks
         << ",\"corr_id\":"             << e_.corr_id
-        << ",\"local_mem_total_bytes\":"     << e_.local_mem_total
-        << ",\"cache_config_requested\":" << static_cast<int>(e_.cache_config_requested)
-        << ",\"cache_config_executed\":"  << static_cast<int>(e_.cache_config_executed)
-        << ",\"shared_mem_executed_bytes\":"    << e_.shared_mem_executed
+        << ",\"local_mem_total_bytes\":"      << e_.local_mem_total
+        << ",\"local_mem_per_thread_bytes\":" << e_.local_mem_per_thread
+        << ",\"cache_config_requested\":"  << static_cast<int>(e_.cache_config_requested)
+        << ",\"cache_config_executed\":"   << static_cast<int>(e_.cache_config_executed)
+        << ",\"shared_mem_executed_bytes\":" << e_.shared_mem_executed
         << "}";
     return oss.str();
 }

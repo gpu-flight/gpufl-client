@@ -101,14 +101,12 @@ struct KernelEvent {
     int max_active_blocks = 0;
     unsigned int corr_id = 0;
 
-    uint32_t local_mem_total = 0;
+    uint32_t local_mem_total = 0;        // total local mem across all threads (bytes)
+    uint32_t local_mem_per_thread = 0;  // bytes spilled per thread (0 = no spill)
 
-    uint8_t cache_config_requested =
-        0;
-    uint8_t cache_config_executed =
-        0;
-    uint32_t shared_mem_executed =
-        0;
+    uint8_t cache_config_requested = 0;
+    uint8_t cache_config_executed = 0;
+    uint32_t shared_mem_executed = 0;
 
     std::string user_scope;
     int scope_depth = 0;
