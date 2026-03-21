@@ -4,6 +4,9 @@ build/
 cmake-build-*/
 cmake/
 
+### docker
+example/python/docker/**/
+
 ### C++ template
 # Prerequisites
 *.d

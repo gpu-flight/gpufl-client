@@ -93,7 +93,9 @@ struct ActivityRecord {
 
     // Phase 1a: additional CUpti_ActivityKernel11 fields
     uint32_t local_mem_total =
-        0;  // localMemoryTotal — total local mem across all threads
+        0;  // localMemoryTotal — total local mem across all threads (bytes)
+    uint32_t local_mem_per_thread =
+        0;  // localMemoryPerThread — bytes spilled to local mem per thread (0 = no spill)
     uint8_t cache_config_requested = 0;  // cacheConfigRequested
     uint8_t cache_config_executed = 0;   // cacheConfigExecuted
     uint32_t shared_mem_executed =
