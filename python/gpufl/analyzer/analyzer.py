@@ -361,9 +361,13 @@ class GpuFlightSession:
             num_regs=('num_regs', 'first'),
             local_bytes=('local_bytes', 'first'),
             const_bytes=('const_bytes', 'first'),
-            local_mem_per_thread=('local_mem_per_thread_bytes', 'first'),
-            local_mem_total=('local_mem_total_bytes', 'first'),
         )
+        for col, alias in [
+            ('local_mem_per_thread_bytes', 'local_mem_per_thread'),
+            ('local_mem_total_bytes',      'local_mem_total'),
+        ]:
+            if col in self.kernels.columns:
+                agg_dict[alias] = (col, 'first')
         for col, alias in [
             ('reg_occupancy',  'reg_occ'),
             ('smem_occupancy', 'smem_occ'),
