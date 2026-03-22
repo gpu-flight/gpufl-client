@@ -58,6 +58,7 @@ target_sources(gpufl PRIVATE
     include/gpufl/core/model/system_event_model.cpp
     include/gpufl/core/sampler.cpp
     include/gpufl/core/runtime.cpp
+    include/gpufl/core/backend_factory.cpp
     include/gpufl/core/gpufl.cpp
     include/gpufl/core/common.cpp
     include/gpufl/core/debug_logger.cpp
