@@ -13,6 +13,7 @@
 #include <exception>
 #include <set>
 
+#include "gpufl/backends/nvidia/cuda_collector.hpp"
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
 #include "gpufl/backends/nvidia/engine/pc_sampling_engine.hpp"
 #include "gpufl/backends/nvidia/engine/range_profiler_engine.hpp"
@@ -20,15 +21,14 @@
 #include "gpufl/backends/nvidia/kernel_launch_handler.hpp"
 #include "gpufl/backends/nvidia/mem_transfer_handler.hpp"
 #include "gpufl/backends/nvidia/resource_handler.hpp"
+#include "gpufl/core/activity_record.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/ring_buffer.hpp"
-#include "gpufl/core/trace_type.hpp"
-
-#include "gpufl/backends/nvidia/cuda_collector.hpp"
 #include "gpufl/core/scope_registry.hpp"
 #include "gpufl/core/stack_registry.hpp"
 #include "gpufl/core/stack_trace.hpp"
+#include "gpufl/core/trace_type.hpp"
 
 namespace gpufl {
 std::atomic<gpufl::CuptiBackend*> g_activeBackend{nullptr};
@@ -55,8 +55,9 @@ void CuptiBackend::initialize(const MonitorOptions& opts) {
             engine_ = std::make_unique<RangeProfilerEngine>();
             GFL_LOG_DEBUG("[CuptiBackend] Engine: RangeProfiler");
 #else
-            GFL_LOG_ERROR("[CuptiBackend] RangeProfiler engine requires "
-                          "GPUFL_HAS_PERFWORKS; falling back to None");
+            GFL_LOG_ERROR(
+                "[CuptiBackend] RangeProfiler engine requires "
+                "GPUFL_HAS_PERFWORKS; falling back to None");
 #endif
             break;
         case ProfilingEngine::None:
@@ -162,16 +163,17 @@ void CuptiBackend::start() {
     if (engine_) {
         if (EnsureCudaContext(&ctx_)) {
             cuptiGetDeviceId(ctx_, &device_id_);
-            chip_name_           = getChipName(device_id_);
-            cached_device_name_  = GetCurrentDeviceName();
+            chip_name_ = getChipName(device_id_);
+            cached_device_name_ = GetCurrentDeviceName();
 
-            EngineContext ectx{ctx_, device_id_, chip_name_,
-                               &cubin_mu_, &cubin_by_crc_};
+            EngineContext ectx{ctx_, device_id_, chip_name_, &cubin_mu_,
+                               &cubin_by_crc_};
             engine_->initialize(opts_, ectx);
             engine_->start();
         } else {
-            GFL_LOG_ERROR("[CuptiBackend] Failed to get CUDA context; "
-                          "engine will not start.");
+            GFL_LOG_ERROR(
+                "[CuptiBackend] Failed to get CUDA context; "
+                "engine will not start.");
         }
     }
 
@@ -216,8 +218,8 @@ void CuptiBackend::RegisterHandler(
 
 void CUPTIAPI CuptiBackend::BufferRequested(uint8_t** buffer, size_t* size,
                                             size_t* maxNumRecords) {
-    *size          = 64 * 1024;
-    *buffer        = static_cast<uint8_t*>(malloc(*size));
+    *size = 64 * 1024;
+    *buffer = static_cast<uint8_t*>(malloc(*size));
     *maxNumRecords = 0;
 }
 
@@ -233,7 +235,7 @@ void CUPTIAPI CuptiBackend::BufferCompleted(CUcontext context,
         return;
     }
 
-    static int64_t  baseCpuNs   = detail::GetTimestampNs();
+    static int64_t baseCpuNs = detail::GetTimestampNs();
     static uint64_t baseCuptiTs = 0;
     if (baseCuptiTs == 0) cuptiGetTimestamp(&baseCuptiTs);
 
@@ -262,13 +264,13 @@ void CUPTIAPI CuptiBackend::BufferCompleted(CUcontext context,
                     auto* pc =
                         reinterpret_cast<CUpti_ActivityPCSampling3*>(record);
                     ActivityRecord out{};
-                    out.type         = TraceType::PC_SAMPLE;
-                    out.corr_id      = pc->correlationId;
+                    out.type = TraceType::PC_SAMPLE;
+                    out.corr_id = pc->correlationId;
                     std::snprintf(out.sample_kind, sizeof(out.sample_kind),
                                   "%s", "pc_sampling");
                     out.samples_count = pc->samples;
                     out.stall_reason = pc->stallReason;
-                    out.device_id    =
+                    out.device_id =
                         reinterpret_cast<const CUpti_ActivityKernel11*>(record)
                             ->deviceId;
                     g_monitorBuffer.Push(out);

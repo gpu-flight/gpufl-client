@@ -2,6 +2,8 @@
 
 #include <cuda_runtime.h>
 
+#include <string>
+
 #include "gpufl/backends/nvidia/cupti_common.hpp"
 
 namespace gpufl {
