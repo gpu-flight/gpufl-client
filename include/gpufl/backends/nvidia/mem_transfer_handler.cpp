@@ -170,8 +170,7 @@ bool MemTransferHandler::handleActivityRecord(const CUpti_Activity* record,
         const auto* m = reinterpret_cast<const CUpti_ActivityMemcpy*>(record);
         ActivityRecord out{};
         out.device_id = m->deviceId;
-        out.stream =
-            reinterpret_cast<cudaStream_t>(static_cast<uintptr_t>(m->streamId));
+        out.stream = static_cast<StreamHandle>(m->streamId);
         out.type = TraceType::MEMCPY;
         out.corr_id = m->correlationId;
         out.cpu_start_ns =
@@ -204,8 +203,7 @@ bool MemTransferHandler::handleActivityRecord(const CUpti_Activity* record,
         const auto* m = reinterpret_cast<const CUpti_ActivityMemset*>(record);
         ActivityRecord out{};
         out.device_id = m->deviceId;
-        out.stream =
-            reinterpret_cast<cudaStream_t>(static_cast<uintptr_t>(m->streamId));
+        out.stream = static_cast<StreamHandle>(m->streamId);
         out.type = TraceType::MEMSET;
         out.corr_id = m->correlationId;
         out.cpu_start_ns =
