@@ -1,9 +1,8 @@
 #pragma once
 
-#include <cuda_runtime.h>
-
 #include <string>
 
+#include "gpufl/core/stream_handle.hpp"
 #include "gpufl/core/trace_type.hpp"
 
 namespace gpufl {
@@ -67,9 +66,9 @@ class Monitor {
     /**
      * @brief Internal API for backends to record events.
      */
-    static void RecordStart(const char* name, cudaStream_t stream,
+    static void RecordStart(const char* name, StreamHandle stream,
                             TraceType type, void** outHandle);
-    static void RecordStop(void* handle, cudaStream_t stream);
+    static void RecordStop(void* handle, StreamHandle stream);
 
     /**
      * @brief Profiler Scope Control

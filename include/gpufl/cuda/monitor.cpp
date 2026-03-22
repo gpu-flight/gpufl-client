@@ -124,8 +124,7 @@ void CollectorLoop() {
                         be.platform = "cuda";
                         be.has_details = rec.has_details;
                         be.device_id = rec.device_id;
-                        be.stream_id = static_cast<uint32_t>(
-                            reinterpret_cast<uintptr_t>(rec.stream));
+                        be.stream_id = static_cast<uint32_t>(rec.stream);
                         be.session_id = rt->session_id;
                         be.pid = detail::GetPid();
                         be.app = rt->app_name;
@@ -172,8 +171,7 @@ void CollectorLoop() {
                         MemcpyEvent be;
                         be.platform = "cuda";
                         be.device_id = rec.device_id;
-                        be.stream_id = static_cast<uint32_t>(
-                            reinterpret_cast<uintptr_t>(rec.stream));
+                        be.stream_id = static_cast<uint32_t>(rec.stream);
                         be.session_id = rt->session_id;
                         be.pid = detail::GetPid();
                         be.app = rt->app_name;
@@ -195,8 +193,7 @@ void CollectorLoop() {
                         MemsetEvent be;
                         be.platform = "cuda";
                         be.device_id = rec.device_id;
-                        be.stream_id = static_cast<uint32_t>(
-                            reinterpret_cast<uintptr_t>(rec.stream));
+                        be.stream_id = static_cast<uint32_t>(rec.stream);
                         be.session_id = rt->session_id;
                         be.pid = detail::GetPid();
                         be.app = rt->app_name;
@@ -338,7 +335,7 @@ void Monitor::Stop() {
 
 void Monitor::PushRange(const char* name) {
     void* handle = nullptr;
-    RecordStart(name, nullptr, TraceType::RANGE, &handle);
+    RecordStart(name, 0, TraceType::RANGE, &handle);
     g_rangeStack.push(handle);
 }
 
@@ -346,10 +343,10 @@ void Monitor::PopRange() {
     if (g_rangeStack.empty()) return;
     void* handle = g_rangeStack.top();
     g_rangeStack.pop();
-    RecordStop(handle, nullptr);
+    RecordStop(handle, 0);
 }
 
-void Monitor::RecordStart(const char* name, const cudaStream_t stream,
+void Monitor::RecordStart(const char* name, const StreamHandle stream,
                           const TraceType type, void** outHandle) {
     auto* rec = new ActivityRecord();
     strncpy(rec->name, name, 127);
@@ -361,14 +358,14 @@ void Monitor::RecordStart(const char* name, const cudaStream_t stream,
 
     cudaEventCreate(&rec->start_event);
     cudaEventCreate(&rec->stop_event);
-    cudaEventRecord(rec->start_event, stream);
+    cudaEventRecord(rec->start_event, reinterpret_cast<cudaStream_t>(stream));
 
     *outHandle = rec;
 }
 
-void Monitor::RecordStop(void* handle, cudaStream_t stream) {
+void Monitor::RecordStop(void* handle, StreamHandle stream) {
     auto* rec = static_cast<ActivityRecord*>(handle);
-    cudaEventRecord(rec->stop_event, stream);
+    cudaEventRecord(rec->stop_event, reinterpret_cast<cudaStream_t>(stream));
 
     bool pushed = g_monitorBuffer.Push(*rec);
 

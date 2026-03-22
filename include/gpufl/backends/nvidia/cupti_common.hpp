@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "gpufl/core/stream_handle.hpp"
 #include "gpufl/core/trace_type.hpp"
 
 #define CUPTI_CHECK(call)                                            \
@@ -43,7 +44,7 @@ struct ActivityRecord {
     uint32_t device_id;
     char name[128];
     TraceType type;
-    cudaStream_t stream;
+    StreamHandle stream;
     cudaEvent_t start_event;
     cudaEvent_t stop_event;
     int64_t cpu_start_ns;

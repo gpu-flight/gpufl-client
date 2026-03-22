@@ -190,8 +190,7 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
 
     ActivityRecord out{};
     out.device_id = k->deviceId;
-    out.stream =
-        reinterpret_cast<cudaStream_t>(static_cast<uintptr_t>(k->streamId));
+    out.stream = static_cast<StreamHandle>(k->streamId);
     out.type = TraceType::KERNEL;
     std::snprintf(out.name, sizeof(out.name), "%s",
                   (k->name ? k->name : "kernel"));
