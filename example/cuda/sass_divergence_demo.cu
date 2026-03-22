@@ -17,6 +17,7 @@
 
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/monitor.hpp"
+#include "gpufl/gpufl.hpp"
 static bool CheckCuda(cudaError_t err, const char* call, const char* file,
                       int line) {
     if (err == cudaSuccess) return true;
@@ -26,8 +27,8 @@ static bool CheckCuda(cudaError_t err, const char* call, const char* file,
     return false;
 }
 
-#define CHECK_CUDA(call)                                              \
-    do {                                                              \
+#define CHECK_CUDA(call)                                             \
+    do {                                                             \
         if (!CheckCuda((call), #call, __FILE__, __LINE__)) return 2; \
     } while (0)
 

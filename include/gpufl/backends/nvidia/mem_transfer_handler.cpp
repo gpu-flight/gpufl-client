@@ -3,6 +3,7 @@
 #include <cstdio>
 
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
+#include "gpufl/core/activity_record.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/ring_buffer.hpp"
@@ -188,7 +189,8 @@ bool MemTransferHandler::handleActivityRecord(const CUpti_Activity* record,
                 const LaunchMeta& meta = it->second;
                 out.scope_depth = meta.scope_depth;
                 out.stack_id = meta.stack_id;
-                std::copy(std::begin(meta.user_scope), std::end(meta.user_scope),
+                std::copy(std::begin(meta.user_scope),
+                          std::end(meta.user_scope),
                           std::begin(out.user_scope));
                 out.api_start_ns = meta.api_enter_ns;
                 out.api_exit_ns = meta.api_exit_ns;
@@ -218,7 +220,8 @@ bool MemTransferHandler::handleActivityRecord(const CUpti_Activity* record,
                 const LaunchMeta& meta = it->second;
                 out.scope_depth = meta.scope_depth;
                 out.stack_id = meta.stack_id;
-                std::copy(std::begin(meta.user_scope), std::end(meta.user_scope),
+                std::copy(std::begin(meta.user_scope),
+                          std::end(meta.user_scope),
                           std::begin(out.user_scope));
                 out.api_start_ns = meta.api_enter_ns;
                 out.api_exit_ns = meta.api_exit_ns;

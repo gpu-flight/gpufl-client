@@ -3,6 +3,7 @@
 #include <cstdio>
 
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
+#include "gpufl/core/activity_record.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/ring_buffer.hpp"
@@ -15,18 +16,6 @@ extern RingBuffer<ActivityRecord, 1024> g_monitorBuffer;
 }
 
 namespace gpufl {
-namespace {
-const char* CallbackSiteName(CUpti_ApiCallbackSite site) {
-    switch (site) {
-        case CUPTI_API_ENTER:
-            return "ENTER";
-        case CUPTI_API_EXIT:
-            return "EXIT";
-        default:
-            return "UNKNOWN";
-    }
-}
-}  // namespace
 
 KernelLaunchHandler::KernelLaunchHandler(CuptiBackend* backend)
     : backend_(backend) {}
@@ -111,10 +100,10 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
                 (domain == CUPTI_CB_DOMAIN_DRIVER_API &&
                  cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel)) {
                 GFL_LOG_DEBUG("[KernelLaunchHandler] details path domain=",
-                              static_cast<int>(domain), " cbid=",
-                              static_cast<int>(cbid), " corr=",
-                              cbInfo->correlationId, " params=",
-                              cbInfo->functionParams);
+                              static_cast<int>(domain),
+                              " cbid=", static_cast<int>(cbid),
+                              " corr=", cbInfo->correlationId,
+                              " params=", cbInfo->functionParams);
                 meta.has_details = true;
                 const auto* params =
                     (cudaLaunchKernel_v7000_params*)(cbInfo->functionParams);
@@ -146,7 +135,6 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
         if (it != backend_->meta_by_corr_.end()) {
             it->second.api_exit_ns = t;
         }
-
     }
 }
 
@@ -179,13 +167,14 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
             backend_->last_kernel_end_ts_.load(std::memory_order_relaxed);
         if (k->start < lastTs + intervalNs) {
             GFL_LOG_DEBUG("[KernelLaunchHandler] activity throttled corr=",
-                          k->correlationId, " start=", k->start, " last=",
-                          lastTs, " intervalNs=", intervalNs);
+                          k->correlationId, " start=", k->start,
+                          " last=", lastTs, " intervalNs=", intervalNs);
             backend_->kernel_activity_throttled_.fetch_add(
                 1, std::memory_order_relaxed);
             return true;  // within throttle window — consume but do not emit
         }
-        backend_->last_kernel_end_ts_.store(k->start, std::memory_order_relaxed);
+        backend_->last_kernel_end_ts_.store(k->start,
+                                            std::memory_order_relaxed);
     }
 
     ActivityRecord out{};
@@ -203,7 +192,8 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
 
     // Phase 1a: always-on fields from CUpti_ActivityKernel11
     out.local_mem_total = k->localMemoryTotal;
-    out.local_mem_per_thread = k->localMemoryPerThread;  // 0 = no register spill
+    out.local_mem_per_thread =
+        k->localMemoryPerThread;  // 0 = no register spill
     out.cache_config_requested = k->cacheConfig.config.requested;
     out.cache_config_executed = k->cacheConfig.config.executed;
     out.shared_mem_executed = k->sharedMemoryExecuted;
@@ -319,8 +309,8 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
     g_monitorBuffer.Push(out);
     backend_->kernel_activity_emitted_.fetch_add(1, std::memory_order_relaxed);
     GFL_LOG_DEBUG("[KernelLaunchHandler] activity pushed corr=", out.corr_id,
-                  " duration_ns=", out.duration_ns, " has_details=",
-                  out.has_details);
+                  " duration_ns=", out.duration_ns,
+                  " has_details=", out.has_details);
     return true;
 }
 
