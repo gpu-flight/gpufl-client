@@ -5,9 +5,8 @@
 #include <string>
 #include <utility>
 
-#include "../backends/nvidia/cuda_collector.hpp"
-#include "gpufl/core/monitor_backend.hpp"
 #include "gpufl/backends/host_collector.hpp"
+#include "gpufl/core/backend_factory.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/events.hpp"
@@ -17,18 +16,11 @@
 #include "gpufl/core/model/perf_metric_model.hpp"
 #include "gpufl/core/model/system_event_model.hpp"
 #include "gpufl/core/monitor.hpp"
+#include "gpufl/core/monitor_backend.hpp"
 #include "gpufl/core/runtime.hpp"
 #include "gpufl/core/scope_registry.hpp"
 #if GPUFL_HAS_CUDA || defined(__CUDACC__)
 #include <cuda_runtime.h>
-#endif
-
-#if GPUFL_ENABLE_NVIDIA && GPUFL_HAS_NVML
-#include "gpufl/backends/nvidia/nvml_collector.hpp"
-#endif
-
-#if GPUFL_ENABLE_AMD && GPUFL_HAS_ROCM
-#include "gpufl/backends/amd/rocm_collector.hpp"
 #endif
 
 namespace gpufl {
@@ -45,66 +37,6 @@ static uint64_t nextScopeId_() {
     return g_nextScopeId.fetch_add(1, std::memory_order_relaxed);
 }
 
-static std::shared_ptr<ISystemCollector<DeviceSample>> createCollector_(
-    const BackendKind backend, std::string* reasonOut) {
-    if (reasonOut) reasonOut->clear();
-
-    auto setReason = [&](const std::string& r) {
-        if (reasonOut && reasonOut->empty()) *reasonOut = r;
-    };
-
-    auto tryNvml = [&]() -> std::shared_ptr<ISystemCollector<DeviceSample>> {
-#if GPUFL_ENABLE_NVIDIA && GPUFL_HAS_NVML
-        return std::make_shared<gpufl::nvidia::NvmlCollector>();
-#else
-        setReason(
-            "NVIDIA telemetry not available (GPUFL_ENABLE_NVIDIA=OFF or NVML "
-            "not found).");
-        return nullptr;
-#endif
-    };
-
-    auto tryRocm = [&]() -> std::shared_ptr<ISystemCollector<DeviceSample>> {
-#if GPUFL_ENABLE_AMD && GPUFL_HAS_ROCM
-        return std::make_shared<gpufl::amd::RocmCollector>();
-#else
-        setReason(
-            "AMD telemetry not available (GPUFL_ENABLE_AMD=OFF or ROCm not "
-            "found).");
-        return nullptr;
-#endif
-    };
-
-    switch (backend) {
-        case BackendKind::None:
-            return nullptr;
-
-        case BackendKind::Nvidia: {
-            auto c = tryNvml();
-            if (!c)
-                setReason("Requested backend=nvidia but NVML is unavailable.");
-            return c;
-        }
-
-        case BackendKind::Amd: {
-            auto c = tryRocm();
-            if (!c) setReason("Requested backend=amd but ROCm is unavailable.");
-            return c;
-        }
-
-        case BackendKind::Auto:
-        default: {
-            // Prefer NVML first, then ROCm
-            if (auto c = tryNvml()) return c;
-            if (auto c = tryRocm()) return c;
-            setReason(
-                "No GPU backend available (NVML/ROCm not compiled in or not "
-                "available).");
-            return nullptr;
-        }
-    }
-}
-
 bool init(const InitOptions& opts) {
     g_opts = opts;
     DebugLogger::setEnabled(opts.enable_debug_output);
@@ -119,7 +51,6 @@ bool init(const InitOptions& opts) {
     rt->session_id = detail::GenerateSessionId();
     rt->logger = std::make_shared<Logger>();
     rt->host_collector = std::make_unique<HostCollector>();
-    rt->cuda_collector = std::make_unique<nvidia::CudaCollector>();
 
     const std::string logPath =
         opts.log_path.empty() ? defaultLogPath_(rt->app_name) : opts.log_path;
@@ -157,7 +88,13 @@ bool init(const InitOptions& opts) {
 
     // Runtime backend selection
     std::string backendReason;
-    rt_ptr->collector = createCollector_(opts.backend, &backendReason);
+    auto backendCollectors =
+        CreateBackendCollectors(opts.backend, &backendReason);
+    rt_ptr->collector =
+        std::move(backendCollectors.telemetry_collector);
+    rt_ptr->static_info_collector =
+        std::move(backendCollectors.static_info_collector);
+
     if (!rt_ptr->collector) {
         GFL_LOG_ERROR("Failed to initialize GPU backend: ", backendReason);
     }
@@ -173,11 +110,8 @@ bool init(const InitOptions& opts) {
     if (rt_ptr->collector) {
         ie.devices = rt_ptr->collector->sampleAll();
     }
-    if (opts.backend == BackendKind::Auto ||
-        opts.backend == BackendKind::Nvidia) {
-#if GPUFL_HAS_CUDA
-        ie.cuda_static_device_infos = rt_ptr->cuda_collector->sampleAll();
-#endif
+    if (rt_ptr->static_info_collector) {
+        ie.cuda_static_device_infos = rt_ptr->static_info_collector->sampleAll();
     }
     ie.host = rt_ptr->host_collector->sample();
 
