@@ -6,11 +6,10 @@
 #include <cupti_sass_metrics.h>
 
 #include <cstdio>
-#include <cstdlib>
-#include <cstring>
 #include <vector>
 
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
+#include "gpufl/core/activity_record.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/ring_buffer.hpp"
@@ -34,12 +33,12 @@ void FreeCuptiCorrelationString(char* s) {
     std::free(s);
 #endif
 }
-}
+}  // namespace
 
 bool SassMetricsEngine::initialize(const MonitorOptions& opts,
-                                    const EngineContext& ctx) {
+                                   const EngineContext& ctx) {
     opts_ = opts;
-    ctx_  = ctx;
+    ctx_ = ctx;
     enabled_ = false;
     config_set_ = false;
     GFL_LOG_DEBUG("[SassMetricsEngine] initialized");
@@ -85,8 +84,7 @@ void SassMetricsEngine::shutdown() {
     if (sass_metrics_buffers_) {
         if (sass_metrics_buffers_->config)
             std::free(sass_metrics_buffers_->config);
-        if (sass_metrics_buffers_->data)
-            std::free(sass_metrics_buffers_->data);
+        if (sass_metrics_buffers_->data) std::free(sass_metrics_buffers_->data);
         delete sass_metrics_buffers_;
         sass_metrics_buffers_ = nullptr;
     }
@@ -103,9 +101,9 @@ void SassMetricsEngine::onScopeStop(const char* /*name*/) {
 
 void SassMetricsEngine::EnableSassMetrics_() {
     if (ctx_.chip_name.empty()) {
-        if (LogCuptiErrorIfFailed(this->name(), "cuptiGetDeviceId",
-                                  cuptiGetDeviceId(ctx_.cuda_ctx,
-                                                   &ctx_.device_id))) {
+        if (LogCuptiErrorIfFailed(
+                this->name(), "cuptiGetDeviceId",
+                cuptiGetDeviceId(ctx_.cuda_ctx, &ctx_.device_id))) {
             return;
         }
         ctx_.chip_name = getChipName(ctx_.device_id);
@@ -115,17 +113,16 @@ void SassMetricsEngine::EnableSassMetrics_() {
     if (!sass_metrics_buffers_) {
         sass_metrics_buffers_ = new SassMetricsBuffers();
         sass_metrics_buffers_->numMetrics = kSassMetricNames.size();
-        sass_metrics_buffers_->config =
-            static_cast<CUpti_SassMetrics_Config*>(
-                std::calloc(sass_metrics_buffers_->numMetrics,
-                            sizeof(CUpti_SassMetrics_Config)));
+        sass_metrics_buffers_->config = static_cast<CUpti_SassMetrics_Config*>(
+            std::calloc(sass_metrics_buffers_->numMetrics,
+                        sizeof(CUpti_SassMetrics_Config)));
     }
 
     size_t validConfigs = 0;
     for (size_t i = 0; i < kSassMetricNames.size(); ++i) {
         CUpti_SassMetrics_GetProperties_Params propParams = {
             CUpti_SassMetrics_GetProperties_Params_STRUCT_SIZE};
-        propParams.pChipName   = ctx_.chip_name.c_str();
+        propParams.pChipName = ctx_.chip_name.c_str();
         propParams.pMetricName = kSassMetricNames[i];
         if (LogCuptiErrorIfFailed(this->name(), "cuptiSassMetricsGetProperties",
                                   cuptiSassMetricsGetProperties(&propParams))) {
@@ -145,16 +142,16 @@ void SassMetricsEngine::EnableSassMetrics_() {
 
     CUpti_SassMetricsSetConfig_Params setConfigParams = {
         CUpti_SassMetricsSetConfig_Params_STRUCT_SIZE};
-    setConfigParams.deviceIndex        = ctx_.device_id;
-    setConfigParams.numOfMetricConfig  = validConfigs;
-    setConfigParams.pConfigs           = sass_metrics_buffers_->config;
+    setConfigParams.deviceIndex = ctx_.device_id;
+    setConfigParams.numOfMetricConfig = validConfigs;
+    setConfigParams.pConfigs = sass_metrics_buffers_->config;
     CUptiResult res = cuptiSassMetricsSetConfig(&setConfigParams);
     if (res == CUPTI_SUCCESS || res == CUPTI_ERROR_INVALID_OPERATION) {
         if (res == CUPTI_SUCCESS) config_set_ = true;
 
         CUpti_SassMetricsEnable_Params enableParams = {
             CUpti_SassMetricsEnable_Params_STRUCT_SIZE};
-        enableParams.ctx                = ctx_.cuda_ctx;
+        enableParams.ctx = ctx_.cuda_ctx;
         enableParams.enableLazyPatching = 1;
         if (LogCuptiErrorIfFailed(this->name(), "cuptiSassMetricsEnable",
                                   cuptiSassMetricsEnable(&enableParams))) {
@@ -180,13 +177,12 @@ void SassMetricsEngine::StopAndCollectSassMetrics_() {
         return;
     }
 
-    size_t nRecords   = props.numOfPatchedInstructionRecords;
+    size_t nRecords = props.numOfPatchedInstructionRecords;
     size_t nInstances = props.numOfInstances;
     auto* data = static_cast<CUpti_SassMetrics_Data*>(
         std::calloc(nRecords, sizeof(CUpti_SassMetrics_Data)));
-    auto* instances = static_cast<CUpti_SassMetrics_InstanceValue*>(
-        std::calloc(nRecords * nInstances,
-                    sizeof(CUpti_SassMetrics_InstanceValue)));
+    auto* instances = static_cast<CUpti_SassMetrics_InstanceValue*>(std::calloc(
+        nRecords * nInstances, sizeof(CUpti_SassMetrics_InstanceValue)));
     if (!data || !instances) {
         std::free(instances);
         std::free(data);
@@ -195,16 +191,16 @@ void SassMetricsEngine::StopAndCollectSassMetrics_() {
     }
 
     for (size_t i = 0; i < nRecords; ++i) {
-        data[i].structSize    = sizeof(CUpti_SassMetrics_Data);
+        data[i].structSize = sizeof(CUpti_SassMetrics_Data);
         data[i].pInstanceValues = &instances[i * nInstances];
     }
 
     CUpti_SassMetricsFlushData_Params flushParams = {
         CUpti_SassMetricsFlushData_Params_STRUCT_SIZE};
-    flushParams.ctx                          = ctx_.cuda_ctx;
+    flushParams.ctx = ctx_.cuda_ctx;
     flushParams.numOfPatchedInstructionRecords = nRecords;
-    flushParams.numOfInstances               = nInstances;
-    flushParams.pMetricsData                 = data;
+    flushParams.numOfInstances = nInstances;
+    flushParams.pMetricsData = data;
 
     CUptiResult flushRes = cuptiSassMetricsFlushData(&flushParams);
     if (flushRes == CUPTI_SUCCESS) {
@@ -218,11 +214,12 @@ void SassMetricsEngine::StopAndCollectSassMetrics_() {
                 if (it != ctx_.cubin_by_crc->end()) {
                     CUpti_GetSassToSourceCorrelationParams corrParams = {
                         sizeof(CUpti_GetSassToSourceCorrelationParams)};
-                    corrParams.cubin        = it->second.data.data();
-                    corrParams.cubinSize    = it->second.data.size();
+                    corrParams.cubin = it->second.data.data();
+                    corrParams.cubinSize = it->second.data.size();
                     corrParams.functionName = data[i].functionName;
-                    corrParams.pcOffset     = data[i].pcOffset;
-                    CUptiResult res = cuptiGetSassToSourceCorrelation(&corrParams);
+                    corrParams.pcOffset = data[i].pcOffset;
+                    CUptiResult res =
+                        cuptiGetSassToSourceCorrelation(&corrParams);
                     if (res == CUPTI_SUCCESS) {
                         if (corrParams.fileName) {
                             std::snprintf(srcFile, sizeof(srcFile), "%s",
@@ -249,21 +246,22 @@ void SassMetricsEngine::StopAndCollectSassMetrics_() {
                 out.pc_offset = data[i].pcOffset;
                 std::snprintf(out.sample_kind, sizeof(out.sample_kind), "%s",
                               "sass_metric");
-                std::snprintf(out.function_name, sizeof(out.function_name), "%s",
-                              data[i].functionName ? data[i].functionName : "unknown");
+                std::snprintf(
+                    out.function_name, sizeof(out.function_name), "%s",
+                    data[i].functionName ? data[i].functionName : "unknown");
                 if (hasSource) {
-                    std::snprintf(out.source_file, sizeof(out.source_file), "%s",
-                                  srcFile);
+                    std::snprintf(out.source_file, sizeof(out.source_file),
+                                  "%s", srcFile);
                     out.source_line = srcLine;
                 }
                 auto itName = metric_id_to_name_.find(inst.metricId);
                 if (itName != metric_id_to_name_.end()) {
-                    std::snprintf(out.metric_name, sizeof(out.metric_name), "%s",
-                                  itName->second.c_str());
-                } else {
                     std::snprintf(out.metric_name, sizeof(out.metric_name),
-                                  "metric_%llu",
-                                  static_cast<unsigned long long>(inst.metricId));
+                                  "%s", itName->second.c_str());
+                } else {
+                    std::snprintf(
+                        out.metric_name, sizeof(out.metric_name), "metric_%llu",
+                        static_cast<unsigned long long>(inst.metricId));
                 }
                 out.metric_value = inst.value;
                 g_monitorBuffer.Push(out);

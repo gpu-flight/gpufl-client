@@ -59,6 +59,8 @@ target_sources(gpufl PRIVATE
     include/gpufl/core/sampler.cpp
     include/gpufl/core/runtime.cpp
     include/gpufl/core/backend_factory.cpp
+    include/gpufl/core/monitor_adapter.cpp
+    include/gpufl/core/monitor.cpp
     include/gpufl/core/gpufl.cpp
     include/gpufl/core/common.cpp
     include/gpufl/core/debug_logger.cpp
@@ -140,7 +142,7 @@ if(GPUFL_ENABLE_NVIDIA)
                 include/gpufl/backends/nvidia/resource_handler.cpp
                 include/gpufl/backends/nvidia/kernel_launch_handler.cpp
                 include/gpufl/backends/nvidia/mem_transfer_handler.cpp
-                include/gpufl/cuda/monitor.cpp
+                include/gpufl/backends/nvidia/monitor_adapter_nvidia.cpp
                 include/gpufl/backends/nvidia/cupti_backend.cpp
                 include/gpufl/backends/nvidia/engine/pc_sampling_engine.cpp
                 include/gpufl/backends/nvidia/engine/sass_metrics_engine.cpp
