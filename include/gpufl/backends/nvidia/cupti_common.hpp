@@ -1,14 +1,9 @@
 #pragma once
 
-#include <cuda_runtime.h>
 #include <cupti.h>
 
-#include <cstdint>
-#include <string>
 #include <utility>
 #include <vector>
-
-#include "gpufl/core/trace_type.hpp"
 
 #define CUPTI_CHECK(call)                                            \
     do {                                                             \
@@ -32,80 +27,12 @@
 namespace gpufl {
 
 /**
- * @brief Cubin binary data keyed by CRC, shared between CuptiBackend and engines.
+ * @brief Cubin binary data keyed by CRC, shared between CuptiBackend and
+ * engines.
  */
 struct CubinInfo {
     std::vector<uint8_t> data;
     uint64_t crc = 0;
-};
-
-struct ActivityRecord {
-    uint32_t device_id;
-    char name[128];
-    TraceType type;
-    cudaStream_t stream;
-    cudaEvent_t start_event;
-    cudaEvent_t stop_event;
-    int64_t cpu_start_ns;
-    int64_t api_start_ns;
-    int64_t api_exit_ns;
-    int64_t duration_ns;
-
-    // Detailed metrics (optional)
-    bool has_details;
-    int grid_x, grid_y, grid_z;
-    int block_x, block_y, block_z;
-    int dyn_shared;
-    int static_shared;
-    int local_bytes;
-    int const_bytes;
-    int num_regs;
-    float occupancy;
-
-    // Per-resource occupancy breakdown
-    float reg_occupancy = 0.0f;    // occupancy limited only by register file
-    float smem_occupancy = 0.0f;   // occupancy limited only by shared memory
-    float warp_occupancy = 0.0f;   // occupancy limited only by warp count
-    float block_occupancy = 0.0f;  // occupancy limited only by block count
-    char limiting_resource[16]{};  // "warps"|"registers"|"shared_mem"|"blocks"
-
-    int max_active_blocks;
-    unsigned int corr_id;
-
-    char source_file[256];
-    uint32_t source_line;
-    char function_name[256];
-    char sample_kind[32];
-    uint32_t samples_count;
-    uint32_t stall_reason;
-    std::string reason_name;
-    char device_name[64]{};
-
-    // SASS Metrics support
-    uint32_t pc_offset;
-    uint64_t metric_value;
-    char metric_name[64];
-
-    char user_scope[256]{};
-    int scope_depth{};
-
-    size_t stack_id{};
-
-    // Phase 1a: additional CUpti_ActivityKernel11 fields
-    uint32_t local_mem_total =
-        0;  // localMemoryTotal — total local mem across all threads (bytes)
-    uint32_t local_mem_per_thread =
-        0;  // localMemoryPerThread — bytes spilled to local mem per thread (0 = no spill)
-    uint8_t cache_config_requested = 0;  // cacheConfigRequested
-    uint8_t cache_config_executed = 0;   // cacheConfigExecuted
-    uint32_t shared_mem_executed =
-        0;  // sharedMemoryExecuted — actual smem allocated by driver
-
-    // Memcpy / Memset specific
-    uint64_t bytes;
-    uint32_t copy_kind;  // CUpti_ActivityMemcpyKind
-    uint32_t src_kind;   // CUpti_ActivityMemoryKind
-    uint32_t dst_kind;   // CUpti_ActivityMemoryKind
 };
 
 struct LaunchMeta {

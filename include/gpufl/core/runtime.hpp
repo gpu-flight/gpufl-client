@@ -4,6 +4,7 @@
 #include <string>
 
 #include "gpufl/backends/host_collector.hpp"
+#include "gpufl/core/backend_interfaces.hpp"
 #include "gpufl/core/sampler.hpp"
 
 namespace gpufl {
@@ -15,7 +16,7 @@ struct Runtime {
     std::shared_ptr<Logger> logger;
     std::shared_ptr<ISystemCollector<DeviceSample>> collector;
     std::unique_ptr<HostCollector> host_collector;
-    std::unique_ptr<ISystemCollector<CudaStaticDeviceInfo>> cuda_collector;
+    std::unique_ptr<IGpuStaticInfoCollector> static_info_collector;
 
     // background system sampling
     std::atomic<bool> system_sampling{false};
