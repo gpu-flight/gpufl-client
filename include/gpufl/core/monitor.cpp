@@ -105,8 +105,7 @@ void CollectorLoop() {
                 KernelBatchRow row;
                 row.start_ns    = rec.cpu_start_ns;
                 row.kernel_id   = kernel_id;
-                row.stream_id   = static_cast<uint32_t>(
-                    reinterpret_cast<uintptr_t>(rec.stream));
+                row.stream_id   = static_cast<uint32_t>(rec.stream);
                 row.duration_ns = duration_ns;
                 row.corr_id     = rec.corr_id;
                 row.dyn_shared  = rec.dyn_shared;
@@ -152,8 +151,7 @@ void CollectorLoop() {
             } else if (rec.type == TraceType::MEMCPY) {
                 MemcpyBatchRow row;
                 row.start_ns    = rec.cpu_start_ns;
-                row.stream_id   = static_cast<uint32_t>(
-                    reinterpret_cast<uintptr_t>(rec.stream));
+                row.stream_id   = static_cast<uint32_t>(rec.stream);
                 row.duration_ns = duration_ns;
                 row.bytes       = rec.bytes;
                 row.copy_kind   = rec.copy_kind;
@@ -169,8 +167,7 @@ void CollectorLoop() {
                 MemsetEvent be;
                 be.platform    = platform;
                 be.device_id   = rec.device_id;
-                be.stream_id   = static_cast<uint32_t>(
-                    reinterpret_cast<uintptr_t>(rec.stream));
+                be.stream_id   = static_cast<uint32_t>(rec.stream);
                 be.session_id  = rt->session_id;
                 be.pid         = detail::GetPid();
                 be.app         = rt->app_name;
