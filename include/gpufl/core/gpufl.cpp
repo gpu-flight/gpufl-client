@@ -12,7 +12,6 @@
 #include "gpufl/core/events.hpp"
 #include "gpufl/core/logger/logger.hpp"
 #include "gpufl/core/model/lifecycle_model.hpp"
-#include "gpufl/core/model/scope_event_model.hpp"
 #include "gpufl/core/model/perf_metric_model.hpp"
 #include "gpufl/core/model/system_event_model.hpp"
 #include "gpufl/core/monitor.hpp"
@@ -71,9 +70,9 @@ bool init(const InitOptions& opts) {
     GFL_LOG_DEBUG("Initializing Monitor (CUPTI)...");
     MonitorOptions mOpts;
     mOpts.collect_kernel_details = opts.enable_kernel_details;
-    mOpts.enable_debug_output    = opts.enable_debug_output;
-    mOpts.profiling_engine       = opts.profiling_engine;
-    mOpts.kernel_sample_rate_ms  = opts.kernel_sample_rate_ms;
+    mOpts.enable_debug_output = opts.enable_debug_output;
+    mOpts.profiling_engine = opts.profiling_engine;
+    mOpts.kernel_sample_rate_ms = opts.kernel_sample_rate_ms;
     if (mOpts.profiling_engine != ProfilingEngine::None) {
         mOpts.collect_kernel_details = true;
     }
@@ -90,8 +89,7 @@ bool init(const InitOptions& opts) {
     std::string backendReason;
     auto backendCollectors =
         CreateBackendCollectors(opts.backend, &backendReason);
-    rt_ptr->collector =
-        std::move(backendCollectors.telemetry_collector);
+    rt_ptr->collector = std::move(backendCollectors.telemetry_collector);
     rt_ptr->static_info_collector =
         std::move(backendCollectors.static_info_collector);
 
@@ -111,7 +109,8 @@ bool init(const InitOptions& opts) {
         ie.devices = rt_ptr->collector->sampleAll();
     }
     if (rt_ptr->static_info_collector) {
-        ie.cuda_static_device_infos = rt_ptr->static_info_collector->sampleAll();
+        ie.cuda_static_device_infos =
+            rt_ptr->static_info_collector->sampleAll();
     }
     ie.host = rt_ptr->host_collector->sample();
 
@@ -126,19 +125,19 @@ bool init(const InitOptions& opts) {
         e.session_id = rt_ptr->session_id;
         e.ts_ns = gpufl::detail::GetTimestampNs();
         if (rt_ptr->collector) e.devices = rt_ptr->collector->sampleAll();
-        if (rt_ptr->host_collector)
-            e.host = rt_ptr->host_collector->sample();
+        if (rt_ptr->host_collector) e.host = rt_ptr->host_collector->sample();
         rt_ptr->logger->write(model::SystemStartModel(e));
     }
     if (opts.sampling_auto_start && opts.system_sample_rate_ms > 0 &&
         rt_ptr->collector) {
         rt_ptr->sampler.start(rt_ptr->app_name, rt_ptr->session_id,
                               rt_ptr->logger, rt_ptr->collector,
-                              opts.system_sample_rate_ms, rt_ptr->app_name);
+                              opts.system_sample_rate_ms, rt_ptr->app_name,
+                              rt_ptr->host_collector.get());
     }
 
-    // Intentionally disabled — shutdown order must be explicit to avoid CUPTI teardown races
-    // std::atexit(shutdown);
+    // Intentionally disabled — shutdown order must be explicit to avoid CUPTI
+    // teardown races std::atexit(shutdown);
 
     GFL_LOG_DEBUG("Initialization complete!");
     return true;
@@ -149,18 +148,19 @@ void systemStart(std::string name) {
     if (!rt || !rt->logger) return;
     {
         SystemStartEvent e;
-        e.pid = gpufl::detail::GetPid();
+        e.pid = detail::GetPid();
         e.app = rt->app_name;
         e.name = std::move(name);
         e.session_id = rt->session_id;
-        e.ts_ns = gpufl::detail::GetTimestampNs();
+        e.ts_ns = detail::GetTimestampNs();
         if (rt->collector) e.devices = rt->collector->sampleAll();
         if (rt->host_collector) e.host = rt->host_collector->sample();
         rt->logger->write(model::SystemStartModel(e));
     }
     if (g_opts.system_sample_rate_ms > 0 && rt->collector) {
         rt->sampler.start(rt->app_name, rt->session_id, rt->logger,
-                          rt->collector, g_opts.system_sample_rate_ms, name);
+                          rt->collector, g_opts.system_sample_rate_ms, name,
+                          rt->host_collector.get());
     }
 }
 
@@ -171,11 +171,11 @@ void systemStop(std::string name) {
     rt->sampler.stop();
 
     SystemStopEvent e;
-    e.pid = gpufl::detail::GetPid();
+    e.pid = detail::GetPid();
     e.app = rt->app_name;
     e.session_id = rt->session_id;
     e.name = std::move(name);
-    e.ts_ns = gpufl::detail::GetTimestampNs();
+    e.ts_ns = detail::GetTimestampNs();
     if (rt->collector) e.devices = rt->collector->sampleAll();
     if (rt->host_collector) e.host = rt->host_collector->sample();
     rt->logger->write(model::SystemStopModel(e));
@@ -191,11 +191,11 @@ void shutdown() {
 
     if (g_opts.sampling_auto_start && rt->collector) {
         SystemStopEvent e;
-        e.pid = gpufl::detail::GetPid();
+        e.pid = detail::GetPid();
         e.app = rt->app_name;
         e.session_id = rt->session_id;
         e.name = "sampling_end";
-        e.ts_ns = gpufl::detail::GetTimestampNs();
+        e.ts_ns = detail::GetTimestampNs();
         if (rt->collector) e.devices = rt->collector->sampleAll();
         if (rt->host_collector) e.host = rt->host_collector->sample();
         rt->logger->write(model::SystemStopModel(e));
@@ -215,8 +215,8 @@ void shutdown() {
 }
 
 // ---- ScopedMonitor ----
- ScopedMonitor::ScopedMonitor(std::string name)
-     : ScopedMonitor(std::move(name), "", false) {}
+ScopedMonitor::ScopedMonitor(std::string name)
+    : ScopedMonitor(std::move(name), "", false) {}
 
 ScopedMonitor::ScopedMonitor(std::string name, std::string tag)
     : ScopedMonitor(std::move(name), std::move(tag), false) {}
@@ -224,45 +224,27 @@ ScopedMonitor::ScopedMonitor(std::string name, std::string tag)
 ScopedMonitor::ScopedMonitor(std::string name, bool deep_profiling)
     : ScopedMonitor(std::move(name), "", deep_profiling) {}
 
-ScopedMonitor::ScopedMonitor(std::string name, std::string tag, bool deep_profiling)
+ScopedMonitor::ScopedMonitor(std::string name, std::string tag,
+                             bool deep_profiling)
     : name_(std::move(name)),
       tag_(std::move(tag)),
       pid_(detail::GetPid()),
       start_ns_(detail::GetTimestampNs()),
       scope_id_(nextScopeId_()) {
-    Runtime* rt = runtime();
-    if (!rt || !rt->logger) return;
-    ScopeBeginEvent e;
-    e.pid = pid_;
-    e.app = rt->app_name;
-    e.session_id = rt->session_id;
-    e.name = name_;
-    e.tag = tag_;
-    e.ts_ns = start_ns_;
-    e.scope_id = scope_id_;
+    if (const Runtime* rt = runtime(); !rt || !rt->logger) return;
 
     auto& stack = getThreadScopeStack();
-
-    e.scope_depth = stack.size();
-    if (!stack.empty()) {
-        std::string fullPath;
-        for (size_t i = 0; i < stack.size(); ++i) {
-            if (i > 0) fullPath += "|";
-            fullPath += stack[i];
-        }
-        e.user_scope = fullPath + "|" + name_;
-    } else {
-        e.user_scope = name_;
-    }
+    const int depth = static_cast<int>(stack.size());
     stack.push_back(name_);
 
-    if (rt->host_collector) {
-        e.host = rt->host_collector->sample();
-    }
-    if (rt->collector) {
-        e.devices = rt->collector->sampleAll();
-    }
-    rt->logger->write(model::ScopeBeginModel(e));
+    const uint32_t name_id = Monitor::InternScopeName(name_);
+    ScopeBatchRow row;
+    row.ts_ns = start_ns_;
+    row.scope_instance_id = scope_id_;
+    row.name_id = name_id;
+    row.event_type = 0;  // begin
+    row.depth = depth;
+    Monitor::PushScopeRow(row);
 
     // Scoped profiling is controlled by runtime options; deep_profiling is
     // kept only for source compatibility.
@@ -276,44 +258,22 @@ ScopedMonitor::~ScopedMonitor() {
     const Runtime* rt = runtime();
     if (!rt || !rt->logger) return;
 
-    ScopeEndEvent e;
-    e.pid = pid_;
-    e.app = rt->app_name;
-    e.session_id = rt->session_id;
-    e.name = name_;
-    e.tag = tag_;
-    e.ts_ns = detail::GetTimestampNs();
-    e.scope_id = scope_id_;
-
     auto& stack = getThreadScopeStack();
+    if (!stack.empty()) stack.pop_back();
+    const int depth = static_cast<int>(stack.size());
 
-    if (!stack.empty()) {
-        stack.pop_back();
-    }
-    e.scope_depth = stack.size();
-    if (!stack.empty()) {
-        std::string fullPath;
-        for (size_t i = 0; i < stack.size(); ++i) {
-            if (i > 0) fullPath += "|";
-            fullPath += stack[i];
-        }
-        e.user_scope = fullPath + "|" + name_;
-    } else {
-        e.user_scope = name_;
-    }
-
-    if (rt->host_collector) {
-        e.host = rt->host_collector->sample();
-    }
-    if (rt->collector) {
-        e.devices = rt->collector->sampleAll();
-    }
-
-    rt->logger->write(model::ScopeEndModel(e));
+    ScopeBatchRow row;
+    row.ts_ns = detail::GetTimestampNs();
+    row.scope_instance_id = scope_id_;
+    row.name_id = Monitor::InternScopeName(name_);
+    row.event_type = 1;  // end
+    row.depth = depth;
+    Monitor::PushScopeRow(row);
 
     if (g_opts.profiling_engine != ProfilingEngine::None) {
         Monitor::EndProfilerScope(name_.c_str());
-        Monitor::EndPerfScope(name_.c_str());  // triggers EndPerfPassAndDecode first
+        Monitor::EndPerfScope(
+            name_.c_str());  // triggers EndPerfPassAndDecode first
         if (IMonitorBackend* b = Monitor::GetBackend()) {
             if (auto event_opt = b->TakeLastPerfEvent()) {
                 PerfMetricEvent& pe = *event_opt;

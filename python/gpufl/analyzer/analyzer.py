@@ -44,62 +44,119 @@ def _shorten_kernel_name(name: str) -> tuple[str, str]:
         short_func += '<…>'
     return short_func, name
 
+
+# CUPTI CUpti_ActivityPCSamplingStallReason — skip 0 (invalid) and 1 (none)
+_STALL_NAMES: dict[int, str] = {
+    2:  "Instruction Fetch",
+    3:  "Execution Dependency",
+    4:  "Memory Dependency",
+    5:  "Texture",
+    6:  "Sync",
+    7:  "Constant Memory",
+    8:  "Pipe Busy",
+    9:  "Memory Throttle",
+    10: "Branch Resolving",
+    11: "Wait",
+    12: "Barrier",
+    13: "Sleeping",
+}
+
+
 class GpuFlightSession:
     def __init__(self, log_dir: str, session_id: str = None, log_prefix: str = "gfl_block", max_stack_depth: int = 5):
         self.log_dir = Path(log_dir)
         self.console = Console()
         self.max_stack_depth = max_stack_depth
+        self.app_name = None
 
-        # 1. Load DataFrames
-        self.device = self._load_log(self._resolve_log_path(log_prefix, "device"))
-        self.scopes = self._load_log(self._resolve_log_path(log_prefix, "scope"))
-        self.system = self._load_log(self._resolve_log_path(log_prefix, "system"))
+        # 1. Load raw DataFrames from JSONL
+        device_df = self._load_log(self._resolve_log_path(log_prefix, "device"))
+        scope_df  = self._load_log(self._resolve_log_path(log_prefix, "scope"))
+        system_df = self._load_log(self._resolve_log_path(log_prefix, "system"))
 
-        # 2. Extract session boundaries from device log
+        # 2. Extract session boundaries — supports both job_start (new) and init (old)
         self.session_start_ns = None
-        self.session_end_ns = None
-        self.static_devices = []
+        self.session_end_ns   = None
+        self.static_devices   = []
 
-        if not self.device.empty and 'type' in self.device.columns:
-            init_rows = self.device[self.device['type'] == 'init']
-            shutdown_rows = self.device[self.device['type'] == 'shutdown']
+        for df in [device_df, scope_df, system_df]:
+            if df.empty or 'type' not in df.columns:
+                continue
+            for etype in ['job_start', 'init']:
+                rows = df[df['type'] == etype]
+                if not rows.empty:
+                    if self.session_start_ns is None and 'ts_ns' in rows.columns:
+                        self.session_start_ns = pd.to_numeric(rows.iloc[0]['ts_ns'], errors='coerce')
+                    if not self.static_devices and 'cuda_static_devices' in rows.columns:
+                        sd = rows.iloc[0].get('cuda_static_devices')
+                        if isinstance(sd, list):
+                            self.static_devices = sd
+                    if self.app_name is None and 'app' in rows.columns:
+                        self.app_name = rows.iloc[0].get('app')
+                    break
+            shut = df[df['type'] == 'shutdown']
+            if not shut.empty and 'ts_ns' in shut.columns and self.session_end_ns is None:
+                self.session_end_ns = pd.to_numeric(shut.iloc[-1]['ts_ns'], errors='coerce')
 
-            if not init_rows.empty and 'ts_ns' in init_rows.columns:
-                self.session_start_ns = pd.to_numeric(init_rows.iloc[0]['ts_ns'], errors='coerce')
-            if not shutdown_rows.empty and 'ts_ns' in shutdown_rows.columns:
-                self.session_end_ns = pd.to_numeric(shutdown_rows.iloc[-1]['ts_ns'], errors='coerce')
+        # 3. Detect format: batch (new) vs per-event (old)
+        _BATCH_TYPES = {
+            'kernel_event_batch', 'memcpy_event_batch', 'device_metric_batch',
+            'scope_event_batch', 'profile_sample_batch', 'host_metric_batch',
+        }
+        is_batch_format = any(
+            not df.empty and 'type' in df.columns and df['type'].isin(_BATCH_TYPES).any()
+            for df in [device_df, scope_df, system_df]
+        )
 
-            # Extract static device info from init event
-            if not init_rows.empty and 'cuda_static_devices' in init_rows.columns:
-                static_devs = init_rows.iloc[0].get('cuda_static_devices')
-                if isinstance(static_devs, list):
-                    self.static_devices = static_devs
-
-        # 3. Split device log by event type
-        if not self.device.empty and 'type' in self.device.columns:
-            self.kernels = self.device[self.device['type'] == 'kernel_event'].copy()
-            self.memcpy  = self.device[self.device['type'] == 'memcpy_event'].copy()
-            self.memset  = self.device[self.device['type'] == 'memset_event'].copy()
+        if is_batch_format:
+            dict_maps = self._build_dict_maps(device_df, scope_df, system_df)
+            (self.kernels, self.memcpy, self.memset,
+             self.scopes, self.perf,
+             self.device_metrics, self.host_metrics,
+             self.scope_events) = self._expand_batches(
+                device_df, scope_df, system_df, dict_maps
+            )
+            self.system = pd.DataFrame()
         else:
-            self.kernels = pd.DataFrame()
-            self.memcpy  = pd.DataFrame()
-            self.memset  = pd.DataFrame()
+            # Legacy per-event format
+            if not device_df.empty and 'type' in device_df.columns:
+                self.kernels = device_df[device_df['type'] == 'kernel_event'].copy()
+                self.memcpy  = device_df[device_df['type'] == 'memcpy_event'].copy()
+                self.memset  = device_df[device_df['type'] == 'memset_event'].copy()
+            else:
+                self.kernels = pd.DataFrame()
+                self.memcpy  = pd.DataFrame()
+                self.memset  = pd.DataFrame()
 
-        if not self.scopes.empty and 'type' in self.scopes.columns:
-            self.perf = self.scopes[self.scopes['type'] == 'perf_metric_event'].copy()
-        else:
-            self.perf = pd.DataFrame()
+            if not scope_df.empty and 'type' in scope_df.columns:
+                self.scopes = scope_df
+                self.perf   = scope_df[scope_df['type'] == 'perf_metric_event'].copy()
+            else:
+                self.scopes = pd.DataFrame()
+                self.perf   = pd.DataFrame()
 
-        # 4. Filter by Session ID if provided (or pick the latest)
+            self.system         = system_df
+            self.device_metrics = pd.DataFrame()
+            self.host_metrics   = pd.DataFrame()
+            self.scope_events   = pd.DataFrame()
+
+        # 4. Filter by session_id
         if session_id:
-            self.kernels = self.kernels[self.kernels['session_id'] == session_id]
-            self.memcpy  = self.memcpy[self.memcpy['session_id'] == session_id]
-            self.memset  = self.memset[self.memset['session_id'] == session_id]
+            for attr in ['kernels', 'memcpy', 'memset', 'scopes', 'scope_events']:
+                df = getattr(self, attr)
+                if not df.empty and 'session_id' in df.columns:
+                    setattr(self, attr, df[df['session_id'] == session_id])
             if not self.perf.empty and 'session_id' in self.perf.columns:
                 self.perf = self.perf[self.perf['session_id'] == session_id]
+            if not self.device_metrics.empty and 'session_id' in self.device_metrics.columns:
+                self.device_metrics = self.device_metrics[self.device_metrics['session_id'] == session_id]
+            if not self.host_metrics.empty and 'session_id' in self.host_metrics.columns:
+                self.host_metrics = self.host_metrics[self.host_metrics['session_id'] == session_id]
 
-        # 5. Pre-Calculate Metrics (The "Secret Sauce")
+        # 5. Pre-calculate derived metrics
         self._enrich_data()
+
+    # ── Log loading ───────────────────────────────────────────────────────────
 
     def _resolve_log_path(self, log_prefix: str, channel: str) -> Path | None:
         """Find a channel log path for current naming + rotation scheme.
@@ -142,14 +199,222 @@ class GpuFlightSession:
                         pass
         return pd.DataFrame(data)
 
+    # ── Batch format support ──────────────────────────────────────────────────
+
+    def _build_dict_maps(self, *dfs) -> dict:
+        """Merge all dictionary_update events into {dict_type: {id: name}} maps."""
+        maps: dict[str, dict[int, str]] = {
+            'kernel': {}, 'scope_name': {}, 'function': {}, 'metric': {}
+        }
+        for df in dfs:
+            if df.empty or 'type' not in df.columns:
+                continue
+            for _, row in df[df['type'] == 'dictionary_update'].iterrows():
+                for col_key, map_key in [
+                    ('kernel_dict',     'kernel'),
+                    ('scope_name_dict', 'scope_name'),
+                    ('function_dict',   'function'),
+                    ('metric_dict',     'metric'),
+                ]:
+                    d = row.get(col_key)
+                    if isinstance(d, dict):
+                        maps[map_key].update({int(k): v for k, v in d.items()})
+        return maps
+
+    def _expand_batches(self, device_df, scope_df, system_df, dict_maps) -> tuple:
+        """Expand all batch message types into flat DataFrames.
+
+        Returns: (kernels, memcpy, memset, scopes, perf, device_metrics, host_metrics)
+        """
+        # ── kernel_event_batch ────────────────────────────────────────────────
+        kernel_rows = []
+        if not device_df.empty and 'type' in device_df.columns:
+            for _, batch in device_df[device_df['type'] == 'kernel_event_batch'].iterrows():
+                cols = batch.get('columns', [])
+                base = int(batch.get('base_time_ns', 0))
+                ci   = {c: i for i, c in enumerate(cols)}
+                for row in (batch.get('rows') or []):
+                    start = base + row[ci['dt_ns']]
+                    kernel_rows.append({
+                        'session_id':       batch.get('session_id'),
+                        'start_ns':         start,
+                        'end_ns':           start + row[ci['duration_ns']],
+                        'duration_ns':      row[ci['duration_ns']],
+                        'name':             dict_maps['kernel'].get(
+                                                row[ci['kernel_id']],
+                                                f"kernel_{row[ci['kernel_id']]}"
+                                            ),
+                        'stream_id':        row[ci['stream_id']],
+                        'corr_id':          row[ci['corr_id']],
+                        'dyn_shared_bytes': row[ci['dyn_shared']],
+                        'num_regs':         row[ci['num_regs']],
+                        'has_details':      bool(row[ci['has_details']]),
+                    })
+        kernels_df = pd.DataFrame(kernel_rows)
+
+        # ── kernel_detail — merge into kernels via corr_id ───────────────────
+        if not kernels_df.empty and not device_df.empty and 'type' in device_df.columns:
+            detail_rows = []
+            for _, det in device_df[device_df['type'] == 'kernel_detail'].iterrows():
+                detail_rows.append({
+                    'corr_id':                    det.get('corr_id'),
+                    'grid':                       det.get('grid'),
+                    'block':                      det.get('block'),
+                    'static_shared_bytes':         det.get('static_shared'),
+                    'local_bytes':                det.get('local_bytes'),
+                    'const_bytes':                det.get('const_bytes'),
+                    'occupancy':                  det.get('occupancy'),
+                    'reg_occupancy':              det.get('reg_occupancy'),
+                    'smem_occupancy':             det.get('smem_occupancy'),
+                    'warp_occupancy':             det.get('warp_occupancy'),
+                    'block_occupancy':            det.get('block_occupancy'),
+                    'limiting_resource':           det.get('limiting_resource'),
+                    'local_mem_total_bytes':       det.get('local_mem_total_bytes'),
+                    'local_mem_per_thread_bytes':  det.get('local_mem_per_thread_bytes'),
+                    'user_scope':                 det.get('user_scope'),
+                    'stack_trace':                det.get('stack_trace'),
+                })
+            if detail_rows:
+                detail_df = pd.DataFrame(detail_rows)
+                detail_df['corr_id']  = pd.to_numeric(detail_df['corr_id'],  errors='coerce')
+                kernels_df['corr_id'] = pd.to_numeric(kernels_df['corr_id'], errors='coerce')
+                kernels_df = kernels_df.merge(detail_df, on='corr_id', how='left')
+
+        # ── memcpy_event_batch ────────────────────────────────────────────────
+        memcpy_rows = []
+        if not device_df.empty and 'type' in device_df.columns:
+            for _, batch in device_df[device_df['type'] == 'memcpy_event_batch'].iterrows():
+                cols = batch.get('columns', [])
+                base = int(batch.get('base_time_ns', 0))
+                ci   = {c: i for i, c in enumerate(cols)}
+                for row in (batch.get('rows') or []):
+                    start = base + row[ci['dt_ns']]
+                    memcpy_rows.append({
+                        'session_id':  batch.get('session_id'),
+                        'start_ns':    start,
+                        'end_ns':      start + row[ci['duration_ns']],
+                        'duration_ns': row[ci['duration_ns']],
+                        'stream_id':   row[ci['stream_id']],
+                        'bytes':       row[ci['bytes']],
+                        'copy_kind':   row[ci['copy_kind']],
+                        'corr_id':     row[ci['corr_id']],
+                    })
+        memcpy_df = pd.DataFrame(memcpy_rows)
+
+        # ── profile_sample_batch (scope log) ──────────────────────────────────
+        sample_rows = []
+        if not scope_df.empty and 'type' in scope_df.columns:
+            for _, batch in scope_df[scope_df['type'] == 'profile_sample_batch'].iterrows():
+                cols = batch.get('columns', [])
+                base = int(batch.get('base_time_ns', 0))
+                ci   = {c: i for i, c in enumerate(cols)}
+                for row in (batch.get('rows') or []):
+                    sk_int      = row[ci['sample_kind']]
+                    sample_kind = 'pc_sampling' if sk_int == 0 else 'sass_metric'
+                    metric_id   = row[ci['metric_id']]
+                    metric_name = dict_maps['metric'].get(metric_id) if metric_id else None
+                    fn_id       = row[ci['function_id']]
+                    fn_name     = dict_maps['function'].get(fn_id) if fn_id else None
+                    sn_id       = row[ci['scope_name_id']]
+                    scope_name  = dict_maps['scope_name'].get(sn_id) if sn_id else None
+                    stall       = row[ci['stall_reason']]
+                    mv          = row[ci['metric_value']]
+                    sample_rows.append({
+                        'type':          'profile_sample',
+                        'session_id':    batch.get('session_id'),
+                        'ts_ns':         base + row[ci['dt_ns']],
+                        'corr_id':       row[ci['corr_id']],
+                        'device_id':     row[ci['device_id']],
+                        'function_name': fn_name,
+                        'pc_offset':     row[ci['pc_offset']],
+                        'metric_name':   metric_name,
+                        'metric_value':  mv,
+                        'stall_reason':  stall if stall > 0 else None,
+                        'sample_kind':   sample_kind,
+                        'scope_name':    scope_name,
+                        # Compatibility aliases used by inspect_stalls / inspect_profile_samples
+                        'reason_name':   _STALL_NAMES.get(stall, f"Stall_{stall}") if stall > 1 else None,
+                        'sample_count':  mv if sample_kind == 'pc_sampling' else 0,
+                    })
+        scopes_df = pd.DataFrame(sample_rows)
+
+        # ── perf_metric_event (scope log — still per-event, not batched) ──────
+        perf_df = pd.DataFrame()
+        if not scope_df.empty and 'type' in scope_df.columns:
+            perf_rows = scope_df[scope_df['type'] == 'perf_metric_event']
+            if not perf_rows.empty:
+                perf_df = perf_rows.copy()
+
+        # ── device_metric_batch (system log) ──────────────────────────────────
+        dm_rows = []
+        if not system_df.empty and 'type' in system_df.columns:
+            for _, batch in system_df[system_df['type'] == 'device_metric_batch'].iterrows():
+                cols = batch.get('columns', [])
+                base = int(batch.get('base_time_ns', 0))
+                ci   = {c: i for i, c in enumerate(cols)}
+                for row in (batch.get('rows') or []):
+                    dm_rows.append({
+                        'session_id': batch.get('session_id'),
+                        'ts_ns':      base + row[ci['dt_ns']],
+                        'device_id':  row[ci['device_id']],
+                        'gpu_util':   row[ci['gpu_util']],
+                        'mem_util':   row[ci['mem_util']],
+                        'temp_c':     row[ci['temp_c']],
+                        'power_mw':   row[ci['power_mw']],
+                        'used_mib':   row[ci['used_mib']],
+                    })
+        device_metrics_df = pd.DataFrame(dm_rows)
+
+        # ── host_metric_batch (system log) ────────────────────────────────────
+        hm_rows = []
+        if not system_df.empty and 'type' in system_df.columns:
+            for _, batch in system_df[system_df['type'] == 'host_metric_batch'].iterrows():
+                cols = batch.get('columns', [])
+                base = int(batch.get('base_time_ns', 0))
+                ci   = {c: i for i, c in enumerate(cols)}
+                for row in (batch.get('rows') or []):
+                    hm_rows.append({
+                        'session_id':    batch.get('session_id'),
+                        'ts_ns':         base + row[ci['dt_ns']],
+                        'cpu_pct':       row[ci['cpu_pct_x100']] / 100.0,
+                        'ram_used_mib':  row[ci['ram_used_mib']],
+                        'ram_total_mib': row[ci['ram_total_mib']],
+                    })
+        host_metrics_df = pd.DataFrame(hm_rows)
+
+        # ── scope_event_batch (scope log) — begin/end pairs ──────────────────
+        scope_event_rows = []
+        if not scope_df.empty and 'type' in scope_df.columns:
+            for _, batch in scope_df[scope_df['type'] == 'scope_event_batch'].iterrows():
+                cols = batch.get('columns', [])
+                base = int(batch.get('base_time_ns', 0))
+                ci   = {c: i for i, c in enumerate(cols)}
+                for row in (batch.get('rows') or []):
+                    sn_id = row[ci['name_id']]
+                    scope_event_rows.append({
+                        'session_id':        batch.get('session_id'),
+                        'ts_ns':             base + row[ci['dt_ns']],
+                        'scope_instance_id': row[ci['scope_instance_id']],
+                        'name':              dict_maps['scope_name'].get(sn_id, f"scope_{sn_id}"),
+                        'event_type':        row[ci['event_type']],   # 0=begin, 1=end
+                        'depth':             row[ci['depth']],
+                    })
+        scope_events_df = pd.DataFrame(scope_event_rows)
+
+        return (kernels_df, memcpy_df, pd.DataFrame(), scopes_df, perf_df,
+                device_metrics_df, host_metrics_df, scope_events_df)
+
+    # ── Derived metrics ───────────────────────────────────────────────────────
+
     def _enrich_data(self):
         """Calculates derived metrics (Latency, Bandwidth, Duration)"""
         if not self.kernels.empty:
             k = self.kernels
             k['duration_ms'] = (k['end_ns'] - k['start_ns']) / 1e6
-            k['cpu_overhead_ms'] = (k['api_exit_ns'] - k['api_start_ns']) / 1e6
-            # Queue Latency: gap between CPU dispatch and GPU start (clamped — clock drift)
-            k['queue_latency_ms'] = ((k['start_ns'] - k['api_exit_ns']) / 1e6).clip(lower=0)
+            # api_start/exit only present in old per-event format
+            if {'api_start_ns', 'api_exit_ns'}.issubset(k.columns):
+                k['cpu_overhead_ms'] = (k['api_exit_ns'] - k['api_start_ns']) / 1e6
+                k['queue_latency_ms'] = ((k['start_ns'] - k['api_exit_ns']) / 1e6).clip(lower=0)
             self.kernels = k
 
         # Phase 1b: memcpy throughput
@@ -267,33 +532,39 @@ class GpuFlightSession:
 
         return corr_to_name, fallback_used
 
+    # ── Public analysis methods ───────────────────────────────────────────────
+
     def print_summary(self):
         """Prints an 'Executive Summary' of the session"""
-        if self.kernels.empty:
-            self.console.print("[bold red]No kernel data found![/bold red]")
-            return
-
-        # Use session init->shutdown timestamps if available, fall back to kernel span
+        # Determine session duration
         if self.session_start_ns is not None and self.session_end_ns is not None:
-            total_duration = self.session_end_ns - self.session_start_ns
+            total_duration_ms = (self.session_end_ns - self.session_start_ns) / 1e6
+        elif not self.kernels.empty:
+            total_duration_ms = (self.kernels['end_ns'].max() - self.kernels['start_ns'].min()) / 1e6
         else:
-            total_duration = self.kernels['end_ns'].max() - self.kernels['start_ns'].min()
-        total_duration_ms = total_duration / 1e6
-        gpu_busy_time = self.kernels['duration_ms'].sum()
+            total_duration_ms = 0.0
 
-        # Try to get runtime device stats from system samples
-        def get_device_stat(devices, key, agg='mean'):
-            if not isinstance(devices, list) or len(devices) == 0:
-                return 0
-            stats = [d.get(key, 0) for d in devices if isinstance(d, dict)]
-            if not stats: return 0
-            return sum(stats) / len(stats) if agg == 'mean' else max(stats)
+        gpu_busy_time = self.kernels['duration_ms'].sum() if not self.kernels.empty else 0.0
 
         has_device_stats = False
         avg_gpu_util = 0.0
         peak_mem = 0
 
-        if not self.system.empty and 'devices' in self.system.columns:
+        # New batch format: device_metrics DataFrame
+        if not self.device_metrics.empty and 'gpu_util' in self.device_metrics.columns:
+            has_device_stats = True
+            avg_gpu_util = self.device_metrics['gpu_util'].mean()
+            peak_mem = int(self.device_metrics['used_mib'].max()) if 'used_mib' in self.device_metrics.columns else 0
+
+        # Legacy format: system DataFrame with nested devices list
+        elif not self.system.empty and 'devices' in self.system.columns:
+            def get_device_stat(devices, key, agg='mean'):
+                if not isinstance(devices, list) or len(devices) == 0:
+                    return 0
+                stats = [d.get(key, 0) for d in devices if isinstance(d, dict)]
+                if not stats: return 0
+                return sum(stats) / len(stats) if agg == 'mean' else max(stats)
+
             non_empty = self.system[self.system['devices'].apply(
                 lambda x: isinstance(x, list) and len(x) > 0
             )]
@@ -305,20 +576,22 @@ class GpuFlightSession:
                     lambda x: get_device_stat(x, 'used_mib', 'max')).max()
 
         # Create Dashboard
-        grid = Table.grid(expand=True)
-        grid.add_column()
-        grid.add_column()
-
         stats = Table(show_header=False, box=None)
         stats.add_row("Total Duration:", f"[bold cyan]{total_duration_ms/1000:.2f} s[/bold cyan]")
-        stats.add_row("Total Kernels:", f"[bold]{len(self.kernels)}[/bold]")
-        stats.add_row("GPU Busy Time:", f"[green]{gpu_busy_time/1000:.2f} s[/green]")
+        if not self.kernels.empty:
+            stats.add_row("Total Kernels:", f"[bold]{len(self.kernels)}[/bold]")
+            stats.add_row("GPU Busy Time:", f"[green]{gpu_busy_time/1000:.2f} s[/green]")
+        else:
+            stats.add_row("Total Kernels:", "[dim]n/a (no GPU profiling)[/dim]")
+        if not self.scope_events.empty:
+            n_scopes = len(self.scope_events[self.scope_events['event_type'] == 0]) if 'event_type' in self.scope_events.columns else 0
+            if n_scopes:
+                stats.add_row("Scope Events:", f"[bold]{n_scopes}[/bold]")
 
         if has_device_stats:
             stats.add_row("Avg GPU Util:", f"[yellow]{avg_gpu_util:.1f}%[/yellow]")
             stats.add_row("Peak VRAM:", f"[red]{peak_mem} MiB[/red]")
         else:
-            # Show device info from cuda_static_devices instead of misleading zeros
             if self.static_devices:
                 for dev in self.static_devices:
                     name = dev.get('name', 'Unknown GPU')
@@ -329,7 +602,12 @@ class GpuFlightSession:
                 stats.add_row("Avg GPU Util:", f"[dim]n/a (NVML unavailable)[/dim]")
                 stats.add_row("Peak VRAM:", f"[dim]n/a (NVML unavailable)[/dim]")
 
-        self.console.print(Panel(stats, title="[bold]GPUFlight Session Report[/bold]", subtitle=self.kernels.iloc[0]['app']))
+        # Use app_name from job_start/init, fall back to kernel column if present
+        subtitle = self.app_name
+        if subtitle is None and 'app' in self.kernels.columns and not self.kernels.empty:
+            subtitle = self.kernels.iloc[0]['app']
+        self.console.print(Panel(stats, title="[bold]GPUFlight Session Report[/bold]",
+                                 subtitle=subtitle or ''))
 
     def inspect_hotspots(self, top_n=5, max_stack_depth=None):
         """Identify the most expensive kernels and show their stack traces"""
@@ -340,7 +618,6 @@ class GpuFlightSession:
         depth = max_stack_depth or self.max_stack_depth
 
         # Group by Kernel Name and Stack Trace
-        # We include stack_trace in groupby to see hotspots per call site
         group_cols = ['name']
         if 'stack_trace' in self.kernels.columns:
             group_cols.append('stack_trace')
@@ -348,40 +625,48 @@ class GpuFlightSession:
         def safe_mode(x):
             return x.mode()[0] if not x.empty else ''
 
+        # Build agg_dict — only include columns that are actually present
+        k = self.kernels
         agg_dict = dict(
             count=('name', 'count'),
             total_time_ms=('duration_ms', 'sum'),
             avg_time_ms=('duration_ms', 'mean'),
             max_time_ms=('duration_ms', 'max'),
-            avg_occupancy=('occupancy', 'mean'),
-            grid=('grid', 'first'),
-            block=('block', 'first'),
-            dyn_shared=('dyn_shared_bytes', 'first'),
-            static_shared=('static_shared_bytes', 'first'),
-            num_regs=('num_regs', 'first'),
-            local_bytes=('local_bytes', 'first'),
-            const_bytes=('const_bytes', 'first'),
         )
+        for col, alias, fn in [
+            ('occupancy',        'avg_occupancy', 'mean'),
+            ('grid',             'grid',          'first'),
+            ('block',            'block',         'first'),
+            ('dyn_shared_bytes', 'dyn_shared',    'first'),
+            ('static_shared_bytes', 'static_shared', 'first'),
+            ('num_regs',         'num_regs',      'first'),
+            ('local_bytes',      'local_bytes',   'first'),
+            ('const_bytes',      'const_bytes',   'first'),
+        ]:
+            if col in k.columns:
+                agg_dict[alias] = (col, fn)
+
         for col, alias in [
             ('local_mem_per_thread_bytes', 'local_mem_per_thread'),
             ('local_mem_total_bytes',      'local_mem_total'),
         ]:
-            if col in self.kernels.columns:
+            if col in k.columns:
                 agg_dict[alias] = (col, 'first')
+
         for col, alias in [
-            ('reg_occupancy',  'reg_occ'),
-            ('smem_occupancy', 'smem_occ'),
-            ('warp_occupancy', 'warp_occ'),
-            ('block_occupancy','block_occ'),
-            ('limiting_resource', 'limiting'),
+            ('reg_occupancy',    'reg_occ'),
+            ('smem_occupancy',   'smem_occ'),
+            ('warp_occupancy',   'warp_occ'),
+            ('block_occupancy',  'block_occ'),
+            ('limiting_resource','limiting'),
         ]:
-            if col in self.kernels.columns:
+            if col in k.columns:
                 if col == 'limiting_resource':
                     agg_dict[alias] = (col, safe_mode)
                 else:
                     agg_dict[alias] = (col, 'mean')
 
-        summary = self.kernels.groupby(group_cols).agg(**agg_dict).sort_values('total_time_ms', ascending=False).head(top_n)
+        summary = k.groupby(group_cols).agg(**agg_dict).sort_values('total_time_ms', ascending=False).head(top_n)
 
         table = Table(title=f"🔥 Top {top_n} Kernel Hotspots (Time Consuming)")
         table.add_column("Kernel Name / Stack Trace", style="cyan", no_wrap=False)
@@ -394,15 +679,12 @@ class GpuFlightSession:
         for (name, *rest), row in summary.iterrows():
             stack_trace = rest[0] if rest else None
 
-            # Show the raw kernel name from the JSON
             display_content = f"[bold]{name}[/bold]"
 
             if stack_trace and isinstance(stack_trace, str) and stack_trace.strip():
                 frames = stack_trace.split('|')
-                # Strip empty and gpufl-internal frames
                 frames = [f.strip() for f in frames if f.strip() and not f.strip().startswith('gpufl::')]
                 if frames:
-                    # Show from outermost caller (rightmost) down to innermost
                     frames_reversed = frames[::-1]
                     limited_frames = frames_reversed[:depth]
                     stack_viz = ""
@@ -410,13 +692,10 @@ class GpuFlightSession:
                         indent = "  " * i
                         prefix = "└─ " if i > 0 else "↳ "
                         stack_viz += f"\n{indent}{prefix}[dim]{frame}[/dim]"
-
                     if len(frames_reversed) > depth:
                         stack_viz += f"\n{'  ' * (depth + 1)}[dim]… ({len(frames_reversed) - depth} more)[/dim]"
-
                     display_content += stack_viz
 
-            # Per-resource occupancy breakdown (available only when hasDetails=True)
             occ_parts = []
             for key, label in [('reg_occ', 'reg'), ('smem_occ', 'smem'), ('warp_occ', 'warp'), ('block_occ', 'blk')]:
                 if key in row.index and pd.notna(row[key]):
@@ -426,21 +705,25 @@ class GpuFlightSession:
             limiting = row.get('limiting', '') if 'limiting' in row.index else ''
             bottleneck_str = f"\n⚑ Bottleneck: {limiting}" if limiting else ""
 
-            static_b        = row['static_shared']      if pd.notna(row.get('static_shared'))      else 0
-            dyn_b           = row['dyn_shared']         if pd.notna(row.get('dyn_shared'))         else 0
-            local_b         = row['local_bytes']        if pd.notna(row.get('local_bytes'))        else 0
-            const_b         = row['const_bytes']        if pd.notna(row.get('const_bytes'))        else 0
-            spill_per_thd   = row.get('local_mem_per_thread', 0) or 0
-            spill_total_kb  = (row.get('local_mem_total', 0) or 0) / 1024
+            static_b       = row['static_shared']   if 'static_shared'   in row.index and pd.notna(row.get('static_shared'))   else 0
+            dyn_b          = row['dyn_shared']       if 'dyn_shared'       in row.index and pd.notna(row.get('dyn_shared'))       else 0
+            local_b        = row['local_bytes']      if 'local_bytes'      in row.index and pd.notna(row.get('local_bytes'))      else 0
+            const_b        = row['const_bytes']      if 'const_bytes'      in row.index and pd.notna(row.get('const_bytes'))      else 0
+            spill_per_thd  = row.get('local_mem_per_thread', 0) or 0
+            spill_total_kb = (row.get('local_mem_total', 0) or 0) / 1024
 
-            # Spill line: always show per-thread bytes; show total KB only when >0
             if spill_per_thd > 0:
                 spill_str = f"\n[red]Spill {spill_per_thd} B/thread · {spill_total_kb:.1f} KB total[/red]"
             else:
                 spill_str = ""
 
+            num_regs = int(row['num_regs']) if 'num_regs' in row.index and pd.notna(row.get('num_regs')) else '?'
+            occ_val  = f"{row['avg_occupancy']*100:.1f}%" if 'avg_occupancy' in row.index and pd.notna(row.get('avg_occupancy')) else "n/a"
+            grid_val  = row['grid']  if 'grid'  in row.index and pd.notna(row.get('grid'))  else "n/a"
+            block_val = row['block'] if 'block' in row.index and pd.notna(row.get('block')) else "n/a"
+
             resource_str = (
-                f"{row['num_regs']} regs"
+                f"{num_regs} regs"
                 + (f" ({occ_breakdown})" if occ_breakdown else "")
                 + f"\nSMem {static_b} B · DMem {dyn_b} B"
                 + f"\nLMem {local_b} B · CMem {const_b} B"
@@ -452,8 +735,8 @@ class GpuFlightSession:
                 display_content,
                 str(row['count']),
                 f"{row['total_time_ms']:.2f} ms",
-                f"{row['avg_occupancy']*100:.1f}%",
-                f"[dim]Grid[/dim]  {row['grid']}\n[dim]Block[/dim] {row['block']}",
+                occ_val,
+                f"[dim]Grid[/dim]  {grid_val}\n[dim]Block[/dim] {block_val}",
                 resource_str
             )
 
@@ -468,7 +751,7 @@ class GpuFlightSession:
         accounts for in the hottest kernels.
         """
         if self.scopes.empty or 'type' not in self.scopes.columns:
-            self.console.print("[yellow]No scope log data found.[/yellow]")
+            self.console.print("[yellow]No PC sampling data found — enable PC sampling at session init.[/yellow]")
             return
 
         samples = self.scopes[self.scopes['type'] == 'profile_sample'].copy()
@@ -528,7 +811,6 @@ class GpuFlightSession:
             stall_cells = []
             for col in stall_cols:
                 val = row[col]
-                # Highlight dominant stall reason in yellow
                 cell = f"[yellow]{val:.1f}%[/yellow]" if val >= 20.0 else f"{val:.1f}%"
                 stall_cells.append(cell)
             table.add_row(
@@ -551,23 +833,23 @@ class GpuFlightSession:
         correlation is available, top kernels by sampled stall pressure.
         """
         if self.scopes.empty or 'type' not in self.scopes.columns:
-            self.console.print("[yellow]No scope log data found.[/yellow]")
+            self.console.print("[yellow]No profile sample data found — enable PC sampling or SASS metrics at session init.[/yellow]")
             return
 
         all_samples = self.scopes[self.scopes['type'] == 'profile_sample'].copy()
         if all_samples.empty:
-            self.console.print("[yellow]No profile_sample events found in scope log.[/yellow]")
+            self.console.print("[yellow]No profile sample data found — enable PC sampling or SASS metrics at session init.[/yellow]")
             return
 
         if 'sample_kind' in all_samples.columns:
-            pc_samples = all_samples[all_samples['sample_kind'] == 'pc_sampling'].copy()
+            pc_samples   = all_samples[all_samples['sample_kind'] == 'pc_sampling'].copy()
             sass_samples = all_samples[all_samples['sample_kind'] == 'sass_metric'].copy()
         else:
             if 'metric_name' in all_samples.columns:
                 sass_samples = all_samples[all_samples['metric_name'].notna()].copy()
-                pc_samples = all_samples[all_samples['metric_name'].isna()].copy()
+                pc_samples   = all_samples[all_samples['metric_name'].isna()].copy()
             else:
-                pc_samples = all_samples.copy()
+                pc_samples   = all_samples.copy()
                 sass_samples = pd.DataFrame()
 
         if 'sample_count' not in pc_samples.columns:
@@ -597,6 +879,7 @@ class GpuFlightSession:
             reason_table.add_column("Samples", justify="right")
             total_samples = float(pc_samples['sample_count'].sum()) or 1.0
             reason_table.add_column("Share", justify="right")
+
             for reason, count in by_reason.items():
                 label = str(reason) if pd.notna(reason) and str(reason) else "unknown"
                 reason_table.add_row(label, str(int(count)), f"{(count/total_samples)*100:.1f}%")
@@ -679,33 +962,97 @@ class GpuFlightSession:
             self.console.print("[yellow]No sass_metric records found in profile_sample stream.[/yellow]")
 
     def inspect_scopes(self):
-        """Analyze time spent in user-defined Scopes (e.g. 'Training_Epoch')"""
-        if self.kernels.empty or 'user_scope' not in self.kernels.columns:
-            self.console.print("[yellow]No scope data found or 'user_scope' column missing.[/yellow]")
+        """Analyze time spent in user-defined Scopes.
+
+        Uses kernel user_scope annotations when GPU kernels are available,
+        otherwise falls back to scope_event_batch begin/end pairs.
+        """
+        # ── Path 1: kernel user_scope (available when kernel_detail present) ──
+        if not self.kernels.empty and 'user_scope' in self.kernels.columns:
+            scoped = self.kernels.dropna(subset=['user_scope'])
+            if not scoped.empty:
+                agg_dict: dict = {'kernels': ('name', 'count'), 'gpu_time_ms': ('duration_ms', 'sum')}
+                if 'queue_latency_ms' in scoped.columns:
+                    agg_dict['avg_queue_ms'] = ('queue_latency_ms', 'mean')
+                if 'cpu_overhead_ms' in scoped.columns:
+                    agg_dict['cpu_overhead_ms'] = ('cpu_overhead_ms', 'sum')
+
+                scope_stats = scoped.groupby('user_scope').agg(**agg_dict).sort_index()
+
+                table = Table(title="📂 Scope Analysis (Hierarchical, kernel-based)")
+                table.add_column("Scope / Phase", style="bold white")
+                table.add_column("GPU Time", style="green", justify="right")
+                if 'avg_queue_ms' in scope_stats.columns:
+                    table.add_column("Queue Latency", style="red", justify="right")
+                if 'cpu_overhead_ms' in scope_stats.columns:
+                    table.add_column("CPU Overhead", style="yellow", justify="right")
+
+                for scope, row in scope_stats.iterrows():
+                    formatted_scope = scope.replace("|", " [dim]>[/dim] ")
+                    cells = [formatted_scope, f"{row['gpu_time_ms']:.2f} ms"]
+                    if 'avg_queue_ms' in scope_stats.columns:
+                        cells.append(f"{row['avg_queue_ms']:.3f} ms")
+                    if 'cpu_overhead_ms' in scope_stats.columns:
+                        cells.append(f"{row['cpu_overhead_ms']:.2f} ms")
+                    table.add_row(*cells)
+
+                self.console.print(table)
+                return
+
+        # ── Path 2: scope_event_batch begin/end pairs ─────────────────────────
+        if self.scope_events.empty:
+            self.console.print("[yellow]No scope data found.[/yellow]")
             return
 
-        # Aggregate metrics by user scope
-        scope_stats = self.kernels.groupby('user_scope').agg(
-            kernels=('name', 'count'),
-            gpu_time_ms=('duration_ms', 'sum'),
-            avg_queue_ms=('queue_latency_ms', 'mean'),
-            cpu_overhead_ms=('cpu_overhead_ms', 'sum')
-        ).sort_index()
+        # Stack-based pairing: handles recycled scope_instance_ids across runs.
+        # Events are sorted by ts_ns; each begin is matched with the next end
+        # sharing the same scope_instance_id.
+        events_sorted = self.scope_events.sort_values('ts_ns')
+        open_scopes: dict = {}   # scope_instance_id → begin row
+        pair_rows = []
+        for _, row in events_sorted.iterrows():
+            key = row['scope_instance_id']
+            if row['event_type'] == 0:   # begin
+                open_scopes[key] = row
+            elif key in open_scopes:     # end with matching begin
+                begin = open_scopes.pop(key)
+                pair_rows.append({
+                    'name':        begin['name'],
+                    'begin_ts':    begin['ts_ns'],
+                    'end_ts':      row['ts_ns'],
+                    'duration_ms': (row['ts_ns'] - begin['ts_ns']) / 1e6,
+                    'depth':       begin['depth'],
+                })
 
-        table = Table(title="📂 Scope Analysis (Hierarchical)")
-        table.add_column("Scope / Phase", style="bold white")
-        table.add_column("GPU Time", style="green", justify="right")
-        table.add_column("Queue Latency", style="red", justify="right")
-        table.add_column("CPU Overhead", style="yellow", justify="right")
+        if not pair_rows:
+            self.console.print("[yellow]No complete scope begin/end pairs found.[/yellow]")
+            return
 
-        for scope, row in scope_stats.iterrows():
-            # format the scope (e.g. replace | with >)
-            formatted_scope = scope.replace("|", " [dim]>[/dim] ")
+        paired = pd.DataFrame(pair_rows)
+
+        scope_stats = (
+            paired.groupby('name')
+            .agg(count=('duration_ms', 'count'),
+                 total_ms=('duration_ms', 'sum'),
+                 avg_ms=('duration_ms', 'mean'),
+                 max_ms=('duration_ms', 'max'))
+            .sort_values('total_ms', ascending=False)
+        )
+
+        table = Table(title="📂 Scope Analysis (begin/end pairs)")
+        table.add_column("Scope", style="bold white")
+        table.add_column("Count", justify="right")
+        table.add_column("Total", style="green", justify="right")
+        table.add_column("Avg", justify="right")
+        table.add_column("Max", justify="right")
+
+        for name, row in scope_stats.iterrows():
             table.add_row(
-                formatted_scope,
-                f"{row['gpu_time_ms']:.2f} ms",
-                f"{row['avg_queue_ms']:.3f} ms",
-                f"{row['cpu_overhead_ms']:.2f} ms"
+                str(name),
+                str(int(row['count'])),
+                f"{row['total_ms']:.2f} ms",
+                f"{row['avg_ms']:.2f} ms",
+                f"{row['max_ms']:.2f} ms",
             )
 
         self.console.print(table)
