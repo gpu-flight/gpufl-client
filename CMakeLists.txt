@@ -47,8 +47,10 @@ target_compile_features(gpufl INTERFACE cxx_std_17)
 set_target_properties(gpufl PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 target_sources(gpufl PRIVATE
+    include/gpufl/core/dictionary_manager.cpp
     include/gpufl/core/logger/logger.cpp
     include/gpufl/core/logger/log_rotator.cpp
+    include/gpufl/core/model/batch_models.cpp
     include/gpufl/core/model/lifecycle_model.cpp
     include/gpufl/core/model/kernel_event_model.cpp
     include/gpufl/core/model/memcpy_event_model.cpp

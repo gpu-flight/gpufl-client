@@ -8,7 +8,7 @@ namespace gpufl::model {
 
 std::string InitEventModel::buildJson() const {
     std::ostringstream oss;
-    oss << "{\"type\":\"init\""
+    oss << "{\"version\":1,\"type\":\"job_start\""
         << ",\"pid\":"         << e_.pid
         << ",\"app\":\""       << jsonEscape(e_.app)        << "\""
         << ",\"session_id\":\"" << jsonEscape(e_.session_id) << "\""
