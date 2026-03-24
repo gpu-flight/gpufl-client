@@ -76,9 +76,9 @@ def test_pipeline():
             with open(full_path, 'r') as f:
                 lines = f.readlines()
 
-            has_init = any('"type":"init"' in line for line in lines)
+            has_init = any('"type":"job_start"' in line for line in lines)
             if not has_init:
-                print(f"FAILED: {cat} log missing init event.")
+                print(f"FAILED: {cat} log missing job_start event.")
                 keep = True
                 raise SystemExit(1)
 
