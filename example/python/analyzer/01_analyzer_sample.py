@@ -1,7 +1,7 @@
-from gpufl.analyzer import GpuFlightSession
 import os
+from gpufl.analyzer import GpuFlightSession
 
-analyzer = GpuFlightSession("./", log_prefix="gfl_block.log", max_stack_depth=5)
+analyzer = GpuFlightSession("./", log_prefix="sass_divergence", max_stack_depth=5)
 
 analyzer.print_summary()
 

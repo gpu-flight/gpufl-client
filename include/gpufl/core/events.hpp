@@ -249,6 +249,92 @@ struct SystemStopEvent {
     std::vector<DeviceSample> devices;
 };
 
+// ── Batch row types (used by BatchBuffer, no heap strings) ────────────────
+
+struct KernelBatchRow {
+    int64_t  start_ns    = 0;  // absolute GPU execution start
+    uint32_t kernel_id   = 0;  // name dictionary ID
+    uint32_t stream_id   = 0;  // raw CUDA stream ID
+    int64_t  duration_ns = 0;
+    unsigned corr_id     = 0;
+    int      dyn_shared  = 0;
+    int      num_regs    = 0;
+    uint8_t  has_details = 0;  // 1 → a kernel_detail event follows with same corr_id
+};
+
+struct KernelDetailRow {
+    unsigned     corr_id = 0;
+    std::string  session_id;
+    int          pid = 0;
+    std::string  app;
+    int grid_x = 0, grid_y = 0, grid_z = 0;
+    int block_x = 0, block_y = 0, block_z = 0;
+    int  static_shared = 0;
+    int  local_bytes   = 0;
+    int  const_bytes   = 0;
+    float occupancy       = 0.0f;
+    float reg_occupancy   = 0.0f;
+    float smem_occupancy  = 0.0f;
+    float warp_occupancy  = 0.0f;
+    float block_occupancy = 0.0f;
+    char  limiting_resource[16]{};
+    int   max_active_blocks      = 0;
+    uint32_t local_mem_total     = 0;
+    uint32_t local_mem_per_thread = 0;
+    uint8_t  cache_config_requested = 0;
+    uint8_t  cache_config_executed  = 0;
+    uint32_t shared_mem_executed    = 0;
+    std::string user_scope;
+    std::string stack_trace;
+};
+
+struct MemcpyBatchRow {
+    int64_t  start_ns    = 0;
+    uint32_t stream_id   = 0;
+    int64_t  duration_ns = 0;
+    uint64_t bytes       = 0;
+    uint32_t copy_kind   = 0;  // numeric CUpti kind value
+    unsigned corr_id     = 0;
+};
+
+struct DeviceMetricBatchRow {
+    int64_t  ts_ns     = 0;  // absolute timestamp
+    int      device_id = 0;
+    unsigned gpu_util  = 0;  // %
+    unsigned mem_util  = 0;  // %
+    unsigned temp_c    = 0;
+    unsigned power_mw  = 0;
+    uint64_t used_mib  = 0;
+};
+
+struct HostMetricBatchRow {
+    int64_t  ts_ns         = 0;   // absolute timestamp
+    uint32_t cpu_pct_x100  = 0;   // cpu_util_percent × 100 (2 decimal places)
+    uint64_t ram_used_mib  = 0;
+    uint64_t ram_total_mib = 0;
+};
+
+struct ScopeBatchRow {
+    int64_t  ts_ns             = 0;  // absolute timestamp
+    uint64_t scope_instance_id = 0;  // monotonic ID shared by begin/end pair
+    uint32_t name_id           = 0;  // scope name dictionary ID
+    uint8_t  event_type        = 0;  // 0 = begin, 1 = end
+    int      depth             = 0;
+};
+
+struct ProfileSampleBatchRow {
+    int64_t  ts_ns         = 0;
+    uint32_t corr_id       = 0;
+    uint32_t device_id     = 0;
+    uint32_t function_id   = 0;   // function_dict ID
+    uint32_t pc_offset     = 0;
+    uint32_t metric_id     = 0;   // metric_dict ID (0 for pc_sampling)
+    uint64_t metric_value  = 0;   // metric value (sass) or sample_count (pc)
+    uint32_t stall_reason  = 0;   // pc_sampling only (0 for sass)
+    uint8_t  sample_kind   = 0;   // 0 = pc_sampling, 1 = sass_metric
+    uint32_t scope_name_id = 0;   // scope_name_dict ID (0 = no scope)
+};
+
 struct PerfMetricEvent {
     int pid = 0;
     std::string app;
