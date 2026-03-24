@@ -20,12 +20,12 @@ def test_session_loading(mock_log_dir):
 def test_session_metrics(mock_log_dir):
     log_dir, prefix = mock_log_dir
     session = GpuFlightSession(log_dir, log_prefix=prefix)
-    
+
     # Check enriched metrics
     assert "duration_ms" in session.kernels.columns
-    assert "queue_latency_ms" in session.kernels.columns
-    
-    # vectorAdd: 1000 to 2000 ns -> 1000 ns = 0.001 ms
+    # queue_latency_ms only present in old per-event format (api_start/exit not in batch)
+
+    # vectorAdd: start=1000, duration=1000 ns -> 0.001 ms
     vector_add = session.kernels[session.kernels["name"] == "vectorAdd"].iloc[0]
     assert vector_add["duration_ms"] == pytest.approx(0.001)
 

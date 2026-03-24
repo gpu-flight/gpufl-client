@@ -2,7 +2,7 @@
 
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/logger/logger.hpp"
-#include "gpufl/core/model/system_event_model.hpp"
+#include "gpufl/core/model/batch_models.hpp"
 
 namespace gpufl {
 Sampler::Sampler() = default;
@@ -11,15 +11,21 @@ Sampler::~Sampler() { stop(); }
 void Sampler::start(std::string appName, std::string sessionId,
                     std::shared_ptr<Logger> logger,
                     std::shared_ptr<ISystemCollector<DeviceSample>> collector,
-                    const int sampleIntervalMs, std::string name) {
+                    const int sampleIntervalMs, std::string name,
+                    HostCollector* hostCollector) {
     stop();
 
-    appName_ = std::move(appName);
-    logger_ = std::move(logger);
-    sessionId_ = std::move(sessionId);
-    collector_ = std::move(collector);
-    intervalMs_ = sampleIntervalMs;
-    name_ = std::move(name);
+    appName_        = std::move(appName);
+    logger_         = std::move(logger);
+    sessionId_      = std::move(sessionId);
+    collector_      = std::move(collector);
+    host_collector_ = hostCollector;
+    intervalMs_     = sampleIntervalMs;
+    name_           = std::move(name);
+    batch_.clear();
+    batch_id_      = 0;
+    host_batch_.clear();
+    host_batch_id_ = 0;
 
     if (!logger_ || !collector_ || intervalMs_ <= 0) return;
 
@@ -41,10 +47,7 @@ void Sampler::stop() {
     }
 
     if (toJoin.joinable()) {
-        // Avoid joining self (causes "resource deadlock would occur")
         if (toJoin.get_id() == std::this_thread::get_id()) {
-            // If stop() is called from within the sampler thread, detach
-            // instead.
             toJoin.detach();
         } else {
             toJoin.join();
@@ -52,23 +55,66 @@ void Sampler::stop() {
     }
 }
 
-void Sampler::runLoop_() const {
+void Sampler::runLoop_() {
     using clock = std::chrono::steady_clock;
-    auto interval = std::chrono::milliseconds(intervalMs_);
+    auto interval       = std::chrono::milliseconds(intervalMs_);
     auto next_wake_time = clock::now();
+    int  samples_since_flush = 0;
+
     while (running_.load()) {
         next_wake_time += interval;
         const int64_t ts = detail::GetTimestampNs();
-        SystemSampleEvent e;
-        e.pid = detail::GetPid();
-        e.app = appName_;
-        e.session_id = sessionId_;
-        e.name = name_;
-        e.ts_ns = ts;
-        e.devices = collector_->sampleAll();
-        logger_->write(model::SystemSampleModel(e));
+
+        for (const DeviceSample& d : collector_->sampleAll()) {
+            DeviceMetricBatchRow row;
+            row.ts_ns     = ts;
+            row.device_id = d.device_id;
+            row.gpu_util  = d.gpu_util;
+            row.mem_util  = d.mem_util;
+            row.temp_c    = d.temp_c;
+            row.power_mw  = d.power_mw;
+            row.used_mib  = d.used_mib;
+            batch_.push(row);
+        }
+
+        if (host_collector_) {
+            const HostSample hs = host_collector_->sample();
+            HostMetricBatchRow hrow;
+            hrow.ts_ns         = ts;
+            hrow.cpu_pct_x100  = static_cast<uint32_t>(hs.cpu_util_percent * 100.0);
+            hrow.ram_used_mib  = hs.ram_used_mib;
+            hrow.ram_total_mib = hs.ram_total_mib;
+            host_batch_.push(hrow);
+        }
+
+        ++samples_since_flush;
+
+        if (samples_since_flush >= kMetricBatchSize || batch_.needsFlush()) {
+            logger_->write(model::DeviceMetricBatchModel(
+                batch_, sessionId_, ++batch_id_));
+            batch_.clear();
+            if (!host_batch_.empty()) {
+                logger_->write(model::HostMetricBatchModel(
+                    host_batch_, sessionId_, ++host_batch_id_));
+                host_batch_.clear();
+            }
+            samples_since_flush = 0;
+        }
 
         std::this_thread::sleep_until(next_wake_time);
     }
+
+    // Flush any remaining samples accumulated before stop()
+    if (!batch_.empty()) {
+        logger_->write(
+            model::DeviceMetricBatchModel(batch_, sessionId_, ++batch_id_));
+        batch_.clear();
+    }
+    if (!host_batch_.empty()) {
+        logger_->write(
+            model::HostMetricBatchModel(host_batch_, sessionId_, ++host_batch_id_));
+        host_batch_.clear();
+    }
 }
+
 }  // namespace gpufl

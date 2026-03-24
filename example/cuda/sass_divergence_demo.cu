@@ -169,7 +169,7 @@ int main() {
     float* h_in = new float[n];
     srand(42);
     for (int i = 0; i < n; ++i) {
-        h_in[i] = (float)rand() / (float)RAND_MAX;
+        h_in[i] = static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
     }
     CHECK_CUDA(cudaMemcpy(d_in, h_in, bytes, cudaMemcpyHostToDevice));
 

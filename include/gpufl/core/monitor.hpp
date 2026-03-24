@@ -1,7 +1,9 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 
+#include "gpufl/core/events.hpp"
 #include "gpufl/core/stream_handle.hpp"
 #include "gpufl/core/trace_type.hpp"
 
@@ -86,6 +88,17 @@ class Monitor {
      * @brief Returns the raw backend pointer (may be null).
      */
     static class IMonitorBackend* GetBackend();
+
+    /**
+     * @brief Intern a scope name into the shared dictionary.
+     * Returns the uint32 dictionary ID, emitting a dictionary_update if new.
+     */
+    static uint32_t InternScopeName(const std::string& name);
+
+    /**
+     * @brief Push a pre-built ScopeBatchRow into the scope batch buffer.
+     */
+    static void PushScopeRow(const ScopeBatchRow& row);
 
    private:
     Monitor() = delete;
