@@ -109,7 +109,7 @@ bool init(const InitOptions& opts) {
         ie.devices = rt_ptr->collector->sampleAll();
     }
     if (rt_ptr->static_info_collector) {
-        ie.cuda_static_device_infos =
+        ie.gpu_static_device_infos =
             rt_ptr->static_info_collector->sampleAll();
     }
     ie.host = rt_ptr->host_collector->sample();
