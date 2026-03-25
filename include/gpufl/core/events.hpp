@@ -10,17 +10,19 @@ struct HostSample {
     uint64_t ram_total_mib = 0;
 };
 
-struct CudaStaticDeviceInfo {
-    int id;
+struct GpuStaticDeviceInfo {
+    int id = 0;
     std::string name;
     std::string uuid;
-    int compute_major;
-    int compute_minor;
-    int l2_cache_size;
-    int shared_mem_per_block;
-    int regs_per_block;
-    int multi_processor_count;
-    int warp_size;
+    std::string vendor;
+    std::string architecture;
+    int compute_major = 0;
+    int compute_minor = 0;
+    int l2_cache_size = 0;
+    int shared_mem_per_block = 0;
+    int regs_per_block = 0;
+    int multi_processor_count = 0;
+    int warp_size = 0;
 };
 
 struct DeviceSample {
@@ -60,7 +62,7 @@ struct InitEvent {
     int64_t ts_ns = 0;
     HostSample host;
     std::vector<DeviceSample> devices;
-    std::vector<CudaStaticDeviceInfo> cuda_static_device_infos;
+    std::vector<GpuStaticDeviceInfo> gpu_static_device_infos;
 };
 
 struct ShutdownEvent {

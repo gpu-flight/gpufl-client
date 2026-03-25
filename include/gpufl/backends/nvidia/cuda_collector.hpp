@@ -6,11 +6,11 @@
 #include "gpufl/core/sampler.hpp"
 
 namespace gpufl::nvidia {
-class CudaCollector : public ISystemCollector<CudaStaticDeviceInfo> {
+class CudaCollector : public ISystemCollector<GpuStaticDeviceInfo> {
    public:
     CudaCollector();
     ~CudaCollector() override;
 
-    std::vector<CudaStaticDeviceInfo> sampleAll() override;
+    std::vector<GpuStaticDeviceInfo> sampleAll() override;
 };
 }  // namespace gpufl::nvidia

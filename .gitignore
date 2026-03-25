@@ -1,8 +1,12 @@
 ### idea
 .idea/**
 build/
+build-*/
 cmake-build-*/
 cmake/
+CMakeFiles/
+CMakeCache.txt
+wget-log*
 
 ### docker
 example/python/docker/**/

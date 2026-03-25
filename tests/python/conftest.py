@@ -20,6 +20,7 @@ def mock_log_dir(tmp_path):
             "ts_ns": 100,
             "host": {},
             "devices": [],
+            "gpu_static_devices": [{"name": "NVIDIA Test GPU", "vendor": "NVIDIA", "multi_processor_count": 108}],
             "cuda_static_devices": [{"name": "NVIDIA Test GPU", "multi_processor_count": 108}]
         },
         # String dictionary (kernel names)
