@@ -68,8 +68,8 @@ inline std::string devicesToJson(const std::vector<DeviceSample>& devs) {
     return oss.str();
 }
 
-inline std::string cudaStaticDevicesToJson(
-    const std::vector<CudaStaticDeviceInfo>& devs) {
+inline std::string gpuStaticDevicesToJson(
+    const std::vector<GpuStaticDeviceInfo>& devs) {
     std::ostringstream oss;
     oss << "[";
     bool first = true;
@@ -79,7 +79,33 @@ inline std::string cudaStaticDevicesToJson(
         oss << "{\"id\":" << d.id
             << ",\"name\":\""          << jsonEscape(d.name) << "\""
             << ",\"uuid\":\""          << jsonEscape(d.uuid) << "\""
-            << ",\"compute_major\":\"" << d.compute_major    << "\""
+            << ",\"vendor\":\""        << jsonEscape(d.vendor) << "\""
+            << ",\"architecture\":\""  << jsonEscape(d.architecture) << "\""
+            << ",\"compute_major\":"   << d.compute_major
+            << ",\"compute_minor\":"   << d.compute_minor
+            << ",\"l2_cache_size_bytes\":"        << d.l2_cache_size
+            << ",\"shared_mem_per_block_bytes\":"  << d.shared_mem_per_block
+            << ",\"regs_per_block\":"              << d.regs_per_block
+            << ",\"multi_processor_count\":"       << d.multi_processor_count
+            << ",\"warp_size\":"       << d.warp_size << "}";
+    }
+    oss << "]";
+    return oss.str();
+}
+
+inline std::string cudaStaticDevicesCompatToJson(
+    const std::vector<GpuStaticDeviceInfo>& devs) {
+    std::ostringstream oss;
+    oss << "[";
+    bool first = true;
+    for (const auto& d : devs) {
+        if (d.vendor != "NVIDIA") continue;
+        if (!first) oss << ",";
+        first = false;
+        oss << "{\"id\":" << d.id
+            << ",\"name\":\""          << jsonEscape(d.name) << "\""
+            << ",\"uuid\":\""          << jsonEscape(d.uuid) << "\""
+            << ",\"compute_major\":"   << d.compute_major
             << ",\"compute_minor\":"   << d.compute_minor
             << ",\"l2_cache_size_bytes\":"        << d.l2_cache_size
             << ",\"shared_mem_per_block_bytes\":"  << d.shared_mem_per_block

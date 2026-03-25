@@ -11,7 +11,7 @@ namespace gpufl {
 class IGpuStaticInfoCollector {
    public:
     virtual ~IGpuStaticInfoCollector() = default;
-    virtual std::vector<CudaStaticDeviceInfo> sampleAll() = 0;
+    virtual std::vector<GpuStaticDeviceInfo> sampleAll() = 0;
 };
 
 struct BackendCollectors {

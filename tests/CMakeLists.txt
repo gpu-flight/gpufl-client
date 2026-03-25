@@ -9,25 +9,43 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(googletest)
 
 # 2. Create the test executable
-add_executable(gpufl_tests 
+set(GPUFL_TEST_SOURCES
     main_test_runner.cpp
     core/test_analyzer.cpp
     core/test_monitor.cpp
+)
+
+if(GPUFL_ENABLE_NVIDIA)
+  list(APPEND GPUFL_TEST_SOURCES
     backends/nvidia/test_nvidia_backend.cpp
     backends/nvidia/test_cuda_collector.cpp
     backends/nvidia/test_nvml_collector.cpp
-)
+  )
+endif()
 
-# 3. Enable CUDA language for this target (assuming CMake 3.18+)
-set_target_properties(gpufl_tests PROPERTIES CUDA_RESOLVE_DEVICE_SYMBOLS ON)
-set_target_properties(gpufl_tests PROPERTIES LANGUAGE CUDA)
+if(GPUFL_ENABLE_AMD)
+  list(APPEND GPUFL_TEST_SOURCES
+    backends/amd/test_hip_static_collector.cpp
+    backends/amd/test_rocm_collector.cpp
+  )
+endif()
+
+add_executable(gpufl_tests ${GPUFL_TEST_SOURCES})
+
+# 3. Enable CUDA-specific test target behavior only when CUDA is available
+if(GPUFL_HAS_CUDA)
+  set_target_properties(gpufl_tests PROPERTIES CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+endif()
 
 # 4. CRITICAL: Point to your project's header structure
 target_include_directories(gpufl_tests PRIVATE 
     ${CMAKE_SOURCE_DIR}/include          # So we can do #include "gpufl/core/..."
     ${CMAKE_SOURCE_DIR}/tests            # So we can do #include "common/..."
-    ${CUDAToolkit_INCLUDE_DIRS}
 )
+
+if(CUDAToolkit_INCLUDE_DIRS)
+  target_include_directories(gpufl_tests PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+endif()
 
 # CUPTI include directory is often not in CUDAToolkit_INCLUDE_DIRS
 # In the root CMakeLists.txt it might be in CUDA::cupti target or CUPTI_INCLUDE_DIR variable.

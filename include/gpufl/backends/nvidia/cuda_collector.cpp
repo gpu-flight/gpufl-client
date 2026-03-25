@@ -10,8 +10,8 @@ namespace gpufl::nvidia {
 CudaCollector::CudaCollector() : ISystemCollector() {}
 CudaCollector::~CudaCollector() = default;
 
-std::vector<gpufl::CudaStaticDeviceInfo> CudaCollector::sampleAll() {
-    std::vector<CudaStaticDeviceInfo> devices;
+std::vector<gpufl::GpuStaticDeviceInfo> CudaCollector::sampleAll() {
+    std::vector<GpuStaticDeviceInfo> devices;
 
 #if GPUFL_HAS_CUDA || defined(__CUDACC__)
     int count = 0;
@@ -21,10 +21,11 @@ std::vector<gpufl::CudaStaticDeviceInfo> CudaCollector::sampleAll() {
         for (int i = 0; i < count; ++i) {
             cudaDeviceProp prop;
             if (cudaGetDeviceProperties(&prop, i) == cudaSuccess) {
-                CudaStaticDeviceInfo info;
+                GpuStaticDeviceInfo info;
                 info.id = i;
                 info.name = prop.name;
                 info.uuid = detail::UuidToString(prop.uuid.bytes);
+                info.vendor = "NVIDIA";
                 info.compute_major = prop.major;
                 info.compute_minor = prop.minor;
                 info.l2_cache_size = prop.l2CacheSize;
