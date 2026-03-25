@@ -1,4 +1,5 @@
 #pragma once
+
 #include <string>
 #include <vector>
 
@@ -7,17 +8,13 @@
 
 namespace gpufl::amd {
 
-class RocmCollector : public ISystemCollector<DeviceSample> {
+class HipStaticCollector : public ISystemCollector<GpuStaticDeviceInfo> {
    public:
-    RocmCollector();
-    ~RocmCollector() override;
+    HipStaticCollector();
+    ~HipStaticCollector() override;
 
-    std::vector<DeviceSample> sampleAll() override;
+    std::vector<GpuStaticDeviceInfo> sampleAll() override;
     static bool IsAvailable(std::string* reason = nullptr);
-
-   private:
-    bool initialized_ = false;
-    uint32_t deviceCount_ = 0;
 };
 
 }  // namespace gpufl::amd

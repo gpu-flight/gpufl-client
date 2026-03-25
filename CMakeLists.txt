@@ -25,14 +25,12 @@ option(GPUFL_ENABLE_AMD    "Enable AMD backends (ROCm when available)" OFF)
 
 option(BUILD_GPUFL_EXAMPLE "Build gpufl example application" ON)
 option(BUILD_PYTHON "Build Python bindings" OFF)
+option(BUILD_TESTING "Build the testing tree." ON)
 
 # -----------------------
 # Library target
 # -----------------------
-add_library(gpufl STATIC
-        include/gpufl/backends/nvidia/sampler/cupti_sass.cpp
-        include/gpufl/backends/nvidia/sampler/cupti_sass.hpp
-)
+add_library(gpufl STATIC)
 add_library(gpufl::gpufl ALIAS gpufl)
 
 target_include_directories(gpufl
@@ -73,6 +71,8 @@ target_sources(gpufl PRIVATE
 set(GPUFL_HAS_CUDA 0)
 set(GPUFL_HAS_NVML 0)
 set(GPUFL_HAS_ROCM 0)
+set(GPUFL_HAS_ROCM_SMI 0)
+set(GPUFL_HAS_HIP 0)
 set(GPUFL_HAS_CUPTI 0)
 set(GPUFL_HAS_PERFWORKS 0)
 # ZLIB — try system install first, fall back to FetchContent so every platform
@@ -139,6 +139,8 @@ if(GPUFL_ENABLE_NVIDIA)
         if(CUDAToolkit_FOUND)
             set(GPUFL_HAS_CUDA 1)
             target_sources(gpufl PRIVATE
+                include/gpufl/backends/nvidia/sampler/cupti_sass.cpp
+                include/gpufl/backends/nvidia/sampler/cupti_sass.hpp
                 include/gpufl/backends/nvidia/cuda_collector.cpp
                 include/gpufl/backends/nvidia/cupti_utils.cpp
                 include/gpufl/backends/nvidia/resource_handler.cpp
@@ -255,14 +257,6 @@ if(GPUFL_ENABLE_NVIDIA)
         target_link_libraries(gpufl PRIVATE dbghelp)
     endif()
 
-    # Apply definitions to public interface so tests inherit them
-    target_compile_definitions(gpufl PUBLIC
-        GPUFL_HAS_CUDA=${GPUFL_HAS_CUDA}
-        GPUFL_HAS_NVML=${GPUFL_HAS_NVML}
-        GPUFL_HAS_CUPTI=${GPUFL_HAS_CUPTI}
-        GPUFL_HAS_PERFWORKS=${GPUFL_HAS_PERFWORKS}
-    )
-
     #
     # Only compile NVML collector if NVML is actually available
     #
@@ -279,30 +273,96 @@ if(GPUFL_ENABLE_NVIDIA)
         add_subdirectory(example/cuda)
     endif()
 
-    # -----------------------
-    # Unit Tests
-    # -----------------------
-    option(BUILD_TESTING "Build the testing tree." ON)
-    if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR AND BUILD_TESTING)
-        enable_testing()
-        add_subdirectory(tests)
-    endif()
 endif()
 
 
 # -----------------------
-# AMD backends (placeholder, auto-detect later)
+# AMD backends
 # -----------------------
 if(GPUFL_ENABLE_AMD)
-    target_compile_definitions(gpufl PUBLIC GPUFL_ENABLE_AMD=1)
+    find_package(rocm_smi CONFIG QUIET HINTS /opt/rocm)
+    if(rocm_smi_FOUND OR TARGET rocm_smi64)
+        set(GPUFL_HAS_ROCM 1)
+        set(GPUFL_HAS_ROCM_SMI 1)
+        target_sources(gpufl PRIVATE
+            include/gpufl/backends/amd/rocm_collector.cpp
+        )
+        if(TARGET rocm_smi64)
+            target_link_libraries(gpufl PRIVATE rocm_smi64)
+        elseif(ROCM_SMI_LIBRARY)
+            target_link_libraries(gpufl PRIVATE ${ROCM_SMI_LIBRARY})
+        endif()
+        if(DEFINED rocm_smi_INCLUDE_DIR)
+            target_include_directories(gpufl PRIVATE ${rocm_smi_INCLUDE_DIR})
+        elseif(DEFINED ROCM_SMI_INCLUDE_DIRS)
+            target_include_directories(gpufl PRIVATE ${ROCM_SMI_INCLUDE_DIRS})
+        endif()
+        message(STATUS "Found ROCm SMI support")
+    else()
+        find_library(ROCM_SMI_LIBRARY NAMES rocm_smi64 librocm_smi64.so
+            HINTS /opt/rocm/lib /opt/rocm/lib64)
+        find_path(ROCM_SMI_INCLUDE_DIR NAMES rocm_smi/rocm_smi.h
+            HINTS /opt/rocm/include)
+        if(ROCM_SMI_LIBRARY AND ROCM_SMI_INCLUDE_DIR)
+            set(GPUFL_HAS_ROCM 1)
+            set(GPUFL_HAS_ROCM_SMI 1)
+            target_sources(gpufl PRIVATE
+                include/gpufl/backends/amd/rocm_collector.cpp
+            )
+            target_link_libraries(gpufl PRIVATE ${ROCM_SMI_LIBRARY})
+            target_include_directories(gpufl PRIVATE ${ROCM_SMI_INCLUDE_DIR})
+            message(STATUS "Found ROCm SMI manually: ${ROCM_SMI_LIBRARY}")
+        else()
+            message(WARNING "ROCm SMI not found! GPUFL_HAS_ROCM will be 0.")
+        endif()
+    endif()
 
-    # Keep your current source wired the same way; later you can replace with real ROCm detection.
-    set(GPUFL_HAS_ROCM 1)
-    target_compile_definitions(gpufl PUBLIC GPUFL_HAS_ROCM=1)
+    find_package(hip CONFIG QUIET HINTS /opt/rocm)
+    if(hip_FOUND OR TARGET hip::host)
+        set(GPUFL_HAS_HIP 1)
+        target_sources(gpufl PRIVATE
+            include/gpufl/backends/amd/hip_static_collector.cpp
+        )
+        if(TARGET hip::host)
+            target_link_libraries(gpufl PRIVATE hip::host)
+        endif()
+        message(STATUS "Found HIP host runtime support")
+    else()
+        find_library(AMD_HIP_LIBRARY NAMES amdhip64
+            HINTS /opt/rocm/lib /opt/rocm/lib64 /lib/x86_64-linux-gnu)
+        find_path(AMD_HIP_INCLUDE_DIR NAMES hip/hip_runtime_api.h
+            HINTS /opt/rocm/include)
+        if(AMD_HIP_LIBRARY AND AMD_HIP_INCLUDE_DIR)
+            set(GPUFL_HAS_HIP 1)
+            target_sources(gpufl PRIVATE
+                include/gpufl/backends/amd/hip_static_collector.cpp
+            )
+            target_link_libraries(gpufl PRIVATE ${AMD_HIP_LIBRARY})
+            target_include_directories(gpufl PRIVATE ${AMD_HIP_INCLUDE_DIR})
+            message(STATUS "Found HIP manually: ${AMD_HIP_LIBRARY}")
+        else()
+            message(WARNING "HIP runtime not found! AMD static inventory will be unavailable.")
+        endif()
+    endif()
 
-    target_sources(gpufl PRIVATE
-        include/gpufl/backends/amd/rocm_collector.cpp
-    )
+    if(BUILD_GPUFL_EXAMPLE AND GPUFL_HAS_HIP AND CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+        add_subdirectory(example/amd)
+    endif()
+endif()
+
+target_compile_definitions(gpufl PUBLIC
+    GPUFL_HAS_CUDA=${GPUFL_HAS_CUDA}
+    GPUFL_HAS_NVML=${GPUFL_HAS_NVML}
+    GPUFL_HAS_CUPTI=${GPUFL_HAS_CUPTI}
+    GPUFL_HAS_PERFWORKS=${GPUFL_HAS_PERFWORKS}
+    GPUFL_HAS_ROCM=${GPUFL_HAS_ROCM}
+    GPUFL_HAS_ROCM_SMI=${GPUFL_HAS_ROCM_SMI}
+    GPUFL_HAS_HIP=${GPUFL_HAS_HIP}
+)
+
+if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR AND BUILD_TESTING)
+    enable_testing()
+    add_subdirectory(tests)
 endif()
 
 if(BUILD_PYTHON)
