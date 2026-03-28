@@ -24,6 +24,8 @@ class SassMetricsEngine final : public IProfilingEngine {
     // SASS metrics are collected at scope end.
     void onScopeStop(const char* name) override;
 
+    bool isEnabled() const { return enabled_; }
+
    private:
     void EnableSassMetrics_();
     void StopAndCollectSassMetrics_();

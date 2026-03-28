@@ -36,10 +36,11 @@ PYBIND11_MODULE(_gpufl_client, m) {
         .export_values();
 
     py::enum_<gpufl::ProfilingEngine>(m, "ProfilingEngine")
-        .value("None",          gpufl::ProfilingEngine::None)
-        .value("PcSampling",    gpufl::ProfilingEngine::PcSampling)
-        .value("SassMetrics",   gpufl::ProfilingEngine::SassMetrics)
-        .value("RangeProfiler", gpufl::ProfilingEngine::RangeProfiler)
+        .value("None",               gpufl::ProfilingEngine::None)
+        .value("PcSampling",         gpufl::ProfilingEngine::PcSampling)
+        .value("SassMetrics",        gpufl::ProfilingEngine::SassMetrics)
+        .value("RangeProfiler",      gpufl::ProfilingEngine::RangeProfiler)
+        .value("PcSamplingWithSass", gpufl::ProfilingEngine::PcSamplingWithSass)
         .export_values();
 
     py::class_<gpufl::InitOptions>(m, "InitOptions")

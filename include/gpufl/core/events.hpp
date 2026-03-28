@@ -325,16 +325,18 @@ struct ScopeBatchRow {
 };
 
 struct ProfileSampleBatchRow {
-    int64_t  ts_ns         = 0;
-    uint32_t corr_id       = 0;
-    uint32_t device_id     = 0;
-    uint32_t function_id   = 0;   // function_dict ID
-    uint32_t pc_offset     = 0;
-    uint32_t metric_id     = 0;   // metric_dict ID (0 for pc_sampling)
-    uint64_t metric_value  = 0;   // metric value (sass) or sample_count (pc)
-    uint32_t stall_reason  = 0;   // pc_sampling only (0 for sass)
-    uint8_t  sample_kind   = 0;   // 0 = pc_sampling, 1 = sass_metric
-    uint32_t scope_name_id = 0;   // scope_name_dict ID (0 = no scope)
+    int64_t  ts_ns           = 0;
+    uint32_t corr_id         = 0;
+    uint32_t device_id       = 0;
+    uint32_t function_id     = 0;   // function_dict ID
+    uint32_t pc_offset       = 0;
+    uint32_t metric_id       = 0;   // metric_dict ID (0 for pc_sampling)
+    uint64_t metric_value    = 0;   // metric value (sass) or sample_count (pc)
+    uint32_t stall_reason    = 0;   // pc_sampling only (0 for sass)
+    uint8_t  sample_kind     = 0;   // 0 = pc_sampling, 1 = sass_metric
+    uint32_t scope_name_id   = 0;   // scope_name_dict ID (0 = no scope)
+    uint32_t source_file_id  = 0;   // source_file_dict ID (0 = unknown)
+    uint32_t source_line     = 0;   // source line number (0 = unknown)
 };
 
 struct PerfMetricEvent {

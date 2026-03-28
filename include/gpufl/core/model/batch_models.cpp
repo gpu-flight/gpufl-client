@@ -163,8 +163,8 @@ std::string ProfileSampleBatchModel::buildJson() const {
         << ",\"batch_id\":" << batch_id_ << ",\"base_time_ns\":" << base
         << ",\"columns\":[\"dt_ns\",\"corr_id\",\"device_id\",\"function_id\","
            "\"pc_offset\",\"metric_id\",\"metric_value\",\"stall_reason\","
-           "\"sample_kind\","
-           "\"scope_name_id\"]"
+           "\"sample_kind\",\"scope_name_id\","
+           "\"source_file_id\",\"source_line\"]"
         << ",\"rows\":[";
 
     bool first = true;
@@ -174,7 +174,8 @@ std::string ProfileSampleBatchModel::buildJson() const {
         oss << '[' << (r.ts_ns - base) << ',' << r.corr_id << ',' << r.device_id
             << ',' << r.function_id << ',' << r.pc_offset << ',' << r.metric_id
             << ',' << r.metric_value << ',' << r.stall_reason << ','
-            << static_cast<int>(r.sample_kind) << ',' << r.scope_name_id << ']';
+            << static_cast<int>(r.sample_kind) << ',' << r.scope_name_id << ','
+            << r.source_file_id << ',' << r.source_line << ']';
     }
     oss << "]}";
     return oss.str();

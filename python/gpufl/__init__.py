@@ -55,10 +55,11 @@ except ImportError as e:
         None_ = "None"
 
     class ProfilingEngine:
-        None_          = "None"
-        PcSampling     = "PcSampling"
-        SassMetrics    = "SassMetrics"
-        RangeProfiler  = "RangeProfiler"
+        None_              = "None"
+        PcSampling         = "PcSampling"
+        SassMetrics        = "SassMetrics"
+        RangeProfiler      = "RangeProfiler"
+        PcSamplingWithSass = "PcSamplingWithSass"
 
     class InitOptions:
         def __init__(self):

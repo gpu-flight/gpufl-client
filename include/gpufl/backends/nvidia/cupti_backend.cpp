@@ -16,6 +16,7 @@
 #include "gpufl/backends/nvidia/cuda_collector.hpp"
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
 #include "gpufl/backends/nvidia/engine/pc_sampling_engine.hpp"
+#include "gpufl/backends/nvidia/engine/pc_sampling_with_sass_engine.hpp"
 #include "gpufl/backends/nvidia/engine/range_profiler_engine.hpp"
 #include "gpufl/backends/nvidia/engine/sass_metrics_engine.hpp"
 #include "gpufl/backends/nvidia/kernel_launch_handler.hpp"
@@ -59,6 +60,10 @@ void CuptiBackend::initialize(const MonitorOptions& opts) {
                 "[CuptiBackend] RangeProfiler engine requires "
                 "GPUFL_HAS_PERFWORKS; falling back to None");
 #endif
+            break;
+        case ProfilingEngine::PcSamplingWithSass:
+            engine_ = std::make_unique<PcSamplingWithSassEngine>();
+            GFL_LOG_DEBUG("[CuptiBackend] Engine: PcSamplingWithSass");
             break;
         case ProfilingEngine::None:
         default:
