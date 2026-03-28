@@ -6,6 +6,7 @@
 #include <mutex>
 #include <stack>
 #include <thread>
+#include <vector>
 
 #include "gpufl/core/activity_record.hpp"
 #include "gpufl/core/batch_buffer.hpp"
@@ -39,6 +40,9 @@ static BatchBuffer<KernelBatchRow>  g_kernelBatch;
 static BatchBuffer<MemcpyBatchRow>  g_memcpyBatch;
 static uint64_t g_kernelBatchId = 0;
 static uint64_t g_memcpyBatchId = 0;
+// Deferred kernel detail rows — written after the kernel batch so the
+// backend's UPDATE (match by corr_id) always finds the INSERT first.
+static std::vector<KernelDetailRow> g_pendingDetails;
 
 // Tracks the most recently begun scope name ID.
 // Updated by PushScopeRow (user thread) when a scope begin row is pushed.
@@ -61,6 +65,12 @@ static void flushBatches(Logger& logger, const std::string& session_id) {
         logger.write(model::KernelEventBatchModel(
             g_kernelBatch, session_id, ++g_kernelBatchId));
         g_kernelBatch.clear();
+        // Write deferred details AFTER their batch so the backend UPDATE
+        // always finds the INSERT row that was just written.
+        for (const auto& d : g_pendingDetails) {
+            logger.write(model::KernelDetailModel(d));
+        }
+        g_pendingDetails.clear();
     }
     if (!g_memcpyBatch.empty()) {
         logger.write(model::MemcpyEventBatchModel(
@@ -141,7 +151,8 @@ void CollectorLoop() {
                     detail.shared_mem_executed    = rec.shared_mem_executed;
                     detail.user_scope  = rec.user_scope;
                     detail.stack_trace = stack_trace;
-                    rt->logger->write(model::KernelDetailModel(detail));
+                    // Defer: written after the kernel batch by flushBatches().
+                    g_pendingDetails.push_back(std::move(detail));
                 }
 
                 if (g_kernelBatch.needsFlush()) {
@@ -222,8 +233,14 @@ void CollectorLoop() {
                 std::string(rec.function_name) + "@" + rec.source_file;
             const uint32_t function_id =
                 g_dictManager.internFunction(func_key);
+            // For PC sampling rows metric_name is empty; use reason_name so the
+            // stall reason string is interned into metric_dict and reachable via
+            // metric_id on the backend.  For SASS rows metric_name is always set.
+            const std::string metric_key = (rec.metric_name[0] != '\0')
+                ? std::string(rec.metric_name)
+                : rec.reason_name;
             const uint32_t metric_id =
-                g_dictManager.internMetric(rec.metric_name);
+                g_dictManager.internMetric(metric_key);
             // Use the most recently begun scope.  PC samples are pushed to the
             // ring buffer by EndPerfScope() (inside ScopedMonitor dtor), which
             // runs after the scope begin row is pushed via PushScopeRow().
@@ -232,18 +249,23 @@ void CollectorLoop() {
             const uint32_t scope_name_id =
                 g_activeScopeNameId.load(std::memory_order_relaxed);
 
+            const uint32_t source_file_id =
+                g_dictManager.internSourceFile(rec.source_file);
+
             ProfileSampleBatchRow row;
-            row.ts_ns         = rec.cpu_start_ns;
-            row.corr_id       = rec.corr_id;
-            row.device_id     = rec.device_id;
-            row.function_id   = function_id;
-            row.pc_offset     = rec.pc_offset;
-            row.metric_id     = metric_id;
-            row.metric_value  = (kind == 1) ? rec.metric_value
-                                            : rec.samples_count;
-            row.stall_reason  = rec.stall_reason;
-            row.sample_kind   = kind;
-            row.scope_name_id = scope_name_id;
+            row.ts_ns           = rec.cpu_start_ns;
+            row.corr_id         = rec.corr_id;
+            row.device_id       = rec.device_id;
+            row.function_id     = function_id;
+            row.pc_offset       = rec.pc_offset;
+            row.metric_id       = metric_id;
+            row.metric_value    = (kind == 1) ? rec.metric_value
+                                              : rec.samples_count;
+            row.stall_reason    = rec.stall_reason;
+            row.sample_kind     = kind;
+            row.scope_name_id   = scope_name_id;
+            row.source_file_id  = source_file_id;
+            row.source_line     = rec.source_line;
 
             bool needs_flush = false;
             {

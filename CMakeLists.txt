@@ -149,6 +149,7 @@ if(GPUFL_ENABLE_NVIDIA)
                 include/gpufl/backends/nvidia/monitor_adapter_nvidia.cpp
                 include/gpufl/backends/nvidia/cupti_backend.cpp
                 include/gpufl/backends/nvidia/engine/pc_sampling_engine.cpp
+                include/gpufl/backends/nvidia/engine/pc_sampling_with_sass_engine.cpp
                 include/gpufl/backends/nvidia/engine/sass_metrics_engine.cpp
                 include/gpufl/backends/nvidia/engine/range_profiler_engine.cpp)
             target_link_libraries(gpufl PRIVATE CUDA::cudart CUDA::cuda_driver)
