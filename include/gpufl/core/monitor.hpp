@@ -12,13 +12,16 @@ namespace gpufl {
 /**
  * @brief Selects which profiling engine is active for this session.
  *
- * Exactly one engine may be active at a time (CUPTI mutual-exclusivity).
+ * Note: RangeProfiler is mutually exclusive with PcSampling (both need
+ * hardware perf counters).  PcSampling and SassMetrics can coexist because
+ * SassMetrics uses software lazy SASS patching, not hardware counters.
  */
 enum class ProfilingEngine {
-    None,           // Monitoring only — no profiling overhead
-    PcSampling,     // PC-level stall-reason sampling (default when profiling)
-    SassMetrics,    // SASS instruction-level metrics
-    RangeProfiler,  // Perfworks hardware counters (requires GPUFL_HAS_PERFWORKS)
+    None,                // Monitoring only — no profiling overhead
+    PcSampling,          // PC-level stall-reason sampling
+    SassMetrics,         // SASS instruction-level metrics
+    RangeProfiler,       // Perfworks hardware counters (requires GPUFL_HAS_PERFWORKS)
+    PcSamplingWithSass,  // PC sampling + SASS metrics in a single run
 };
 
 struct MonitorOptions {
