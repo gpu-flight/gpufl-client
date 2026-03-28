@@ -36,17 +36,19 @@ void appendDict(std::ostringstream& oss, const char* key,
 
 void DictionaryManager::flushDictionary(Logger& logger,
                                          const std::string& session_id) {
-    std::unordered_map<std::string, uint32_t> dk, ds, df, dm;
+    std::unordered_map<std::string, uint32_t> dk, ds, df, dm, dsf;
     {
         std::lock_guard lk(mu_);
         if (dirty_kernels_.empty() && dirty_scope_names_.empty() &&
-            dirty_functions_.empty() && dirty_metrics_.empty()) {
+            dirty_functions_.empty() && dirty_metrics_.empty() &&
+            dirty_source_files_.empty()) {
             return;
         }
-        dk = std::move(dirty_kernels_);
-        ds = std::move(dirty_scope_names_);
-        df = std::move(dirty_functions_);
-        dm = std::move(dirty_metrics_);
+        dk  = std::move(dirty_kernels_);
+        ds  = std::move(dirty_scope_names_);
+        df  = std::move(dirty_functions_);
+        dm  = std::move(dirty_metrics_);
+        dsf = std::move(dirty_source_files_);
     }
 
     std::ostringstream oss;
@@ -54,10 +56,11 @@ void DictionaryManager::flushDictionary(Logger& logger,
         << model::jsonEscape(session_id) << '"';
 
     bool firstField = false;
-    appendDict(oss, "kernel_dict", dk, firstField);
-    appendDict(oss, "scope_name_dict", ds, firstField);
-    appendDict(oss, "function_dict", df, firstField);
-    appendDict(oss, "metric_dict", dm, firstField);
+    appendDict(oss, "kernel_dict",      dk,  firstField);
+    appendDict(oss, "scope_name_dict",  ds,  firstField);
+    appendDict(oss, "function_dict",    df,  firstField);
+    appendDict(oss, "metric_dict",      dm,  firstField);
+    appendDict(oss, "source_file_dict", dsf, firstField);
 
     oss << '}';
     logger.write(DictLine{oss.str()});

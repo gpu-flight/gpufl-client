@@ -54,6 +54,18 @@ class DictionaryManager {
         return id;
     }
 
+    uint32_t internSourceFile(const std::string& path) {
+        if (path.empty()) return 0;
+        std::lock_guard lk(mu_);
+        if (const auto it = source_file_dict_.find(path);
+            it != source_file_dict_.end())
+            return it->second;
+        const uint32_t id = next_source_file_id_++;
+        source_file_dict_[path] = id;
+        dirty_source_files_[path] = id;
+        return id;
+    }
+
     // Emits a dictionary_update JSON line to Channel::All for any new entries
     // accumulated since the last call.  No-op if nothing is dirty.
     void flushDictionary(Logger& logger, const std::string& session_id);
@@ -72,6 +84,9 @@ class DictionaryManager {
         metric_dict_.clear();
         dirty_metrics_.clear();
         next_metric_id_ = 1;
+        source_file_dict_.clear();
+        dirty_source_files_.clear();
+        next_source_file_id_ = 1;
     }
 
    private:
@@ -92,6 +107,10 @@ class DictionaryManager {
     std::unordered_map<std::string, uint32_t> metric_dict_;
     std::unordered_map<std::string, uint32_t> dirty_metrics_;
     uint32_t next_metric_id_ = 1;
+
+    std::unordered_map<std::string, uint32_t> source_file_dict_;
+    std::unordered_map<std::string, uint32_t> dirty_source_files_;
+    uint32_t next_source_file_id_ = 1;
 };
 
 }  // namespace gpufl
