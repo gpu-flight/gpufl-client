@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
@@ -29,7 +30,7 @@ struct MonitorOptions {
     bool enable_debug_output = false;
     bool enable_stack_trace = false;
     int kernel_sample_rate_ms = 0;
-    uint32_t pc_sampling_period = 5000;  // GPU clock cycles between PC samples
+    uint32_t pc_sampling_period = 12;  // log2 exponent: 2^N GPU cycles between samples (valid: 5-31; 12 = 4096 cycles)
     ProfilingEngine profiling_engine = ProfilingEngine::None;
 };
 
@@ -97,6 +98,13 @@ class Monitor {
      * Returns the uint32 dictionary ID, emitting a dictionary_update if new.
      */
     static uint32_t InternScopeName(const std::string& name);
+
+    /**
+     * @brief Enqueue a cubin for SASS disassembly on the next batch flush.
+     * Called once per unique cubin (identified by CRC) from ResourceHandler.
+     */
+    static void EnqueueCubinForDisassembly(uint64_t crc, const uint8_t* data,
+                                           size_t size);
 
     /**
      * @brief Push a pre-built ScopeBatchRow into the scope batch buffer.

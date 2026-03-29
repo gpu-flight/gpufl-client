@@ -61,6 +61,8 @@ static std::atomic<uint64_t> g_nextScopeInstanceId{1};
 
 static void flushBatches(Logger& logger, const std::string& session_id) {
     g_dictManager.flushDictionary(logger, session_id);
+    g_dictManager.flushSourceContent(logger, session_id);
+    g_dictManager.flushDisassembly(logger, session_id);
     if (!g_kernelBatch.empty()) {
         logger.write(model::KernelEventBatchModel(
             g_kernelBatch, session_id, ++g_kernelBatchId));
@@ -402,6 +404,11 @@ IMonitorBackend* Monitor::GetBackend() {
 
 uint32_t Monitor::InternScopeName(const std::string& name) {
     return g_dictManager.internScopeName(name);
+}
+
+void Monitor::EnqueueCubinForDisassembly(uint64_t crc, const uint8_t* data,
+                                         size_t size) {
+    g_dictManager.enqueueDisassembly(crc, data, size);
 }
 
 void Monitor::PushScopeRow(const ScopeBatchRow& row) {
