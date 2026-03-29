@@ -21,6 +21,8 @@ namespace {
 std::vector<const char*> kSassMetricNames = {
     "smsp__sass_inst_executed",
     "smsp__sass_thread_inst_executed",
+    "smsp__sass_sectors_mem_global",
+    "smsp__sass_sectors_mem_global_ideal",
 };
 
 void FreeCuptiCorrelationString(char* s) {
@@ -208,32 +210,47 @@ void SassMetricsEngine::StopAndCollectSassMetrics_() {
             char srcFile[256]{};
             uint32_t srcLine = 0;
             bool hasSource = false;
+            // Grab data pointer under lock, then call CUPTI outside to avoid
+            // deadlock if CUPTI triggers a module-load callback.
+            const uint8_t* cubinData = nullptr;
+            size_t cubinSize = 0;
             if (ctx_.cubin_mu && ctx_.cubin_by_crc) {
                 std::lock_guard<std::mutex> lk(*ctx_.cubin_mu);
                 auto it = ctx_.cubin_by_crc->find(data[i].cubinCrc);
                 if (it != ctx_.cubin_by_crc->end()) {
-                    CUpti_GetSassToSourceCorrelationParams corrParams = {
-                        sizeof(CUpti_GetSassToSourceCorrelationParams)};
-                    corrParams.cubin = it->second.data.data();
-                    corrParams.cubinSize = it->second.data.size();
-                    corrParams.functionName = data[i].functionName;
-                    corrParams.pcOffset = data[i].pcOffset;
-                    CUptiResult res =
-                        cuptiGetSassToSourceCorrelation(&corrParams);
-                    if (res == CUPTI_SUCCESS) {
-                        if (corrParams.fileName) {
+                    cubinData = it->second.data.data();
+                    cubinSize = it->second.data.size();
+                }
+            }
+            if (cubinData) {
+                CUpti_GetSassToSourceCorrelationParams corrParams = {
+                    sizeof(CUpti_GetSassToSourceCorrelationParams)};
+                corrParams.cubin = cubinData;
+                corrParams.cubinSize = cubinSize;
+                corrParams.functionName = data[i].functionName;
+                corrParams.pcOffset = data[i].pcOffset;
+                CUptiResult res =
+                    cuptiGetSassToSourceCorrelation(&corrParams);
+                if (res == CUPTI_SUCCESS) {
+                    if (corrParams.fileName) {
+                        if (corrParams.dirName &&
+                            corrParams.dirName[0] != '\0') {
+                            std::snprintf(srcFile, sizeof(srcFile), "%s/%s",
+                                          corrParams.dirName,
+                                          corrParams.fileName);
+                        } else {
                             std::snprintf(srcFile, sizeof(srcFile), "%s",
                                           corrParams.fileName);
-                            hasSource = true;
                         }
-                        srcLine = corrParams.lineNumber;
-                        FreeCuptiCorrelationString(corrParams.fileName);
-                        FreeCuptiCorrelationString(corrParams.dirName);
-                    } else {
-                        LogCuptiErrorIfFailed(this->name(),
-                                              "cuptiGetSassToSourceCorrelation",
-                                              res);
+                        hasSource = true;
                     }
+                    srcLine = corrParams.lineNumber;
+                    FreeCuptiCorrelationString(corrParams.fileName);
+                    FreeCuptiCorrelationString(corrParams.dirName);
+                } else {
+                    LogCuptiErrorIfFailed(this->name(),
+                                          "cuptiGetSassToSourceCorrelation",
+                                          res);
                 }
             }
 

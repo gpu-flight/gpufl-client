@@ -350,24 +350,35 @@ void PcSamplingEngine::StopAndCollectPcSampling_() {
                                           sizeof(out.function_name), "unknown");
                         }
 
-                        // Source correlation via cubin map
+                        // Source correlation — grab data pointer under lock,
+                        // then call CUPTI outside the lock to avoid deadlock
+                        // when CUPTI triggers a module-load callback.
+                        const uint8_t* cubinData = nullptr;
+                        size_t cubinSize = 0;
                         if (ctx_.cubin_mu && ctx_.cubin_by_crc) {
                             std::lock_guard<std::mutex> lk(*ctx_.cubin_mu);
                             auto it = ctx_.cubin_by_crc->find(pc.cubinCrc);
                             if (it != ctx_.cubin_by_crc->end()) {
-                                GFL_LOG_DEBUG(
-                                    "start getting source correlation");
-                                auto sourceCorr =
-                                    nvidia::CuptiSass::sampleSourceCorrelation(
-                                        it->second.data.data(),
-                                        it->second.data.size(),
-                                        out.function_name, pc.pcOffset);
-                                if (!sourceCorr.fileName.empty()) {
-                                    std::snprintf(out.source_file,
-                                                  sizeof(out.source_file), "%s",
-                                                  sourceCorr.fileName.c_str());
-                                    out.source_line = sourceCorr.lineNumber;
-                                }
+                                cubinData = it->second.data.data();
+                                cubinSize = it->second.data.size();
+                            }
+                        }
+                        if (cubinData) {
+                            GFL_LOG_DEBUG("start getting source correlation");
+                            auto sourceCorr =
+                                nvidia::CuptiSass::sampleSourceCorrelation(
+                                    cubinData, cubinSize,
+                                    out.function_name, pc.pcOffset);
+                            if (!sourceCorr.fileName.empty()) {
+                                const std::string fullPath =
+                                    sourceCorr.dirName.empty()
+                                        ? sourceCorr.fileName
+                                        : sourceCorr.dirName + "/" +
+                                              sourceCorr.fileName;
+                                std::snprintf(out.source_file,
+                                              sizeof(out.source_file), "%s",
+                                              fullPath.c_str());
+                                out.source_line = sourceCorr.lineNumber;
                             }
                         }
 
