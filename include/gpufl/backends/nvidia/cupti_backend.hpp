@@ -9,6 +9,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "gpufl/backends/nvidia/cupti_common.hpp"
@@ -95,9 +96,12 @@ class CuptiBackend : public IMonitorBackend {
     std::string cached_device_name_ = "Unknown Device";
     CUcontext ctx_ = nullptr;
 
-    // Cubin map — written by ResourceHandler, read by engines
+    // Cubin map — written by ResourceHandler, read by engines.
+    // seen_cubin_ptrs_ caches raw pointers so MODULE_PROFILED callbacks
+    // (which fire on every kernel launch) are skipped after the first hit.
     std::mutex cubin_mu_;
     std::unordered_map<uint64_t, CubinInfo> cubin_by_crc_;
+    std::unordered_set<const void*> seen_cubin_ptrs_;
 
     std::vector<std::shared_ptr<ICuptiHandler>> handlers_;
     std::mutex handler_mu_;
