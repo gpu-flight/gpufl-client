@@ -4,6 +4,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace gpufl {
 
@@ -54,21 +55,23 @@ class DictionaryManager {
         return id;
     }
 
-    uint32_t internSourceFile(const std::string& path) {
-        if (path.empty()) return 0;
-        std::lock_guard lk(mu_);
-        if (const auto it = source_file_dict_.find(path);
-            it != source_file_dict_.end())
-            return it->second;
-        const uint32_t id = next_source_file_id_++;
-        source_file_dict_[path] = id;
-        dirty_source_files_[path] = id;
-        return id;
-    }
+    uint32_t internSourceFile(const std::string& path);
 
     // Emits a dictionary_update JSON line to Channel::All for any new entries
     // accumulated since the last call.  No-op if nothing is dirty.
     void flushDictionary(Logger& logger, const std::string& session_id);
+
+    // Emits one source_file_content JSON line per newly-seen source file.
+    // No-op if no new source files since last call.
+    void flushSourceContent(Logger& logger, const std::string& session_id);
+
+    // Enqueues a cubin (by CRC) for SASS disassembly on the next flush.
+    // No-op if the CRC was already enqueued.
+    void enqueueDisassembly(uint64_t crc, const uint8_t* data, size_t size);
+
+    // Runs nvdisasm on each pending cubin and emits one cubin_disassembly
+    // JSON line per function.  No-op if nothing is pending.
+    void flushDisassembly(Logger& logger, const std::string& session_id);
 
     void reset() {
         std::lock_guard lk(mu_);
@@ -87,6 +90,8 @@ class DictionaryManager {
         source_file_dict_.clear();
         dirty_source_files_.clear();
         next_source_file_id_ = 1;
+        pending_source_content_.clear();
+        pending_disasm_cubins_.clear();
     }
 
    private:
@@ -111,6 +116,12 @@ class DictionaryManager {
     std::unordered_map<std::string, uint32_t> source_file_dict_;
     std::unordered_map<std::string, uint32_t> dirty_source_files_;
     uint32_t next_source_file_id_ = 1;
+
+    // file_id → lines (populated once per new source file, flushed via flushSourceContent)
+    std::unordered_map<uint32_t, std::vector<std::string>> pending_source_content_;
+
+    // cubin_crc → raw bytes (populated once per cubin, flushed via flushDisassembly)
+    std::unordered_map<uint64_t, std::vector<uint8_t>> pending_disasm_cubins_;
 };
 
 }  // namespace gpufl

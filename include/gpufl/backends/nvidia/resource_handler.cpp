@@ -4,6 +4,7 @@
 
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
 #include "gpufl/core/debug_logger.hpp"
+#include "gpufl/core/monitor.hpp"
 
 namespace gpufl {
 
@@ -35,22 +36,42 @@ void ResourceHandler::handle(CUpti_CallbackDomain domain, CUpti_CallbackId cbid,
         auto *modData = static_cast<CUpti_ModuleResourceData *>(
             resourceData->resourceDescriptor);
         if (modData && modData->pCubin && modData->cubinSize > 0) {
-            size_t cubinSize = 0;
-            const void *cubinPtr = nullptr;
+            const void *cubinPtr = modData->pCubin;
+            const size_t cubinSize = modData->cubinSize;
+
+            // CUPTI_CBID_RESOURCE_MODULE_PROFILED fires on every kernel
+            // launch when PC sampling is active. Use the raw pointer as an
+            // O(1) sentinel — cubin memory is stable for the process lifetime.
+            {
+                std::lock_guard<std::mutex> lk(backend_->cubin_mu_);
+                if (backend_->seen_cubin_ptrs_.count(cubinPtr)) return;
+            }
+
             CUpti_GetCubinCrcParams params = {CUpti_GetCubinCrcParamsSize};
-            cubinPtr = modData->pCubin;
-            cubinSize = modData->cubinSize;
             params.cubinSize = cubinSize;
             params.cubin = cubinPtr;
             GFL_LOG_DEBUG("Attempting CRC for Cubin at ", cubinPtr,
                           " Size: ", cubinSize);
             if (cuptiGetCubinCrc(&params) == CUPTI_SUCCESS) {
-                std::lock_guard<std::mutex> lk(backend_->cubin_mu_);
-                auto &info = backend_->cubin_by_crc_[params.cubinCrc];
-                info.crc = params.cubinCrc;
-                info.data.assign(
-                    static_cast<const uint8_t *>(cubinPtr),
-                    static_cast<const uint8_t *>(cubinPtr) + cubinSize);
+                bool isNew = false;
+                {
+                    std::lock_guard<std::mutex> lk(backend_->cubin_mu_);
+                    backend_->seen_cubin_ptrs_.insert(cubinPtr);
+                    if (backend_->cubin_by_crc_.find(params.cubinCrc) ==
+                        backend_->cubin_by_crc_.end()) {
+                        auto &info = backend_->cubin_by_crc_[params.cubinCrc];
+                        info.crc = params.cubinCrc;
+                        info.data.assign(
+                            static_cast<const uint8_t *>(cubinPtr),
+                            static_cast<const uint8_t *>(cubinPtr) + cubinSize);
+                        isNew = true;
+                    }
+                }
+                if (isNew) {
+                    Monitor::EnqueueCubinForDisassembly(
+                        params.cubinCrc,
+                        static_cast<const uint8_t *>(cubinPtr), cubinSize);
+                }
             } else {
                 GFL_LOG_ERROR(
                     "[DEBUG-CALLBACK] Failed to compute CRC for cubin");

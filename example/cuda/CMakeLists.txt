@@ -145,6 +145,12 @@ target_link_libraries(exercises3_1 PRIVATE
         CUDA::cupti
         CUDA::cudart
 )
+target_compile_options(exercises3_1 PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:
+        -lineinfo
+        -gencode=arch=compute_86,code=sm_86     # embeds cubin
+        -gencode=arch=compute_86,code=compute_86
+        >)
 
 # Properties
 set_target_properties(gfl_block_example PROPERTIES
