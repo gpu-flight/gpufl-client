@@ -74,6 +74,8 @@ static std::string SanitizeStackTrace(const std::string& rawTrace) {
 
     // Split by '|'
     while (std::getline(ss, segment, '|')) {
+        if (segment.empty()) continue;
+
         // STOP: Hit the bottom of the stack (CUDA driver)
         if (IsInternalFunction(segment)) {
             break;

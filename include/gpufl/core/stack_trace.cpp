@@ -13,6 +13,18 @@
 
 namespace gpufl {
 namespace core {
+std::string DemangleName(const char* mangled) {
+    if (!mangled || mangled[0] == '\0') return mangled ? mangled : "";
+    // Windows: MSVC-mangled names start with '?'; try UnDecorateSymbolName
+    if (mangled[0] == '?') {
+        char buf[512];
+        DWORD result = UnDecorateSymbolName(mangled, buf, sizeof(buf),
+                                            UNDNAME_COMPLETE);
+        if (result > 0) return std::string(buf);
+    }
+    return mangled;
+}
+
 std::string GetCallStack(int skipFrames) {
     HANDLE process = GetCurrentProcess();
 
@@ -62,6 +74,18 @@ std::string GetCallStack(int skipFrames) {
 
 namespace gpufl {
 namespace core {
+std::string DemangleName(const char* mangled) {
+    if (!mangled || mangled[0] == '\0') return mangled ? mangled : "";
+    int status = 0;
+    char* demangled = abi::__cxa_demangle(mangled, nullptr, nullptr, &status);
+    if (status == 0 && demangled) {
+        std::string result(demangled);
+        free(demangled);
+        return result;
+    }
+    return mangled;
+}
+
 std::string GetCallStack(int skipFrames) {
     void* callstack[64];
     int frames = backtrace(callstack, 64);
@@ -74,25 +98,17 @@ std::string GetCallStack(int skipFrames) {
 
     for (int i = frames - 1; i >= skipFrames; --i) {
         std::string line = strs[i];
-        std::string name = line;
+        std::string name;
 
         size_t openParen = line.find('(');
         size_t plusSign = line.find('+');
         if (openParen != std::string::npos && plusSign != std::string::npos) {
             std::string raw =
                 line.substr(openParen + 1, plusSign - openParen - 1);
-
-            int status;
-            char* demangled =
-                abi::__cxa_demangle(raw.c_str(), nullptr, nullptr, &status);
-            if (status == 0 && demangled) {
-                name = demangled;
-                free(demangled);
-            } else {
-                name = raw;
-            }
+            name = DemangleName(raw.c_str());
         }
 
+        if (name.empty()) continue;
         if (name.find("GetCallStack") != std::string::npos) continue;
         if (name.find("clone") != std::string::npos) continue;
         if (name.find("_start") != std::string::npos) continue;
