@@ -9,4 +9,11 @@ namespace gpufl::core {
  * GetCallStack itself)
  */
 std::string GetCallStack(int skipFrames = 1);
+
+/**
+ * Demangles a C++ mangled symbol name (e.g. "_Z11vectorScalePiii" ->
+ * "vectorScale(int*, int, int, int)"). Returns the original name if
+ * demangling fails or the input is not a mangled symbol.
+ */
+std::string DemangleName(const char* mangled);
 }  // namespace gpufl::core

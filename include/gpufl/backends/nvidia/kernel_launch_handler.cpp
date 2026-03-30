@@ -11,6 +11,8 @@
 #include "gpufl/core/stack_registry.hpp"
 #include "gpufl/core/stack_trace.hpp"
 
+using gpufl::core::DemangleName;
+
 namespace gpufl {
 extern RingBuffer<ActivityRecord, 1024> g_monitorBuffer;
 }
@@ -62,7 +64,8 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
         const char* nm =
             cbInfo->symbolName ? cbInfo->symbolName : cbInfo->functionName;
         if (!nm) nm = "kernel_launch";
-        std::snprintf(meta.name, sizeof(meta.name), "%s", nm);
+        const std::string demangledName = DemangleName(nm);
+        std::snprintf(meta.name, sizeof(meta.name), "%s", demangledName.c_str());
 
         if (backend_->GetOptions().enable_stack_trace) {
             const std::string trace = gpufl::core::GetCallStack(2);
@@ -181,8 +184,8 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
     out.device_id = k->deviceId;
     out.stream = static_cast<StreamHandle>(k->streamId);
     out.type = TraceType::KERNEL;
-    std::snprintf(out.name, sizeof(out.name), "%s",
-                  (k->name ? k->name : "kernel"));
+    const std::string demangledKernelName = DemangleName(k->name ? k->name : "kernel");
+    std::snprintf(out.name, sizeof(out.name), "%s", demangledKernelName.c_str());
     out.cpu_start_ns = baseCpuNs + static_cast<int64_t>(k->start - baseCuptiTs);
     out.duration_ns = static_cast<int64_t>(k->end - k->start);
     out.dyn_shared = k->dynamicSharedMemory;
