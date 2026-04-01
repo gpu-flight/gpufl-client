@@ -50,9 +50,14 @@ TEST_F(CuptiBackendTest, ProfilingMode) {
     backend.start();
     EXPECT_TRUE(backend.IsActive());
 
-    // onScopeStart/Stop should not crash even if PC Sampling fails to enable on
-    // some GPUs
-    backend.OnScopeStart("test_scope");
+    // onScopeStart/Stop should not crash even if PC Sampling cannot be
+    // enabled (unsupported GPU, restricted permissions, etc.).
+    for (int i = 0; i < 3; ++i) {
+        backend.OnScopeStart("test_scope");
+        backend.OnScopeStop("test_scope");
+    }
+    // Guard against ref-count underflow paths when stop is called without a
+    // matching successful start.
     backend.OnScopeStop("test_scope");
 
     backend.stop();

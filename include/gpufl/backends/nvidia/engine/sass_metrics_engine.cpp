@@ -25,6 +25,20 @@ std::vector<const char*> kSassMetricNames = {
     "smsp__sass_sectors_mem_global_ideal",
 };
 
+bool IsInsufficientPrivilege(CUptiResult res) {
+    if (res == CUPTI_ERROR_INSUFFICIENT_PRIVILEGES) return true;
+#ifdef CUPTI_ERROR_VIRTUALIZED_DEVICE_INSUFFICIENT_PRIVILEGES
+    if (res == CUPTI_ERROR_VIRTUALIZED_DEVICE_INSUFFICIENT_PRIVILEGES)
+        return true;
+#endif
+    return false;
+}
+
+bool IsExpectedTeardownError(CUptiResult res) {
+    return res == CUPTI_SUCCESS || res == CUPTI_ERROR_NOT_INITIALIZED ||
+           IsInsufficientPrivilege(res);
+}
+
 void FreeCuptiCorrelationString(char* s) {
     if (!s) return;
 #if defined(_WIN32) && defined(_DEBUG)
@@ -56,8 +70,14 @@ void SassMetricsEngine::start() {
     // Initialize profiler device — required before SASS Metrics APIs
     CUpti_Profiler_Initialize_Params p = {
         CUpti_Profiler_Initialize_Params_STRUCT_SIZE};
+    CUptiResult initRes = cuptiProfilerInitialize(&p);
     if (LogCuptiErrorIfFailed(this->name(), "cuptiProfilerInitialize",
-                              cuptiProfilerInitialize(&p))) {
+                              initRes)) {
+        if (IsInsufficientPrivilege(initRes)) {
+            GFL_LOG_ERROR(
+                "[SassMetricsEngine] Insufficient privileges for CUPTI "
+                "SASS metrics. Skipping SASS instrumentation.");
+        }
         return;
     }
 
@@ -71,16 +91,22 @@ void SassMetricsEngine::shutdown() {
         CUpti_SassMetricsDisable_Params disableParams = {
             CUpti_SassMetricsDisable_Params_STRUCT_SIZE};
         disableParams.ctx = ctx_.cuda_ctx;
-        LogCuptiErrorIfFailed(this->name(), "cuptiSassMetricsDisable",
-                              cuptiSassMetricsDisable(&disableParams));
+        CUptiResult disableRes = cuptiSassMetricsDisable(&disableParams);
+        if (!IsExpectedTeardownError(disableRes)) {
+            LogCuptiErrorIfFailed(this->name(), "cuptiSassMetricsDisable",
+                                  disableRes);
+        }
     }
 
     if (config_set_) {
         CUpti_SassMetricsUnsetConfig_Params unsetParams = {
             CUpti_SassMetricsUnsetConfig_Params_STRUCT_SIZE};
         unsetParams.deviceIndex = ctx_.device_id;
-        LogCuptiErrorIfFailed(this->name(), "cuptiSassMetricsUnsetConfig",
-                              cuptiSassMetricsUnsetConfig(&unsetParams));
+        CUptiResult unsetRes = cuptiSassMetricsUnsetConfig(&unsetParams);
+        if (!IsExpectedTeardownError(unsetRes)) {
+            LogCuptiErrorIfFailed(this->name(), "cuptiSassMetricsUnsetConfig",
+                                  unsetRes);
+        }
     }
 
     if (sass_metrics_buffers_) {
@@ -155,8 +181,26 @@ void SassMetricsEngine::EnableSassMetrics_() {
             CUpti_SassMetricsEnable_Params_STRUCT_SIZE};
         enableParams.ctx = ctx_.cuda_ctx;
         enableParams.enableLazyPatching = 1;
+        CUptiResult enableRes = cuptiSassMetricsEnable(&enableParams);
         if (LogCuptiErrorIfFailed(this->name(), "cuptiSassMetricsEnable",
-                                  cuptiSassMetricsEnable(&enableParams))) {
+                                  enableRes)) {
+            if (config_set_) {
+                CUpti_SassMetricsUnsetConfig_Params unsetParams = {
+                    CUpti_SassMetricsUnsetConfig_Params_STRUCT_SIZE};
+                unsetParams.deviceIndex = ctx_.device_id;
+                CUptiResult unsetRes = cuptiSassMetricsUnsetConfig(&unsetParams);
+                if (!IsExpectedTeardownError(unsetRes)) {
+                    LogCuptiErrorIfFailed(this->name(),
+                                          "cuptiSassMetricsUnsetConfig",
+                                          unsetRes);
+                }
+                config_set_ = false;
+            }
+            if (IsInsufficientPrivilege(enableRes)) {
+                GFL_LOG_ERROR(
+                    "[SassMetricsEngine] Insufficient privileges for CUPTI "
+                    "SASS metrics. Skipping SASS instrumentation.");
+            }
             return;
         }
         enabled_ = true;
