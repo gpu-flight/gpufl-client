@@ -39,12 +39,20 @@ void ResourceHandler::handle(CUpti_CallbackDomain domain, CUpti_CallbackId cbid,
             const void *cubinPtr = modData->pCubin;
             const size_t cubinSize = modData->cubinSize;
 
-            // CUPTI_CBID_RESOURCE_MODULE_PROFILED fires on every kernel
-            // launch when PC sampling is active. Use the raw pointer as an
-            // O(1) sentinel — cubin memory is stable for the process lifetime.
             {
                 std::lock_guard<std::mutex> lk(backend_->cubin_mu_);
                 if (backend_->seen_cubin_ptrs_.count(cubinPtr)) return;
+                // CUPTI_CBID_RESOURCE_MODULE_PROFILED fires on every kernel
+                // launch when PC sampling is active, including for
+                // SASS-patched cubin variants that have a different pointer
+                // than the original. Calling cuptiGetCubinCrc() from within
+                // this callback deadlocks when SASS lazy patching holds
+                // CUPTI-internal locks. Mark the pointer seen and bail out —
+                // the original cubin was already processed by MODULE_LOADED.
+                if (cbid == CUPTI_CBID_RESOURCE_MODULE_PROFILED) {
+                    backend_->seen_cubin_ptrs_.insert(cubinPtr);
+                    return;
+                }
             }
 
             CUpti_GetCubinCrcParams params = {CUpti_GetCubinCrcParamsSize};
