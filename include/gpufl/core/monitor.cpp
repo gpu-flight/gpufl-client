@@ -336,9 +336,11 @@ void Monitor::Initialize(const MonitorOptions& opts) {
 void Monitor::Shutdown() {
     if (!g_initialized.exchange(false)) return;
 
-    if (g_adapter) g_adapter->shutdown();
+    // Stop collector first to avoid racing backend teardown while the collector
+    // thread is still issuing periodic flushActivities() calls.
     g_collectorRunning.store(false);
     if (g_collectorThread.joinable()) g_collectorThread.join();
+    if (g_adapter) g_adapter->shutdown();
     g_adapter.reset();
 }
 

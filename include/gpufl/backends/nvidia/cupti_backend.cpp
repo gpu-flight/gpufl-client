@@ -36,6 +36,25 @@ std::atomic<gpufl::CuptiBackend*> g_activeBackend{nullptr};
 
 extern RingBuffer<ActivityRecord, 1024> g_monitorBuffer;
 
+namespace {
+bool IsInsufficientPrivilege(CUptiResult res) {
+    if (res == CUPTI_ERROR_INSUFFICIENT_PRIVILEGES) return true;
+#ifdef CUPTI_ERROR_VIRTUALIZED_DEVICE_INSUFFICIENT_PRIVILEGES
+    if (res == CUPTI_ERROR_VIRTUALIZED_DEVICE_INSUFFICIENT_PRIVILEGES)
+        return true;
+#endif
+    return false;
+}
+
+void LogCuptiIfUnexpected(const char* scope, const char* op, CUptiResult res) {
+    if (res == CUPTI_SUCCESS || res == CUPTI_ERROR_NOT_INITIALIZED ||
+        IsInsufficientPrivilege(res)) {
+        return;
+    }
+    LogCuptiErrorIfFailed(scope, op, res);
+}
+}  // namespace
+
 void CuptiBackend::initialize(const MonitorOptions& opts) {
     opts_ = opts;
 
@@ -118,22 +137,15 @@ void CuptiBackend::initialize(const MonitorOptions& opts) {
 void CuptiBackend::shutdown() {
     if (!initialized_) return;
 
+    if (active_.load(std::memory_order_relaxed)) {
+        stop();
+    }
+
     // Delegate engine teardown first
     if (engine_) {
         engine_->stop();
         engine_->shutdown();
         engine_.reset();
-    }
-
-    LogCuptiErrorIfFailed("Perfworks", "cuptiActivityFlushAll",
-                          cuptiActivityFlushAll(1));
-
-    {
-        std::lock_guard<std::mutex> lk(handler_mu_);
-        std::set<CUpti_CallbackDomain> domains;
-        for (const auto& h : handlers_)
-            for (auto d : h->requiredDomains()) domains.insert(d);
-        for (auto d : domains) cuptiEnableDomain(0, subscriber_, d);
     }
 
     cuptiUnsubscribe(subscriber_);
@@ -190,8 +202,8 @@ void CuptiBackend::stop() {
     if (!initialized_) return;
     active_.store(false);
 
-    LogCuptiErrorIfFailed("Perfworks", "cuptiActivityFlushAll",
-                          cuptiActivityFlushAll(1));
+    LogCuptiIfUnexpected("Perfworks", "cuptiActivityFlushAll",
+                         cuptiActivityFlushAll(1));
 
     {
         std::set<CUpti_ActivityKind> kinds;
