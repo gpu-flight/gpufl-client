@@ -4,7 +4,6 @@
 
 #if GPUFL_ENABLE_NVIDIA && GPUFL_HAS_CUDA
 #include "gpufl/backends/nvidia/cuda_collector.hpp"
-#endif
 
 class CudaCollectorTest : public ::testing::Test {
    protected:
