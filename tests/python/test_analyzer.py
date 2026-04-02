@@ -16,6 +16,7 @@ def test_session_loading(mock_log_dir):
     assert len(session.kernels) == 2
     assert "vectorAdd" in session.kernels["name"].values
     assert "matrixMul" in session.kernels["name"].values
+    assert session.static_devices[0]["name"] == "NVIDIA Test GPU"
 
 def test_session_metrics(mock_log_dir):
     log_dir, prefix = mock_log_dir
@@ -52,3 +53,19 @@ def test_session_scopes(mock_log_dir):
     
     # Should not crash
     session.inspect_scopes()
+
+def test_session_loads_canonical_static_devices(mock_log_dir):
+    log_dir, prefix = mock_log_dir
+    session = GpuFlightSession(log_dir, log_prefix=prefix)
+
+    assert session.static_devices == [
+        {"name": "NVIDIA Test GPU", "vendor": "NVIDIA", "multi_processor_count": 108}
+    ]
+
+def test_session_loads_rocm_static_devices(mock_log_dir_rocm_only):
+    log_dir, prefix = mock_log_dir_rocm_only
+    session = GpuFlightSession(log_dir, log_prefix=prefix)
+
+    assert session.static_devices == [
+        {"name": "AMD Test GPU", "vendor": "AMD", "multi_processor_count": 120}
+    ]

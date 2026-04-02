@@ -8,12 +8,8 @@
 #include "gpufl/backends/nvidia/nvml_collector.hpp"
 #endif
 
-#if GPUFL_ENABLE_AMD && GPUFL_HAS_ROCM
+#if GPUFL_ENABLE_AMD && (GPUFL_HAS_ROCM_SMI || GPUFL_HAS_HIP)
 #include "gpufl/backends/amd/rocm_collector.hpp"
-#endif
-
-#if GPUFL_ENABLE_AMD && GPUFL_HAS_HIP
-#include "gpufl/backends/amd/hip_static_collector.hpp"
 #endif
 
 namespace gpufl {
@@ -21,24 +17,12 @@ namespace gpufl {
 #if GPUFL_HAS_CUDA
 class NvidiaStaticInfoCollector final : public IGpuStaticInfoCollector {
    public:
-    std::vector<GpuStaticDeviceInfo> sampleAll() override {
+    std::vector<GpuStaticDeviceInfo> sampleStaticInfo() override {
         return collector_.sampleAll();
     }
 
    private:
     nvidia::CudaCollector collector_;
-};
-#endif
-
-#if GPUFL_ENABLE_AMD && GPUFL_HAS_HIP
-class AmdStaticInfoCollector final : public IGpuStaticInfoCollector {
-   public:
-    std::vector<GpuStaticDeviceInfo> sampleAll() override {
-        return collector_.sampleAll();
-    }
-
-   private:
-    amd::HipStaticCollector collector_;
 };
 #endif
 
@@ -62,38 +46,25 @@ BackendCollectors CreateBackendCollectors(const BackendKind backend,
 #endif
     };
 
-    auto tryRocm = [&]() -> std::shared_ptr<ISystemCollector<DeviceSample>> {
-#if GPUFL_ENABLE_AMD && GPUFL_HAS_ROCM
+    auto tryAmdUnified = [&]() -> std::shared_ptr<IUnifiedGpuCollector> {
+#if GPUFL_ENABLE_AMD && (GPUFL_HAS_ROCM_SMI || GPUFL_HAS_HIP)
         std::string reason;
         if (!gpufl::amd::RocmCollector::IsAvailable(&reason)) {
-            setReason("AMD telemetry unavailable: " + reason);
+            setReason("AMD backend unavailable: " + reason);
             return nullptr;
         }
         return std::make_shared<gpufl::amd::RocmCollector>();
 #else
         setReason(
-            "AMD telemetry not available (GPUFL_ENABLE_AMD=OFF or ROCm not "
+            "AMD backend not available (GPUFL_ENABLE_AMD=OFF or ROCm/HIP not "
             "found).");
         return nullptr;
 #endif
     };
 
-    auto tryNvidiaStatic = [&]() -> std::unique_ptr<IGpuStaticInfoCollector> {
+    auto tryNvidiaStatic = [&]() -> std::shared_ptr<IGpuStaticInfoCollector> {
 #if GPUFL_HAS_CUDA
-        return std::make_unique<NvidiaStaticInfoCollector>();
-#else
-        return nullptr;
-#endif
-    };
-
-    auto tryAmdStatic = [&]() -> std::unique_ptr<IGpuStaticInfoCollector> {
-#if GPUFL_ENABLE_AMD && GPUFL_HAS_HIP
-        std::string reason;
-        if (!gpufl::amd::HipStaticCollector::IsAvailable(&reason)) {
-            setReason("AMD static inventory unavailable: " + reason);
-            return nullptr;
-        }
-        return std::make_unique<AmdStaticInfoCollector>();
+        return std::make_shared<NvidiaStaticInfoCollector>();
 #else
         return nullptr;
 #endif
@@ -112,11 +83,19 @@ BackendCollectors CreateBackendCollectors(const BackendKind backend,
             break;
 
         case BackendKind::Amd:
-            out.telemetry_collector = tryRocm();
-            if (!out.telemetry_collector) {
-                setReason("Requested backend=amd but ROCm is unavailable.");
+            out.unified_collector = tryAmdUnified();
+            if (!out.unified_collector) {
+                setReason("Requested backend=amd but no AMD capability is available.");
+            } else {
+                if (out.unified_collector->canSampleTelemetry()) {
+                    out.telemetry_collector = std::static_pointer_cast<
+                        ISystemCollector<DeviceSample>>(out.unified_collector);
+                }
+                if (out.unified_collector->canSampleStaticInfo()) {
+                    out.static_info_collector = std::static_pointer_cast<
+                        IGpuStaticInfoCollector>(out.unified_collector);
+                }
             }
-            out.static_info_collector = tryAmdStatic();
             break;
 
         case BackendKind::Auto:
@@ -127,9 +106,16 @@ BackendCollectors CreateBackendCollectors(const BackendKind backend,
                 break;
             }
 
-            out.telemetry_collector = tryRocm();
-            if (out.telemetry_collector) {
-                out.static_info_collector = tryAmdStatic();
+            out.unified_collector = tryAmdUnified();
+            if (out.unified_collector) {
+                if (out.unified_collector->canSampleTelemetry()) {
+                    out.telemetry_collector = std::static_pointer_cast<
+                        ISystemCollector<DeviceSample>>(out.unified_collector);
+                }
+                if (out.unified_collector->canSampleStaticInfo()) {
+                    out.static_info_collector = std::static_pointer_cast<
+                        IGpuStaticInfoCollector>(out.unified_collector);
+                }
                 break;
             }
 
@@ -139,8 +125,10 @@ BackendCollectors CreateBackendCollectors(const BackendKind backend,
                     "not available).");
             }
             out.static_info_collector = tryNvidiaStatic();
-            if (!out.static_info_collector) {
-                out.static_info_collector = tryAmdStatic();
+            if (!out.static_info_collector && out.unified_collector &&
+                out.unified_collector->canSampleStaticInfo()) {
+                out.static_info_collector = std::static_pointer_cast<
+                    IGpuStaticInfoCollector>(out.unified_collector);
             }
             break;
     }

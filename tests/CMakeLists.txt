@@ -15,17 +15,26 @@ set(GPUFL_TEST_SOURCES
     core/test_monitor.cpp
 )
 
-if(GPUFL_ENABLE_NVIDIA)
+if(GPUFL_ENABLE_NVIDIA AND GPUFL_HAS_CUPTI)
   list(APPEND GPUFL_TEST_SOURCES
     backends/nvidia/test_nvidia_backend.cpp
+  )
+endif()
+
+if(GPUFL_ENABLE_NVIDIA AND GPUFL_HAS_CUDA)
+  list(APPEND GPUFL_TEST_SOURCES
     backends/nvidia/test_cuda_collector.cpp
+  )
+endif()
+
+if(GPUFL_ENABLE_NVIDIA AND GPUFL_HAS_NVML)
+  list(APPEND GPUFL_TEST_SOURCES
     backends/nvidia/test_nvml_collector.cpp
   )
 endif()
 
-if(GPUFL_ENABLE_AMD)
+if(GPUFL_ENABLE_AMD AND (GPUFL_HAS_ROCM_SMI OR GPUFL_HAS_HIP))
   list(APPEND GPUFL_TEST_SOURCES
-    backends/amd/test_hip_static_collector.cpp
     backends/amd/test_rocm_collector.cpp
   )
 endif()

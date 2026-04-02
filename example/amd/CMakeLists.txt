@@ -1,5 +1,17 @@
 cmake_minimum_required(VERSION 3.28)
 
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  project(gpufl_amd_examples LANGUAGES CXX)
+
+  set(GPUFL_ENABLE_AMD ON CACHE BOOL "Enable AMD backends (ROCm when available)" FORCE)
+  set(GPUFL_ENABLE_NVIDIA OFF CACHE BOOL "Enable NVIDIA backends (CUDA + NVML when available)" FORCE)
+  set(BUILD_GPUFL_EXAMPLE OFF CACHE BOOL "Build gpufl example application" FORCE)
+  set(BUILD_PYTHON OFF CACHE BOOL "Build Python bindings" FORCE)
+  set(BUILD_TESTING OFF CACHE BOOL "Build the testing tree." FORCE)
+
+  add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../.. ${CMAKE_BINARY_DIR}/gpufl-root)
+endif()
+
 if(UNIX)
   if(NOT DEFINED ROCM_PATH)
     if(DEFINED ENV{ROCM_PATH})
