@@ -14,9 +14,10 @@ struct Runtime {
     std::string app_name;
     std::string session_id;
     std::shared_ptr<Logger> logger;
+    std::shared_ptr<IUnifiedGpuCollector> unified_gpu_collector;
     std::shared_ptr<ISystemCollector<DeviceSample>> collector;
     std::unique_ptr<HostCollector> host_collector;
-    std::unique_ptr<IGpuStaticInfoCollector> static_info_collector;
+    std::shared_ptr<IGpuStaticInfoCollector> static_info_collector;
 
     // background system sampling
     std::atomic<bool> system_sampling{false};
