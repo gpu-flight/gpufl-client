@@ -16,8 +16,11 @@ std::string InitEventModel::buildJson() const {
         << ",\"ts_ns\":"       << e_.ts_ns
         << ",\"host\":"        << hostToJson(e_.host)
         << ",\"devices\":"     << devicesToJson(e_.devices)
-        << ",\"gpu_static_devices\":" << gpuStaticDevicesToJson(e_.gpu_static_device_infos)
-        << ",\"cuda_static_devices\":" << cudaStaticDevicesCompatToJson(e_.gpu_static_device_infos)
+        << ",\"gpu_static_devices\":" << staticDevicesToJson(e_.gpu_static_device_infos)
+        << ",\"cuda_static_devices\":"
+        << staticDevicesToJsonForVendor(e_.gpu_static_device_infos, "NVIDIA")
+        << ",\"rocm_static_devices\":"
+        << staticDevicesToJsonForVendor(e_.gpu_static_device_infos, "AMD")
         << "}";
     return oss.str();
 }

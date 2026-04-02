@@ -68,7 +68,7 @@ inline std::string devicesToJson(const std::vector<DeviceSample>& devs) {
     return oss.str();
 }
 
-inline std::string gpuStaticDevicesToJson(
+inline std::string staticDevicesToJson(
     const std::vector<GpuStaticDeviceInfo>& devs) {
     std::ostringstream oss;
     oss << "[";
@@ -93,18 +93,20 @@ inline std::string gpuStaticDevicesToJson(
     return oss.str();
 }
 
-inline std::string cudaStaticDevicesCompatToJson(
-    const std::vector<GpuStaticDeviceInfo>& devs) {
+inline std::string staticDevicesToJsonForVendor(
+    const std::vector<GpuStaticDeviceInfo>& devs, const std::string& vendor) {
     std::ostringstream oss;
     oss << "[";
     bool first = true;
     for (const auto& d : devs) {
-        if (d.vendor != "NVIDIA") continue;
+        if (d.vendor != vendor) continue;
         if (!first) oss << ",";
         first = false;
         oss << "{\"id\":" << d.id
             << ",\"name\":\""          << jsonEscape(d.name) << "\""
             << ",\"uuid\":\""          << jsonEscape(d.uuid) << "\""
+            << ",\"vendor\":\""        << jsonEscape(d.vendor) << "\""
+            << ",\"architecture\":\""  << jsonEscape(d.architecture) << "\""
             << ",\"compute_major\":"   << d.compute_major
             << ",\"compute_minor\":"   << d.compute_minor
             << ",\"l2_cache_size_bytes\":"        << d.l2_cache_size

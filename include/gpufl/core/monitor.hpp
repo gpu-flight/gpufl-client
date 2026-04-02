@@ -10,6 +10,13 @@
 
 namespace gpufl {
 
+enum class MonitorBackendKind {
+    Auto,
+    Nvidia,
+    Amd,
+    None,
+};
+
 /**
  * @brief Selects which profiling engine is active for this session.
  *
@@ -32,6 +39,7 @@ struct MonitorOptions {
     int kernel_sample_rate_ms = 0;
     uint32_t pc_sampling_period = 12;  // log2 exponent: 2^N GPU cycles between samples (valid: 5-31; 12 = 4096 cycles)
     ProfilingEngine profiling_engine = ProfilingEngine::None;
+    MonitorBackendKind backend_kind = MonitorBackendKind::Auto;
 };
 
 /**

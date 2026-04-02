@@ -88,11 +88,17 @@ class GpuFlightSession:
                     if self.session_start_ns is None and 'ts_ns' in rows.columns:
                         self.session_start_ns = pd.to_numeric(rows.iloc[0]['ts_ns'], errors='coerce')
                     if not self.static_devices:
-                        sd = None
+                        sd = []
                         if 'gpu_static_devices' in rows.columns:
                             sd = rows.iloc[0].get('gpu_static_devices')
-                        elif 'cuda_static_devices' in rows.columns:
-                            sd = rows.iloc[0].get('cuda_static_devices')
+                        if not isinstance(sd, list) or not sd:
+                            sd = []
+                            for field in ('cuda_static_devices', 'rocm_static_devices'):
+                                if field not in rows.columns:
+                                    continue
+                                devices = rows.iloc[0].get(field)
+                                if isinstance(devices, list) and devices:
+                                    sd.extend(devices)
                         if isinstance(sd, list):
                             self.static_devices = sd
                     if self.app_name is None and 'app' in rows.columns:

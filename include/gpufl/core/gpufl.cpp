@@ -26,6 +26,24 @@ namespace gpufl {
 std::atomic<int> g_systemSampleRateMs{0};
 InitOptions g_opts;
 
+namespace {
+
+MonitorBackendKind ToMonitorBackendKind(const BackendKind backend) {
+    switch (backend) {
+        case BackendKind::Nvidia:
+            return MonitorBackendKind::Nvidia;
+        case BackendKind::Amd:
+            return MonitorBackendKind::Amd;
+        case BackendKind::None:
+            return MonitorBackendKind::None;
+        case BackendKind::Auto:
+        default:
+            return MonitorBackendKind::Auto;
+    }
+}
+
+}  // namespace
+
 static std::string defaultLogPath_(const std::string& app) {
     return app + ".log";
 }
@@ -77,6 +95,7 @@ bool init(const InitOptions& opts) {
         mOpts.collect_kernel_details = true;
     }
     mOpts.enable_stack_trace = opts.enable_stack_trace;
+    mOpts.backend_kind = ToMonitorBackendKind(opts.backend);
     Monitor::Initialize(mOpts);
 
     GFL_LOG_DEBUG("Starting Monitor...");
@@ -89,6 +108,7 @@ bool init(const InitOptions& opts) {
     std::string backendReason;
     auto backendCollectors =
         CreateBackendCollectors(opts.backend, &backendReason);
+    rt_ptr->unified_gpu_collector = std::move(backendCollectors.unified_collector);
     rt_ptr->collector = std::move(backendCollectors.telemetry_collector);
     rt_ptr->static_info_collector =
         std::move(backendCollectors.static_info_collector);
@@ -110,7 +130,7 @@ bool init(const InitOptions& opts) {
     }
     if (rt_ptr->static_info_collector) {
         ie.gpu_static_device_infos =
-            rt_ptr->static_info_collector->sampleAll();
+            rt_ptr->static_info_collector->sampleStaticInfo();
     }
     ie.host = rt_ptr->host_collector->sample();
 
@@ -246,10 +266,9 @@ ScopedMonitor::ScopedMonitor(std::string name, std::string tag,
     row.depth = depth;
     Monitor::PushScopeRow(row);
 
-    // Scoped profiling is controlled by runtime options; deep_profiling is
-    // kept only for source compatibility.
+    // Scope callbacks are useful for both tracing and profiling backends.
+    Monitor::BeginProfilerScope(name_.c_str());
     if (g_opts.profiling_engine != ProfilingEngine::None) {
-        Monitor::BeginProfilerScope(name_.c_str());
         Monitor::BeginPerfScope(name_.c_str());
     }
 }
@@ -270,8 +289,8 @@ ScopedMonitor::~ScopedMonitor() {
     row.depth = depth;
     Monitor::PushScopeRow(row);
 
+    Monitor::EndProfilerScope(name_.c_str());
     if (g_opts.profiling_engine != ProfilingEngine::None) {
-        Monitor::EndProfilerScope(name_.c_str());
         Monitor::EndPerfScope(
             name_.c_str());  // triggers EndPerfPassAndDecode first
         if (IMonitorBackend* b = Monitor::GetBackend()) {

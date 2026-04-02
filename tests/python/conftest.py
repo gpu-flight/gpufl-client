@@ -21,7 +21,8 @@ def mock_log_dir(tmp_path):
             "host": {},
             "devices": [],
             "gpu_static_devices": [{"name": "NVIDIA Test GPU", "vendor": "NVIDIA", "multi_processor_count": 108}],
-            "cuda_static_devices": [{"name": "NVIDIA Test GPU", "multi_processor_count": 108}]
+            "cuda_static_devices": [{"name": "NVIDIA Test GPU", "vendor": "NVIDIA", "multi_processor_count": 108}],
+            "rocm_static_devices": []
         },
         # String dictionary (kernel names)
         {
@@ -148,6 +149,36 @@ def mock_log_dir(tmp_path):
     ]
     with open(system_log, "w") as f:
         for ev in system_events:
+            f.write(json.dumps(ev) + "\n")
+
+    return str(log_dir), prefix
+
+
+@pytest.fixture
+def mock_log_dir_rocm_only(tmp_path):
+    log_dir = tmp_path / "logs_rocm"
+    log_dir.mkdir()
+
+    prefix = "test_run_rocm"
+    device_log = log_dir / f"{prefix}.device.0.log"
+    device_events = [
+        {
+            "version": 1, "type": "job_start",
+            "session_id": "test-session-rocm", "app": "test_app", "pid": 1234,
+            "ts_ns": 100,
+            "host": {},
+            "devices": [],
+            "gpu_static_devices": [{"name": "AMD Test GPU", "vendor": "AMD", "multi_processor_count": 120}],
+            "rocm_static_devices": [{"name": "AMD Test GPU", "vendor": "AMD", "multi_processor_count": 120}]
+        },
+        {
+            "type": "shutdown",
+            "session_id": "test-session-rocm", "app": "test_app", "pid": 1234,
+            "ts_ns": 10000
+        },
+    ]
+    with open(device_log, "w") as f:
+        for ev in device_events:
             f.write(json.dumps(ev) + "\n")
 
     return str(log_dir), prefix

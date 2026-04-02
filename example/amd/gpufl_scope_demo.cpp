@@ -48,10 +48,10 @@ int main() {
     }
 
     std::cout << "=== GPUFL AMD Scope Demo ===\n";
-    std::cout << "Backend: AMD telemetry\n";
+    std::cout << "Backend: AMD telemetry + kernel tracing\n";
     std::cout << "Logs: " << opts.log_path << "\n";
-    std::cout << "Note: AMD kernel tracing is not implemented yet, so this demo\n"
-                 "records system telemetry plus user scope ranges.\n\n";
+    std::cout << "Note: with ROCprofiler-SDK available, this demo records HIP\n"
+                 "kernel dispatches, memcpy activity, system telemetry, and user scopes.\n\n";
 
     const int n = 1 << 22;
     const size_t bytes = static_cast<size_t>(n) * sizeof(int);
