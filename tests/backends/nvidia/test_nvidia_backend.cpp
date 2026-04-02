@@ -5,7 +5,6 @@
 #if GPUFL_ENABLE_NVIDIA && GPUFL_HAS_CUPTI
 #include "gpufl/backends/nvidia/cupti_backend.hpp"
 #include "gpufl/backends/nvidia/kernel_launch_handler.hpp"
-#endif
 
 class CuptiBackendTest : public ::testing::Test {
    protected:
