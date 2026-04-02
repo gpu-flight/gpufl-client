@@ -27,6 +27,6 @@ class IMonitorAdapter {
     virtual IMonitorBackend* backend() = 0;
 };
 
-std::unique_ptr<IMonitorAdapter> CreateMonitorAdapter();
+std::unique_ptr<IMonitorAdapter> CreateMonitorAdapter(const MonitorOptions& opts);
 
 }  // namespace gpufl

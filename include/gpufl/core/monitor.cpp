@@ -326,7 +326,7 @@ void Monitor::Initialize(const MonitorOptions& opts) {
     g_activeScopeNameId.store(0);
 
     DebugLogger::setEnabled(opts.enable_debug_output);
-    g_adapter = CreateMonitorAdapter();
+    g_adapter = CreateMonitorAdapter(opts);
     if (g_adapter) g_adapter->initialize(opts);
 
     g_collectorRunning.store(true);

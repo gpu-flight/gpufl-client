@@ -73,6 +73,7 @@ set(GPUFL_HAS_NVML 0)
 set(GPUFL_HAS_ROCM 0)
 set(GPUFL_HAS_ROCM_SMI 0)
 set(GPUFL_HAS_HIP 0)
+set(GPUFL_HAS_ROCPROFILER_SDK 0)
 set(GPUFL_HAS_CUPTI 0)
 set(GPUFL_HAS_PERFWORKS 0)
 # ZLIB — try system install first, fall back to FetchContent so every platform
@@ -285,9 +286,6 @@ if(GPUFL_ENABLE_AMD)
     if(rocm_smi_FOUND OR TARGET rocm_smi64)
         set(GPUFL_HAS_ROCM 1)
         set(GPUFL_HAS_ROCM_SMI 1)
-        target_sources(gpufl PRIVATE
-            include/gpufl/backends/amd/rocm_collector.cpp
-        )
         if(TARGET rocm_smi64)
             target_link_libraries(gpufl PRIVATE rocm_smi64)
         elseif(ROCM_SMI_LIBRARY)
@@ -307,9 +305,6 @@ if(GPUFL_ENABLE_AMD)
         if(ROCM_SMI_LIBRARY AND ROCM_SMI_INCLUDE_DIR)
             set(GPUFL_HAS_ROCM 1)
             set(GPUFL_HAS_ROCM_SMI 1)
-            target_sources(gpufl PRIVATE
-                include/gpufl/backends/amd/rocm_collector.cpp
-            )
             target_link_libraries(gpufl PRIVATE ${ROCM_SMI_LIBRARY})
             target_include_directories(gpufl PRIVATE ${ROCM_SMI_INCLUDE_DIR})
             message(STATUS "Found ROCm SMI manually: ${ROCM_SMI_LIBRARY}")
@@ -321,9 +316,6 @@ if(GPUFL_ENABLE_AMD)
     find_package(hip CONFIG QUIET HINTS /opt/rocm)
     if(hip_FOUND OR TARGET hip::host)
         set(GPUFL_HAS_HIP 1)
-        target_sources(gpufl PRIVATE
-            include/gpufl/backends/amd/hip_static_collector.cpp
-        )
         if(TARGET hip::host)
             target_link_libraries(gpufl PRIVATE hip::host)
         endif()
@@ -335,15 +327,31 @@ if(GPUFL_ENABLE_AMD)
             HINTS /opt/rocm/include)
         if(AMD_HIP_LIBRARY AND AMD_HIP_INCLUDE_DIR)
             set(GPUFL_HAS_HIP 1)
-            target_sources(gpufl PRIVATE
-                include/gpufl/backends/amd/hip_static_collector.cpp
-            )
             target_link_libraries(gpufl PRIVATE ${AMD_HIP_LIBRARY})
             target_include_directories(gpufl PRIVATE ${AMD_HIP_INCLUDE_DIR})
             message(STATUS "Found HIP manually: ${AMD_HIP_LIBRARY}")
         else()
             message(WARNING "HIP runtime not found! AMD static inventory will be unavailable.")
         endif()
+    endif()
+
+    find_package(rocprofiler-sdk QUIET CONFIG HINTS /opt/rocm)
+    if(TARGET rocprofiler-sdk::rocprofiler-sdk)
+        set(GPUFL_HAS_ROCPROFILER_SDK 1)
+        target_link_libraries(gpufl PRIVATE rocprofiler-sdk::rocprofiler-sdk)
+        target_sources(gpufl PRIVATE
+            include/gpufl/backends/amd/monitor_adapter_amd.cpp
+            include/gpufl/backends/amd/rocprofiler_backend.cpp
+        )
+        message(STATUS "Found ROCprofiler-SDK support")
+    else()
+        message(STATUS "ROCprofiler-SDK not found; AMD kernel tracing disabled")
+    endif()
+
+    if(GPUFL_HAS_ROCM_SMI OR GPUFL_HAS_HIP)
+        target_sources(gpufl PRIVATE
+            include/gpufl/backends/amd/rocm_collector.cpp
+        )
     endif()
 
     if(BUILD_GPUFL_EXAMPLE AND GPUFL_HAS_HIP AND CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
@@ -359,6 +367,7 @@ target_compile_definitions(gpufl PUBLIC
     GPUFL_HAS_ROCM=${GPUFL_HAS_ROCM}
     GPUFL_HAS_ROCM_SMI=${GPUFL_HAS_ROCM_SMI}
     GPUFL_HAS_HIP=${GPUFL_HAS_HIP}
+    GPUFL_HAS_ROCPROFILER_SDK=${GPUFL_HAS_ROCPROFILER_SDK}
 )
 
 if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR AND BUILD_TESTING)
