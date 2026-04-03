@@ -194,6 +194,22 @@ void CuptiBackend::start() {
         }
     }
 
+    // Re-enable activity kinds after engine start. Some engines call
+    // cuptiProfilerInitialize() or cuptiSassMetricsEnable(), which on some
+    // systems (e.g. insufficient profiler privileges) can internally reset or
+    // disable previously-enabled activity kinds including
+    // CUPTI_ACTIVITY_KIND_KERNEL.  Re-enabling here is idempotent and ensures
+    // kernel activity records are produced regardless of engine type.
+    {
+        std::set<CUpti_ActivityKind> kinds;
+        {
+            std::lock_guard<std::mutex> lk(handler_mu_);
+            for (const auto& h : handlers_)
+                for (auto k : h->requiredActivityKinds()) kinds.insert(k);
+        }
+        for (auto k : kinds) cuptiActivityEnable(k);
+    }
+
     active_.store(true);
     GFL_LOG_DEBUG("Backend started.");
 }

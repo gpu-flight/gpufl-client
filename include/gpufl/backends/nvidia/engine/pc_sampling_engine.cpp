@@ -241,14 +241,8 @@ bool PcSamplingEngine::EnableSamplingFeatures_() {
     CUpti_PCSamplingConfigurationInfo configInfo[7] = {};
     configInfo[0].attributeType =
         CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_COLLECTION_MODE;
-    // KERNEL_SERIALIZED and SASS lazy patching both intercept cuLaunchKernel
-    // at the driver level and deadlock on the first kernel launch. Use
-    // CONTINUOUS mode when SASS metrics are also active so that the lazy
-    // patching pass can complete before PC samples are drained.
     configInfo[0].attributeData.collectionModeData.collectionMode =
-        (opts_.profiling_engine == ProfilingEngine::PcSamplingWithSass)
-            ? CUPTI_PC_SAMPLING_COLLECTION_MODE_CONTINUOUS
-            : CUPTI_PC_SAMPLING_COLLECTION_MODE_KERNEL_SERIALIZED;
+        CUPTI_PC_SAMPLING_COLLECTION_MODE_KERNEL_SERIALIZED;
 
     configInfo[1].attributeType =
         CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_SAMPLING_PERIOD;
