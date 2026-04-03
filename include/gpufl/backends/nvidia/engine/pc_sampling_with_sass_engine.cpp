@@ -1,5 +1,7 @@
 #include "gpufl/backends/nvidia/engine/pc_sampling_with_sass_engine.hpp"
 
+#include <cupti.h>
+
 #include "gpufl/core/debug_logger.hpp"
 
 namespace gpufl {
@@ -44,9 +46,17 @@ void PcSamplingWithSassEngine::onScopeStart(const char* name) {
 }
 
 void PcSamplingWithSassEngine::onScopeStop(const char* name) {
-    // PC stop first: performs cudaDeviceSynchronize() so GPU is fully idle
-    // before SASS tries to flush its accumulated instruction counters.
+    // PC stop first: performs cudaDeviceSynchronize() so GPU is fully idle.
     pc_->onScopeStop(name);
+
+    // Flush CUPTI activity buffers now, while the ring buffer still has space.
+    // pc_->onScopeStop() synchronizes the GPU and stops PC sampling, making
+    // kernel activity records available in CUPTI's internal buffers.  Flushing
+    // here (non-blocking) pushes those kernel records into g_monitorBuffer
+    // before sass_->onScopeStop() pushes its own records, which could
+    // otherwise fill the ring buffer and cause kernel records to be dropped.
+    cuptiActivityFlushAll(0);
+
     if (sass_ok_) sass_->onScopeStop(name);
 }
 

@@ -180,7 +180,15 @@ void SassMetricsEngine::EnableSassMetrics_() {
         CUpti_SassMetricsEnable_Params enableParams = {
             CUpti_SassMetricsEnable_Params_STRUCT_SIZE};
         enableParams.ctx = ctx_.cuda_ctx;
-        enableParams.enableLazyPatching = 1;
+        // When PC sampling is also active (PcSamplingWithSass), SASS lazy
+        // patching intercepts cuLaunchKernel at the same level as
+        // KERNEL_SERIALIZED PC sampling — causing a deadlock. Use eager
+        // patching (=0) so cubins are patched at module-load time before any
+        // kernel launch, eliminating the conflict and correlation ID
+        // mismatches.
+        enableParams.enableLazyPatching =
+            (opts_.profiling_engine == ProfilingEngine::PcSamplingWithSass) ? 0
+                                                                            : 1;
         CUptiResult enableRes = cuptiSassMetricsEnable(&enableParams);
         if (LogCuptiErrorIfFailed(this->name(), "cuptiSassMetricsEnable",
                                   enableRes)) {
@@ -188,11 +196,11 @@ void SassMetricsEngine::EnableSassMetrics_() {
                 CUpti_SassMetricsUnsetConfig_Params unsetParams = {
                     CUpti_SassMetricsUnsetConfig_Params_STRUCT_SIZE};
                 unsetParams.deviceIndex = ctx_.device_id;
-                CUptiResult unsetRes = cuptiSassMetricsUnsetConfig(&unsetParams);
+                CUptiResult unsetRes =
+                    cuptiSassMetricsUnsetConfig(&unsetParams);
                 if (!IsExpectedTeardownError(unsetRes)) {
-                    LogCuptiErrorIfFailed(this->name(),
-                                          "cuptiSassMetricsUnsetConfig",
-                                          unsetRes);
+                    LogCuptiErrorIfFailed(
+                        this->name(), "cuptiSassMetricsUnsetConfig", unsetRes);
                 }
                 config_set_ = false;
             }
@@ -259,7 +267,7 @@ void SassMetricsEngine::StopAndCollectSassMetrics_() {
             const uint8_t* cubinData = nullptr;
             size_t cubinSize = 0;
             if (ctx_.cubin_mu && ctx_.cubin_by_crc) {
-                std::lock_guard<std::mutex> lk(*ctx_.cubin_mu);
+                std::lock_guard lk(*ctx_.cubin_mu);
                 auto it = ctx_.cubin_by_crc->find(data[i].cubinCrc);
                 if (it != ctx_.cubin_by_crc->end()) {
                     cubinData = it->second.data.data();
@@ -273,8 +281,7 @@ void SassMetricsEngine::StopAndCollectSassMetrics_() {
                 corrParams.cubinSize = cubinSize;
                 corrParams.functionName = data[i].functionName;
                 corrParams.pcOffset = data[i].pcOffset;
-                CUptiResult res =
-                    cuptiGetSassToSourceCorrelation(&corrParams);
+                CUptiResult res = cuptiGetSassToSourceCorrelation(&corrParams);
                 if (res == CUPTI_SUCCESS) {
                     if (corrParams.fileName) {
                         if (corrParams.dirName &&
@@ -292,9 +299,8 @@ void SassMetricsEngine::StopAndCollectSassMetrics_() {
                     FreeCuptiCorrelationString(corrParams.fileName);
                     FreeCuptiCorrelationString(corrParams.dirName);
                 } else {
-                    LogCuptiErrorIfFailed(this->name(),
-                                          "cuptiGetSassToSourceCorrelation",
-                                          res);
+                    LogCuptiErrorIfFailed(
+                        this->name(), "cuptiGetSassToSourceCorrelation", res);
                 }
             }
 

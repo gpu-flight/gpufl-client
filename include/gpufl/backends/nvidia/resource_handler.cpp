@@ -8,7 +8,18 @@
 
 namespace gpufl {
 
-ResourceHandler::ResourceHandler(CuptiBackend *backend) : backend_(backend) {}
+ResourceHandler::ResourceHandler(CuptiBackend *backend) : backend_(backend) {
+    worker_ = std::thread(&ResourceHandler::workerLoop, this);
+}
+
+ResourceHandler::~ResourceHandler() {
+    {
+        std::lock_guard<std::mutex> lk(pending_mu_);
+        stop_worker_ = true;
+    }
+    pending_cv_.notify_all();
+    if (worker_.joinable()) worker_.join();
+}
 
 bool ResourceHandler::shouldHandle(CUpti_CallbackDomain domain,
                                    CUpti_CallbackId cbid) const {
@@ -45,45 +56,76 @@ void ResourceHandler::handle(CUpti_CallbackDomain domain, CUpti_CallbackId cbid,
                 // CUPTI_CBID_RESOURCE_MODULE_PROFILED fires on every kernel
                 // launch when PC sampling is active, including for
                 // SASS-patched cubin variants that have a different pointer
-                // than the original. Calling cuptiGetCubinCrc() from within
-                // this callback deadlocks when SASS lazy patching holds
-                // CUPTI-internal locks. Mark the pointer seen and bail out —
+                // than the original. Mark the pointer seen and bail out —
                 // the original cubin was already processed by MODULE_LOADED.
                 if (cbid == CUPTI_CBID_RESOURCE_MODULE_PROFILED) {
                     backend_->seen_cubin_ptrs_.insert(cubinPtr);
                     return;
                 }
+                backend_->seen_cubin_ptrs_.insert(cubinPtr);
             }
 
-            CUpti_GetCubinCrcParams params = {CUpti_GetCubinCrcParamsSize};
-            params.cubinSize = cubinSize;
-            params.cubin = cubinPtr;
-            GFL_LOG_DEBUG("Attempting CRC for Cubin at ", cubinPtr,
+            // Copy the cubin bytes here (safe — no CUPTI calls).
+            // cuptiGetCubinCrc() must NOT be called from this callback:
+            // SASS holds CUPTI-internal locks during cubin patching (even
+            // with enableLazyPatching=0, modules loaded after
+            // cuptiSassMetricsEnable() are still patched lazily). Calling
+            // cuptiGetCubinCrc() here deadlocks. Defer to the worker thread.
+            GFL_LOG_DEBUG("Queuing Cubin for CRC at ", cubinPtr,
                           " Size: ", cubinSize);
-            if (cuptiGetCubinCrc(&params) == CUPTI_SUCCESS) {
-                bool isNew = false;
-                {
-                    std::lock_guard<std::mutex> lk(backend_->cubin_mu_);
-                    backend_->seen_cubin_ptrs_.insert(cubinPtr);
-                    if (backend_->cubin_by_crc_.find(params.cubinCrc) ==
-                        backend_->cubin_by_crc_.end()) {
-                        auto &info = backend_->cubin_by_crc_[params.cubinCrc];
-                        info.crc = params.cubinCrc;
-                        info.data.assign(
-                            static_cast<const uint8_t *>(cubinPtr),
-                            static_cast<const uint8_t *>(cubinPtr) + cubinSize);
-                        isNew = true;
-                    }
-                }
-                if (isNew) {
-                    Monitor::EnqueueCubinForDisassembly(
-                        params.cubinCrc,
-                        static_cast<const uint8_t *>(cubinPtr), cubinSize);
-                }
-            } else {
-                GFL_LOG_ERROR(
-                    "[DEBUG-CALLBACK] Failed to compute CRC for cubin");
+            std::vector<uint8_t> bytes(
+                static_cast<const uint8_t *>(cubinPtr),
+                static_cast<const uint8_t *>(cubinPtr) + cubinSize);
+            {
+                std::lock_guard<std::mutex> lk(pending_mu_);
+                pending_.push(std::move(bytes));
             }
+            pending_cv_.notify_one();
+        }
+    }
+}
+
+void ResourceHandler::workerLoop() {
+    while (true) {
+        std::vector<uint8_t> data;
+        {
+            std::unique_lock<std::mutex> lk(pending_mu_);
+            pending_cv_.wait(lk,
+                             [this] { return !pending_.empty() || stop_worker_; });
+            if (stop_worker_ && pending_.empty()) return;
+            data = std::move(pending_.front());
+            pending_.pop();
+        }
+
+        // Now outside the CUPTI callback — SASS locks are released.
+        // Safe to call cuptiGetCubinCrc() on the copied bytes.
+        CUpti_GetCubinCrcParams params = {CUpti_GetCubinCrcParamsSize};
+        params.cubinSize = data.size();
+        params.cubin = data.data();
+        GFL_LOG_DEBUG("Computing CRC for cubin copy, size=", data.size());
+        if (cuptiGetCubinCrc(&params) != CUPTI_SUCCESS) {
+            GFL_LOG_ERROR("[ResourceHandler] Failed to compute CRC for cubin");
+            continue;
+        }
+
+        bool isNew = false;
+        const uint8_t *enqueuePtr = nullptr;
+        size_t enqueueSize = 0;
+        {
+            std::lock_guard<std::mutex> lk(backend_->cubin_mu_);
+            if (backend_->cubin_by_crc_.find(params.cubinCrc) ==
+                backend_->cubin_by_crc_.end()) {
+                auto &info = backend_->cubin_by_crc_[params.cubinCrc];
+                info.crc = params.cubinCrc;
+                info.data = std::move(data);
+                enqueuePtr = info.data.data();
+                enqueueSize = info.data.size();
+                isNew = true;
+            }
+        }
+        if (isNew) {
+            Monitor::EnqueueCubinForDisassembly(params.cubinCrc, enqueuePtr,
+                                                enqueueSize);
         }
     }
 }
