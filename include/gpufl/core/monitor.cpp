@@ -336,9 +336,18 @@ void Monitor::Initialize(const MonitorOptions& opts) {
 void Monitor::Shutdown() {
     if (!g_initialized.exchange(false)) return;
 
-    if (g_adapter) g_adapter->shutdown();
+    // Stop the backend BEFORE joining the collector thread.
+    // CuptiBackend::stop() calls cuptiActivityFlushAll(1), which fires
+    // BufferCompleted → pushes kernel activity records to the ring buffer.
+    // If we join the collector first and THEN call stop() (via shutdown()),
+    // those records arrive after the collector has drained and they are lost.
+    // Calling stop() here ensures all records land in the ring buffer while
+    // the collector thread is still running and will consume them.
+    if (g_adapter) g_adapter->stop();
+
     g_collectorRunning.store(false);
     if (g_collectorThread.joinable()) g_collectorThread.join();
+    if (g_adapter) g_adapter->shutdown();
     g_adapter.reset();
 }
 

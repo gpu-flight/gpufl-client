@@ -47,7 +47,7 @@ class PcSamplingEngine final : public IProfilingEngine {
         SamplingAPI, // cuptiPCSampling* API (newer GPUs)
     };
 
-    void EnableSamplingFeatures_();
+    bool EnableSamplingFeatures_();
     void StartPcSampling_();
     void StopAndCollectPcSampling_();
 
@@ -56,6 +56,9 @@ class PcSamplingEngine final : public IProfilingEngine {
 
     Method pc_sampling_method_ = Method::None;
     std::atomic<int> pc_sampling_ref_count_{0};
+    std::atomic<bool> sampling_api_ready_{false};
+    std::atomic<bool> sampling_api_started_{false};
+    std::atomic<bool> sampling_api_blocked_{false};
 
     std::unique_ptr<PCSamplingBuffers, PCSamplingDeleter> pc_sampling_buffers_;
 

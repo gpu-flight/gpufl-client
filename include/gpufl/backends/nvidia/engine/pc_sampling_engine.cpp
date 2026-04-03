@@ -24,6 +24,17 @@ namespace gpufl {
 
 extern RingBuffer<ActivityRecord, 1024> g_monitorBuffer;
 
+namespace {
+bool IsInsufficientPrivilege(CUptiResult res) {
+    if (res == CUPTI_ERROR_INSUFFICIENT_PRIVILEGES) return true;
+#ifdef CUPTI_ERROR_VIRTUALIZED_DEVICE_INSUFFICIENT_PRIVILEGES
+    if (res == CUPTI_ERROR_VIRTUALIZED_DEVICE_INSUFFICIENT_PRIVILEGES)
+        return true;
+#endif
+    return false;
+}
+}  // namespace
+
 // ---- PCSamplingDeleter -----------------------------------------------------
 
 void PCSamplingDeleter::operator()(PCSamplingBuffers* b) const {
@@ -47,11 +58,21 @@ bool PcSamplingEngine::initialize(const MonitorOptions& opts,
                                   const EngineContext& ctx) {
     opts_ = opts;
     ctx_ = ctx;
+    pc_sampling_method_ = Method::None;
+    pc_sampling_ref_count_.store(0);
+    sampling_api_ready_.store(false);
+    sampling_api_started_.store(false);
+    sampling_api_blocked_.store(false);
     GFL_LOG_DEBUG("[PcSamplingEngine] initialized");
     return true;
 }
 
 void PcSamplingEngine::start() {
+    pc_sampling_ref_count_.store(0);
+    sampling_api_started_.store(false);
+    sampling_api_ready_.store(false);
+    sampling_api_blocked_.store(false);
+
     CUptiResult pcRes = cuptiActivityEnable(CUPTI_ACTIVITY_KIND_PC_SAMPLING);
 
     if (pcRes == CUPTI_SUCCESS) {
@@ -69,6 +90,13 @@ void PcSamplingEngine::start() {
     } else {
         LogCuptiErrorIfFailed(this->name(), "cuptiActivityEnable(PC_SAMPLING)",
                               pcRes);
+        if (IsInsufficientPrivilege(pcRes)) {
+            sampling_api_blocked_.store(true);
+            GFL_LOG_ERROR(
+                "[PC Sampling] CUPTI profiling permissions are restricted for "
+                "this user. Enable GPU performance counter access or run with "
+                "elevated privileges.");
+        }
         pc_sampling_method_ = Method::None;
     }
 }
@@ -78,7 +106,26 @@ void PcSamplingEngine::stop() {
     // CuptiBackend::stop() for all registered kinds.
 }
 
-void PcSamplingEngine::shutdown() { pc_sampling_buffers_.reset(); }
+void PcSamplingEngine::shutdown() {
+    if (sampling_api_ready_.load() && ctx_.cuda_ctx) {
+        CUpti_PCSamplingDisableParams disableParams = {};
+        disableParams.size = sizeof(CUpti_PCSamplingDisableParams);
+        disableParams.ctx = ctx_.cuda_ctx;
+        CUptiResult disableRes = cuptiPCSamplingDisable(&disableParams);
+        if (disableRes != CUPTI_SUCCESS &&
+            disableRes != CUPTI_ERROR_NOT_INITIALIZED &&
+            !IsInsufficientPrivilege(disableRes)) {
+            LogCuptiErrorIfFailed(this->name(), "cuptiPCSamplingDisable",
+                                  disableRes);
+        }
+    }
+
+    sampling_api_ready_.store(false);
+    sampling_api_started_.store(false);
+    sampling_api_blocked_.store(false);
+    pc_sampling_ref_count_.store(0);
+    pc_sampling_buffers_.reset();
+}
 
 void PcSamplingEngine::onScopeStart(const char* /*name*/) {
     StartPcSampling_();
@@ -90,24 +137,35 @@ void PcSamplingEngine::onScopeStop(const char* /*name*/) {
 
 // ---- Private helpers -------------------------------------------------------
 
-void PcSamplingEngine::EnableSamplingFeatures_() {
-    if (pc_sampling_method_ == Method::None) return;
+bool PcSamplingEngine::EnableSamplingFeatures_() {
+    if (pc_sampling_method_ != Method::SamplingAPI) return false;
+    if (sampling_api_blocked_.load()) return false;
+    if (sampling_api_ready_.load()) return true;
 
     GFL_LOG_DEBUG("[PcSamplingEngine] Configuring PC Sampling...");
 
     if (!ctx_.cuda_ctx) {
         GFL_LOG_ERROR(
             "[GPUFL] Cannot configure PC Sampling: cuda_ctx is NULL!");
-        return;
+        return false;
     }
 
     CUpti_PCSamplingEnableParams enableParams = {};
     enableParams.size = sizeof(CUpti_PCSamplingEnableParams);
     enableParams.ctx = ctx_.cuda_ctx;
     CUptiResult enableRes = cuptiPCSamplingEnable(&enableParams);
-    if (LogCuptiErrorIfFailed(this->name(), "cuptiPCSamplingEnable",
-                              enableRes)) {
-        return;
+    if (enableRes != CUPTI_SUCCESS &&
+        enableRes != CUPTI_ERROR_INVALID_OPERATION) {
+        LogCuptiErrorIfFailed(this->name(), "cuptiPCSamplingEnable",
+                              enableRes);
+        if (IsInsufficientPrivilege(enableRes)) {
+            sampling_api_blocked_.store(true);
+            pc_sampling_method_ = Method::None;
+            GFL_LOG_ERROR(
+                "[PC Sampling] Insufficient privileges: disabling PC "
+                "sampling for this session.");
+        }
+        return false;
     }
 
     if (!pc_sampling_buffers_) {
@@ -183,14 +241,8 @@ void PcSamplingEngine::EnableSamplingFeatures_() {
     CUpti_PCSamplingConfigurationInfo configInfo[7] = {};
     configInfo[0].attributeType =
         CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_COLLECTION_MODE;
-    // KERNEL_SERIALIZED and SASS lazy patching both intercept cuLaunchKernel
-    // at the driver level and deadlock on the first kernel launch. Use
-    // CONTINUOUS mode when SASS metrics are also active so that the lazy
-    // patching pass can complete before PC samples are drained.
     configInfo[0].attributeData.collectionModeData.collectionMode =
-        (opts_.profiling_engine == ProfilingEngine::PcSamplingWithSass)
-            ? CUPTI_PC_SAMPLING_COLLECTION_MODE_CONTINUOUS
-            : CUPTI_PC_SAMPLING_COLLECTION_MODE_KERNEL_SERIALIZED;
+        CUPTI_PC_SAMPLING_COLLECTION_MODE_KERNEL_SERIALIZED;
 
     configInfo[1].attributeType =
         CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_SAMPLING_PERIOD;
@@ -230,26 +282,48 @@ void PcSamplingEngine::EnableSamplingFeatures_() {
 
     CUptiResult configRes =
         cuptiPCSamplingSetConfigurationAttribute(&configParams);
-    if (!LogCuptiErrorIfFailed(this->name(),
-                               "cuptiPCSamplingSetConfigurationAttribute",
-                               configRes)) {
-        GFL_LOG_DEBUG("[PC Sampling] configured and enabled successfully.");
+    if (configRes != CUPTI_SUCCESS &&
+        configRes != CUPTI_ERROR_INVALID_OPERATION) {
+        LogCuptiErrorIfFailed(this->name(),
+                              "cuptiPCSamplingSetConfigurationAttribute",
+                              configRes);
+        if (IsInsufficientPrivilege(configRes)) {
+            sampling_api_blocked_.store(true);
+            pc_sampling_method_ = Method::None;
+            GFL_LOG_ERROR(
+                "[PC Sampling] Insufficient privileges: disabling PC "
+                "sampling for this session.");
+        }
+        return false;
     }
+
+    sampling_api_ready_.store(true);
+    GFL_LOG_DEBUG("[PC Sampling] configured and enabled successfully.");
+    return true;
 }
 
 void PcSamplingEngine::StartPcSampling_() {
-    if (pc_sampling_method_ != Method::SamplingAPI) return;
-
-    if (pc_sampling_ref_count_.fetch_add(1) > 0) {
-        GFL_LOG_DEBUG("[PC Sampling] already active (RefCount=",
-                      pc_sampling_ref_count_.load(), ")");
+    if (pc_sampling_method_ != Method::SamplingAPI ||
+        sampling_api_blocked_.load()) {
         return;
     }
 
-    EnableSamplingFeatures_();
+    int expected = 0;
+    if (!pc_sampling_ref_count_.compare_exchange_strong(expected, 1)) {
+        const int refs = pc_sampling_ref_count_.fetch_add(1) + 1;
+        GFL_LOG_DEBUG("[PC Sampling] already active (RefCount=",
+                      refs, ")");
+        return;
+    }
+
+    if (!EnableSamplingFeatures_()) {
+        pc_sampling_ref_count_.store(0);
+        return;
+    }
 
     if (!ctx_.cuda_ctx) {
         GFL_LOG_ERROR("[GPUFL] Cannot start PC Sampling: cuda_ctx is NULL!");
+        pc_sampling_ref_count_.store(0);
         return;
     }
 
@@ -262,19 +336,37 @@ void PcSamplingEngine::StartPcSampling_() {
     CUptiResult res = cuptiPCSamplingStart(&startParams);
     if (res == CUPTI_ERROR_INVALID_OPERATION) {
         GFL_LOG_DEBUG("[GPUFL] PC Sampling already active (Implicit Start).");
+        sampling_api_started_.store(true);
     } else if (res == CUPTI_ERROR_NOT_SUPPORTED ||
                res == CUPTI_ERROR_LEGACY_PROFILER_NOT_SUPPORTED) {
         GFL_LOG_DEBUG(
             "[GPUFL] PC Sampling not supported on this GPU/configuration.");
+        sampling_api_ready_.store(false);
+        sampling_api_started_.store(false);
+        pc_sampling_ref_count_.store(0);
+        pc_sampling_method_ = Method::None;
     } else if (res != CUPTI_SUCCESS) {
         LogCuptiErrorIfFailed(this->name(), "cuptiPCSamplingStart", res);
+        if (IsInsufficientPrivilege(res)) {
+            sampling_api_blocked_.store(true);
+            pc_sampling_method_ = Method::None;
+            GFL_LOG_ERROR(
+                "[PC Sampling] Insufficient privileges: disabling PC "
+                "sampling for this session.");
+        }
+        sampling_api_ready_.store(false);
+        sampling_api_started_.store(false);
+        pc_sampling_ref_count_.store(0);
     } else {
+        sampling_api_started_.store(true);
         GFL_LOG_DEBUG("[PC Sampling] >>> STARTED (Scope Begin) <<<");
     }
 }
 
 void PcSamplingEngine::StopAndCollectPcSampling_() {
     if (pc_sampling_method_ != Method::SamplingAPI) return;
+
+    if (pc_sampling_ref_count_.load() <= 0) return;
 
     int refs = pc_sampling_ref_count_.fetch_sub(1);
     if (refs > 1) {
@@ -285,6 +377,8 @@ void PcSamplingEngine::StopAndCollectPcSampling_() {
         pc_sampling_ref_count_.store(0);
         return;
     }
+
+    if (!sampling_api_started_.exchange(false)) return;
 
     if (!ctx_.cuda_ctx || !IsContextValid(ctx_.cuda_ctx)) {
         GFL_LOG_ERROR("[GPUFL] Aborting PC Sampling: Context invalid.");
@@ -303,7 +397,18 @@ void PcSamplingEngine::StopAndCollectPcSampling_() {
     CUpti_PCSamplingStopParams stopParams = {};
     stopParams.size = sizeof(CUpti_PCSamplingStopParams);
     stopParams.ctx = ctx_.cuda_ctx;
-    cuptiPCSamplingStop(&stopParams);
+    CUptiResult stopRes = cuptiPCSamplingStop(&stopParams);
+    if (stopRes != CUPTI_SUCCESS) {
+        if (stopRes != CUPTI_ERROR_INVALID_OPERATION) {
+            LogCuptiErrorIfFailed(this->name(), "cuptiPCSamplingStop",
+                                  stopRes);
+        }
+        if (IsInsufficientPrivilege(stopRes)) {
+            sampling_api_blocked_.store(true);
+            pc_sampling_method_ = Method::None;
+        }
+        return;
+    }
 
     CUpti_PCSamplingGetDataParams getDataParams = {};
     getDataParams.size = sizeof(CUpti_PCSamplingGetDataParams);
@@ -407,11 +512,6 @@ void PcSamplingEngine::StopAndCollectPcSampling_() {
 
         if (!hasMore) break;
     }
-
-    CUpti_PCSamplingDisableParams disableParams = {};
-    disableParams.size = sizeof(CUpti_PCSamplingDisableParams);
-    disableParams.ctx = ctx_.cuda_ctx;
-    cuptiPCSamplingDisable(&disableParams);
 }
 
 }  // namespace gpufl
