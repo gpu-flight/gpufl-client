@@ -147,7 +147,7 @@ int main() {
     opts.enable_kernel_details = true;
     opts.enable_debug_output = true;
     opts.sampling_auto_start = true;
-    opts.enable_stack_trace = false;
+    opts.enable_stack_trace = true;
     opts.profiling_engine = gpufl::ProfilingEngine::PcSamplingWithSass;
 
     if (!gpufl::init(opts)) {
