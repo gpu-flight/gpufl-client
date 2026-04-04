@@ -185,6 +185,24 @@ bool ReadPowerThrottle(const uint32_t deviceIndex) {
     return powerUw >= capUw;
 }
 
+bool IsCpuLikeSmiDevice(const uint32_t deviceIndex) {
+    char name[256] = {};
+    if (!IsSuccess(rsmi_dev_name_get(deviceIndex, name, sizeof(name))) ||
+        name[0] == '\0') {
+        return false;
+    }
+    const std::string lower = [&] {
+        std::string s(name);
+        std::transform(s.begin(), s.end(), s.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return s;
+    }();
+    return lower.find("raphael") != std::string::npos ||
+           lower.find("ryzen") != std::string::npos ||
+           lower.find("epyc") != std::string::npos ||
+           lower.find("threadripper") != std::string::npos;
+}
+
 DeviceSample BuildTelemetrySample(const uint32_t deviceIndex) {
     DeviceSample sample{};
     sample.device_id = static_cast<int>(deviceIndex);
@@ -384,6 +402,10 @@ std::vector<DeviceSample> RocmCollector::sampleAll() {
 #if GPUFL_HAS_ROCM_SMI
     out.reserve(telemetry_device_count_);
     for (uint32_t i = 0; i < telemetry_device_count_; ++i) {
+        if (IsCpuLikeSmiDevice(i)) {
+            GFL_LOG_DEBUG("[RocmCollector] skipping CPU iGPU SMI device index=", i);
+            continue;
+        }
         out.push_back(BuildTelemetrySample(i));
     }
 #endif
