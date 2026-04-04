@@ -102,16 +102,31 @@ std::string DeviceMetricBatchModel::buildJson() const {
     const auto& rows = buf_.rows();
     if (rows.empty()) return {};
     const int64_t base = rows.front().ts_ns;
+    const bool has_extended_metrics = [&rows]() {
+        for (const auto& r : rows) {
+            if (r.fan_speed_pct != 0 || r.temp_mem_c != 0 ||
+                r.temp_junction_c != 0 || r.voltage_mv != 0 ||
+                r.energy_uj != 0 || r.clock_mem != 0 ||
+                r.pcie_bw_bps != 0 || r.ecc_corrected != 0 ||
+                r.ecc_uncorrected != 0) {
+                return true;
+            }
+        }
+        return false;
+    }();
 
     std::ostringstream oss;
     oss << "{\"version\":1,\"type\":\"device_metric_batch\""
         << ",\"session_id\":\"" << jsonEscape(session_id_) << '"'
         << ",\"batch_id\":" << batch_id_ << ",\"base_time_ns\":" << base
         << ",\"columns\":[\"dt_ns\",\"device_id\",\"gpu_util\","
-           "\"mem_util\",\"temp_c\",\"power_mw\",\"used_mib\",\"clock_sm\","
-           "\"fan_speed_pct\",\"temp_mem_c\",\"temp_junction_c\","
-           "\"voltage_mv\",\"energy_uj\",\"clock_mem\","
-           "\"pcie_bw_bps\",\"ecc_corrected\",\"ecc_uncorrected\"]"
+           "\"mem_util\",\"temp_c\",\"power_mw\",\"used_mib\",\"clock_sm\"";
+    if (has_extended_metrics) {
+        oss << ",\"fan_speed_pct\",\"temp_mem_c\",\"temp_junction_c\","
+               "\"voltage_mv\",\"energy_uj\",\"clock_mem\","
+               "\"pcie_bw_bps\",\"ecc_corrected\",\"ecc_uncorrected\"";
+    }
+    oss << ']'
         << ",\"rows\":[";
 
     bool first = true;
@@ -120,12 +135,15 @@ std::string DeviceMetricBatchModel::buildJson() const {
         first = false;
         oss << '[' << (r.ts_ns - base) << ',' << r.device_id << ','
             << r.gpu_util << ',' << r.mem_util << ',' << r.temp_c << ','
-            << r.power_mw << ',' << r.used_mib << ',' << r.clock_sm << ','
-            << r.fan_speed_pct << ',' << r.temp_mem_c << ','
-            << r.temp_junction_c << ',' << r.voltage_mv << ','
-            << r.energy_uj << ',' << r.clock_mem << ','
-            << r.pcie_bw_bps << ',' << r.ecc_corrected << ','
-            << r.ecc_uncorrected << ']';
+            << r.power_mw << ',' << r.used_mib << ',' << r.clock_sm;
+        if (has_extended_metrics) {
+            oss << ',' << r.fan_speed_pct << ',' << r.temp_mem_c << ','
+                << r.temp_junction_c << ',' << r.voltage_mv << ','
+                << r.energy_uj << ',' << r.clock_mem << ','
+                << r.pcie_bw_bps << ',' << r.ecc_corrected << ','
+                << r.ecc_uncorrected;
+        }
+        oss << ']';
     }
     oss << "]}";
     return oss.str();
