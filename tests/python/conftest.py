@@ -130,10 +130,10 @@ def mock_log_dir(tmp_path):
         {
             "version": 1, "type": "device_metric_batch",
             "session_id": "test-session", "batch_id": 1, "base_time_ns": 1000,
-            "columns": ["dt_ns","device_id","gpu_util","mem_util","temp_c","power_mw","used_mib"],
+            "columns": ["dt_ns","device_id","gpu_util","mem_util","temp_c","power_mw","used_mib","clock_sm"],
             "rows": [
-                [0,    0, 50, 30, 70, 150000, 1024],
-                [3000, 0, 80, 40, 75, 200000, 2048]
+                [0,    0, 50, 30, 70, 150000, 1024, 1900],
+                [3000, 0, 80, 40, 75, 200000, 2048, 2100]
             ]
         },
         # Host metric batch
@@ -180,5 +180,44 @@ def mock_log_dir_rocm_only(tmp_path):
     with open(device_log, "w") as f:
         for ev in device_events:
             f.write(json.dumps(ev) + "\n")
+
+    return str(log_dir), prefix
+
+
+@pytest.fixture
+def mock_log_dir_legacy_device_batch(tmp_path):
+    log_dir = tmp_path / "logs_legacy_device_batch"
+    log_dir.mkdir()
+
+    prefix = "legacy_batch"
+
+    device_log = log_dir / f"{prefix}.device.0.log"
+    with open(device_log, "w") as f:
+        f.write(json.dumps({
+            "version": 1, "type": "job_start",
+            "session_id": "legacy-session", "app": "test_app", "pid": 1234,
+            "ts_ns": 100, "host": {}, "devices": []
+        }) + "\n")
+        f.write(json.dumps({
+            "type": "shutdown",
+            "session_id": "legacy-session", "app": "test_app", "pid": 1234,
+            "ts_ns": 10000
+        }) + "\n")
+
+    scope_log = log_dir / f"{prefix}.scope.0.log"
+    with open(scope_log, "w") as f:
+        f.write("")
+
+    # Legacy column shape without clock_sm
+    system_log = log_dir / f"{prefix}.system.0.log"
+    with open(system_log, "w") as f:
+        f.write(json.dumps({
+            "version": 1, "type": "device_metric_batch",
+            "session_id": "legacy-session", "batch_id": 1, "base_time_ns": 1000,
+            "columns": ["dt_ns","device_id","gpu_util","mem_util","temp_c","power_mw","used_mib"],
+            "rows": [
+                [0, 0, 25, 15, 65, 120000, 512]
+            ]
+        }) + "\n")
 
     return str(log_dir), prefix
