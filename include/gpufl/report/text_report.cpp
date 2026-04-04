@@ -398,6 +398,15 @@ void TextReport::parseSystemLog(const std::vector<JsonValue>& records) {
                     static_cast<int>(rowInt(row, ci, "power_mw")),
                     rowU64(row, ci, "used_mib"),
                     static_cast<int>(rowInt(row, ci, "clock_sm")),
+                    static_cast<int>(rowInt(row, ci, "fan_speed_pct")),
+                    static_cast<int>(rowInt(row, ci, "temp_mem_c")),
+                    static_cast<int>(rowInt(row, ci, "temp_junction_c")),
+                    static_cast<int>(rowInt(row, ci, "voltage_mv")),
+                    rowU64(row, ci, "energy_uj"),
+                    static_cast<int>(rowInt(row, ci, "clock_mem")),
+                    rowU64(row, ci, "pcie_bw_bps"),
+                    rowU64(row, ci, "ecc_corrected"),
+                    rowU64(row, ci, "ecc_uncorrected"),
                 });
             }
         } else if (type == "host_metric_batch") {
@@ -618,16 +627,59 @@ void TextReport::writeSystemMetrics(std::ostringstream& out) const {
         out << "  GPU Metrics:\n";
 
         // Functional aggregation with accumulate
-        struct GpuAgg { double sumUtil=0, maxUtil=0, minUtil=1e9, sumTemp=0, maxTemp=0,
-                               sumPow=0, maxPow=0, sumClk=0; uint64_t maxMem=0; int clkN=0; int n=0; };
+        struct GpuAgg {
+            double sumUtil=0, maxUtil=0, minUtil=1e9;
+            double sumTemp=0, maxTemp=0;
+            double sumJTemp=0, maxJTemp=0; int jTempN=0;
+            double sumMTemp=0, maxMTemp=0; int mTempN=0;
+            double sumPow=0, maxPow=0;
+            double sumVolt=0, maxVolt=0; int voltN=0;
+            double sumFan=0, maxFan=0; int fanN=0;
+            double sumClk=0, peakClk=0; int clkN=0;
+            double sumMemClk=0, peakMemClk=0; int memClkN=0;
+            double sumPcie=0, maxPcie=0; int pcieN=0;
+            uint64_t maxMem=0;
+            uint64_t lastEnergy=0, firstEnergy=0; bool hasEnergy=false;
+            uint64_t maxEccCorr=0, maxEccUncorr=0;
+            int n=0;
+        };
         auto agg = std::accumulate(device_metrics_.begin(), device_metrics_.end(), GpuAgg{},
             [](GpuAgg a, const DeviceMetricRecord& m) {
-                a.sumUtil += m.gpu_util; a.maxUtil = (std::max)(a.maxUtil, (double)m.gpu_util);
+                a.sumUtil += m.gpu_util;
+                a.maxUtil = (std::max)(a.maxUtil, (double)m.gpu_util);
                 a.minUtil = (std::min)(a.minUtil, (double)m.gpu_util);
-                a.sumTemp += m.temp_c;   a.maxTemp = (std::max)(a.maxTemp, (double)m.temp_c);
-                a.sumPow  += m.power_mw; a.maxPow  = (std::max)(a.maxPow, (double)m.power_mw);
-                a.maxMem = (std::max)(a.maxMem, m.used_mib);
-                if (m.clock_sm > 0) { a.sumClk += m.clock_sm; a.clkN++; }
+                a.sumTemp += m.temp_c;
+                a.maxTemp = (std::max)(a.maxTemp, (double)m.temp_c);
+                a.sumPow  += m.power_mw;
+                a.maxPow  = (std::max)(a.maxPow, (double)m.power_mw);
+                a.maxMem  = (std::max)(a.maxMem, m.used_mib);
+                if (m.clock_sm > 0) {
+                    a.sumClk += m.clock_sm; a.peakClk = (std::max)(a.peakClk, (double)m.clock_sm); a.clkN++;
+                }
+                if (m.temp_junction_c > 0) {
+                    a.sumJTemp += m.temp_junction_c; a.maxJTemp = (std::max)(a.maxJTemp, (double)m.temp_junction_c); a.jTempN++;
+                }
+                if (m.temp_mem_c > 0) {
+                    a.sumMTemp += m.temp_mem_c; a.maxMTemp = (std::max)(a.maxMTemp, (double)m.temp_mem_c); a.mTempN++;
+                }
+                if (m.voltage_mv > 0) {
+                    a.sumVolt += m.voltage_mv; a.maxVolt = (std::max)(a.maxVolt, (double)m.voltage_mv); a.voltN++;
+                }
+                if (m.fan_speed_pct > 0) {
+                    a.sumFan += m.fan_speed_pct; a.maxFan = (std::max)(a.maxFan, (double)m.fan_speed_pct); a.fanN++;
+                }
+                if (m.clock_mem > 0) {
+                    a.sumMemClk += m.clock_mem; a.peakMemClk = (std::max)(a.peakMemClk, (double)m.clock_mem); a.memClkN++;
+                }
+                if (m.pcie_bw_bps > 0) {
+                    a.sumPcie += m.pcie_bw_bps; a.maxPcie = (std::max)(a.maxPcie, (double)m.pcie_bw_bps); a.pcieN++;
+                }
+                if (m.energy_uj > 0) {
+                    if (!a.hasEnergy) { a.firstEnergy = m.energy_uj; a.hasEnergy = true; }
+                    a.lastEnergy = m.energy_uj;
+                }
+                a.maxEccCorr   = (std::max)(a.maxEccCorr, m.ecc_corrected);
+                a.maxEccUncorr = (std::max)(a.maxEccUncorr, m.ecc_uncorrected);
                 a.n++; return a;
             });
 
@@ -635,10 +687,42 @@ void TextReport::writeSystemMetrics(std::ostringstream& out) const {
             << "%  peak " << std::setprecision(0) << agg.maxUtil << "%  min " << agg.minUtil << "%\n";
         out << "    Temperature:        avg " << std::setprecision(1) << (agg.sumTemp / agg.n)
             << " C  peak " << std::setprecision(0) << agg.maxTemp << " C\n";
+        if (agg.jTempN > 0)
+            out << "    Junction Temp:      avg " << std::setprecision(1) << (agg.sumJTemp / agg.jTempN)
+                << " C  peak " << std::setprecision(0) << agg.maxJTemp << " C\n";
+        if (agg.mTempN > 0)
+            out << "    Memory Temp:        avg " << std::setprecision(1) << (agg.sumMTemp / agg.mTempN)
+                << " C  peak " << std::setprecision(0) << agg.maxMTemp << " C\n";
         out << "    Power:              avg " << fmtPower(agg.sumPow / agg.n) << "  peak " << fmtPower(agg.maxPow) << "\n";
+        if (agg.voltN > 0)
+            out << "    Voltage:            avg " << std::setprecision(0) << (agg.sumVolt / agg.voltN)
+                << " mV  peak " << agg.maxVolt << " mV\n";
+        if (agg.hasEnergy && agg.lastEnergy > agg.firstEnergy) {
+            double energyJ = (agg.lastEnergy - agg.firstEnergy) / 1e6;
+            if (energyJ >= 1000.0)
+                out << "    Energy:             " << std::setprecision(2) << (energyJ / 1000.0) << " kJ\n";
+            else
+                out << "    Energy:             " << std::setprecision(2) << energyJ << " J\n";
+        }
+        if (agg.fanN > 0)
+            out << "    Fan Speed:          avg " << std::setprecision(0) << (agg.sumFan / agg.fanN)
+                << "%  peak " << agg.maxFan << "%\n";
         out << "    VRAM Usage:         peak " << agg.maxMem << " MiB\n";
         if (agg.clkN > 0)
-            out << "    SM Clock:           avg " << std::setprecision(0) << (agg.sumClk / agg.clkN) << " MHz\n";
+            out << "    SM Clock:           avg " << std::setprecision(0) << (agg.sumClk / agg.clkN)
+                << " MHz  peak " << agg.peakClk << " MHz\n";
+        if (agg.memClkN > 0)
+            out << "    Memory Clock:       avg " << std::setprecision(0) << (agg.sumMemClk / agg.memClkN)
+                << " MHz  peak " << agg.peakMemClk << " MHz\n";
+        if (agg.pcieN > 0) {
+            double avgGbps = (agg.sumPcie / agg.pcieN) / 1e9;
+            double peakGbps = agg.maxPcie / 1e9;
+            out << "    PCIe Bandwidth:     avg " << std::setprecision(1) << avgGbps
+                << " GB/s  peak " << peakGbps << " GB/s\n";
+        }
+        if (agg.maxEccCorr > 0 || agg.maxEccUncorr > 0)
+            out << "    ECC Errors:         " << agg.maxEccCorr << " corrected, "
+                << agg.maxEccUncorr << " uncorrected\n";
     }
 
     if (!host_metrics_.empty()) {

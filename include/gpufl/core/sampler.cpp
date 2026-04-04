@@ -67,14 +67,23 @@ void Sampler::runLoop_() {
 
         for (const DeviceSample& d : collector_->sampleAll()) {
             DeviceMetricBatchRow row;
-            row.ts_ns     = ts;
-            row.device_id = d.device_id;
-            row.gpu_util  = d.gpu_util;
-            row.mem_util  = d.mem_util;
-            row.temp_c    = d.temp_c;
-            row.power_mw  = d.power_mw;
-            row.used_mib  = d.used_mib;
-            row.clock_sm  = d.clock_sm;
+            row.ts_ns            = ts;
+            row.device_id        = d.device_id;
+            row.gpu_util         = d.gpu_util;
+            row.mem_util         = d.mem_util;
+            row.temp_c           = d.temp_c;
+            row.power_mw         = d.power_mw;
+            row.used_mib         = d.used_mib;
+            row.clock_sm         = d.clock_sm;
+            row.fan_speed_pct    = d.fan_speed_pct;
+            row.temp_mem_c       = d.temp_mem_c;
+            row.temp_junction_c  = d.temp_junction_c;
+            row.voltage_mv       = d.voltage_mv;
+            row.energy_uj        = d.energy_uj;
+            row.clock_mem        = d.clock_mem;
+            row.pcie_bw_bps      = d.pcie_rx_bps + d.pcie_tx_bps;
+            row.ecc_corrected    = d.ecc_corrected;
+            row.ecc_uncorrected  = d.ecc_uncorrected;
             batch_.push(row);
         }
 
