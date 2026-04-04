@@ -30,6 +30,9 @@ def test_session_metrics(mock_log_dir):
     vector_add = session.kernels[session.kernels["name"] == "vectorAdd"].iloc[0]
     assert vector_add["duration_ms"] == pytest.approx(0.001)
 
+    assert "clock_sm" in session.device_metrics.columns
+    assert session.device_metrics["clock_sm"].dropna().mean() == pytest.approx(2000.0)
+
 def test_session_summary(mock_log_dir, capsys):
     log_dir, prefix = mock_log_dir
     session = GpuFlightSession(log_dir, log_prefix=prefix)
@@ -69,3 +72,11 @@ def test_session_loads_rocm_static_devices(mock_log_dir_rocm_only):
     assert session.static_devices == [
         {"name": "AMD Test GPU", "vendor": "AMD", "multi_processor_count": 120}
     ]
+
+def test_session_loads_legacy_device_batch_without_clock(mock_log_dir_legacy_device_batch):
+    log_dir, prefix = mock_log_dir_legacy_device_batch
+    session = GpuFlightSession(log_dir, log_prefix=prefix)
+
+    assert not session.device_metrics.empty
+    assert "clock_sm" in session.device_metrics.columns
+    assert session.device_metrics["clock_sm"].isna().all()

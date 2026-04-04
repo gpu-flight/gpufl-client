@@ -362,16 +362,20 @@ class GpuFlightSession:
                 cols = batch.get('columns', [])
                 base = int(batch.get('base_time_ns', 0))
                 ci   = {c: i for i, c in enumerate(cols)}
+                def _val(row, key, default=0):
+                    idx = ci.get(key)
+                    return row[idx] if idx is not None and idx < len(row) else default
                 for row in (batch.get('rows') or []):
                     dm_rows.append({
                         'session_id': batch.get('session_id'),
-                        'ts_ns':      base + row[ci['dt_ns']],
-                        'device_id':  row[ci['device_id']],
-                        'gpu_util':   row[ci['gpu_util']],
-                        'mem_util':   row[ci['mem_util']],
-                        'temp_c':     row[ci['temp_c']],
-                        'power_mw':   row[ci['power_mw']],
-                        'used_mib':   row[ci['used_mib']],
+                        'ts_ns':      base + _val(row, 'dt_ns', 0),
+                        'device_id':  _val(row, 'device_id', 0),
+                        'gpu_util':   _val(row, 'gpu_util', 0),
+                        'mem_util':   _val(row, 'mem_util', 0),
+                        'temp_c':     _val(row, 'temp_c', 0),
+                        'power_mw':   _val(row, 'power_mw', 0),
+                        'used_mib':   _val(row, 'used_mib', 0),
+                        'clock_sm':   _val(row, 'clock_sm', None),
                     })
         device_metrics_df = pd.DataFrame(dm_rows)
 
@@ -559,12 +563,17 @@ class GpuFlightSession:
         has_device_stats = False
         avg_gpu_util = 0.0
         peak_mem = 0
+        avg_sm_clock = None
 
         # New batch format: device_metrics DataFrame
         if not self.device_metrics.empty and 'gpu_util' in self.device_metrics.columns:
             has_device_stats = True
             avg_gpu_util = self.device_metrics['gpu_util'].mean()
             peak_mem = int(self.device_metrics['used_mib'].max()) if 'used_mib' in self.device_metrics.columns else 0
+            if 'clock_sm' in self.device_metrics.columns:
+                sm_series = pd.to_numeric(self.device_metrics['clock_sm'], errors='coerce').dropna()
+                if not sm_series.empty:
+                    avg_sm_clock = sm_series.mean()
 
         # Legacy format: system DataFrame with nested devices list
         elif not self.system.empty and 'devices' in self.system.columns:
@@ -601,6 +610,8 @@ class GpuFlightSession:
         if has_device_stats:
             stats.add_row("Avg GPU Util:", f"[yellow]{avg_gpu_util:.1f}%[/yellow]")
             stats.add_row("Peak VRAM:", f"[red]{peak_mem} MiB[/red]")
+            if avg_sm_clock is not None:
+                stats.add_row("Avg SM Clock:", f"[yellow]{avg_sm_clock:.0f} MHz[/yellow]")
         else:
             if self.static_devices:
                 for dev in self.static_devices:

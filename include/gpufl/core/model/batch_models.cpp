@@ -108,7 +108,7 @@ std::string DeviceMetricBatchModel::buildJson() const {
         << ",\"session_id\":\"" << jsonEscape(session_id_) << '"'
         << ",\"batch_id\":" << batch_id_ << ",\"base_time_ns\":" << base
         << ",\"columns\":[\"dt_ns\",\"device_id\",\"gpu_util\","
-           "\"mem_util\",\"temp_c\",\"power_mw\",\"used_mib\"]"
+           "\"mem_util\",\"temp_c\",\"power_mw\",\"used_mib\",\"clock_sm\"]"
         << ",\"rows\":[";
 
     bool first = true;
@@ -117,7 +117,7 @@ std::string DeviceMetricBatchModel::buildJson() const {
         first = false;
         oss << '[' << (r.ts_ns - base) << ',' << r.device_id << ','
             << r.gpu_util << ',' << r.mem_util << ',' << r.temp_c << ','
-            << r.power_mw << ',' << r.used_mib << ']';
+            << r.power_mw << ',' << r.used_mib << ',' << r.clock_sm << ']';
     }
     oss << "]}";
     return oss.str();

@@ -74,6 +74,7 @@ void Sampler::runLoop_() {
             row.temp_c    = d.temp_c;
             row.power_mw  = d.power_mw;
             row.used_mib  = d.used_mib;
+            row.clock_sm  = d.clock_sm;
             batch_.push(row);
         }
 
