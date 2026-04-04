@@ -21,6 +21,9 @@
 #include <rocprofiler-sdk/external_correlation.h>
 #include <rocprofiler-sdk/rocprofiler.h>
 
+#include <unistd.h>
+#include <zlib.h>
+
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/monitor.hpp"
@@ -227,7 +230,9 @@ int RocprofilerBackend::toolInitialize() {
         return -1;
     }
 
-    const std::array<rocprofiler_tracing_operation_t, 1> code_object_ops = {
+    const std::array<rocprofiler_tracing_operation_t, 2> code_object_ops = {
+        static_cast<rocprofiler_tracing_operation_t>(
+            ROCPROFILER_CODE_OBJECT_LOAD),
         static_cast<rocprofiler_tracing_operation_t>(
             ROCPROFILER_CODE_OBJECT_DEVICE_KERNEL_SYMBOL_REGISTER),
     };
@@ -349,8 +354,22 @@ void RocprofilerBackend::callbackTracingShim(rocprofiler_callback_tracing_record
     auto* backend = static_cast<RocprofilerBackend*>(callback_data);
     if (!backend || record.kind != ROCPROFILER_CALLBACK_TRACING_CODE_OBJECT ||
         record.phase != ROCPROFILER_CALLBACK_PHASE_LOAD ||
-        record.operation != ROCPROFILER_CODE_OBJECT_DEVICE_KERNEL_SYMBOL_REGISTER ||
         record.payload == nullptr) {
+        return;
+    }
+
+    if (record.operation ==
+        static_cast<rocprofiler_tracing_operation_t>(ROCPROFILER_CODE_OBJECT_LOAD)) {
+        const auto* loadData =
+            static_cast<const rocprofiler_callback_tracing_code_object_load_data_t*>(
+                record.payload);
+        backend->handleCodeObjectLoad(*loadData);
+        return;
+    }
+
+    if (record.operation !=
+        static_cast<rocprofiler_tracing_operation_t>(
+            ROCPROFILER_CODE_OBJECT_DEVICE_KERNEL_SYMBOL_REGISTER)) {
         return;
     }
 
@@ -443,8 +462,17 @@ rocprofiler_status_t RocprofilerBackend::queryAgentsShim(
 
         backend->agent_types_[agent->id.handle] = agent->type;
         if (agent->type == ROCPROFILER_AGENT_TYPE_GPU) {
-            backend->gpu_device_ids_[agent->id.handle] =
-                std::max(agent->logical_node_type_id, 0);
+            int dev_id = std::max(agent->logical_node_type_id, 0);
+            backend->gpu_device_ids_[agent->id.handle] = dev_id;
+
+            GpuArchProps props{};
+            props.wave_front_size = agent->wave_front_size > 0 ? agent->wave_front_size : 64;
+            props.max_waves_per_cu = agent->max_waves_per_cu;
+            props.simd_per_cu = agent->simd_per_cu;
+            props.lds_size_bytes = agent->lds_size_in_kb * 1024;
+            props.cu_count = agent->cu_count;
+            props.workgroup_max_size = agent->workgroup_max_size;
+            backend->gpu_arch_props_[dev_id] = props;
         }
     }
 
@@ -486,6 +514,54 @@ uint32_t RocprofilerBackend::classifyMemcpyKind(const rocprofiler_agent_id_t src
         return 4;
     }
     return 0;
+}
+
+void RocprofilerBackend::handleCodeObjectLoad(
+    const rocprofiler_callback_tracing_code_object_load_data_t& data) {
+
+    std::vector<uint8_t> elf_bytes;
+
+    if (data.storage_type == ROCPROFILER_CODE_OBJECT_STORAGE_TYPE_MEMORY) {
+        const auto* ptr = reinterpret_cast<const uint8_t*>(data.memory_base);
+        if (ptr && data.memory_size > 0)
+            elf_bytes.assign(ptr, ptr + data.memory_size);
+    } else if (data.storage_type == ROCPROFILER_CODE_OBJECT_STORAGE_TYPE_FILE) {
+        // Read code object from file descriptor at load_base offset with load_size
+        if (data.storage_file >= 0 && data.load_size > 0) {
+            elf_bytes.resize(data.load_size);
+            auto saved = ::lseek(data.storage_file, 0, SEEK_CUR);
+            if (::lseek(data.storage_file, static_cast<off_t>(data.load_base), SEEK_SET) >= 0) {
+                auto rd = ::read(data.storage_file, elf_bytes.data(), data.load_size);
+                if (rd < 0 || static_cast<uint64_t>(rd) != data.load_size)
+                    elf_bytes.clear();
+            } else {
+                elf_bytes.clear();
+            }
+            if (saved >= 0) ::lseek(data.storage_file, saved, SEEK_SET);
+        }
+    }
+
+    if (elf_bytes.size() < 4) return;
+
+    // Verify ELF magic
+    if (elf_bytes[0] != 0x7f || elf_bytes[1] != 'E' ||
+        elf_bytes[2] != 'L' || elf_bytes[3] != 'F') {
+        return;
+    }
+
+    uint64_t crc = ::crc32(0L, elf_bytes.data(),
+                           static_cast<uInt>(elf_bytes.size()));
+
+    {
+        std::lock_guard<std::mutex> lock(code_object_mutex_);
+        if (enqueued_disasm_crcs_.count(crc)) return;
+        enqueued_disasm_crcs_.insert(crc);
+    }
+
+    GFL_LOG_DEBUG("[ROCProfilerBackend] code object loaded: id=", data.code_object_id,
+                  " size=", elf_bytes.size(), " crc=", crc);
+
+    Monitor::EnqueueCubinForDisassembly(crc, elf_bytes.data(), elf_bytes.size());
 }
 
 void RocprofilerBackend::handleKernelDispatch(
@@ -530,8 +606,82 @@ void RocprofilerBackend::handleKernelDispatch(
             const auto& meta = itr->second;
             out.num_regs = static_cast<int>(
                 meta.sgpr_count + meta.arch_vgpr_count + meta.accum_vgpr_count);
+            out.arch_vgpr_count = static_cast<int>(meta.arch_vgpr_count);
             if (out.static_shared == 0) out.static_shared = static_cast<int>(meta.group_segment_size);
             if (out.local_bytes == 0) out.local_bytes = static_cast<int>(meta.private_segment_size);
+        }
+    }
+
+    // Compute occupancy from architecture properties
+    {
+        int dev_id = static_cast<int>(out.device_id);
+        auto pit = gpu_arch_props_.find(dev_id);
+        if (pit != gpu_arch_props_.end()) {
+            const auto& props = pit->second;
+            int threadsPerBlock = out.block_x * out.block_y * out.block_z;
+            if (threadsPerBlock > 0 && props.max_waves_per_cu > 0 && props.wave_front_size > 0) {
+                int wavesPerBlock = (threadsPerBlock + static_cast<int>(props.wave_front_size) - 1)
+                                    / static_cast<int>(props.wave_front_size);
+                int maxWavesPerCU = static_cast<int>(props.max_waves_per_cu);
+
+                // Wave/workgroup limit
+                int waveBlocks = (wavesPerBlock > 0) ? (maxWavesPerCU / wavesPerBlock) : 0;
+
+                // LDS (shared memory) limit
+                int smemPerBlock = out.static_shared + out.dyn_shared;
+                int ldsBytes = static_cast<int>(props.lds_size_bytes);
+                int smemBlocks = (smemPerBlock > 0 && ldsBytes > 0) ? (ldsBytes / smemPerBlock) : waveBlocks;
+
+                // VGPR register limit
+                // Use arch_vgpr_count (not combined num_regs which includes SGPRs).
+                // RDNA architectures have 1536 VGPRs per SIMD unit, allocated per-wave
+                // in granularity of 16 VGPRs (RDNA 1/2) or 24 VGPRs (RDNA 3/4).
+                // We use the max_waves_per_cu / simd_per_cu to derive VGPRs per SIMD:
+                //   total_vgprs_per_simd = max_waves_per_simd * max_vgprs_per_wave
+                // For RDNA 3/4: 1536 VGPRs per SIMD, 2 SIMDs per CU = 3072 VGPRs/CU.
+                constexpr int kVgprAllocGranularity = 8;
+                constexpr int kVgprsPerSimd = 1536;  // RDNA standard
+                int vgprsPerThread = out.arch_vgpr_count;
+                int vgprsAligned = (vgprsPerThread > 0)
+                    ? (((vgprsPerThread + kVgprAllocGranularity - 1) / kVgprAllocGranularity)
+                       * kVgprAllocGranularity)
+                    : 0;
+                int regBlocks = waveBlocks;  // default: not limited by registers
+                if (vgprsAligned > 0 && props.simd_per_cu > 0) {
+                    int totalVgprsPerCU = kVgprsPerSimd * static_cast<int>(props.simd_per_cu);
+                    int regWavesPerCU = totalVgprsPerCU / vgprsAligned;
+                    regBlocks = (wavesPerBlock > 0) ? (regWavesPerCU / wavesPerBlock) : waveBlocks;
+                }
+
+                // Overall occupancy = minimum of all limits
+                int activeBlocks = (std::min)({waveBlocks, smemBlocks, regBlocks});
+                activeBlocks = (std::max)(activeBlocks, 0);
+
+                auto toOcc = [&](int blocks) -> float {
+                    return (maxWavesPerCU > 0 && wavesPerBlock > 0)
+                        ? (std::min)(1.0f, static_cast<float>(blocks * wavesPerBlock) / maxWavesPerCU)
+                        : 0.0f;
+                };
+
+                out.occupancy = toOcc(activeBlocks);
+                out.warp_occupancy = toOcc(waveBlocks);
+                out.smem_occupancy = toOcc(smemBlocks);
+                out.reg_occupancy = toOcc(regBlocks);
+                out.block_occupancy = 1.0f;  // AMD doesn't have a hard block-per-CU limit like NVIDIA
+                out.max_active_blocks = activeBlocks;
+
+                struct { float occ; const char* name; } limiters[] = {
+                    {out.warp_occupancy, "waves"},
+                    {out.reg_occupancy, "registers"},
+                    {out.smem_occupancy, "shared_mem"},
+                };
+                const char* limiting = "waves";
+                float minOcc = out.warp_occupancy;
+                for (auto& l : limiters) {
+                    if (l.occ < minOcc) { minOcc = l.occ; limiting = l.name; }
+                }
+                std::snprintf(out.limiting_resource, sizeof(out.limiting_resource), "%s", limiting);
+            }
         }
     }
 

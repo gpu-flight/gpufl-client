@@ -245,6 +245,67 @@ DeviceSample BuildTelemetrySample(const uint32_t deviceIndex) {
 
     sample.temp_c = ReadTemperatureC(deviceIndex);
 
+    // Junction temperature
+    {
+        int64_t milliC = 0;
+        if (IsSuccess(rsmi_dev_temp_metric_get(
+                deviceIndex, RSMI_TEMP_TYPE_JUNCTION, RSMI_TEMP_CURRENT, &milliC)) &&
+            milliC > 0) {
+            sample.temp_junction_c = static_cast<unsigned int>(milliC / kMillidegreesPerDegree);
+        }
+    }
+
+    // Memory temperature
+    {
+        int64_t milliC = 0;
+        if (IsSuccess(rsmi_dev_temp_metric_get(
+                deviceIndex, RSMI_TEMP_TYPE_MEMORY, RSMI_TEMP_CURRENT, &milliC)) &&
+            milliC > 0) {
+            sample.temp_mem_c = static_cast<unsigned int>(milliC / kMillidegreesPerDegree);
+        }
+    }
+
+    // Fan speed percentage
+    {
+        int64_t speed = 0;
+        uint64_t maxSpeed = 0;
+        if (IsSuccess(rsmi_dev_fan_speed_get(deviceIndex, 0, &speed)) &&
+            IsSuccess(rsmi_dev_fan_speed_max_get(deviceIndex, 0, &maxSpeed)) &&
+            maxSpeed > 0 && speed >= 0) {
+            sample.fan_speed_pct = static_cast<unsigned int>(
+                static_cast<uint64_t>(speed) * 100 / maxSpeed);
+        }
+    }
+
+    // GFX voltage
+    {
+        int64_t milliV = 0;
+        if (IsSuccess(rsmi_dev_volt_metric_get(
+                deviceIndex, RSMI_VOLT_TYPE_VDDGFX, RSMI_VOLT_CURRENT, &milliV)) &&
+            milliV > 0) {
+            sample.voltage_mv = static_cast<unsigned int>(milliV);
+        }
+    }
+
+    // Cumulative energy
+    {
+        uint64_t energy = 0;
+        float resolution = 0;
+        uint64_t timestamp = 0;
+        if (IsSuccess(rsmi_dev_energy_count_get(deviceIndex, &energy, &resolution, &timestamp))) {
+            sample.energy_uj = energy;
+        }
+    }
+
+    // ECC error counts
+    {
+        rsmi_error_count_t ec{};
+        if (IsSuccess(rsmi_dev_ecc_count_get(deviceIndex, RSMI_GPU_BLOCK_UMC, &ec))) {
+            sample.ecc_corrected = ec.correctable_err;
+            sample.ecc_uncorrected = ec.uncorrectable_err;
+        }
+    }
+
     uint64_t powerUw = 0;
     RSMI_POWER_TYPE powerType = RSMI_INVALID_POWER;
     if (IsSuccess(rsmi_dev_power_get(deviceIndex, &powerUw, &powerType)) &&
@@ -380,6 +441,20 @@ RocmCollector::RocmCollector() {
     if (static_info_available_) {
         static_device_count_ = ProbeHipDeviceCount(nullptr).second;
     }
+    resolveDeviceNames();
+#endif
+}
+
+void RocmCollector::resolveDeviceNames() {
+#if GPUFL_HAS_HIP
+    int count = 0;
+    if (hipGetDeviceCount(&count) != hipSuccess) return;
+    for (int i = 0; i < count; ++i) {
+        hipDeviceProp_t prop{};
+        if (hipGetDeviceProperties(&prop, i) == hipSuccess && IsGpuHipDevice(prop)) {
+            hip_device_names_[i] = prop.name;
+        }
+    }
 #endif
 }
 
@@ -406,7 +481,16 @@ std::vector<DeviceSample> RocmCollector::sampleAll() {
             GFL_LOG_DEBUG("[RocmCollector] skipping CPU iGPU SMI device index=", i);
             continue;
         }
-        out.push_back(BuildTelemetrySample(i));
+        auto sample = BuildTelemetrySample(i);
+        // SMI may return hex product ID (e.g. "0x7550") instead of full name.
+        // Use the HIP device name if available and SMI name looks like a hex ID.
+        if (!sample.name.empty() && sample.name[0] == '0' && sample.name.size() > 1 &&
+            sample.name[1] == 'x') {
+            auto nit = hip_device_names_.find(sample.device_id);
+            if (nit != hip_device_names_.end())
+                sample.name = nit->second;
+        }
+        out.push_back(std::move(sample));
     }
 #endif
     return out;

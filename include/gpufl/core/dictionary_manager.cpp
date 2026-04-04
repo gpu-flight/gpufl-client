@@ -126,71 +126,136 @@ void DictionaryManager::flushDisassembly(Logger& logger,
             }
         }
 
-        // Run nvdisasm --print-code
+        // Detect platform and select disassembler
+        // AMD code objects are ELF with e_machine == EM_AMDGPU (0xE0)
+        bool isAmd = (bytes.size() >= 18 &&
+                      bytes[0] == 0x7f && bytes[1] == 'E' &&
+                      bytes[2] == 'L' && bytes[3] == 'F' &&
+                      (bytes[18] == 0xE0 && bytes[19] == 0x00));
+
         char cmd[640];
-        std::snprintf(cmd, sizeof(cmd),
-                      "/usr/local/cuda/bin/nvdisasm --print-code %s 2>/dev/null",
-                      tmpPath);
+        if (isAmd) {
+            // Discover llvm-objdump path
+            const char* rocmPath = std::getenv("ROCM_PATH");
+            if (rocmPath && rocmPath[0]) {
+                std::snprintf(cmd, sizeof(cmd),
+                              "%s/llvm/bin/llvm-objdump -d %s 2>/dev/null",
+                              rocmPath, tmpPath);
+            } else {
+                std::snprintf(cmd, sizeof(cmd),
+                              "/opt/rocm/llvm/bin/llvm-objdump -d %s 2>/dev/null",
+                              tmpPath);
+            }
+        } else {
+            std::snprintf(cmd, sizeof(cmd),
+                          "/usr/local/cuda/bin/nvdisasm --print-code %s 2>/dev/null",
+                          tmpPath);
+        }
+
         FILE* pipe = ::popen(cmd, "r");
         if (!pipe) {
             ::unlink(tmpPath);
-            GFL_LOG_ERROR("[flushDisassembly] popen failed — nvdisasm unavailable?");
+            GFL_LOG_ERROR("[flushDisassembly] popen failed — disassembler unavailable?");
             continue;
         }
 
-        // Parse nvdisasm output.
-        // Function labels appear as bare labels at column 0: "funcName:"
-        // (not starting with '.' or whitespace).
-        // Instructions appear with leading whitespace: "/*XXXX*/   INSTR ;"
         std::unordered_map<std::string,
                            std::vector<std::pair<uint32_t, std::string>>>
             funcEntries;
         std::string currentFunc;
+        uint64_t currentFuncBase = 0;
         char lineBuf[2048];
+
         while (std::fgets(lineBuf, sizeof(lineBuf), pipe)) {
             std::string raw = lineBuf;
-            // Strip trailing newline/CR
             while (!raw.empty() &&
                    (raw.back() == '\n' || raw.back() == '\r'))
                 raw.pop_back();
             if (raw.empty()) continue;
 
-            // Function label: starts at column 0, doesn't start with '.' or
-            // whitespace, ends with ':'. e.g. "_Z11vectorScalePiii:"
-            if (!std::isspace((unsigned char)raw[0]) && raw[0] != '.' &&
-                raw.back() == ':') {
-                currentFunc = raw.substr(0, raw.size() - 1);
-                if (!funcEntries.count(currentFunc))
-                    funcEntries[currentFunc] = {};
-                continue;
-            }
+            if (isAmd) {
+                // AMD llvm-objdump format:
+                // Function: "0000000000001F00 <_Z15vectorAddKernelPKiS0_Pii>:"
+                // Instruction: "\ts_clause 0x1  // 000000001F00: BF850001"
+                if (raw.rfind("Disassembly of", 0) == 0) continue;
 
-            // Instruction line: leading whitespace then "/*XXXX*/   INSTR ;"
-            if (currentFunc.empty()) continue;
-            const size_t start = raw.find_first_not_of(" \t");
-            if (start == std::string::npos) continue;
-            const std::string s = raw.substr(start);
+                // Function label: contains '<' and '>' and ends with ':'
+                auto langle = raw.find('<');
+                auto rangle = raw.find('>');
+                if (langle != std::string::npos && rangle != std::string::npos &&
+                    rangle > langle && raw.back() == ':') {
+                    currentFunc = raw.substr(langle + 1, rangle - langle - 1);
+                    // Parse base address from the leading hex
+                    std::string addrStr = raw.substr(0, raw.find_first_of(" \t"));
+                    try { currentFuncBase = std::stoull(addrStr, nullptr, 16); }
+                    catch (...) { currentFuncBase = 0; }
+                    if (!funcEntries.count(currentFunc))
+                        funcEntries[currentFunc] = {};
+                    continue;
+                }
 
-            if (s.rfind("/*", 0) != 0) continue;
-            const size_t end = s.find("*/");
-            if (end == std::string::npos) continue;
-            const std::string hexStr = s.substr(2, end - 2);
-            uint32_t pc = 0;
-            try {
-                pc = static_cast<uint32_t>(std::stoul(hexStr, nullptr, 16));
-            } catch (...) {
-                continue;
+                // Comment-only lines ("; %bb.0:")
+                size_t firstNonWs = raw.find_first_not_of(" \t");
+                if (firstNonWs != std::string::npos && raw[firstNonWs] == ';')
+                    continue;
+
+                if (currentFunc.empty()) continue;
+
+                // Instruction line: has "// XXXXXXXXXXXX:" comment
+                size_t commentPos = raw.find("// ");
+                if (commentPos == std::string::npos) continue;
+                std::string afterComment = raw.substr(commentPos + 3);
+                size_t colonPos = afterComment.find(':');
+                if (colonPos == std::string::npos) continue;
+
+                uint64_t absPC = 0;
+                try { absPC = std::stoull(afterComment.substr(0, colonPos), nullptr, 16); }
+                catch (...) { continue; }
+                uint32_t pc = static_cast<uint32_t>(absPC - currentFuncBase);
+
+                // Instruction text: before the "//" comment, trimmed
+                std::string ins = raw.substr(0, commentPos);
+                size_t insStart = ins.find_first_not_of(" \t");
+                if (insStart == std::string::npos) continue;
+                ins = ins.substr(insStart);
+                while (!ins.empty() && (ins.back() == ' ' || ins.back() == '\t'))
+                    ins.pop_back();
+                funcEntries[currentFunc].emplace_back(pc, std::move(ins));
+            } else {
+                // NVIDIA nvdisasm format:
+                // Function: "_Z11vectorScalePiii:"
+                // Instruction: "/*XXXX*/   INSTR ;"
+                if (!std::isspace((unsigned char)raw[0]) && raw[0] != '.' &&
+                    raw.back() == ':') {
+                    currentFunc = raw.substr(0, raw.size() - 1);
+                    if (!funcEntries.count(currentFunc))
+                        funcEntries[currentFunc] = {};
+                    continue;
+                }
+
+                if (currentFunc.empty()) continue;
+                const size_t start = raw.find_first_not_of(" \t");
+                if (start == std::string::npos) continue;
+                const std::string s = raw.substr(start);
+
+                if (s.rfind("/*", 0) != 0) continue;
+                const size_t end = s.find("*/");
+                if (end == std::string::npos) continue;
+                const std::string hexStr = s.substr(2, end - 2);
+                uint32_t pc = 0;
+                try { pc = static_cast<uint32_t>(std::stoul(hexStr, nullptr, 16)); }
+                catch (...) { continue; }
+                size_t insStart = s.find_first_not_of(" \t", end + 2);
+                if (insStart == std::string::npos) continue;
+                std::string ins = s.substr(insStart);
+                if (!ins.empty() && ins.back() == ';') ins.pop_back();
+                while (!ins.empty() && ins.back() == ' ') ins.pop_back();
+                funcEntries[currentFunc].emplace_back(pc, std::move(ins));
             }
-            size_t insStart = s.find_first_not_of(" \t", end + 2);
-            if (insStart == std::string::npos) continue;
-            std::string ins = s.substr(insStart);
-            // Remove trailing " ;"
-            if (!ins.empty() && ins.back() == ';') ins.pop_back();
-            while (!ins.empty() && ins.back() == ' ') ins.pop_back();
-            funcEntries[currentFunc].emplace_back(pc, std::move(ins));
         }
         GFL_LOG_DEBUG("[flushDisassembly] parsed ", funcEntries.size(),
-                      " functions from cubin crc=", crc);
+                      " functions from ", isAmd ? "code object" : "cubin",
+                      " crc=", crc);
         ::pclose(pipe);
         ::unlink(tmpPath);
 
