@@ -1,0 +1,18 @@
+# Python / notebooks — not needed for the C++ daemon build
+python/
+example/python/
+**/.Trash-*
+**/__pycache__/
+**/*.pyc
+
+# Build artifacts
+cmake-build-*/
+build/
+*.o
+*.a
+
+# Dev / IDE
+.git/
+.idea/
+.vscode/
+*.md
