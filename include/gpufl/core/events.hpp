@@ -44,6 +44,15 @@ struct DeviceSample {
     unsigned int clock_sm = 0;   // MHz
     unsigned int clock_mem = 0;  // MHz
 
+    // Extended metrics (AMD ROCm SMI)
+    unsigned int fan_speed_pct = 0;    // Fan speed 0-100%
+    unsigned int temp_mem_c = 0;       // Memory temperature, Celsius
+    unsigned int temp_junction_c = 0;  // Junction temperature, Celsius
+    unsigned int voltage_mv = 0;       // GFX voltage, millivolts
+    uint64_t energy_uj = 0;            // Cumulative energy, microjoules
+    uint64_t ecc_corrected = 0;        // Correctable ECC error count
+    uint64_t ecc_uncorrected = 0;      // Uncorrectable ECC error count
+
     bool throttle_power;    // True if hitting Power CAp
     bool throttle_thermal;  // True if slowing down due to Heat
 
@@ -308,6 +317,16 @@ struct DeviceMetricBatchRow {
     unsigned power_mw  = 0;
     uint64_t used_mib  = 0;
     unsigned clock_sm  = 0;  // MHz
+    // Extended metrics
+    unsigned fan_speed_pct   = 0;  // %
+    unsigned temp_mem_c      = 0;  // Celsius
+    unsigned temp_junction_c = 0;  // Celsius
+    unsigned voltage_mv      = 0;  // millivolts
+    uint64_t energy_uj       = 0;  // cumulative microjoules
+    unsigned clock_mem       = 0;  // MHz
+    uint64_t pcie_bw_bps     = 0;  // bytes/sec (rx+tx combined)
+    uint64_t ecc_corrected   = 0;
+    uint64_t ecc_uncorrected = 0;
 };
 
 struct HostMetricBatchRow {

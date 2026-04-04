@@ -64,6 +64,15 @@ class TextReport {
         int power_mw = 0;
         uint64_t used_mib = 0;
         int clock_sm = 0;
+        int fan_speed_pct = 0;
+        int temp_mem_c = 0;
+        int temp_junction_c = 0;
+        int voltage_mv = 0;
+        uint64_t energy_uj = 0;
+        int clock_mem = 0;
+        uint64_t pcie_bw_bps = 0;
+        uint64_t ecc_corrected = 0;
+        uint64_t ecc_uncorrected = 0;
     };
 
     struct HostMetricRecord {

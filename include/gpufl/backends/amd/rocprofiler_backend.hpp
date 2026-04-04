@@ -1,13 +1,17 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 #include <rocprofiler-sdk/agent.h>
 #include <rocprofiler-sdk/buffer_tracing.h>
+#include <rocprofiler-sdk/callback_tracing.h>
 #include <rocprofiler-sdk/fwd.h>
 #include <rocprofiler-sdk/registration.h>
 
@@ -62,6 +66,7 @@ class RocprofilerBackend final : public IMonitorBackend {
                               uint64_t end_timestamp,
                               const rocprofiler_async_correlation_id_t& correlation_id);
     void handleMemoryCopy(const rocprofiler_buffer_tracing_memory_copy_record_t& data);
+    void handleCodeObjectLoad(const rocprofiler_callback_tracing_code_object_load_data_t& data);
 
     std::string resolveKernelName(uint64_t kernel_id) const;
     int resolveDeviceId(rocprofiler_agent_id_t agent_id) const;
@@ -97,6 +102,21 @@ class RocprofilerBackend final : public IMonitorBackend {
     mutable std::mutex agent_mutex_;
     std::unordered_map<uint64_t, int> gpu_device_ids_;
     std::unordered_map<uint64_t, rocprofiler_agent_type_t> agent_types_;
+
+    // GPU architecture properties for occupancy calculation
+    struct GpuArchProps {
+        uint32_t wave_front_size = 64;
+        uint32_t max_waves_per_cu = 0;
+        uint32_t simd_per_cu = 0;
+        uint32_t lds_size_bytes = 0;  // per CU
+        uint32_t cu_count = 0;
+        uint32_t workgroup_max_size = 0;
+    };
+    std::unordered_map<int, GpuArchProps> gpu_arch_props_;  // device_id -> props
+
+    // Code object storage for ISA disassembly
+    mutable std::mutex code_object_mutex_;
+    std::unordered_set<uint64_t> enqueued_disasm_crcs_;
 
     MonitorOptions opts_{};
     rocprofiler_context_id_t context_{};

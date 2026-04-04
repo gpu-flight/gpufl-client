@@ -28,6 +28,7 @@ struct ActivityRecord {
     int local_bytes = 0;
     int const_bytes = 0;
     int num_regs = 0;
+    int arch_vgpr_count = 0;  // AMD: architecture VGPRs only (for occupancy calc)
     float occupancy = 0.0f;
 
     // Per-resource occupancy breakdown
