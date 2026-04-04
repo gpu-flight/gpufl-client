@@ -3,8 +3,12 @@
 #include <cerrno>
 #include <cstring>
 #include <iostream>
-#include <pthread.h>
 #include <string>
+#include <thread>
+
+#ifndef _WIN32
+#include <pthread.h>
+#endif
 
 #include "gpufl/gpufl.hpp"
 
@@ -15,6 +19,24 @@ std::string getenv_or(const char* var, const char* fallback) {
     return val ? std::string(val) : std::string(fallback);
 }
 
+#ifdef _WIN32
+volatile std::sig_atomic_t g_shutdownRequested = 0;
+
+void signalHandler(int /*sig*/) {
+    g_shutdownRequested = 1;
+}
+
+bool blockTerminationSignals() {
+    return true;
+}
+
+bool waitForShutdownSignal() {
+    while (!g_shutdownRequested) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    return true;
+}
+#else
 bool blockTerminationSignals() {
     sigset_t set;
     if (::sigemptyset(&set) != 0) return false;
@@ -34,10 +56,16 @@ bool waitForShutdownSignal() {
     const int rc = ::sigwait(&set, &sig);
     return rc == 0;
 }
+#endif
 
 }  // namespace
 
 int main() {
+#ifdef _WIN32
+    std::signal(SIGINT, signalHandler);
+    std::signal(SIGTERM, signalHandler);
+#endif
+
     if (!blockTerminationSignals()) {
         std::cerr << "Failed to block termination signals: "
                   << std::strerror(errno) << '\n';
