@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "gpufl/core/backend_interfaces.hpp"
@@ -24,10 +25,13 @@ class RocmCollector : public IUnifiedGpuCollector {
     static bool IsStaticInfoAvailable(std::string* reason = nullptr);
 
    private:
+    void resolveDeviceNames();
+
     bool telemetry_initialized_ = false;
     bool static_info_available_ = false;
     uint32_t telemetry_device_count_ = 0;
     int static_device_count_ = 0;
+    std::unordered_map<int, std::string> hip_device_names_;  // device_id -> full name from HIP
 };
 
 }  // namespace gpufl::amd
