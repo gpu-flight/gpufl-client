@@ -622,11 +622,11 @@ void TextReport::writeSystemMetrics(std::ostringstream& out) const {
                                sumPow=0, maxPow=0, sumClk=0; uint64_t maxMem=0; int clkN=0; int n=0; };
         auto agg = std::accumulate(device_metrics_.begin(), device_metrics_.end(), GpuAgg{},
             [](GpuAgg a, const DeviceMetricRecord& m) {
-                a.sumUtil += m.gpu_util; a.maxUtil = std::max(a.maxUtil, (double)m.gpu_util);
-                a.minUtil = std::min(a.minUtil, (double)m.gpu_util);
-                a.sumTemp += m.temp_c;   a.maxTemp = std::max(a.maxTemp, (double)m.temp_c);
-                a.sumPow  += m.power_mw; a.maxPow  = std::max(a.maxPow, (double)m.power_mw);
-                a.maxMem = std::max(a.maxMem, m.used_mib);
+                a.sumUtil += m.gpu_util; a.maxUtil = (std::max)(a.maxUtil, (double)m.gpu_util);
+                a.minUtil = (std::min)(a.minUtil, (double)m.gpu_util);
+                a.sumTemp += m.temp_c;   a.maxTemp = (std::max)(a.maxTemp, (double)m.temp_c);
+                a.sumPow  += m.power_mw; a.maxPow  = (std::max)(a.maxPow, (double)m.power_mw);
+                a.maxMem = (std::max)(a.maxMem, m.used_mib);
                 if (m.clock_sm > 0) { a.sumClk += m.clock_sm; a.clkN++; }
                 a.n++; return a;
             });
@@ -648,8 +648,8 @@ void TextReport::writeSystemMetrics(std::ostringstream& out) const {
         struct HostAgg { double sumCpu=0, maxCpu=0; uint64_t maxRam=0, totalRam=0; int n=0; };
         auto agg = std::accumulate(host_metrics_.begin(), host_metrics_.end(), HostAgg{},
             [](HostAgg a, const HostMetricRecord& m) {
-                a.sumCpu += m.cpu_pct; a.maxCpu = std::max(a.maxCpu, m.cpu_pct);
-                a.maxRam = std::max(a.maxRam, m.ram_used_mib);
+                a.sumCpu += m.cpu_pct; a.maxCpu = (std::max)(a.maxCpu, m.cpu_pct);
+                a.maxRam = (std::max)(a.maxRam, m.ram_used_mib);
                 if (m.ram_total_mib > 0) a.totalRam = m.ram_total_mib;
                 a.n++; return a;
             });

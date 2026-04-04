@@ -107,7 +107,7 @@ class TextReport {
         int count = 0;
         double total = 0;
         double max_val = 0;
-        void add(double v) { count++; total += v; max_val = std::max(max_val, v); }
+        void add(double v) { count++; total += v; max_val = (std::max)(max_val, v); }
         double avg() const { return count > 0 ? total / count : 0; }
     };
 
