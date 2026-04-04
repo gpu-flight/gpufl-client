@@ -24,6 +24,7 @@ option(GPUFL_ENABLE_NVIDIA "Enable NVIDIA backends (CUDA + NVML when available)"
 option(GPUFL_ENABLE_AMD    "Enable AMD backends (ROCm when available)" OFF)
 
 option(BUILD_GPUFL_EXAMPLE "Build gpufl example application" ON)
+option(BUILD_GPUFL_MONITOR "Build gpufl-monitor standalone daemon" ON)
 option(BUILD_PYTHON "Build Python bindings" OFF)
 option(BUILD_TESTING "Build the testing tree." ON)
 
@@ -375,6 +376,10 @@ target_compile_definitions(gpufl PUBLIC
 if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR AND BUILD_TESTING)
     enable_testing()
     add_subdirectory(tests)
+endif()
+
+if(BUILD_GPUFL_MONITOR AND CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+    add_subdirectory(daemon/monitor)
 endif()
 
 if(BUILD_PYTHON)

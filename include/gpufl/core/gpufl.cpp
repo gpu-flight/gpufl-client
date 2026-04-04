@@ -82,6 +82,7 @@ bool init(const InitOptions& opts) {
     Logger::Options logOpts;
     logOpts.base_path = logPath;
     logOpts.system_sample_rate_ms = opts.system_sample_rate_ms;
+    logOpts.flush_always = opts.flush_logs_always;
 
     g_lastLogPath = logPath;
     g_lastAppName = rt->app_name;

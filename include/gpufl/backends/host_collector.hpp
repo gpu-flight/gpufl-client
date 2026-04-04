@@ -136,8 +136,8 @@ class HostCollector {
         struct sysinfo info;
         if (sysinfo(&info) == 0) {
             // sysinfo units can vary (mem_unit), usually 1
-            uint64_t total = (uint64_t)info.totalram * info.mem_unit;
-            uint64_t free = (uint64_t)info.freeram * info.mem_unit;
+            const uint64_t total = info.totalram * info.mem_unit;
+            const uint64_t free = info.freeram * info.mem_unit;
             // Buffers/cache are often counted as "used" in raw math but
             // "available" effectively. For simplicity here: Used = Total -
             // Free.
