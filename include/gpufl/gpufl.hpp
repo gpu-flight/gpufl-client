@@ -44,6 +44,12 @@ bool init(const InitOptions& opts);
 // Stop runtime, flush and close logs.
 void shutdown();
 
+// Generate a text report from the log files written during this session.
+// Call after shutdown().
+// - No argument: prints the report to console (stdout).
+// - With output_path: saves the report to a file.
+void generateReport(const std::string& output_path = "");
+
 class ScopedMonitor {
    public:
     explicit ScopedMonitor(std::string name, std::string tag, bool deep_profiling);

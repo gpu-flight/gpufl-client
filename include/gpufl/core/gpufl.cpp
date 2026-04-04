@@ -1,5 +1,7 @@
 #include "gpufl.hpp"
 
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -18,6 +20,7 @@
 #include "gpufl/core/monitor_backend.hpp"
 #include "gpufl/core/runtime.hpp"
 #include "gpufl/core/scope_registry.hpp"
+#include "gpufl/report/text_report.hpp"
 #if GPUFL_HAS_CUDA || defined(__CUDACC__)
 #include <cuda_runtime.h>
 #endif
@@ -48,6 +51,10 @@ static std::string defaultLogPath_(const std::string& app) {
     return app + ".log";
 }
 
+// Remembered after init() for use by generateReport() after shutdown()
+static std::string g_lastLogPath;
+static std::string g_lastAppName;
+
 static std::atomic<uint64_t> g_nextScopeId{1};
 
 static uint64_t nextScopeId_() {
@@ -75,6 +82,9 @@ bool init(const InitOptions& opts) {
     Logger::Options logOpts;
     logOpts.base_path = logPath;
     logOpts.system_sample_rate_ms = opts.system_sample_rate_ms;
+
+    g_lastLogPath = logPath;
+    g_lastAppName = rt->app_name;
 
     GFL_LOG_DEBUG("Opening log file: ", logPath);
     if (!rt->logger->open(logOpts)) {
@@ -309,4 +319,28 @@ ScopedMonitor::~ScopedMonitor() {
         }
     }
 }
+void generateReport(const std::string& output_path) {
+    namespace fs = std::filesystem;
+
+    fs::path p(g_lastLogPath);
+    std::string dir = p.parent_path().string();
+    if (dir.empty()) dir = ".";
+
+    std::string prefix = p.filename().string();
+    if (prefix.size() > 4 && prefix.substr(prefix.size() - 4) == ".log")
+        prefix = prefix.substr(0, prefix.size() - 4);
+
+    report::TextReport::Options opts;
+    opts.log_dir = dir;
+    opts.log_prefix = prefix;
+    std::string text = report::TextReport(opts).generate();
+
+    if (output_path.empty()) {
+        std::cout << text;
+    } else {
+        std::ofstream file(output_path);
+        if (file.is_open()) file << text;
+    }
+}
+
 }  // namespace gpufl

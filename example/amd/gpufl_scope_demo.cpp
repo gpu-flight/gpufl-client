@@ -1,7 +1,7 @@
+#include <hip/hip_runtime.h>
+
 #include <cstdlib>
 #include <iostream>
-
-#include <hip/hip_runtime.h>
 
 #include "gpufl/gpufl.hpp"
 
@@ -131,6 +131,7 @@ int main() {
     std::free(h_c);
 
     gpufl::shutdown();
+    gpufl::generateReport();
 
     std::cout << "\nDemo complete. Inspect logs with prefix " << opts.log_path
               << "\n";
