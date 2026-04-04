@@ -1,6 +1,6 @@
 #include "gpufl/backends/nvidia/resource_handler.hpp"
 
-#include <cupti_pcsampling.h>
+#include <zlib.h>
 
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
 #include "gpufl/core/debug_logger.hpp"
@@ -97,26 +97,29 @@ void ResourceHandler::workerLoop() {
             pending_.pop();
         }
 
-        // Now outside the CUPTI callback — SASS locks are released.
-        // Safe to call cuptiGetCubinCrc() on the copied bytes.
-        CUpti_GetCubinCrcParams params = {CUpti_GetCubinCrcParamsSize};
-        params.cubinSize = data.size();
-        params.cubin = data.data();
+        // Compute the cubin CRC using zlib crc32 — this matches the algorithm
+        // CUPTI uses internally for the cubinCrc field in activity records
+        // (CUpti_ActivityKernel11, CUpti_ActivityPCSampling3, etc.).
+        //
+        // We previously called cuptiGetCubinCrc() here, but that function
+        // acquires CUPTI's internal global lock, which is also held by
+        // cuptiSassMetricsEnable() while it patches loaded modules.  Even
+        // from this worker thread the call can therefore deadlock when
+        // cuptiSassMetricsEnable() is still running on another thread.
+        // Using zlib directly avoids all CUPTI locks.
         GFL_LOG_DEBUG("Computing CRC for cubin copy, size=", data.size());
-        if (cuptiGetCubinCrc(&params) != CUPTI_SUCCESS) {
-            GFL_LOG_ERROR("[ResourceHandler] Failed to compute CRC for cubin");
-            continue;
-        }
+        const uint64_t cubinCrc = static_cast<uint64_t>(
+            crc32(0, data.data(), static_cast<uInt>(data.size())));
 
         bool isNew = false;
         const uint8_t *enqueuePtr = nullptr;
         size_t enqueueSize = 0;
         {
             std::lock_guard<std::mutex> lk(backend_->cubin_mu_);
-            if (backend_->cubin_by_crc_.find(params.cubinCrc) ==
+            if (backend_->cubin_by_crc_.find(cubinCrc) ==
                 backend_->cubin_by_crc_.end()) {
-                auto &info = backend_->cubin_by_crc_[params.cubinCrc];
-                info.crc = params.cubinCrc;
+                auto &info = backend_->cubin_by_crc_[cubinCrc];
+                info.crc = cubinCrc;
                 info.data = std::move(data);
                 enqueuePtr = info.data.data();
                 enqueueSize = info.data.size();
@@ -124,7 +127,7 @@ void ResourceHandler::workerLoop() {
             }
         }
         if (isNew) {
-            Monitor::EnqueueCubinForDisassembly(params.cubinCrc, enqueuePtr,
+            Monitor::EnqueueCubinForDisassembly(cubinCrc, enqueuePtr,
                                                 enqueueSize);
         }
     }
