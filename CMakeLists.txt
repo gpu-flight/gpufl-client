@@ -66,6 +66,8 @@ target_sources(gpufl PRIVATE
     include/gpufl/core/debug_logger.cpp
     include/gpufl/core/stack_trace.cpp
     include/gpufl/core/scope_registry.cpp
+    include/gpufl/report/json_reader.cpp
+    include/gpufl/report/text_report.cpp
 )
 
 set(GPUFL_HAS_CUDA 0)
