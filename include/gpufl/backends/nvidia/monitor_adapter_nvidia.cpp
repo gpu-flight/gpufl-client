@@ -24,10 +24,6 @@ void NvidiaMonitorAdapter::stop() {
     if (backend_) backend_->stop();
 }
 
-void NvidiaMonitorAdapter::flushActivities() {
-    cuptiActivityFlushAll(0);
-}
-
 std::string NvidiaMonitorAdapter::memcpyKindToString(const uint32_t kind) const {
     switch (kind) {
         case CUPTI_ACTIVITY_MEMCPY_KIND_HTOD:

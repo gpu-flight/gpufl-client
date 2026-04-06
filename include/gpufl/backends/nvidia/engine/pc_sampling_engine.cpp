@@ -1,5 +1,6 @@
 #include "gpufl/backends/nvidia/engine/pc_sampling_engine.hpp"
 
+#include <cuda_runtime.h>
 #include <cupti.h>
 #include <cupti_pcsampling.h>
 
@@ -241,8 +242,11 @@ bool PcSamplingEngine::EnableSamplingFeatures_() {
     CUpti_PCSamplingConfigurationInfo configInfo[7] = {};
     configInfo[0].attributeType =
         CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_COLLECTION_MODE;
+    // CONTINUOUS mode: avoids deadlock between KERNEL_SERIALIZED and
+    // cudaDeviceSynchronize().  Kernel activity records are re-enabled
+    // explicitly after PC sampling configuration.
     configInfo[0].attributeData.collectionModeData.collectionMode =
-        CUPTI_PC_SAMPLING_COLLECTION_MODE_KERNEL_SERIALIZED;
+        CUPTI_PC_SAMPLING_COLLECTION_MODE_CONTINUOUS;
 
     configInfo[1].attributeType =
         CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_SAMPLING_PERIOD;
@@ -259,10 +263,16 @@ bool PcSamplingEngine::EnableSamplingFeatures_() {
     configInfo[3].attributeData.hardwareBufferSizeData.hardwareBufferSize =
         256 * 1024 * 1024;
 
+    // Disable start/stop control — let CUPTI automatically sample around
+    // each kernel.  With enableStartStopControl=1, the user must call
+    // cuptiPCSamplingStart/Stop, but calling Stop from a CUPTI callback
+    // (e.g. cudaDeviceSynchronize hook) corrupts state and calling it
+    // before cudaDeviceSynchronize in KERNEL_SERIALIZED mode deadlocks.
+    // With auto mode, sampling just works and we collect data at scope end.
     configInfo[4].attributeType =
         CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_ENABLE_START_STOP_CONTROL;
     configInfo[4]
-        .attributeData.enableStartStopControlData.enableStartStopControl = 1;
+        .attributeData.enableStartStopControlData.enableStartStopControl = 0;
 
     configInfo[5].attributeType =
         CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_SAMPLING_DATA_BUFFER;
@@ -297,7 +307,34 @@ bool PcSamplingEngine::EnableSamplingFeatures_() {
         return false;
     }
 
+    // Privilege probe: call cuptiPCSamplingGetData with empty buffers
+    // BEFORE any kernel runs. Probing here with zero
+    // data is safe and catches the error early.
+    {
+        pc_sampling_buffers_->data->totalNumPcs = 0;
+        CUpti_PCSamplingGetDataParams probeParams = {};
+        probeParams.size = sizeof(CUpti_PCSamplingGetDataParams);
+        probeParams.ctx = ctx_.cuda_ctx;
+        probeParams.pcSamplingData = pc_sampling_buffers_->data;
+        CUptiResult probeRes = cuptiPCSamplingGetData(&probeParams);
+        if (IsInsufficientPrivilege(probeRes)) {
+            GFL_LOG_DEBUG(
+                "[PC Sampling] Privilege probe failed — disabling "
+                "PC sampling for this session.");
+            sampling_api_blocked_.store(true);
+            pc_sampling_method_ = Method::None;
+            return false;
+        }
+    }
+
     sampling_api_ready_.store(true);
+
+    // cuptiPCSamplingEnable / SetConfigurationAttribute can internally
+    // disable CUPTI_ACTIVITY_KIND_KERNEL.  Re-enable so kernel activity
+    // records continue to flow alongside PC samples.
+    cuptiActivityEnable(CUPTI_ACTIVITY_KIND_KERNEL);
+    cuptiActivityEnable(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL);
+
     GFL_LOG_DEBUG("[PC Sampling] configured and enabled successfully.");
     return true;
 }
@@ -321,46 +358,11 @@ void PcSamplingEngine::StartPcSampling_() {
         return;
     }
 
-    if (!ctx_.cuda_ctx) {
-        GFL_LOG_ERROR("[GPUFL] Cannot start PC Sampling: cuda_ctx is NULL!");
-        pc_sampling_ref_count_.store(0);
-        return;
-    }
-
-    GFL_LOG_DEBUG("[PC Sampling] Starting with ctx=",
-                  static_cast<void*>(ctx_.cuda_ctx));
-
-    CUpti_PCSamplingStartParams startParams = {};
-    startParams.size = sizeof(CUpti_PCSamplingStartParams);
-    startParams.ctx = ctx_.cuda_ctx;
-    CUptiResult res = cuptiPCSamplingStart(&startParams);
-    if (res == CUPTI_ERROR_INVALID_OPERATION) {
-        GFL_LOG_DEBUG("[GPUFL] PC Sampling already active (Implicit Start).");
-        sampling_api_started_.store(true);
-    } else if (res == CUPTI_ERROR_NOT_SUPPORTED ||
-               res == CUPTI_ERROR_LEGACY_PROFILER_NOT_SUPPORTED) {
-        GFL_LOG_DEBUG(
-            "[GPUFL] PC Sampling not supported on this GPU/configuration.");
-        sampling_api_ready_.store(false);
-        sampling_api_started_.store(false);
-        pc_sampling_ref_count_.store(0);
-        pc_sampling_method_ = Method::None;
-    } else if (res != CUPTI_SUCCESS) {
-        LogCuptiErrorIfFailed(this->name(), "cuptiPCSamplingStart", res);
-        if (IsInsufficientPrivilege(res)) {
-            sampling_api_blocked_.store(true);
-            pc_sampling_method_ = Method::None;
-            GFL_LOG_ERROR(
-                "[PC Sampling] Insufficient privileges: disabling PC "
-                "sampling for this session.");
-        }
-        sampling_api_ready_.store(false);
-        sampling_api_started_.store(false);
-        pc_sampling_ref_count_.store(0);
-    } else {
-        sampling_api_started_.store(true);
-        GFL_LOG_DEBUG("[PC Sampling] >>> STARTED (Scope Begin) <<<");
-    }
+    // With enableStartStopControl=0, CUPTI automatically samples around
+    // each kernel — no explicit Start/Stop needed.  Just mark as active
+    // so StopAndCollect knows to getData.
+    sampling_api_started_.store(true);
+    GFL_LOG_DEBUG("[PC Sampling] >>> STARTED (Scope Begin) <<<");
 }
 
 void PcSamplingEngine::StopAndCollectPcSampling_() {
@@ -390,25 +392,12 @@ void PcSamplingEngine::StopAndCollectPcSampling_() {
         return;
     }
 
-    GFL_LOG_DEBUG("[PC Sampling] <<< STOPPING (Scope End) >>>");
+    GFL_LOG_DEBUG("[PC Sampling] <<< COLLECTING (Scope End) >>>");
 
+    // With enableStartStopControl=0 CUPTI auto-samples around each kernel.
+    // We just need to synchronize the GPU (so all kernels are done) and
+    // then collect the accumulated PC sampling data.
     cudaDeviceSynchronize();
-
-    CUpti_PCSamplingStopParams stopParams = {};
-    stopParams.size = sizeof(CUpti_PCSamplingStopParams);
-    stopParams.ctx = ctx_.cuda_ctx;
-    CUptiResult stopRes = cuptiPCSamplingStop(&stopParams);
-    if (stopRes != CUPTI_SUCCESS) {
-        if (stopRes != CUPTI_ERROR_INVALID_OPERATION) {
-            LogCuptiErrorIfFailed(this->name(), "cuptiPCSamplingStop",
-                                  stopRes);
-        }
-        if (IsInsufficientPrivilege(stopRes)) {
-            sampling_api_blocked_.store(true);
-            pc_sampling_method_ = Method::None;
-        }
-        return;
-    }
 
     CUpti_PCSamplingGetDataParams getDataParams = {};
     getDataParams.size = sizeof(CUpti_PCSamplingGetDataParams);
@@ -421,8 +410,16 @@ void PcSamplingEngine::StopAndCollectPcSampling_() {
         const bool hasMore = (getRes == CUPTI_ERROR_OUT_OF_MEMORY);
 
         if (getRes != CUPTI_SUCCESS && !hasMore) {
-            LogCuptiErrorIfFailed(this->name(), "cuptiPCSamplingGetData",
-                                  getRes);
+            if (IsInsufficientPrivilege(getRes)) {
+                GFL_LOG_DEBUG(
+                    "[PC Sampling] Insufficient privileges for getData — "
+                    "disabling PC sampling for this session.");
+                sampling_api_blocked_.store(true);
+                pc_sampling_method_ = Method::None;
+            } else {
+                LogCuptiErrorIfFailed(this->name(), "cuptiPCSamplingGetData",
+                                      getRes);
+            }
             break;
         }
 

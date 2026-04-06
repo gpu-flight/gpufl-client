@@ -259,7 +259,7 @@ if(GPUFL_ENABLE_NVIDIA)
     endif()
 
     if(WIN32)
-        target_link_libraries(gpufl PRIVATE dbghelp)
+        target_link_libraries(gpufl PRIVATE dbghelp pdh)
     endif()
 
     #

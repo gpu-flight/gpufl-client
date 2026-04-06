@@ -19,8 +19,6 @@ class NvidiaMonitorAdapter final : public IMonitorAdapter {
     void shutdown() override;
     void start() override;
     void stop() override;
-    void flushActivities() override;
-
     const char* platformName() const override { return "cuda"; }
     std::string memcpyKindToString(uint32_t kind) const override;
     std::string memoryKindToString(uint32_t kind) const override;

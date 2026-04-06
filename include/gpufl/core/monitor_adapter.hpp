@@ -18,8 +18,6 @@ class IMonitorAdapter {
     virtual void shutdown() = 0;
     virtual void start() = 0;
     virtual void stop() = 0;
-    virtual void flushActivities() = 0;
-
     virtual const char* platformName() const = 0;
     virtual std::string memcpyKindToString(uint32_t kind) const = 0;
     virtual std::string memoryKindToString(uint32_t kind) const = 0;
