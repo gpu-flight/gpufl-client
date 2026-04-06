@@ -22,8 +22,21 @@ namespace gpufl {
 KernelLaunchHandler::KernelLaunchHandler(CuptiBackend* backend)
     : backend_(backend) {}
 
-std::vector<CUpti_CallbackDomain> KernelLaunchHandler::requiredDomains() const {
-    return {CUPTI_CB_DOMAIN_RUNTIME_API, CUPTI_CB_DOMAIN_DRIVER_API};
+std::vector<std::pair<CUpti_CallbackDomain, CUpti_CallbackId>>
+KernelLaunchHandler::requiredCallbacks() const {
+    return {
+        {CUPTI_CB_DOMAIN_RUNTIME_API,
+         CUPTI_RUNTIME_TRACE_CBID_cudaLaunch_v3020},
+        {CUPTI_CB_DOMAIN_RUNTIME_API,
+         CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_v7000},
+        {CUPTI_CB_DOMAIN_DRIVER_API, CUPTI_DRIVER_TRACE_CBID_cuLaunch},
+        {CUPTI_CB_DOMAIN_DRIVER_API, CUPTI_DRIVER_TRACE_CBID_cuLaunchGrid},
+        {CUPTI_CB_DOMAIN_DRIVER_API,
+         CUPTI_DRIVER_TRACE_CBID_cuLaunchGridAsync},
+        {CUPTI_CB_DOMAIN_DRIVER_API, CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel},
+        {CUPTI_CB_DOMAIN_DRIVER_API,
+         CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel_ptsz},
+    };
 }
 
 std::vector<CUpti_ActivityKind> KernelLaunchHandler::requiredActivityKinds()
@@ -98,10 +111,8 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
 
         if (backend_->GetOptions().collect_kernel_details &&
             cbInfo->functionParams != nullptr) {
-            if ((domain == CUPTI_CB_DOMAIN_RUNTIME_API &&
-                 cbid == CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_v7000) ||
-                (domain == CUPTI_CB_DOMAIN_DRIVER_API &&
-                 cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel)) {
+            if (domain == CUPTI_CB_DOMAIN_RUNTIME_API &&
+                cbid == CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_v7000) {
                 GFL_LOG_DEBUG("[KernelLaunchHandler] details path domain=",
                               static_cast<int>(domain),
                               " cbid=", static_cast<int>(cbid),
@@ -117,26 +128,46 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
                 meta.block_y = params->blockDim.y;
                 meta.block_z = params->blockDim.z;
                 meta.dyn_shared = static_cast<int>(params->sharedMem);
-                CalculateOccupancy(meta, params->func);
+            } else if (domain == CUPTI_CB_DOMAIN_DRIVER_API &&
+                       cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel) {
+                GFL_LOG_DEBUG("[KernelLaunchHandler] details path domain=",
+                              static_cast<int>(domain),
+                              " cbid=", static_cast<int>(cbid),
+                              " corr=", cbInfo->correlationId,
+                              " params=", cbInfo->functionParams);
+                meta.has_details = true;
+                const auto* params =
+                    (cuLaunchKernel_params*)cbInfo->functionParams;
+                meta.grid_x = params->gridDimX;
+                meta.grid_y = params->gridDimY;
+                meta.grid_z = params->gridDimZ;
+                meta.block_x = params->blockDimX;
+                meta.block_y = params->blockDimY;
+                meta.block_z = params->blockDimZ;
+                meta.dyn_shared = static_cast<int>(params->sharedMemBytes);
             }
         }
 
-        std::lock_guard<std::mutex> lk(backend_->meta_mu_);
-        auto& existing = backend_->meta_by_corr_[cbInfo->correlationId];
-        if (existing.has_details && !meta.has_details) {
-            GFL_LOG_DEBUG(
-                "[DEBUG-CALLBACK] Skipping overwrite of rich metadata for "
-                "CorrID ",
-                cbInfo->correlationId, " by Driver API.");
-        } else {
-            existing = meta;
+        // Store metadata — emit later from scope stop (PC Sampling path)
+        // or handleActivityRecord (normal path).
+        {
+            std::lock_guard lk(backend_->meta_mu_);
+            auto& existing = backend_->meta_by_corr_[cbInfo->correlationId];
+            if (existing.has_details && !meta.has_details) {
+                GFL_LOG_DEBUG(
+                    "[DEBUG-CALLBACK] Skipping overwrite of rich metadata "
+                    "for CorrID ",
+                    cbInfo->correlationId, " by Driver API.");
+            } else {
+                existing = meta;
+            }
         }
     } else if (cbInfo->callbackSite == CUPTI_API_EXIT) {
-        const int64_t t = detail::GetTimestampNs();
+        const int64_t exitNs = detail::GetTimestampNs();
         std::lock_guard<std::mutex> lk(backend_->meta_mu_);
         auto it = backend_->meta_by_corr_.find(cbInfo->correlationId);
         if (it != backend_->meta_by_corr_.end()) {
-            it->second.api_exit_ns = t;
+            it->second.api_exit_ns = exitNs;
         }
     }
 }
@@ -227,10 +258,9 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
                 out.block_z = m.block_z;
                 out.local_bytes = static_cast<int>(k->localMemoryPerThread);
                 out.const_bytes = m.const_bytes;
-                out.occupancy = m.occupancy;
-                out.max_active_blocks = m.max_active_blocks;
 
-                // Compute per-resource occupancy breakdown
+                // Compute per-resource occupancy from activity record data
+                // (registers, shared memory) and SM properties.
                 SmProps props = GetSMProps(out.device_id);
                 int threadsPerBlock = out.block_x * out.block_y * out.block_z;
                 int warpsPerBlock =
@@ -260,18 +290,12 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
 
                 // Shared memory limit
                 int smemPerBlock = out.static_shared + out.dyn_shared;
-                int smemBlocks_approx =
+                int smemBlocks =
                     (smemPerBlock > 0) ? (props.sharedMemPerSM / smemPerBlock)
                                        : warpBlocks;
-                int nonSmemLimit =
-                    std::min({warpBlocks, regBlocks, blockBlocks});
-                int smemBlocks;
-                if (out.max_active_blocks > 0 && smemPerBlock > 0 &&
-                    out.max_active_blocks < nonSmemLimit) {
-                    smemBlocks = out.max_active_blocks;
-                } else {
-                    smemBlocks = smemBlocks_approx;
-                }
+
+                out.max_active_blocks =
+                    std::min({warpBlocks, regBlocks, blockBlocks, smemBlocks});
 
                 auto toOcc = [&](int blocks) -> float {
                     return (maxWarpsPerSM > 0 && warpsPerBlock > 0)
@@ -284,6 +308,7 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
                 out.reg_occupancy = toOcc(regBlocks);
                 out.smem_occupancy = toOcc(smemBlocks);
                 out.block_occupancy = toOcc(blockBlocks);
+                out.occupancy = toOcc(out.max_active_blocks);
 
                 struct {
                     float occ;

@@ -14,7 +14,8 @@ class MemTransferHandler : public ICuptiHandler {
                       CUpti_CallbackId cbid) const override;
     void handle(CUpti_CallbackDomain domain, CUpti_CallbackId cbid,
                 const void* cbdata) override;
-    std::vector<CUpti_CallbackDomain> requiredDomains() const override;
+    std::vector<std::pair<CUpti_CallbackDomain, CUpti_CallbackId>>
+    requiredCallbacks() const override;
     std::vector<CUpti_ActivityKind> requiredActivityKinds() const override;
     bool handleActivityRecord(const CUpti_Activity* record, int64_t baseCpuNs,
                               uint64_t baseCuptiTs) override;

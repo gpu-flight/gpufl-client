@@ -16,8 +16,6 @@
 #include "gpufl/core/logger/logger.hpp"
 #include "gpufl/core/model/batch_models.hpp"
 #include "gpufl/core/model/memcpy_event_model.hpp"
-#include "gpufl/core/model/profile_sample_model.hpp"
-#include "gpufl/core/model/scope_event_model.hpp"
 #include "gpufl/core/monitor_adapter.hpp"
 #include "gpufl/core/ring_buffer.hpp"
 #include "gpufl/core/runtime.hpp"
@@ -28,9 +26,9 @@ namespace gpufl {
 RingBuffer<ActivityRecord, 1024> g_monitorBuffer;
 
 static std::unique_ptr<IMonitorAdapter> g_adapter;
-static std::atomic<bool> g_initialized{false};
+static std::atomic g_initialized{false};
 static std::thread g_collectorThread;
-static std::atomic<bool> g_collectorRunning{false};
+static std::atomic g_collectorRunning{false};
 static thread_local std::stack<void*> g_rangeStack;
 
 // Batch state — kernel/memcpy accessed only from CollectorLoop thread;
@@ -46,10 +44,6 @@ static std::vector<KernelDetailRow> g_pendingDetails;
 
 // Tracks the most recently begun scope name ID.
 // Updated by PushScopeRow (user thread) when a scope begin row is pushed.
-// PC_SAMPLE records arrive in the ring buffer after EndPerfScope() is called
-// (which happens in ScopedMonitor dtor), but KERNEL activity records arrive
-// later via flushActivities().  By the time PC samples are processed the
-// active scope ID is already written here, so we can assign it directly.
 static std::atomic<uint32_t> g_activeScopeNameId{0};
 
 static BatchBuffer<ScopeBatchRow>         g_scopeBatch;
@@ -291,8 +285,7 @@ void CollectorLoop() {
         static auto lastFlush = std::chrono::steady_clock::now();
         if (std::chrono::steady_clock::now() - lastFlush >
             std::chrono::milliseconds(250)) {
-            if (g_initialized.load() && g_adapter) g_adapter->flushActivities();
-            if (Runtime* rt = runtime(); rt && rt->logger) {
+            if (const Runtime* rt = runtime(); rt && rt->logger) {
                 flushBatches(*rt->logger, rt->session_id);
             }
             lastFlush = std::chrono::steady_clock::now();
