@@ -29,6 +29,16 @@ class NvmlCollector : public ISystemCollector<DeviceSample> {
 
     static std::string NvmlErrorToString(nvmlReturn_t r);
     static unsigned long long ToMiB(unsigned long long bytes);
+
+#ifdef _WIN32
+    // PDH fallback for GPU utilization on WDDM where NVML returns 0%.
+    void* pdh_query_ = nullptr;
+    void* pdh_gpu_counter_ = nullptr;
+    bool  pdh_available_ = false;
+    void  initPdh_();
+    void  cleanupPdh_();
+    unsigned int sampleGpuUtilPdh_();
+#endif
 };
 }  // namespace gpufl::nvidia
 #else

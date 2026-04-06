@@ -143,7 +143,7 @@ int main() {
     gpufl::InitOptions opts;
     opts.app_name = "sass_divergence_demo";
     opts.log_path = "sass_divergence";
-    opts.system_sample_rate_ms = 50;
+    opts.system_sample_rate_ms = 10;
     opts.enable_kernel_details = true;
     opts.enable_debug_output = true;
     opts.sampling_auto_start = true;
@@ -221,6 +221,7 @@ int main() {
     delete[] h_in;
 
     gpufl::shutdown();
+    gpufl::generateReport();
 
     std::cout << "\n=== Done ===" << std::endl;
     std::cout << "Logs: " << opts.log_path << ".scope.log" << std::endl;
