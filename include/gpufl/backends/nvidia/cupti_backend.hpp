@@ -49,6 +49,11 @@ class CuptiBackend : public IMonitorBackend {
 
     bool IsActive() const { return active_.load(); }
     const MonitorOptions& GetOptions() const { return opts_; }
+
+    // Flush any pending kernel metadata as synthetic activity records.
+    // Called from scope stop after cudaDeviceSynchronize() so durations
+    // reflect actual GPU execution time.
+    void FlushPendingKernels();
     CUpti_SubscriberHandle GetSubscriber() const { return subscriber_; }
 
     void OnScopeStart(const char* name) override {
@@ -58,6 +63,12 @@ class CuptiBackend : public IMonitorBackend {
     void OnScopeStop(const char* name) override {
         GFL_LOG_DEBUG("OnScopeStop");
         if (engine_) engine_->onScopeStop(name);
+        // After engine scope stop (which does cudaDeviceSynchronize),
+        // flush any pending kernel records with real durations.
+        if (opts_.profiling_engine == ProfilingEngine::PcSampling ||
+            opts_.profiling_engine == ProfilingEngine::PcSamplingWithSass) {
+            FlushPendingKernels();
+        }
     }
     void OnPerfScopeStart(const char* name) override {
         if (engine_) engine_->onPerfScopeStart(name);

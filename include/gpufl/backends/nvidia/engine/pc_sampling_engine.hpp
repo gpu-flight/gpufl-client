@@ -40,6 +40,14 @@ class PcSamplingEngine final : public IProfilingEngine {
     void onScopeStart(const char* name) override;
     void onScopeStop(const char* name)  override;
 
+    /// True when using the PC Sampling API (newer GPUs) rather than
+    /// the legacy Activity API.  Used by the composite engine to decide
+    /// whether SASS metrics can safely coexist.
+    bool isSamplingAPI() const {
+        return pc_sampling_method_ == Method::SamplingAPI;
+    }
+
+
    private:
     enum class Method {
         None,        // PC Sampling not available / not initialized

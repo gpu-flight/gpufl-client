@@ -2,7 +2,6 @@
 
 #include <zlib.h>
 
-#include "gpufl/backends/nvidia/cupti_utils.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/monitor.hpp"
 
@@ -14,7 +13,7 @@ ResourceHandler::ResourceHandler(CuptiBackend *backend) : backend_(backend) {
 
 ResourceHandler::~ResourceHandler() {
     {
-        std::lock_guard<std::mutex> lk(pending_mu_);
+        std::lock_guard lk(pending_mu_);
         stop_worker_ = true;
     }
     pending_cv_.notify_all();
@@ -89,7 +88,7 @@ void ResourceHandler::workerLoop() {
     while (true) {
         std::vector<uint8_t> data;
         {
-            std::unique_lock<std::mutex> lk(pending_mu_);
+            std::unique_lock lk(pending_mu_);
             pending_cv_.wait(lk,
                              [this] { return !pending_.empty() || stop_worker_; });
             if (stop_worker_ && pending_.empty()) return;
@@ -108,27 +107,31 @@ void ResourceHandler::workerLoop() {
         // cuptiSassMetricsEnable() is still running on another thread.
         // Using zlib directly avoids all CUPTI locks.
         GFL_LOG_DEBUG("Computing CRC for cubin copy, size=", data.size());
-        const uint64_t cubinCrc = static_cast<uint64_t>(
-            crc32(0, data.data(), static_cast<uInt>(data.size())));
+        const uint64_t cubinCrc = crc32(0, data.data(), static_cast<uInt>(data.size()));
 
         bool isNew = false;
         const uint8_t *enqueuePtr = nullptr;
         size_t enqueueSize = 0;
         {
-            std::lock_guard<std::mutex> lk(backend_->cubin_mu_);
+            GFL_LOG_DEBUG("Lock here");
+            std::lock_guard lk(backend_->cubin_mu_);
+            GFL_LOG_DEBUG("Lock acquired");
             if (backend_->cubin_by_crc_.find(cubinCrc) ==
                 backend_->cubin_by_crc_.end()) {
-                auto &info = backend_->cubin_by_crc_[cubinCrc];
-                info.crc = cubinCrc;
-                info.data = std::move(data);
-                enqueuePtr = info.data.data();
-                enqueueSize = info.data.size();
+                auto &[map_data, map_crc] = backend_->cubin_by_crc_[cubinCrc];
+
+                map_crc = cubinCrc;
+                map_data = std::move(data); // Now successfully moves the outer bytes into the map
+
+                enqueuePtr = map_data.data();
+                enqueueSize = map_data.size(); // Will now be > 0
                 isNew = true;
             }
         }
         if (isNew) {
             Monitor::EnqueueCubinForDisassembly(cubinCrc, enqueuePtr,
                                                 enqueueSize);
+            GFL_LOG_DEBUG("Finished EnqueueCubinForDisassembly!");
         }
     }
 }

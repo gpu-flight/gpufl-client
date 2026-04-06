@@ -24,10 +24,6 @@ void AmdMonitorAdapter::stop() {
     if (backend_) backend_->stop();
 }
 
-void AmdMonitorAdapter::flushActivities() {
-    if (backend_) backend_->flushBuffers();
-}
-
 std::string AmdMonitorAdapter::memcpyKindToString(const uint32_t kind) const {
     switch (kind) {
         case 1:

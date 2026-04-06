@@ -180,6 +180,7 @@ void CuptiBackend::start() {
     if (engine_) {
         if (EnsureCudaContext(&ctx_)) {
             cuptiGetDeviceId(ctx_, &device_id_);
+            GetSMProps(device_id_);
             chip_name_ = getChipName(device_id_);
             cached_device_name_ = GetCurrentDeviceName();
 
@@ -243,8 +244,70 @@ void CuptiBackend::stop() {
 void CuptiBackend::RegisterHandler(
     const std::shared_ptr<ICuptiHandler>& handler) {
     if (!handler) return;
-    std::lock_guard<std::mutex> lk(handler_mu_);
+    std::lock_guard lk(handler_mu_);
     handlers_.push_back(handler);
+}
+
+void CuptiBackend::FlushPendingKernels() {
+    const int64_t flushNs = detail::GetTimestampNs();
+    std::unordered_map<uint64_t, LaunchMeta> pending;
+    {
+        std::lock_guard lk(meta_mu_);
+        pending = std::move(meta_by_corr_);
+    }
+    for (auto& [corr, m] : pending) {
+        ActivityRecord out{};
+        out.device_id = device_id_;
+        out.stream = 0;
+        out.type = TraceType::KERNEL;
+        std::snprintf(out.name, sizeof(out.name), "%s", m.name);
+        out.cpu_start_ns = m.api_enter_ns;
+        out.duration_ns = flushNs - m.api_enter_ns;
+        out.corr_id = static_cast<unsigned>(corr);
+        out.api_start_ns = m.api_enter_ns;
+        out.api_exit_ns = m.api_exit_ns > 0 ? m.api_exit_ns : flushNs;
+        out.scope_depth = m.scope_depth;
+        out.stack_id = m.stack_id;
+        std::copy(std::begin(m.user_scope), std::end(m.user_scope),
+                  std::begin(out.user_scope));
+        if (m.has_details) {
+            out.has_details = true;
+            out.grid_x = m.grid_x;
+            out.grid_y = m.grid_y;
+            out.grid_z = m.grid_z;
+            out.block_x = m.block_x;
+            out.block_y = m.block_y;
+            out.block_z = m.block_z;
+            out.dyn_shared = m.dyn_shared;
+
+            SmProps props = GetSMProps(out.device_id);
+            int threadsPerBlock =
+                out.block_x * out.block_y * out.block_z;
+            int warpsPerBlock =
+                (threadsPerBlock + props.warpSize - 1) / props.warpSize;
+            int maxWarpsPerSM = props.maxThreadsPerSM / props.warpSize;
+            int warpBlocks = (warpsPerBlock > 0)
+                                 ? (maxWarpsPerSM / warpsPerBlock) : 0;
+            int blockBlocks = props.maxBlocksPerSM;
+            out.max_active_blocks = std::min(warpBlocks, blockBlocks);
+            auto toOcc = [&](int blocks) -> float {
+                return (maxWarpsPerSM > 0 && warpsPerBlock > 0)
+                           ? std::min(1.0f,
+                                      static_cast<float>(
+                                          blocks * warpsPerBlock) /
+                                          maxWarpsPerSM)
+                           : 0.0f;
+            };
+            out.warp_occupancy = toOcc(warpBlocks);
+            out.block_occupancy = toOcc(blockBlocks);
+            out.occupancy = out.warp_occupancy;
+            std::snprintf(out.limiting_resource,
+                          sizeof(out.limiting_resource), "%s", "warps");
+        }
+        g_monitorBuffer.Push(out);
+        kernel_activity_seen_.fetch_add(1, std::memory_order_relaxed);
+        kernel_activity_emitted_.fetch_add(1, std::memory_order_relaxed);
+    }
 }
 
 // ---- Static callbacks ------------------------------------------------------
@@ -262,7 +325,7 @@ void CUPTIAPI CuptiBackend::BufferCompleted(CUcontext context,
                                             const size_t validSize) {
     auto* backend = g_activeBackend.load(std::memory_order_acquire);
     if (!backend) {
-        ::gpufl::DebugLogger::error("[CUPTI] ",
+        DebugLogger::error("[CUPTI] ",
                                     "BufferCompleted: No active backend!");
         if (buffer) free(buffer);
         return;
@@ -274,7 +337,7 @@ void CUPTIAPI CuptiBackend::BufferCompleted(CUcontext context,
 
     std::vector<std::shared_ptr<ICuptiHandler>> handlers;
     {
-        std::lock_guard<std::mutex> lk(backend->handler_mu_);
+        std::lock_guard lk(backend->handler_mu_);
         handlers = backend->handlers_;
     }
 

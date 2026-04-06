@@ -7,6 +7,15 @@
 
 #include <sstream>
 
+#include "gpufl/core/debug_logger.hpp"
+
+#ifdef _WIN32
+#include <windows.h>
+#include <pdh.h>
+#include <pdhmsg.h>
+#pragma comment(lib, "pdh.lib")
+#endif
+
 // Define max links (Hopper/Ampere usually have max 12-18 links)
 #define MAX_LVLINKS 18
 
@@ -41,9 +50,16 @@ NvmlCollector::NvmlCollector() {
     if (r != NVML_SUCCESS) {
         deviceCount_ = 0;
     }
+
+#ifdef _WIN32
+    initPdh_();
+#endif
 }
 
 NvmlCollector::~NvmlCollector() {
+#ifdef _WIN32
+    cleanupPdh_();
+#endif
     if (initialized_) {
         nvmlShutdown();
         initialized_ = false;
@@ -92,6 +108,14 @@ std::vector<gpufl::DeviceSample> NvmlCollector::sampleAll() {
             s.gpu_util = static_cast<int>(util.gpu);
             s.mem_util = static_cast<int>(util.memory);
         }
+#ifdef _WIN32
+        // On Windows WDDM, NVML returns 0% for CUDA compute workloads.
+        // Fall back to the Windows PDH performance counter for GPU engine
+        // utilization which reports correctly on WDDM.
+        if (s.gpu_util == 0 && pdh_available_) {
+            s.gpu_util = sampleGpuUtilPdh_();
+        }
+#endif
 
         nvmlTemperature_t tempInfo{};
         tempInfo.version = nvmlTemperature_v1;
@@ -130,6 +154,46 @@ std::vector<gpufl::DeviceSample> NvmlCollector::sampleAll() {
         } else {
             s.throttle_power = false;
             s.throttle_thermal = false;
+        }
+
+        // ---------------------------------------------------------
+        // Extended metrics (silently ignore failures — not all GPUs
+        // support all sensors)
+        // ---------------------------------------------------------
+
+        // Fan speed (may fail on laptops / blower-less cards)
+        unsigned int fanSpeed = 0;
+        if (nvmlDeviceGetFanSpeed_v2(dev, 0, &fanSpeed) == NVML_SUCCESS)
+            s.fan_speed_pct = fanSpeed;
+
+        // Memory temperature — not available via NVML on NVIDIA GPUs
+        // (only NVML_TEMPERATURE_GPU sensor exists). Left at 0.
+
+        // Junction temperature — on NVIDIA, the GPU die sensor IS the
+        // junction temp, so mirror temp_c.
+        s.temp_junction_c = s.temp_c;
+
+        // Cumulative energy consumption (millijoules → microjoules)
+        {
+            unsigned long long energyMj = 0;
+            if (nvmlDeviceGetTotalEnergyConsumption(dev, &energyMj) ==
+                NVML_SUCCESS)
+                s.energy_uj = energyMj * 1000ULL;
+        }
+
+        // ECC error counters (only on GPUs with ECC — datacenter cards)
+        {
+            unsigned long long corrected = 0, uncorrected = 0;
+            if (nvmlDeviceGetMemoryErrorCounter(
+                    dev, NVML_MEMORY_ERROR_TYPE_CORRECTED,
+                    NVML_VOLATILE_ECC, NVML_MEMORY_LOCATION_DEVICE_MEMORY,
+                    &corrected) == NVML_SUCCESS)
+                s.ecc_corrected = corrected;
+            if (nvmlDeviceGetMemoryErrorCounter(
+                    dev, NVML_MEMORY_ERROR_TYPE_UNCORRECTED,
+                    NVML_VOLATILE_ECC, NVML_MEMORY_LOCATION_DEVICE_MEMORY,
+                    &uncorrected) == NVML_SUCCESS)
+                s.ecc_uncorrected = uncorrected;
         }
 
         // ---------------------------------------------------------
@@ -185,4 +249,72 @@ std::vector<gpufl::DeviceSample> NvmlCollector::sampleAll() {
 
     return out;
 }
+#ifdef _WIN32
+void NvmlCollector::initPdh_() {
+    PDH_HQUERY query = nullptr;
+    if (PdhOpenQueryW(nullptr, 0, &query) != ERROR_SUCCESS) return;
+
+    PDH_HCOUNTER counter = nullptr;
+    // English counter name — locale-independent.
+    // engtype_3D = 3D/Compute engine (CUDA workloads).
+    PDH_STATUS st = PdhAddEnglishCounterW(
+        query,
+        L"\\GPU Engine(*)\\Utilization Percentage",
+        0, &counter);
+    if (st != ERROR_SUCCESS) {
+        PdhCloseQuery(query);
+        return;
+    }
+
+    // First collect establishes baseline for rate counters.
+    PdhCollectQueryData(query);
+
+    pdh_query_ = query;
+    pdh_gpu_counter_ = counter;
+    pdh_available_ = true;
+    GFL_LOG_DEBUG("[NVML] PDH GPU utilization counter initialized");
+}
+
+void NvmlCollector::cleanupPdh_() {
+    if (pdh_query_) {
+        PdhCloseQuery(static_cast<PDH_HQUERY>(pdh_query_));
+        pdh_query_ = nullptr;
+        pdh_gpu_counter_ = nullptr;
+        pdh_available_ = false;
+    }
+}
+
+unsigned int NvmlCollector::sampleGpuUtilPdh_() {
+    auto query = static_cast<PDH_HQUERY>(pdh_query_);
+    auto counter = static_cast<PDH_HCOUNTER>(pdh_gpu_counter_);
+
+    if (PdhCollectQueryData(query) != ERROR_SUCCESS) return 0;
+
+    // The wildcard counter returns multiple instances (one per GPU engine).
+    // Sum the 3D/Compute engine utilization across all instances.
+    DWORD bufSize = 0, itemCount = 0;
+    PDH_STATUS st = PdhGetFormattedCounterArrayW(
+        counter, PDH_FMT_DOUBLE, &bufSize, &itemCount, nullptr);
+    if (st != PDH_MORE_DATA || bufSize == 0) return 0;
+
+    std::vector<uint8_t> buf(bufSize);
+    auto* items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buf.data());
+    st = PdhGetFormattedCounterArrayW(
+        counter, PDH_FMT_DOUBLE, &bufSize, &itemCount, items);
+    if (st != ERROR_SUCCESS) return 0;
+
+    double maxUtil = 0.0;
+    for (DWORD i = 0; i < itemCount; ++i) {
+        if (items[i].FmtValue.CStatus == PDH_CSTATUS_VALID_DATA) {
+            if (items[i].FmtValue.doubleValue > maxUtil)
+                maxUtil = items[i].FmtValue.doubleValue;
+        }
+    }
+
+    // PDH returns 0-100 as double; clamp and convert.
+    if (maxUtil > 100.0) maxUtil = 100.0;
+    return static_cast<unsigned int>(maxUtil);
+}
+#endif
+
 }  // namespace gpufl::nvidia

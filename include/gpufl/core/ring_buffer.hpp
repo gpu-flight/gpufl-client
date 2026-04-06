@@ -32,7 +32,7 @@ class RingBuffer {
 
    public:
     bool Push(const T& item) {
-        size_t headIdx = head_.fetch_add(1, std::memory_order_acq_rel);
+        const size_t headIdx = head_.fetch_add(1, std::memory_order_acq_rel);
         size_t index = headIdx & MASK;
 
         Slot* slot = &buffer_[index];

@@ -91,6 +91,7 @@ int main() {
     cudaFree(d_c);
 
     gpufl::shutdown();
+    gpufl::generateReport();
 
     std::cout << "\n=== Demo Complete ===" << std::endl;
     std::cout << "Check " << opts.log_path << " for detailed logs" << std::endl;
