@@ -18,24 +18,15 @@ bool PcSamplingWithSassEngine::initialize(const MonitorOptions& opts,
 }
 
 void PcSamplingWithSassEngine::start() {
-    // Start PC sampling first to determine the method.
+    // Start SASS first — cuptiSassMetricsEnable() patches loaded modules.
+    // Then start PC sampling — it must see already-patched cubins,
+    // otherwise both subsystems racing to patch on first kernel launch
+    // can deadlock.  The original deadlock was caused by periodic
+    // cuptiActivityFlushAll(0) from the collector thread (now removed),
+    // not by SASS + PC Sampling coexistence.
+    sass_->start();
+    sass_ok_ = sass_->isEnabled();
     pc_->start();
-
-    // SASS metrics use cuptiSassMetricsEnable() which lazily patches
-    // cubins on first kernel launch.  When the PC Sampling API is active
-    // (SamplingAPI/CONTINUOUS mode), the lazy patching races with PC
-    // sampling hardware setup for CUPTI internal locks, causing an
-    // intermittent deadlock on the first kernel launch.  Skip SASS in
-    // this case — PC sampling provides stall-reason data on its own.
-    if (pc_->isSamplingAPI()) {
-        sass_ok_ = false;
-        GFL_LOG_DEBUG(
-            "[PcSamplingWithSass] PC Sampling API active — skipping SASS "
-            "metrics to avoid deadlock with lazy cubin patching.");
-    } else {
-        sass_->start();
-        sass_ok_ = sass_->isEnabled();
-    }
     if (!sass_ok_) {
         GFL_LOG_DEBUG(
             "[PcSamplingWithSass] SASS metrics failed to enable — "
