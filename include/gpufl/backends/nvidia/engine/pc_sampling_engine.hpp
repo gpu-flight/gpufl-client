@@ -39,6 +39,7 @@ class PcSamplingEngine final : public IProfilingEngine {
 
     void onScopeStart(const char* name) override;
     void onScopeStop(const char* name)  override;
+    void drainData() override;
 
     /// True when using the PC Sampling API (newer GPUs) rather than
     /// the legacy Activity API.  Used by the composite engine to decide
@@ -67,6 +68,7 @@ class PcSamplingEngine final : public IProfilingEngine {
     std::atomic<bool> sampling_api_ready_{false};
     std::atomic<bool> sampling_api_started_{false};
     std::atomic<bool> sampling_api_blocked_{false};
+    bool privilege_probed_ = false;
 
     std::unique_ptr<PCSamplingBuffers, PCSamplingDeleter> pc_sampling_buffers_;
 
