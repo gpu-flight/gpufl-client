@@ -1,10 +1,9 @@
 #include <iostream>
 #include <random>
 
-#include "../../../include/gpufl/gpufl.hpp"
+#include "gpufl/gpufl.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/monitor.hpp"
-#include "gpufl/gpufl.hpp"
 
 __global__ void matmul_row_per_thread(const float* __restrict__ A,
                                       const float* __restrict__ B, float* C,
@@ -132,5 +131,6 @@ int main() {
     free(h_B);
     free(h_C);
     gpufl::shutdown();
+    gpufl::generateReport();
     return 0;
 }
