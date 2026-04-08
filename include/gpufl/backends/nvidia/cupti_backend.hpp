@@ -60,6 +60,9 @@ class CuptiBackend : public IMonitorBackend {
         GFL_LOG_DEBUG("OnScopeStart");
         if (engine_) engine_->onScopeStart(name);
     }
+    void DrainProfilingData() override {
+        if (engine_) engine_->drainData();
+    }
     void OnScopeStop(const char* name) override {
         GFL_LOG_DEBUG("OnScopeStop");
         if (engine_) engine_->onScopeStop(name);

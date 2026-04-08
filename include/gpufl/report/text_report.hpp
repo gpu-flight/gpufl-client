@@ -95,6 +95,7 @@ class TextReport {
         uint64_t metric_value = 0;
         int stall_reason = 0;
         int sample_kind = 0;
+        std::string reason_name;
     };
 
     struct SessionInfo {
