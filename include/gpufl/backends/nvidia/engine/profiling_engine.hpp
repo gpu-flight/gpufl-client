@@ -60,6 +60,10 @@ class IProfilingEngine {
     virtual void onScopeStart(const char* /*name*/) {}
     virtual void onScopeStop(const char* /*name*/) {}
 
+    /** @brief Periodically drain buffered profiling data (e.g. PC Sampling).
+     *  Called from the collector thread every ~250ms. */
+    virtual void drainData() {}
+
     // ---- Perf-scope hooks (Range Profiler / Perfworks) ----
     virtual void onPerfScopeStart(const char* /*name*/) {}
     virtual void onPerfScopeStop(const char* /*name*/) {}

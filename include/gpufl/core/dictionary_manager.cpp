@@ -6,7 +6,12 @@
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
-#ifndef _WIN32
+
+#ifdef _WIN32
+#include <io.h>       // _open, _write, _close, _unlink, _mktemp_s
+#include <fcntl.h>    // _O_CREAT, _O_WRONLY, _O_BINARY
+#include <windows.h>  // GetTempPathA
+#else
 #include <unistd.h>
 #endif
 
@@ -98,10 +103,6 @@ void DictionaryManager::enqueueDisassembly(uint64_t crc, const uint8_t* data,
 
 void DictionaryManager::flushDisassembly(Logger& logger,
                                           const std::string& session_id) {
-#ifdef _WIN32
-    (void)logger; (void)session_id;
-    return;  // nvdisasm subprocess not supported on Windows
-#else
     std::unordered_map<uint64_t, std::vector<uint8_t>> pending;
     {
         std::lock_guard lk(mu_);
@@ -111,6 +112,35 @@ void DictionaryManager::flushDisassembly(Logger& logger,
 
     for (auto& [crc, bytes] : pending) {
         // Write cubin to a temp file
+        std::string tmpPathStr;
+#ifdef _WIN32
+        char tmpDir[MAX_PATH];
+        DWORD len = GetTempPathA(MAX_PATH, tmpDir);
+        if (len == 0 || len >= MAX_PATH) {
+            GFL_LOG_ERROR("[flushDisassembly] GetTempPathA failed");
+            continue;
+        }
+        char tmpTemplate[MAX_PATH];
+        std::snprintf(tmpTemplate, MAX_PATH, "%sgpufl_cubin_XXXXXX", tmpDir);
+        if (_mktemp_s(tmpTemplate, std::strlen(tmpTemplate) + 1) != 0) {
+            GFL_LOG_ERROR("[flushDisassembly] _mktemp_s failed");
+            continue;
+        }
+        int fd = _open(tmpTemplate, _O_CREAT | _O_WRONLY | _O_BINARY, 0600);
+        if (fd < 0) {
+            GFL_LOG_ERROR("[flushDisassembly] _open failed");
+            continue;
+        }
+        {
+            int written = _write(fd, bytes.data(), static_cast<unsigned>(bytes.size()));
+            _close(fd);
+            if (written < 0) {
+                _unlink(tmpTemplate);
+                continue;
+            }
+        }
+        tmpPathStr = tmpTemplate;
+#else
         char tmpPath[] = "/tmp/gpufl_cubin_XXXXXX";
         int fd = mkstemp(tmpPath);
         if (fd < 0) {
@@ -125,6 +155,8 @@ void DictionaryManager::flushDisassembly(Logger& logger,
                 continue;
             }
         }
+        tmpPathStr = tmpPath;
+#endif
 
         // Detect platform and select disassembler
         // AMD code objects are ELF with e_machine == EM_AMDGPU (0xE0)
@@ -135,26 +167,51 @@ void DictionaryManager::flushDisassembly(Logger& logger,
 
         char cmd[640];
         if (isAmd) {
+#ifdef _WIN32
+            // ROCm on Windows: not typical, skip AMD disassembly
+            std::remove(tmpPathStr.c_str());
+            continue;
+#else
             // Discover llvm-objdump path
             const char* rocmPath = std::getenv("ROCM_PATH");
             if (rocmPath && rocmPath[0]) {
                 std::snprintf(cmd, sizeof(cmd),
                               "%s/llvm/bin/llvm-objdump -d %s 2>/dev/null",
-                              rocmPath, tmpPath);
+                              rocmPath, tmpPathStr.c_str());
             } else {
                 std::snprintf(cmd, sizeof(cmd),
                               "/opt/rocm/llvm/bin/llvm-objdump -d %s 2>/dev/null",
-                              tmpPath);
+                              tmpPathStr.c_str());
             }
+#endif
         } else {
+#ifdef _WIN32
+            // Discover nvdisasm.exe via CUDA_PATH env var
+            const char* cudaPath = std::getenv("CUDA_PATH");
+            if (cudaPath && cudaPath[0]) {
+                std::snprintf(cmd, sizeof(cmd),
+                              "\"%s\\bin\\nvdisasm.exe\" --print-code \"%s\" 2>NUL",
+                              cudaPath, tmpPathStr.c_str());
+            } else {
+                // Fallback: try nvdisasm on PATH
+                std::snprintf(cmd, sizeof(cmd),
+                              "nvdisasm.exe --print-code \"%s\" 2>NUL",
+                              tmpPathStr.c_str());
+            }
+#else
             std::snprintf(cmd, sizeof(cmd),
                           "/usr/local/cuda/bin/nvdisasm --print-code %s 2>/dev/null",
-                          tmpPath);
+                          tmpPathStr.c_str());
+#endif
         }
 
+#ifdef _WIN32
+        FILE* pipe = _popen(cmd, "r");
+#else
         FILE* pipe = ::popen(cmd, "r");
+#endif
         if (!pipe) {
-            ::unlink(tmpPath);
+            std::remove(tmpPathStr.c_str());
             GFL_LOG_ERROR("[flushDisassembly] popen failed — disassembler unavailable?");
             continue;
         }
@@ -256,8 +313,12 @@ void DictionaryManager::flushDisassembly(Logger& logger,
         GFL_LOG_DEBUG("[flushDisassembly] parsed ", funcEntries.size(),
                       " functions from ", isAmd ? "code object" : "cubin",
                       " crc=", crc);
+#ifdef _WIN32
+        _pclose(pipe);
+#else
         ::pclose(pipe);
-        ::unlink(tmpPath);
+#endif
+        std::remove(tmpPathStr.c_str());
 
         // Emit one cubin_disassembly JSON message per function
         for (auto& [funcName, entries] : funcEntries) {
@@ -278,7 +339,6 @@ void DictionaryManager::flushDisassembly(Logger& logger,
             logger.write(DictLine{oss.str()});
         }
     }
-#endif  // !_WIN32
 }
 
 void DictionaryManager::flushDictionary(Logger& logger,

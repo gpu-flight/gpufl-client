@@ -368,12 +368,24 @@ void TextReport::parseScopeLog(const std::vector<JsonValue>& records,
                 int met_id = static_cast<int>(rowInt(row, ci, "metric_id"));
                 auto fn_it = function_dict.find(fn_id);
                 auto met_it = metric_dict.find(met_id);
+
+                // Read reason_name if available in the columnar data
+                std::string rname;
+                auto rn_it = ci.find("reason_name");
+                if (rn_it != ci.end()) {
+                    size_t idx = rn_it->second;
+                    const auto& arr = row.get_array();
+                    if (idx < arr.size() && arr[idx].is_string())
+                        rname = arr[idx].get_string();
+                }
+
                 profile_samples_.push_back({
                     (fn_it != function_dict.end()) ? fn_it->second : "",
                     (met_it != metric_dict.end()) ? met_it->second : "",
                     rowU64(row, ci, "metric_value"),
                     static_cast<int>(rowInt(row, ci, "stall_reason")),
                     static_cast<int>(rowInt(row, ci, "sample_kind")),
+                    std::move(rname),
                 });
             }
         }
@@ -812,73 +824,244 @@ void TextReport::writeScopeSummary(std::ostringstream& out) const {
     }
 }
 
+// ── Profile analysis helpers ────────────────────────────────────────────────
+
+static std::string fmtCount(uint64_t v) {
+    std::string s = std::to_string(v);
+    int n = static_cast<int>(s.size());
+    std::string out;
+    for (int i = 0; i < n; ++i) {
+        if (i > 0 && (n - i) % 3 == 0) out += ',';
+        out += s[i];
+    }
+    return out;
+}
+
+static std::string makeBar(double pct, int maxWidth = 20) {
+    int filled = static_cast<int>(pct / 100.0 * maxWidth + 0.5);
+    if (filled < 0) filled = 0;
+    if (filled > maxWidth) filled = maxWidth;
+    return std::string(filled, '#');
+}
+
+// Per-function collected data for the profile analysis
+struct FuncProfile {
+    std::map<std::string, uint64_t> stalls;    // reason → count
+    uint64_t totalStalls = 0;
+    uint64_t warpInsts = 0;
+    uint64_t threadInsts = 0;
+    uint64_t globalSectors = 0;
+    uint64_t idealSectors = 0;
+};
+
 void TextReport::writeProfileAnalysis(std::ostringstream& out) const {
     out << "\n" << SEP << "\n  Profile / SASS Analysis\n" << SEP << "\n";
     if (profile_samples_.empty()) { out << "  (No profile sample data)\n"; return; }
 
-    // Stall reason distribution
-    std::map<std::string, uint64_t> stallCounts;
-    for (const auto& ps : profile_samples_)
-        if (ps.stall_reason > 1)
-            stallCounts[resolveStallReason(ps.stall_reason)] += ps.metric_value;
+    // Convert a raw CUPTI stall metric name to a human-readable short name.
+    // e.g. "smsp__pcsamp_warps_issue_stalled_wait_not_issued" → "Wait (not issued)"
+    auto shortenStallName = [](const std::string& raw) -> std::string {
+        const std::string prefix = "smsp__pcsamp_warps_issue_stalled_";
+        std::string s = raw;
+        if (s.size() > prefix.size() && s.substr(0, prefix.size()) == prefix)
+            s = s.substr(prefix.size());
 
-    if (!stallCounts.empty()) {
-        uint64_t totalStalls = std::accumulate(stallCounts.begin(), stallCounts.end(), uint64_t(0),
-                                               [](uint64_t s, const auto& p) { return s + p.second; });
+        // Handle "_not_issued" suffix
+        const std::string notIssued = "_not_issued";
+        bool isNotIssued = false;
+        if (s.size() > notIssued.size() &&
+            s.substr(s.size() - notIssued.size()) == notIssued) {
+            s = s.substr(0, s.size() - notIssued.size());
+            isNotIssued = true;
+        }
 
-        out << "  Stall Reason Distribution:\n";
-        out << "  " << std::left << std::setw(30) << "Reason"
-            << std::right << std::setw(10) << "Samples" << std::setw(8) << "Pct" << "\n";
-        out << "  " << std::string(48, '-') << "\n";
+        // Replace underscores with spaces and capitalize first letter of each word
+        for (size_t i = 0; i < s.size(); ++i) {
+            if (s[i] == '_') s[i] = ' ';
+            if (i == 0 || (i > 0 && s[i-1] == ' '))
+                s[i] = static_cast<char>(std::toupper(static_cast<unsigned char>(s[i])));
+        }
 
-        auto ranked = sortedTopN(stallCounts, 0, [](uint64_t v) { return static_cast<double>(v); });
-        for (const auto& [reason, count] : ranked)
-            out << "  " << std::left << std::setw(30) << reason
-                << std::right << std::setw(10) << count
-                << std::setw(7) << std::fixed << std::setprecision(1) << (count * 100.0 / totalStalls) << "%\n";
+        if (isNotIssued) s += " (idle)";
+        return s;
+    };
 
-        // Per-kernel stall breakdown
-        std::map<std::string, uint64_t> kernStalls;
-        for (const auto& ps : profile_samples_)
-            if (ps.stall_reason > 1 && !ps.function_name.empty())
-                kernStalls[ps.function_name] += ps.metric_value;
+    // Resolve stall reason display name: prefer reason_name from log, then
+    // metric_name (for PC sampling, reason_name is interned as metric_name),
+    // then fall back to the static map. Always shorten CUPTI-style names.
+    auto resolveStallDisplay = [&](const ProfileSampleRecord& ps) -> std::string {
+        std::string raw;
+        if (!ps.reason_name.empty())
+            raw = ps.reason_name;
+        else if (ps.sample_kind == 0 && !ps.metric_name.empty())
+            raw = ps.metric_name;
+        else
+            return resolveStallReason(ps.stall_reason);
+        return shortenStallName(raw);
+    };
 
-        if (!kernStalls.empty()) {
-            auto topKern = sortedTopN(kernStalls, top_n_, [](uint64_t v) { return static_cast<double>(v); });
-            out << "\n  Top " << top_n_ << " Kernels by Stall Samples:\n";
-            for (const auto& [fn, count] : topKern)
-                out << "    " << std::left << std::setw(52) << truncate(shortenKernelName(fn), 50)
-                    << std::right << std::setw(8) << count << " samples\n";
+    // ── Collect per-function data ───────────────────────────────────────────
+    std::map<std::string, FuncProfile> byFunc;
+    for (const auto& ps : profile_samples_) {
+        std::string fn = ps.function_name.empty() ? "(unknown)" : ps.function_name;
+        auto& fp = byFunc[fn];
+
+        if (ps.stall_reason > 1) {
+            std::string reason = resolveStallDisplay(ps);
+            fp.stalls[reason] += ps.metric_value;
+            fp.totalStalls += ps.metric_value;
+        }
+        if (ps.metric_name == "smsp__sass_inst_executed")
+            fp.warpInsts += ps.metric_value;
+        else if (ps.metric_name == "smsp__sass_thread_inst_executed")
+            fp.threadInsts += ps.metric_value;
+        else if (ps.metric_name == "smsp__sass_sectors_mem_global")
+            fp.globalSectors += ps.metric_value;
+        else if (ps.metric_name == "smsp__sass_sectors_mem_global_ideal")
+            fp.idealSectors += ps.metric_value;
+    }
+
+    // ── Rank functions by total stall samples ───────────────────────────────
+    std::vector<std::pair<std::string, const FuncProfile*>> ranked;
+    for (const auto& [fn, fp] : byFunc)
+        ranked.emplace_back(fn, &fp);
+    std::sort(ranked.begin(), ranked.end(),
+              [](const auto& a, const auto& b) { return a.second->totalStalls > b.second->totalStalls; });
+    if (static_cast<int>(ranked.size()) > top_n_)
+        ranked.resize(top_n_);
+
+    // ── Write per-function analysis ─────────────────────────────────────────
+    for (const auto& [fn, fp] : ranked) {
+        std::string shortName = shortenKernelName(fn);
+        out << "\n  " << shortName;
+        if (fp->totalStalls > 0)
+            out << "  (" << fmtCount(fp->totalStalls) << " stall samples)";
+        out << "\n  " << std::string((std::min)(shortName.size() + 30, size_t(72)), '-') << "\n";
+
+        // Stall distribution
+        if (!fp->stalls.empty()) {
+            auto stallRanked = sortedTopN(fp->stalls, 0, [](uint64_t v) { return static_cast<double>(v); });
+            out << "    Stalls:\n";
+            for (const auto& [reason, count] : stallRanked) {
+                double pct = fp->totalStalls > 0 ? count * 100.0 / fp->totalStalls : 0;
+                out << "      " << std::left << std::setw(28) << truncate(reason, 26)
+                    << std::right << std::setw(8) << fmtCount(count)
+                    << std::setw(7) << std::fixed << std::setprecision(1) << pct << "%  "
+                    << makeBar(pct) << "\n";
+            }
+        }
+
+        // Instruction analysis
+        if (fp->warpInsts > 0 || fp->threadInsts > 0) {
+            out << "    Instructions:\n";
+            if (fp->warpInsts > 0)
+                out << "      Warp Insts:           " << std::setw(16) << fmtCount(fp->warpInsts) << "\n";
+            if (fp->threadInsts > 0)
+                out << "      Thread Insts:         " << std::setw(16) << fmtCount(fp->threadInsts) << "\n";
+            if (fp->warpInsts > 0 && fp->threadInsts > 0) {
+                double ratio = static_cast<double>(fp->threadInsts) / fp->warpInsts;
+                double eff = ratio / 32.0 * 100;
+                out << "      Warp Efficiency:      " << std::setw(15)
+                    << (std::to_string(static_cast<int>(ratio * 10) / 10) + "." +
+                        std::to_string(static_cast<int>(ratio * 10) % 10))
+                    << " / 32 (" << std::fixed << std::setprecision(1) << eff << "%)\n";
+            }
+        }
+
+        // Memory analysis
+        if (fp->globalSectors > 0) {
+            out << "    Memory:\n";
+            out << "      Global Sectors:       " << std::setw(16) << fmtCount(fp->globalSectors) << "\n";
+            if (fp->idealSectors > 0) {
+                out << "      Ideal Sectors:        " << std::setw(16) << fmtCount(fp->idealSectors) << "\n";
+                double memEff = static_cast<double>(fp->idealSectors) / fp->globalSectors * 100;
+                out << "      Memory Efficiency:    " << std::setw(15) << std::fixed
+                    << std::setprecision(1) << memEff << "%\n";
+            }
+        }
+
+        // Interpretation hints
+        {
+            std::vector<std::string> hints;
+
+            // Memory efficiency hint
+            if (fp->globalSectors > 0 && fp->idealSectors > 0) {
+                double memEff = static_cast<double>(fp->idealSectors) / fp->globalSectors * 100;
+                if (memEff < 50)
+                    hints.push_back("Low memory efficiency (" +
+                        std::to_string(static_cast<int>(memEff)) +
+                        "%) - consider coalesced access patterns or shared memory tiling.");
+            }
+
+            // Stall-based hints
+            if (fp->totalStalls > 0) {
+                uint64_t memStalls = 0, pipeStalls = 0, execStalls = 0;
+                for (const auto& [r, c] : fp->stalls) {
+                    std::string lower = r;
+                    for (auto& ch : lower) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                    if (lower.find("memory") != std::string::npos || lower.find("mem") != std::string::npos)
+                        memStalls += c;
+                    if (lower.find("pipe") != std::string::npos)
+                        pipeStalls += c;
+                    if (lower.find("execution") != std::string::npos || lower.find("exec") != std::string::npos)
+                        execStalls += c;
+                }
+                double memPct = memStalls * 100.0 / fp->totalStalls;
+                double pipePct = pipeStalls * 100.0 / fp->totalStalls;
+                double execPct = execStalls * 100.0 / fp->totalStalls;
+
+                if (memPct > 30)
+                    hints.push_back("Memory stalls dominate (" +
+                        std::to_string(static_cast<int>(memPct)) +
+                        "%) - optimize memory access patterns.");
+                if (pipePct > 20)
+                    hints.push_back("Pipe busy stalls (" +
+                        std::to_string(static_cast<int>(pipePct)) +
+                        "%) - arithmetic unit contention; consider reducing instruction intensity.");
+                if (execPct > 30)
+                    hints.push_back("Execution dependency stalls (" +
+                        std::to_string(static_cast<int>(execPct)) +
+                        "%) - increase instruction-level parallelism.");
+            }
+
+            // Warp efficiency hint
+            if (fp->warpInsts > 0 && fp->threadInsts > 0) {
+                double eff = static_cast<double>(fp->threadInsts) / fp->warpInsts / 32.0 * 100;
+                if (eff < 90)
+                    hints.push_back("Low warp efficiency (" +
+                        std::to_string(static_cast<int>(eff)) +
+                        "%) - reduce branch divergence within warps.");
+            }
+
+            if (!hints.empty()) {
+                out << "    Hints:\n";
+                for (const auto& h : hints)
+                    out << "      * " << h << "\n";
+            }
         }
     }
 
-    // SASS metrics summary
-    std::map<std::string, uint64_t> metricSums;
-    for (const auto& ps : profile_samples_)
-        if (!ps.metric_name.empty())
-            metricSums[ps.metric_name] += ps.metric_value;
+    // ── Global SASS metrics (other metrics not covered above) ───────────────
+    std::map<std::string, uint64_t> otherMetrics;
+    for (const auto& ps : profile_samples_) {
+        if (ps.metric_name.empty()) continue;
+        if (ps.stall_reason > 1 && ps.sample_kind == 0) continue;  // stall data already shown
+        if (ps.metric_name == "smsp__sass_inst_executed") continue;
+        if (ps.metric_name == "smsp__sass_thread_inst_executed") continue;
+        if (ps.metric_name == "smsp__sass_sectors_mem_global") continue;
+        if (ps.metric_name == "smsp__sass_sectors_mem_global_ideal") continue;
+        otherMetrics[ps.metric_name] += ps.metric_value;
+    }
 
-    if (!metricSums.empty()) {
-        auto ranked = sortedTopN(metricSums, 0, [](uint64_t v) { return static_cast<double>(v); });
-        out << "\n  SASS Metrics Summary:\n";
+    if (!otherMetrics.empty()) {
+        auto metricRanked = sortedTopN(otherMetrics, 0, [](uint64_t v) { return static_cast<double>(v); });
+        out << "\n  Other SASS Metrics:\n";
         out << "  " << std::left << std::setw(50) << "Metric"
-            << std::right << std::setw(12) << "Total" << "\n";
-        out << "  " << std::string(62, '-') << "\n";
-        for (const auto& [metric, total] : ranked)
+            << std::right << std::setw(16) << "Total" << "\n";
+        out << "  " << std::string(66, '-') << "\n";
+        for (const auto& [metric, total] : metricRanked)
             out << "  " << std::left << std::setw(50) << truncate(metric, 48)
-                << std::right << std::setw(12) << total << "\n";
-
-        // Thread divergence analysis
-        auto warpIt = metricSums.find("smsp__sass_inst_executed");
-        auto threadIt = metricSums.find("smsp__sass_thread_inst_executed");
-        if (warpIt != metricSums.end() && threadIt != metricSums.end() && warpIt->second > 0) {
-            double ratio = static_cast<double>(threadIt->second) / warpIt->second;
-            out << "\n  Thread Divergence Analysis:\n";
-            out << "    Warp Instructions:    " << warpIt->second << "\n";
-            out << "    Thread Instructions:  " << threadIt->second << "\n";
-            out << "    Avg Threads/Warp:     " << std::fixed << std::setprecision(1) << ratio << " / 32\n";
-            out << "    Warp Efficiency:      " << std::setprecision(1) << (ratio / 32.0 * 100) << "%\n";
-        }
+                << std::right << std::setw(16) << fmtCount(total) << "\n";
     }
 }
 

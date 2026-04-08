@@ -288,6 +288,9 @@ void CollectorLoop() {
             if (const Runtime* rt = runtime(); rt && rt->logger) {
                 flushBatches(*rt->logger, rt->session_id);
             }
+            // Periodically drain PC sampling hardware buffer so data from
+            // multiple kernels is collected (not just the first kernel).
+            if (g_adapter) g_adapter->drainProfilingData();
             lastFlush = std::chrono::steady_clock::now();
         }
     }

@@ -45,6 +45,9 @@ class IMonitorBackend {
     virtual void OnScopeStart(const char* name) {}
     virtual void OnScopeStop(const char* name) {}
 
+    /** @brief Periodically drain buffered profiling data. Thread-safe. */
+    virtual void DrainProfilingData() {}
+
     virtual void OnPerfScopeStart(const char* name) {}
     virtual void OnPerfScopeStop(const char* name) {}
     virtual std::optional<PerfMetricEvent> TakeLastPerfEvent() { return std::nullopt; }
