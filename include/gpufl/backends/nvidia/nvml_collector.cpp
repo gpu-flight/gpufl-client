@@ -5,6 +5,7 @@
 
 #include "gpufl/backends/nvidia/nvml_collector.hpp"
 
+#include <chrono>
 #include <sstream>
 
 #include "gpufl/core/debug_logger.hpp"
@@ -125,7 +126,27 @@ std::vector<gpufl::DeviceSample> NvmlCollector::sampleAll() {
         }
 
         if (nvmlDeviceGetPowerUsage(dev, &powerMilliW) == NVML_SUCCESS) {
-            s.power_mw = static_cast<long long>(powerMilliW);
+            // Some Blackwell (RTX 50-series) drivers return cumulative energy
+            // in millijoules instead of instantaneous power in milliwatts.
+            // Detect this: any GPU drawing >1000 W is clearly wrong.
+            if (powerMilliW > 1000000) {
+                // Compute instantaneous power from energy delta
+                static unsigned long long prevEnergy = 0;
+                static std::chrono::steady_clock::time_point prevTime;
+                auto now = std::chrono::steady_clock::now();
+                if (prevEnergy > 0 && powerMilliW > prevEnergy) {
+                    auto dtMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - prevTime).count();
+                    if (dtMs > 0) {
+                        // energy delta (mJ) / time delta (s) = power (mW)
+                        s.power_mw = static_cast<long long>(
+                            (powerMilliW - prevEnergy) * 1000ULL / static_cast<unsigned long long>(dtMs));
+                    }
+                }
+                prevEnergy = powerMilliW;
+                prevTime = now;
+            } else {
+                s.power_mw = static_cast<long long>(powerMilliW);
+            }
         }
 
         // Clocks (not all GPUs expose all clocks; ignore failures)
