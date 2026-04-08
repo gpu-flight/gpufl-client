@@ -1,0 +1,42 @@
+# Builds the occupancy_demo example for use as a sample GPU workload
+# alongside the gpufl-monitor container.
+#
+# The demo runs in a loop, generating real kernel events, device metrics,
+# and scope data that the agent forwards to the backend.
+
+FROM nvidia/cuda:13.1.0-devel-ubuntu24.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ninja-build g++ git ca-certificates python3-pip libnvidia-ml-dev \
+    && pip3 install cmake --break-system-packages \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+
+RUN cmake -S . -B /build \
+        -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_GPUFL_EXAMPLE=ON \
+        -DBUILD_TESTING=OFF \
+        -DBUILD_PYTHON=OFF \
+        -DBUILD_GPUFL_MONITOR=OFF \
+    && cmake --build /build --target occupancy_demo --parallel
+
+# --- Runtime ---
+FROM nvidia/cuda:13.1.0-runtime-ubuntu24.04
+
+COPY --from=builder /build/example/cuda/occupancy_demo /usr/local/bin/occupancy_demo
+# CUPTI shared lib (needed by gpufl inside the demo)
+COPY --from=builder /usr/local/cuda/lib64/libcupti.so* /usr/local/cuda/lib64/
+RUN echo "/usr/local/cuda/lib64" > /etc/ld.so.conf.d/cuda.conf && ldconfig
+
+WORKDIR /var/gpufl/demo
+
+# Run the demo in a loop with a short pause between iterations
+COPY scripts/docker-demo-loop.sh /usr/local/bin/demo-loop.sh
+RUN chmod +x /usr/local/bin/demo-loop.sh
+
+CMD ["/usr/local/bin/demo-loop.sh"]
