@@ -1,4 +1,28 @@
 services:
+  # ── GPU demo workload ──────────────────────────────────────────────────────
+  # Runs occupancy_demo in a loop, generating real kernel events + metrics.
+  # Logs are written to a shared volume that the monitor agent tails.
+  gpufl-demo:
+    image: gpufl/demo:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.demo
+    runtime: nvidia
+    environment:
+      GPUFL_DEMO_LOG_DIR: /var/gpufl/demo
+      GPUFL_DEMO_INTERVAL_SEC: ${GPUFL_DEMO_INTERVAL_SEC:-30}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - gpufl-demo-logs:/var/gpufl/demo
+    restart: unless-stopped
+
+  # ── GPU monitor + agent ────────────────────────────────────────────────────
   gpufl-monitor:
     image: gpufl/monitor:latest
     build:
@@ -11,10 +35,8 @@ services:
       GPUFL_MONITOR_LOG_DIR: ${GPUFL_MONITOR_LOG_DIR:-/var/gpufl/monitor/session}
       GPUFL_MONITOR_INTERVAL_MS: ${GPUFL_MONITOR_INTERVAL_MS:-5000}
 
-      # Java agent — source
-      GPUFL_SOURCE_FOLDER: ${GPUFL_MONITOR_LOG_DIR:-/var/gpufl/monitor}
-      GPUFL_SOURCE_PREFIX: ${GPUFL_MONITOR_PREFIX:-session}
-      GPUFL_LOG_TYPES: ${GPUFL_LOG_TYPES:-device,scope,system}
+      # Java agent — source folders (auto-discovers all log prefixes)
+      GPUFL_SOURCE_FOLDERS: ${GPUFL_SOURCE_FOLDERS:-/var/gpufl/monitor,/var/gpufl/demo}
       GPUFL_CURSOR_FILE: ${GPUFL_CURSOR_FILE:-/var/gpufl/monitor/cursor.json}
 
       # Java agent — publisher (HTTP)
@@ -37,9 +59,13 @@ services:
               capabilities: [gpu]
     volumes:
       - gpufl-cursor:/var/gpufl/monitor
+      - gpufl-demo-logs:/var/gpufl/demo:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      - gpufl-demo
     restart: unless-stopped
 
 volumes:
   gpufl-cursor:
+  gpufl-demo-logs:

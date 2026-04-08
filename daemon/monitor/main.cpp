@@ -78,6 +78,9 @@ int main() {
     const int intervalMs =
         std::stoi(getenv_or("GPUFL_MONITOR_INTERVAL_MS", "5000"));
 
+    std::cout << "Starting GPUFL monitor with app name: " << appName
+              << ", log path: " << logPath << ", interval: " << intervalMs
+              << "ms\n";
     gpufl::InitOptions opts;
     opts.app_name = appName;
     opts.log_path = logPath;

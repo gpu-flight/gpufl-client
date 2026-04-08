@@ -412,7 +412,7 @@ void PcSamplingEngine::StopAndCollectPcSampling_() {
         if (getRes != CUPTI_SUCCESS && !hasMore) {
             if (IsInsufficientPrivilege(getRes)) {
                 GFL_LOG_DEBUG(
-                    "[PC Sampling] Insufficient privileges for getData — "
+                    "[PC Sampling] Insufficient privileges for getData - "
                     "disabling PC sampling for this session.");
                 sampling_api_blocked_.store(true);
                 pc_sampling_method_ = Method::None;
