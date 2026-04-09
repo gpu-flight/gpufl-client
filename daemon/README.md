@@ -4,9 +4,18 @@
 
 Both processes run inside a single Docker container managed by `supervisord`.
 
+GPU vendor support:
+
+| Vendor | Dockerfile | Compose file |
+|---|---|---|
+| NVIDIA | `Dockerfile.monitor` | `docker-compose.monitor.yml` |
+| AMD | `Dockerfile.monitor.amd` | `docker-compose.monitor.amd.yml` |
+
 ---
 
 ## Prerequisites
+
+### NVIDIA
 
 - Docker 24+ with [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) installed
 - A running GPUFlight backend reachable from the container
@@ -18,13 +27,30 @@ Verify the NVIDIA runtime is available:
 docker run --rm --gpus all nvidia/cuda:13.1.0-base-ubuntu24.04 nvidia-smi
 ```
 
+### AMD
+
+- Docker 24+ with a ROCm-enabled kernel (Linux 5.15+ recommended)
+- `/dev/kfd` and `/dev/dri` present on the host (standard with ROCm driver)
+- A running GPUFlight backend reachable from the container
+- An API token for the backend (create one under **Settings → API Keys**)
+
+Verify AMD GPU access:
+
+```bash
+docker run --rm --device /dev/kfd --device /dev/dri \
+  --group-add video --group-add render \
+  rocm/dev-ubuntu-24.04:6.4-complete rocm-smi
+```
+
 ---
 
 ## Building the image
 
-The build uses two stages: a C++ stage (builds `gpufl-monitor`) and a slim runtime image. The Java agent JAR is pulled automatically from the pre-built `ghcr.io/gpu-flight/gpufl-agent` image — no local checkout of `gpufl-agent` is required.
+The build uses multiple stages: a C++ stage (builds `gpufl-monitor`), a JRE stage, and a slim runtime image. The Java agent JAR is pulled automatically from the pre-built `ghcr.io/gpu-flight/gpufl-agent` image — no local checkout of `gpufl-agent` is required.
 
-From the **repository root** (where `Dockerfile.monitor` lives):
+### NVIDIA
+
+From the **repository root**:
 
 ```bash
 docker build \
@@ -33,9 +59,22 @@ docker build \
   .
 ```
 
+### AMD
+
+From the **repository root**:
+
+```bash
+docker build \
+  -f Dockerfile.monitor.amd \
+  -t gpufl/monitor-amd:latest \
+  .
+```
+
 ---
 
 ## Running with docker compose (recommended)
+
+### NVIDIA
 
 Copy `.env.example` to `.env` and set the required variables, then:
 
@@ -57,9 +96,31 @@ Stop and remove the container:
 docker compose -f docker-compose.monitor.yml down
 ```
 
+### AMD
+
+```bash
+GPUFL_HTTP_URL=https://your-backend/api/v1/events/ \
+GPUFL_HTTP_TOKEN=gfl_your_token_here \
+docker compose -f docker-compose.monitor.amd.yml up -d
+```
+
+View logs:
+
+```bash
+docker compose -f docker-compose.monitor.amd.yml logs -f
+```
+
+Stop:
+
+```bash
+docker compose -f docker-compose.monitor.amd.yml down
+```
+
 ---
 
 ## Running with docker run
+
+### NVIDIA
 
 ```bash
 docker run -d \
@@ -72,7 +133,21 @@ docker run -d \
   gpufl/monitor:latest
 ```
 
-The named volume `gpufl-cursor` persists the agent's read cursor so it resumes from where it left off after a restart.
+### AMD
+
+```bash
+docker run -d \
+  --name gpufl-monitor-amd \
+  --device /dev/kfd --device /dev/dri \
+  --group-add video --group-add render \
+  --restart unless-stopped \
+  -e GPUFL_HTTP_URL=https://your-backend/api/v1/events/ \
+  -e GPUFL_HTTP_TOKEN=gfl_your_token_here \
+  -v gpufl-cursor-amd:/var/gpufl/monitor \
+  gpufl/monitor-amd:latest
+```
+
+The named volume persists the agent's read cursor so it resumes from where it left off after a restart.
 
 ---
 
@@ -119,6 +194,8 @@ Set `GPUFL_PUBLISHER_TYPE=kafka` and configure:
 
 ## Verifying it works
 
+Replace `gpufl-monitor` with `gpufl-monitor-amd` for the AMD container.
+
 1. Check both processes are running:
 
 ```bash
@@ -134,13 +211,19 @@ docker exec gpufl-monitor ls /var/gpufl/monitor/session/
 # session.device.log  session.system.log
 ```
 
-3. Tail the container output to see events being shipped:
+3. (AMD only) Verify ROCm sees the GPU inside the container:
+
+```bash
+docker exec gpufl-monitor-amd rocm-smi
+```
+
+4. Tail the container output to see events being shipped:
 
 ```bash
 docker logs -f gpufl-monitor
 ```
 
-4. Open the GPUFlight dashboard — the **Monitoring → Overview** page should show live GPU utilization within one sampling interval.
+5. Open the GPUFlight dashboard — the **Monitoring → Overview** page should show live GPU utilization within one sampling interval.
 
 ---
 
