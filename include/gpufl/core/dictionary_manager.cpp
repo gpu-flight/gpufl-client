@@ -186,16 +186,18 @@ void DictionaryManager::flushDisassembly(Logger& logger,
 #endif
         } else {
 #ifdef _WIN32
-            // Discover nvdisasm.exe via CUDA_PATH env var
+            // Discover nvdisasm.exe via CUDA_PATH env var.
+            // Wrap entire command in outer quotes for cmd.exe /c — needed
+            // when both the executable path and arguments contain spaces
+            // (e.g., "C:\Program Files\...").
             const char* cudaPath = std::getenv("CUDA_PATH");
             if (cudaPath && cudaPath[0]) {
                 std::snprintf(cmd, sizeof(cmd),
-                              "\"%s\\bin\\nvdisasm.exe\" --print-code \"%s\" 2>NUL",
+                              "\"\"%s\\bin\\nvdisasm.exe\" --print-code \"%s\"\"",
                               cudaPath, tmpPathStr.c_str());
             } else {
-                // Fallback: try nvdisasm on PATH
                 std::snprintf(cmd, sizeof(cmd),
-                              "nvdisasm.exe --print-code \"%s\" 2>NUL",
+                              "\"nvdisasm.exe --print-code \"%s\"\"",
                               tmpPathStr.c_str());
             }
 #else
@@ -222,7 +224,6 @@ void DictionaryManager::flushDisassembly(Logger& logger,
         std::string currentFunc;
         uint64_t currentFuncBase = 0;
         char lineBuf[2048];
-
         while (std::fgets(lineBuf, sizeof(lineBuf), pipe)) {
             std::string raw = lineBuf;
             while (!raw.empty() &&
