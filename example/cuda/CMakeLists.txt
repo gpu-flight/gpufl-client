@@ -30,7 +30,6 @@ add_executable(test_occupancy test_occupancy.cu)
 add_executable(gfl_block_example block_style_example.cu)
 add_executable(system_monitor system_monitor.cu)
 add_executable(check_conflict check_conflict.cu)
-add_executable(exercises3_1 programming_massively_parallel/exercises3_1.cu)
 add_executable(check_device check_device.cu)
 add_executable(cupti_pc_sampling cupti_pc_sampling.cu)
 add_executable(list_sass_metrics list_sass_metrics.cu)
@@ -38,6 +37,7 @@ add_executable(vector_add_benchmark vector_add_benchmark.cu)
 add_executable(cupti_basic cupti_basic.cu)
 add_executable(occupancy_demo occupancy_demo.cu)
 add_executable(sass_divergence_demo sass_divergence_demo.cu)
+add_executable(memory_coalescing_demo memory_coalescing_demo.cu)
 
 target_compile_options(gfl_block_example PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:
@@ -126,16 +126,14 @@ target_link_libraries(sass_divergence_demo PRIVATE
         CUDA::cudart
 )
 
-target_link_libraries(exercises3_1 PRIVATE
+target_link_libraries(memory_coalescing_demo PRIVATE
         gpufl::gpufl
         CUDA::cupti
         CUDA::cudart
 )
-target_compile_options(exercises3_1 PRIVATE
+target_compile_options(memory_coalescing_demo PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:
         -lineinfo
-        -gencode=arch=compute_86,code=sm_86     # embeds cubin
-        -gencode=arch=compute_86,code=compute_86
         >)
 
 # Properties
@@ -169,6 +167,9 @@ set_target_properties(occupancy_demo PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
 )
 set_target_properties(sass_divergence_demo PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+)
+set_target_properties(memory_coalescing_demo PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
 )
 
