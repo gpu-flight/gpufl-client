@@ -68,6 +68,7 @@ target_sources(gpufl PRIVATE
     include/gpufl/core/stack_trace.cpp
     include/gpufl/core/scope_registry.cpp
     include/gpufl/report/json_reader.cpp
+    include/gpufl/report/hint_engine.cpp
     include/gpufl/report/text_report.cpp
 )
 

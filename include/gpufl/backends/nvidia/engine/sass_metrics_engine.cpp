@@ -154,6 +154,10 @@ void SassMetricsEngine::EnableSassMetrics_() {
         propParams.pMetricName = kSassMetricNames[i];
         if (LogCuptiErrorIfFailed(this->name(), "cuptiSassMetricsGetProperties",
                                   cuptiSassMetricsGetProperties(&propParams))) {
+            GFL_LOG_DEBUG(
+                "[SassMetricsEngine] Metric not available on this GPU, "
+                "skipping: %s",
+                kSassMetricNames[i]);
             continue;
         }
         sass_metrics_buffers_->config[i].metricId = propParams.metric.metricId;
