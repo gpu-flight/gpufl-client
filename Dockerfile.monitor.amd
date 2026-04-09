@@ -1,0 +1,94 @@
+# gpufl-monitor — AMD GPU monitoring daemon + gpufl-agent uploader
+#
+# Build:
+#   docker build -f Dockerfile.monitor.amd -t gpufl/monitor-amd:latest .
+#
+# Run:
+#   docker run -d \
+#     --device /dev/kfd --device /dev/dri \
+#     --group-add video --group-add render \
+#     -e GPUFL_HTTP_URL=http://my-backend:8080/api/v1/events/ \
+#     -e GPUFL_HTTP_TOKEN=gfl_... \
+#     gpufl/monitor-amd:latest
+#
+# The Java agent JAR is pulled from the pre-built ghcr.io/gpu-flight/gpufl-agent image.
+# No local gpufl-agent checkout is required.
+
+# ── Stage 1: build the C++ daemon (AMD) ───────────────────────────────────────
+FROM rocm/dev-ubuntu-24.04:6.4-complete AS builder-cpp
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ninja-build \
+        g++ \
+        git \
+        ca-certificates \
+        python3-pip \
+    && pip3 install cmake --break-system-packages \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+
+RUN cmake -S . -B /build \
+        -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_GPUFL_EXAMPLE=OFF \
+        -DBUILD_TESTING=OFF \
+        -DBUILD_PYTHON=OFF \
+        -DBUILD_GPUFL_MONITOR=ON \
+        -DGPUFL_ENABLE_NVIDIA=OFF \
+        -DGPUFL_ENABLE_AMD=ON \
+    && cmake --build /build --target gpufl-monitor --parallel
+
+# ── Stage 2: pull the pre-built Java agent ────────────────────────────────────
+FROM ghcr.io/gpu-flight/gpufl-agent:latest AS agent-jar
+
+# ── Stage 3: Java 25 JRE provider ─────────────────────────────────────────────
+FROM eclipse-temurin:25-jre AS jre
+
+# ── Stage 4: runtime image ─────────────────────────────────────────────────────
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Add ROCm apt repository
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        wget \
+        gnupg \
+    && wget -q -O - https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor -o /etc/apt/keyrings/rocm.gpg \
+    && echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/6.4 noble main' \
+        > /etc/apt/sources.list.d/rocm.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        supervisor \
+        rocm-smi-lib \
+        rocm-hip-runtime \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy Java 25 JRE from Temurin (Ubuntu 24.04 repos only ship up to openjdk-21)
+COPY --from=jre /opt/java/openjdk /opt/java/openjdk
+ENV JAVA_HOME=/opt/java/openjdk
+ENV PATH="${JAVA_HOME}/bin:${PATH}"
+
+# Copy built daemon binary
+COPY --from=builder-cpp /build/daemon/monitor/gpufl-monitor /usr/local/bin/gpufl-monitor
+
+# Copy Java agent fat JAR from the pre-built image
+COPY --from=agent-jar /app/gpufl-agent.jar /opt/gpufl-agent/agent.jar
+
+# supervisord config
+COPY Dockerfile.monitor.supervisord.conf /etc/supervisor/conf.d/gpufl-monitor.conf
+
+# Default values — override with -e flags at runtime
+ENV GPUFL_MONITOR_APP=gpufl-monitor
+ENV GPUFL_MONITOR_LOG_DIR=/var/gpufl/monitor/session
+ENV GPUFL_MONITOR_INTERVAL_MS=5000
+ENV GPUFL_SOURCE_PREFIX=session
+ENV GPUFL_PUBLISHER_TYPE=http
+ENV GPUFL_CURSOR_FILE=/var/gpufl/monitor/cursor.json
+
+RUN mkdir -p /var/gpufl/monitor
+
+CMD ["/usr/bin/supervisord", "-n", "-c", "/etc/supervisor/supervisord.conf"]
