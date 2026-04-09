@@ -33,8 +33,6 @@ add_executable(check_conflict check_conflict.cu)
 add_executable(exercises3_1 programming_massively_parallel/exercises3_1.cu)
 add_executable(check_device check_device.cu)
 add_executable(cupti_pc_sampling cupti_pc_sampling.cu)
-add_executable(test_sass_metrics test_sass_metrics.cu)
-add_executable(test_sass_cubin test_sass_cubin.cu)
 add_executable(list_sass_metrics list_sass_metrics.cu)
 add_executable(vector_add_benchmark vector_add_benchmark.cu)
 add_executable(cupti_basic cupti_basic.cu)
@@ -89,18 +87,6 @@ target_link_libraries(check_device PRIVATE
         CUDA::cupti
 )
 target_link_libraries(cupti_pc_sampling PRIVATE
-        gpufl::gpufl
-        CUDA::cudart
-        CUDA::cupti
-)
-
-target_link_libraries(test_sass_metrics PRIVATE
-        gpufl::gpufl
-        CUDA::cudart
-        CUDA::cupti
-)
-
-target_link_libraries(test_sass_cubin PRIVATE
         gpufl::gpufl
         CUDA::cudart
         CUDA::cupti
@@ -169,14 +155,6 @@ set_target_properties(check_device PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
 )
 set_target_properties(cupti_pc_sampling PROPERTIES
-        CUDA_SEPARABLE_COMPILATION ON
-)
-
-set_target_properties(test_sass_metrics PROPERTIES
-        CUDA_SEPARABLE_COMPILATION ON
-)
-
-set_target_properties(test_sass_cubin PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
 )
 
@@ -253,7 +231,7 @@ if (WIN32)
                 "${CUPTI_DLL_DIR}/nvperf_host*.dll"
                 "${CUPTI_DLL_DIR}/nvperf_target*.dll")
 
-        foreach (TARGET_NAME test_occupancy system_monitor gfl_block_example cupti_pc_sampling test_sass_metrics test_sass_cubin list_sass_metrics vector_add_benchmark occupancy_demo sass_divergence_demo)
+        foreach (TARGET_NAME test_occupancy system_monitor gfl_block_example cupti_pc_sampling list_sass_metrics vector_add_benchmark occupancy_demo sass_divergence_demo)
             add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
                     COMMAND ${CMAKE_COMMAND} -E copy_if_different
                     "${CUPTI_DLL_TO_COPY}"
