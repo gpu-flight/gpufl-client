@@ -913,6 +913,10 @@ void TextReport::writeProfileAnalysis(std::ostringstream& out) const {
             fp.globalSectors += ps.metric_value;
         else if (ps.metric_name == "smsp__sass_sectors_mem_global_ideal")
             fp.idealSectors += ps.metric_value;
+        else if (ps.metric_name == "smsp__sass_sectors_mem_global_op_ld_ideal")
+            fp.idealLoadSectors += ps.metric_value;
+        else if (ps.metric_name == "smsp__sass_sectors_mem_global_op_st_ideal")
+            fp.idealStoreSectors += ps.metric_value;
     }
 
     // ── Rank functions by total stall samples ───────────────────────────────
@@ -964,13 +968,20 @@ void TextReport::writeProfileAnalysis(std::ostringstream& out) const {
 
         // Memory analysis
         if (fp->globalSectors > 0) {
+            const uint64_t effectiveIdeal = fp->idealSectors > 0
+                ? fp->idealSectors
+                : fp->idealLoadSectors + fp->idealStoreSectors;
             out << "    Memory:\n";
             out << "      Global Sectors:       " << std::setw(16) << fmtCount(fp->globalSectors) << "\n";
-            if (fp->idealSectors > 0) {
-                out << "      Ideal Sectors:        " << std::setw(16) << fmtCount(fp->idealSectors) << "\n";
-                double memEff = static_cast<double>(fp->idealSectors) / fp->globalSectors * 100;
+            if (effectiveIdeal > 0) {
+                out << "      Ideal Sectors:        " << std::setw(16) << fmtCount(effectiveIdeal);
+                if (fp->idealSectors == 0) out << " (ld+st)";
+                out << "\n";
+                double memEff = static_cast<double>(effectiveIdeal) / fp->globalSectors * 100;
                 out << "      Memory Efficiency:    " << std::setw(15) << std::fixed
                     << std::setprecision(1) << memEff << "%\n";
+            } else {
+                out << "      Memory Efficiency:    (not available on this GPU)\n";
             }
         }
 
@@ -994,6 +1005,8 @@ void TextReport::writeProfileAnalysis(std::ostringstream& out) const {
         if (ps.metric_name == "smsp__sass_thread_inst_executed") continue;
         if (ps.metric_name == "smsp__sass_sectors_mem_global") continue;
         if (ps.metric_name == "smsp__sass_sectors_mem_global_ideal") continue;
+        if (ps.metric_name == "smsp__sass_sectors_mem_global_op_ld_ideal") continue;
+        if (ps.metric_name == "smsp__sass_sectors_mem_global_op_st_ideal") continue;
         otherMetrics[ps.metric_name] += ps.metric_value;
     }
 
