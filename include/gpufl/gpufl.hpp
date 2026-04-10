@@ -21,6 +21,7 @@ struct InitOptions {
     bool enable_kernel_details = false;
     bool enable_debug_output = false;
     bool enable_stack_trace = true;
+    bool enable_source_collection = true;  // collect source file content for source/SASS correlation
     bool flush_logs_always = false;
     ProfilingEngine profiling_engine = ProfilingEngine::PcSampling;
 };
