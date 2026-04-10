@@ -310,6 +310,7 @@ void Monitor::Initialize(const MonitorOptions& opts) {
 
     // Reset batch state for this session
     g_dictManager.reset();
+    g_dictManager.enable_source_collection = opts.enable_source_collection;
     g_kernelBatch.clear();
     g_memcpyBatch.clear();
     g_kernelBatchId  = 0;

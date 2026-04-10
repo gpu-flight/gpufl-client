@@ -48,6 +48,7 @@ struct MonitorOptions {
     bool collect_kernel_details = false;
     bool enable_debug_output = false;
     bool enable_stack_trace = false;
+    bool enable_source_collection = true;
     int kernel_sample_rate_ms = 0;
     uint32_t pc_sampling_period = 12;  // log2 exponent: 2^N GPU cycles between samples (valid: 5-31; 12 = 4096 cycles)
     ProfilingEngine profiling_engine = ProfilingEngine::None;
