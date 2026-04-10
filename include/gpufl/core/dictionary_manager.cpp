@@ -7,6 +7,8 @@
 #include <sstream>
 #include <stdexcept>
 
+#include "gpufl/core/sass_compressor.hpp"
+
 #ifdef _WIN32
 #include <io.h>       // _open, _write, _close, _unlink, _mktemp_s
 #include <fcntl.h>    // _O_CREAT, _O_WRONLY, _O_BINARY
@@ -321,20 +323,28 @@ void DictionaryManager::flushDisassembly(Logger& logger,
 #endif
         std::remove(tmpPathStr.c_str());
 
-        // Emit one cubin_disassembly JSON message per function
+        // Emit one cubin_disassembly JSON message per function.
+        // SassCompressor detects runs of structurally identical instructions
+        // (same opcode + registers, differing only in immediates) and merges
+        // them into a single entry with "count": N.
         for (auto& [funcName, entries] : funcEntries) {
             if (entries.empty()) continue;
+            auto compressed = SassCompressor::compress(entries);
             std::ostringstream oss;
             oss << "{\"version\":1,\"type\":\"cubin_disassembly\",\"session_id\":\""
                 << model::jsonEscape(session_id) << "\",\"cubin_crc\":" << crc
                 << ",\"function_name\":\"" << model::jsonEscape(funcName)
                 << "\",\"entries\":[";
             bool first = true;
-            for (auto& [pc, sass] : entries) {
+            for (auto& [pc, sass, count] : compressed) {
                 if (!first) oss << ',';
                 first = false;
                 oss << "{\"pc\":" << pc << ",\"sass\":\""
-                    << model::jsonEscape(sass) << "\"}";
+                    << model::jsonEscape(sass) << "\"";
+                if (count > 1) {
+                    oss << ",\"count\":" << count;
+                }
+                oss << '}';
             }
             oss << "]}";
             logger.write(DictLine{oss.str()});
