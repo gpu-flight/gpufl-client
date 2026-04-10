@@ -60,14 +60,19 @@ uint32_t DictionaryManager::internSourceFile(const std::string& path) {
     source_file_dict_[path] = id;
     dirty_source_files_[path] = id;
 
-    // Read file content eagerly; failures are silently ignored (file may not
-    // be accessible on the machine running the backend ingestor).
-    std::ifstream f(path);
-    if (f.is_open()) {
-        std::vector<std::string> lines;
-        std::string line;
-        while (std::getline(f, line)) lines.push_back(line);
-        if (!lines.empty()) pending_source_content_[id] = std::move(lines);
+    // Read file content eagerly when source collection is enabled.
+    // When disabled, we still intern the path (needed for function keys
+    // and source_file_id in profile samples) but skip reading the actual
+    // source code from disk — users who don't want their source code
+    // sent to the backend can set enable_source_collection = false.
+    if (enable_source_collection) {
+        std::ifstream f(path);
+        if (f.is_open()) {
+            std::vector<std::string> lines;
+            std::string line;
+            while (std::getline(f, line)) lines.push_back(line);
+            if (!lines.empty()) pending_source_content_[id] = std::move(lines);
+        }
     }
     return id;
 }

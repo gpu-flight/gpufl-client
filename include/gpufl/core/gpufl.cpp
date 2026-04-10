@@ -106,6 +106,7 @@ bool init(const InitOptions& opts) {
         mOpts.collect_kernel_details = true;
     }
     mOpts.enable_stack_trace = opts.enable_stack_trace;
+    mOpts.enable_source_collection = opts.enable_source_collection;
     mOpts.backend_kind = ToMonitorBackendKind(opts.backend);
     Monitor::Initialize(mOpts);
 

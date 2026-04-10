@@ -12,6 +12,12 @@ class Logger;
 
 class DictionaryManager {
    public:
+    /// When false, internSourceFile() still interns the path (needed for
+    /// the function key) but does NOT read the file content from disk.
+    /// flushSourceContent() becomes a no-op.  Users who don't want their
+    /// source code sent to the backend can set this to false.
+    bool enable_source_collection = true;
+
     uint32_t internKernel(const std::string& name) {
         std::lock_guard lk(mu_);
         if (const auto it = kernel_dict_.find(name); it != kernel_dict_.end())
