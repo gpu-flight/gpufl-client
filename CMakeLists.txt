@@ -375,6 +375,54 @@ target_compile_definitions(gpufl PUBLIC
     GPUFL_HAS_ROCPROFILER_SDK=${GPUFL_HAS_ROCPROFILER_SDK}
 )
 
+# ---------------------------------------------------------------------------
+# gpufl_copy_runtime_dlls(<target>)
+#
+# On Windows, CUPTI and NVPERF DLLs are not in the system PATH.
+# Without these DLLs the exe silently fails to start (no error message).
+# Call this function for every executable target that links against gpufl.
+#
+# Usage (in consumer's CMakeLists.txt):
+#   gpufl_copy_runtime_dlls(my_app)
+# ---------------------------------------------------------------------------
+function(gpufl_copy_runtime_dlls TARGET_NAME)
+    if (NOT WIN32)
+        return()
+    endif()
+
+    set(_SEARCH_DIRS "")
+    if (CUDAToolkit_ROOT)
+        list(APPEND _SEARCH_DIRS "${CUDAToolkit_ROOT}/extras/CUPTI/lib64")
+    endif()
+    if (DEFINED ENV{CUDA_PATH})
+        file(TO_CMAKE_PATH "$ENV{CUDA_PATH}/extras/CUPTI/lib64" _ENV_DIR)
+        list(APPEND _SEARCH_DIRS "${_ENV_DIR}")
+    endif()
+
+    foreach(_DIR ${_SEARCH_DIRS})
+        file(GLOB _CUPTI "${_DIR}/cupti64*.dll")
+        if (_CUPTI)
+            file(GLOB _ALL_DLLS
+                "${_DIR}/cupti64*.dll"
+                "${_DIR}/nvperf_host*.dll"
+                "${_DIR}/nvperf_target*.dll")
+            foreach(_DLL ${_ALL_DLLS})
+                add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${_DLL}" "$<TARGET_FILE_DIR:${TARGET_NAME}>"
+                    COMMENT "gpufl: copying ${_DLL}")
+            endforeach()
+            return()
+        endif()
+    endforeach()
+
+    message(WARNING
+        "gpufl: Could not find CUPTI DLLs to copy for target '${TARGET_NAME}'.\n"
+        "  The executable may fail to start on Windows without cupti64_*.dll.\n"
+        "  Searched: ${_SEARCH_DIRS}\n"
+        "  Set CUDA_PATH or ensure CUDAToolkit is findable.")
+endfunction()
+
 if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR AND BUILD_TESTING)
     enable_testing()
     add_subdirectory(tests)
