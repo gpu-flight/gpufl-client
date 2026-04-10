@@ -30,10 +30,6 @@
 #include "gpufl/core/ring_buffer.hpp"
 #include "gpufl/core/trace_type.hpp"
 
-namespace gpufl {
-extern RingBuffer<ActivityRecord, 1024> g_monitorBuffer;
-}
-
 namespace gpufl::amd {
 namespace {
 

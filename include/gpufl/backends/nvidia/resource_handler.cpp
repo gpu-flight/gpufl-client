@@ -1,5 +1,6 @@
 #include "gpufl/backends/nvidia/resource_handler.hpp"
 
+#include <cupti_pcsampling.h>
 #include <zlib.h>
 
 #include "gpufl/core/debug_logger.hpp"
@@ -49,18 +50,17 @@ void ResourceHandler::handle(CUpti_CallbackDomain domain, CUpti_CallbackId cbid,
             const void *cubinPtr = modData->pCubin;
             const size_t cubinSize = modData->cubinSize;
 
+            // CUPTI_CBID_RESOURCE_MODULE_PROFILED fires on every kernel
+            // launch when PC sampling is active, including for
+            // SASS-patched cubin variants.  Use the raw pointer as an
+            // O(1) sentinel — cubin memory is stable for the process
+            // lifetime.  We must NOT skip MODULE_PROFILED entirely:
+            // its cubin may have a different CRC than the original
+            // MODULE_LOADED cubin, and CUPTI's PC sampling data
+            // references that CRC for source correlation.
             {
                 std::lock_guard<std::mutex> lk(backend_->cubin_mu_);
                 if (backend_->seen_cubin_ptrs_.count(cubinPtr)) return;
-                // CUPTI_CBID_RESOURCE_MODULE_PROFILED fires on every kernel
-                // launch when PC sampling is active, including for
-                // SASS-patched cubin variants that have a different pointer
-                // than the original. Mark the pointer seen and bail out —
-                // the original cubin was already processed by MODULE_LOADED.
-                if (cbid == CUPTI_CBID_RESOURCE_MODULE_PROFILED) {
-                    backend_->seen_cubin_ptrs_.insert(cubinPtr);
-                    return;
-                }
                 backend_->seen_cubin_ptrs_.insert(cubinPtr);
             }
 
@@ -96,18 +96,30 @@ void ResourceHandler::workerLoop() {
             pending_.pop();
         }
 
-        // Compute the cubin CRC using zlib crc32 — this matches the algorithm
-        // CUPTI uses internally for the cubinCrc field in activity records
-        // (CUpti_ActivityKernel11, CUpti_ActivityPCSampling3, etc.).
+        // Compute the cubin CRC.  We prefer cuptiGetCubinCrc() because it
+        // returns the exact CRC that CUPTI uses in PC sampling records
+        // (CUpti_PCSamplingPCData::cubinCrc) and activity records.
         //
-        // We previously called cuptiGetCubinCrc() here, but that function
-        // acquires CUPTI's internal global lock, which is also held by
-        // cuptiSassMetricsEnable() while it patches loaded modules.  Even
-        // from this worker thread the call can therefore deadlock when
-        // cuptiSassMetricsEnable() is still running on another thread.
-        // Using zlib directly avoids all CUPTI locks.
+        // cuptiGetCubinCrc() acquires CUPTI's internal global lock, which
+        // can deadlock when called from a CUPTI callback while
+        // cuptiSassMetricsEnable() is patching modules.  However, this
+        // worker thread runs OUTSIDE the callback, so the deadlock does
+        // not apply here.  Fall back to zlib crc32 only if CUPTI fails.
         GFL_LOG_DEBUG("Computing CRC for cubin copy, size=", data.size());
-        const uint64_t cubinCrc = crc32(0, data.data(), static_cast<uInt>(data.size()));
+        uint64_t cubinCrc = 0;
+        {
+            CUpti_GetCubinCrcParams crcParams = {CUpti_GetCubinCrcParamsSize};
+            crcParams.cubin = data.data();
+            crcParams.cubinSize = data.size();
+            if (cuptiGetCubinCrc(&crcParams) == CUPTI_SUCCESS) {
+                cubinCrc = crcParams.cubinCrc;
+            } else {
+                // Fallback: zlib crc32 (may not match CUPTI's CRC on all
+                // driver versions, but better than nothing).
+                GFL_LOG_DEBUG("cuptiGetCubinCrc failed, falling back to zlib crc32");
+                cubinCrc = crc32(0, data.data(), static_cast<uInt>(data.size()));
+            }
+        }
 
         bool isNew = false;
         const uint8_t *enqueuePtr = nullptr;
