@@ -136,6 +136,7 @@ target_compile_options(memory_coalescing_demo PRIVATE
         -lineinfo
         >)
 
+
 # Properties
 set_target_properties(gfl_block_example PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
