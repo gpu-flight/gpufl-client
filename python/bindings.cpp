@@ -54,6 +54,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
         .def_readwrite("enable_kernel_details", &gpufl::InitOptions::enable_kernel_details)
         .def_readwrite("enable_debug_output",   &gpufl::InitOptions::enable_debug_output)
         .def_readwrite("enable_stack_trace",    &gpufl::InitOptions::enable_stack_trace)
+        .def_readwrite("enable_source_collection", &gpufl::InitOptions::enable_source_collection)
         .def_readwrite("profiling_engine",      &gpufl::InitOptions::profiling_engine);
 
     // Convenience wrapper: accepts either the new profiling_engine enum or the
@@ -69,6 +70,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
                      // Legacy bool args (deprecated — use profiling_engine)
                      bool enable_profiling,
                      bool enable_stack_trace,
+                     bool enable_source_collection,
                      bool enable_perf_scope,
                      gpufl::ProfilingEngine profiling_engine_override) -> bool {
 
@@ -82,6 +84,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
         opts.enable_kernel_details = enable_kernel_details;
         opts.enable_debug_output   = enable_debug_output;
         opts.enable_stack_trace    = enable_stack_trace;
+        opts.enable_source_collection = enable_source_collection;
 
         // If caller explicitly set profiling_engine, use it; otherwise derive
         // from the legacy bool flags for backward compatibility.
@@ -107,6 +110,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
        py::arg("enable_debug_output")       = false,
        py::arg("enable_profiling")          = true,
        py::arg("enable_stack_trace")        = true,
+       py::arg("enable_source_collection")  = true,
        py::arg("enable_perf_scope")         = false,
        py::arg("profiling_engine")          = gpufl::ProfilingEngine::PcSampling);
 
