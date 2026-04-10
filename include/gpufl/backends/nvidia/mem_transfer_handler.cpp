@@ -6,14 +6,11 @@
 #include "gpufl/core/activity_record.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
+#include "gpufl/core/monitor.hpp"
 #include "gpufl/core/ring_buffer.hpp"
 #include "gpufl/core/scope_registry.hpp"
 #include "gpufl/core/stack_registry.hpp"
 #include "gpufl/core/stack_trace.hpp"
-
-namespace gpufl {
-extern RingBuffer<ActivityRecord, 1024> g_monitorBuffer;
-}
 
 namespace gpufl {
 

@@ -23,7 +23,7 @@
 
 namespace gpufl {
 
-RingBuffer<ActivityRecord, 1024> g_monitorBuffer;
+RingBuffer<ActivityRecord, kMonitorBufferSize> g_monitorBuffer;
 
 static std::unique_ptr<IMonitorAdapter> g_adapter;
 static std::atomic g_initialized{false};

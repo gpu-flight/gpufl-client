@@ -8,7 +8,7 @@ namespace gpufl {
 template <typename Row>
 class BatchBuffer {
    public:
-    static constexpr size_t kMaxRows = 512;
+    static constexpr size_t kMaxRows = 2048;
 
     void push(const Row& row) { rows_.push_back(row); }
     bool empty() const { return rows_.empty(); }

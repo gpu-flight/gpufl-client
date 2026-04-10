@@ -47,6 +47,7 @@ set_target_properties(gpufl PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 target_sources(gpufl PRIVATE
     include/gpufl/core/dictionary_manager.cpp
+    include/gpufl/core/sass_compressor.cpp
     include/gpufl/core/logger/logger.cpp
     include/gpufl/core/logger/log_rotator.cpp
     include/gpufl/core/model/batch_models.cpp

@@ -34,8 +34,6 @@
 namespace gpufl {
 std::atomic<gpufl::CuptiBackend*> g_activeBackend{nullptr};
 
-extern RingBuffer<ActivityRecord, 1024> g_monitorBuffer;
-
 namespace {
 bool IsInsufficientPrivilege(CUptiResult res) {
     if (res == CUPTI_ERROR_INSUFFICIENT_PRIVILEGES) return true;
