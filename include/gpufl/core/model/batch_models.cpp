@@ -120,7 +120,7 @@ std::string DeviceMetricBatchModel::buildJson() const {
         << ",\"session_id\":\"" << jsonEscape(session_id_) << '"'
         << ",\"batch_id\":" << batch_id_ << ",\"base_time_ns\":" << base
         << ",\"columns\":[\"dt_ns\",\"device_id\",\"gpu_util\","
-           "\"mem_util\",\"temp_c\",\"power_mw\",\"used_mib\",\"clock_sm\"";
+           "\"mem_util\",\"temp_c\",\"power_mw\",\"used_mib\",\"total_mib\",\"clock_sm\"";
     if (has_extended_metrics) {
         oss << ",\"fan_speed_pct\",\"temp_mem_c\",\"temp_junction_c\","
                "\"voltage_mv\",\"energy_uj\",\"clock_mem\","
@@ -135,7 +135,7 @@ std::string DeviceMetricBatchModel::buildJson() const {
         first = false;
         oss << '[' << (r.ts_ns - base) << ',' << r.device_id << ','
             << r.gpu_util << ',' << r.mem_util << ',' << r.temp_c << ','
-            << r.power_mw << ',' << r.used_mib << ',' << r.clock_sm;
+            << r.power_mw << ',' << r.used_mib << ',' << r.total_mib << ',' << r.clock_sm;
         if (has_extended_metrics) {
             oss << ',' << r.fan_speed_pct << ',' << r.temp_mem_c << ','
                 << r.temp_junction_c << ',' << r.voltage_mv << ','
