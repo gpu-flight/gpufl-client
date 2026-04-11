@@ -21,7 +21,9 @@ std::vector<const char*> kSassMetricNames = {
     "smsp__sass_inst_executed",
     "smsp__sass_thread_inst_executed",
     "smsp__sass_sectors_mem_global",
-    "smsp__sass_sectors_mem_global_ideal",
+    "smsp__sass_sectors_mem_global_ideal",        // sm_120+: aggregate ideal
+    "smsp__sass_sectors_mem_global_op_ld_ideal",  // fallback: load ideal (sm_86)
+    "smsp__sass_sectors_mem_global_op_st_ideal",  // fallback: store ideal (sm_86)
 };
 
 bool IsInsufficientPrivilege(CUptiResult res) {
@@ -159,8 +161,8 @@ void SassMetricsEngine::EnableSassMetrics_() {
                 kSassMetricNames[i]);
             continue;
         }
-        sass_metrics_buffers_->config[i].metricId = propParams.metric.metricId;
-        sass_metrics_buffers_->config[i].outputGranularity =
+        sass_metrics_buffers_->config[validConfigs].metricId = propParams.metric.metricId;
+        sass_metrics_buffers_->config[validConfigs].outputGranularity =
             CUPTI_SASS_METRICS_OUTPUT_GRANULARITY_GPU;
         metric_id_to_name_[propParams.metric.metricId] = kSassMetricNames[i];
         ++validConfigs;
