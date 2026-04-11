@@ -15,8 +15,10 @@ struct FuncProfile {
     uint64_t totalStalls   = 0;
     uint64_t warpInsts     = 0;
     uint64_t threadInsts   = 0;
-    uint64_t globalSectors = 0;
-    uint64_t idealSectors  = 0;
+    uint64_t globalSectors     = 0;
+    uint64_t idealSectors      = 0;  // aggregate ideal (sm_120+)
+    uint64_t idealLoadSectors  = 0;  // per-op load ideal (sm_86 fallback)
+    uint64_t idealStoreSectors = 0;  // per-op store ideal (sm_86 fallback)
 };
 
 // Returns zero or more actionable hint strings for a single kernel/function profile.

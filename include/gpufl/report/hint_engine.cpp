@@ -10,15 +10,33 @@ namespace report {
 std::vector<std::string> computeHints(const FuncProfile& fp) {
     std::vector<std::string> hints;
 
-    // Memory efficiency hint
-    if (fp.globalSectors > 0 && fp.idealSectors > 0) {
+    // Memory efficiency hint — three-tier fallback:
+    // Tier 1: aggregate ideal (smsp__sass_sectors_mem_global_ideal, sm_120+)
+    // Tier 2: sum of per-op ideals (op_ld + op_st, sm_86 fallback)
+    // Tier 3: Long Scoreboard proxy when no ideal metric is available at all
+    const uint64_t effectiveIdeal = fp.idealSectors > 0
+        ? fp.idealSectors
+        : fp.idealLoadSectors + fp.idealStoreSectors;
+
+    if (fp.globalSectors > 0 && effectiveIdeal > 0) {
         const double memEff =
-            static_cast<double>(fp.idealSectors) / fp.globalSectors * 100;
+            static_cast<double>(effectiveIdeal) / fp.globalSectors * 100;
         if (memEff < 50)
             hints.push_back("Low memory efficiency (" +
                             std::to_string(static_cast<int>(memEff)) +
                             "%) - consider coalesced access patterns or shared "
                             "memory tiling.");
+    } else if (fp.globalSectors > 0 && effectiveIdeal == 0) {
+        auto it = fp.stalls.find("Long Scoreboard");
+        if (it != fp.stalls.end() && fp.totalStalls > 0) {
+            const double lsPct = it->second * 100.0 / fp.totalStalls;
+            if (lsPct > 20)
+                hints.push_back("High Long Scoreboard stalls (" +
+                                std::to_string(static_cast<int>(lsPct)) +
+                                "%) suggest memory latency; check global access "
+                                "coalescing (memory efficiency metric unavailable "
+                                "on this GPU).");
+        }
     }
 
     // Stall-based hints
