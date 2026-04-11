@@ -88,7 +88,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
 
         // If caller explicitly set profiling_engine, use it; otherwise derive
         // from the legacy bool flags for backward compatibility.
-        if (profiling_engine_override != gpufl::ProfilingEngine::PcSampling) {
+        if (profiling_engine_override != gpufl::ProfilingEngine::PcSamplingWithSass) {
             // Explicit override was provided (anything != the default)
             opts.profiling_engine = profiling_engine_override;
         } else if (!enable_profiling) {
@@ -96,7 +96,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
         } else if (enable_perf_scope) {
             opts.profiling_engine = gpufl::ProfilingEngine::RangeProfiler;
         } else {
-            opts.profiling_engine = gpufl::ProfilingEngine::PcSampling;
+            opts.profiling_engine = gpufl::ProfilingEngine::PcSamplingWithSass;
         }
 
         return gpufl::init(opts);
@@ -112,7 +112,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
        py::arg("enable_stack_trace")        = true,
        py::arg("enable_source_collection")  = true,
        py::arg("enable_perf_scope")         = false,
-       py::arg("profiling_engine")          = gpufl::ProfilingEngine::PcSampling);
+       py::arg("profiling_engine")          = gpufl::ProfilingEngine::PcSamplingWithSass);
 
     m.def("system_start", [](std::string name) { gpufl::systemStart(std::move(name)); },
         py::arg("name") = "system");

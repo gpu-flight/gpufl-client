@@ -74,6 +74,7 @@ void Sampler::runLoop_() {
             row.temp_c           = d.temp_c;
             row.power_mw         = d.power_mw;
             row.used_mib         = d.used_mib;
+            row.total_mib        = d.total_mib;
             row.clock_sm         = d.clock_sm;
             row.fan_speed_pct    = d.fan_speed_pct;
             row.temp_mem_c       = d.temp_mem_c;

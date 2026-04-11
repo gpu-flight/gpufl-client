@@ -316,6 +316,7 @@ struct DeviceMetricBatchRow {
     unsigned temp_c    = 0;
     unsigned power_mw  = 0;
     uint64_t used_mib  = 0;
+    uint64_t total_mib = 0;
     unsigned clock_sm  = 0;  // MHz
     // Extended metrics
     unsigned fan_speed_pct   = 0;  // %

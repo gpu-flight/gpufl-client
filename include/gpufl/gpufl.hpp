@@ -23,7 +23,7 @@ struct InitOptions {
     bool enable_stack_trace = true;
     bool enable_source_collection = true;  // collect source file content for source/SASS correlation
     bool flush_logs_always = false;
-    ProfilingEngine profiling_engine = ProfilingEngine::PcSampling;
+    ProfilingEngine profiling_engine = ProfilingEngine::PcSamplingWithSass;
 };
 
 struct BackendProbeResult {

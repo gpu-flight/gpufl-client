@@ -1,25 +1,25 @@
 import os
 import sys
 
-# 1. Windows DLL Handling
+# 1. Windows DLL Handling — ensure CUDA and CUPTI DLLs are findable.
+# os.add_dll_directory() alone is insufficient for some Python builds;
+# we also prepend to PATH as a belt-and-suspenders approach.
 if os.name == 'nt':
     cuda_path = os.environ.get('CUDA_PATH')
     if cuda_path:
-        # Add CUDA bin directory
-        bin_path = os.path.join(cuda_path, 'bin')
-        if os.path.exists(bin_path):
-            try:
-                os.add_dll_directory(bin_path)
-            except AttributeError:
-                pass
-
-        # Add CUPTI lib64 directory
-        cupti_path = os.path.join(cuda_path, 'extras', 'CUPTI', 'lib64')
-        if os.path.exists(cupti_path):
-            try:
-                os.add_dll_directory(cupti_path)
-            except AttributeError:
-                pass
+        _dll_dirs = [
+            os.path.join(cuda_path, 'bin'),
+            os.path.join(cuda_path, 'extras', 'CUPTI', 'lib64'),
+        ]
+        for d in _dll_dirs:
+            if os.path.isdir(d):
+                try:
+                    os.add_dll_directory(d)
+                except (AttributeError, OSError):
+                    pass
+                # Also add to PATH for Python extension module loading
+                if d not in os.environ.get('PATH', ''):
+                    os.environ['PATH'] = d + os.pathsep + os.environ.get('PATH', '')
 
 # 2. Import C++ Core Bindings
 try:
@@ -72,7 +72,9 @@ except ImportError as e:
             self.enable_kernel_details = False
             self.enable_debug_output = False
             self.enable_stack_trace = True
-            self.profiling_engine = ProfilingEngine.PcSampling
+            self.enable_source_collection = True
+            self.flush_logs_always = False
+            self.profiling_engine = ProfilingEngine.PcSamplingWithSass
 
     class Scope:
         def __init__(self, *args): pass
