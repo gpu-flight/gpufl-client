@@ -97,12 +97,14 @@ void Logger::LogChannel::write(const std::string& line) {
             return;
         }
     }
-    // Write line + newline in a single buffer so the agent never sees a
-    // partial line on disk.  Always flush to ensure the complete line is
-    // visible to the tailing agent before the next write begins.
+    // Write line + newline.  Flush only when explicitly requested
+    // (flush_always) to reduce sync I/O overhead.  The agent's LogTailer
+    // handles partial reads gracefully, so deferred flush is safe.
     stream_.write(line.data(), static_cast<std::streamsize>(line.size()));
     stream_.put('\n');
-    stream_.flush();
+    if (opt_.flush_always) {
+        stream_.flush();
+    }
     current_bytes_ += bytesToWrite;
 }
 

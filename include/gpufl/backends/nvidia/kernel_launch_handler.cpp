@@ -19,6 +19,18 @@ namespace gpufl {
 KernelLaunchHandler::KernelLaunchHandler(CuptiBackend* backend)
     : backend_(backend) {}
 
+const std::string& KernelLaunchHandler::cachedDemangle(const char* mangled) {
+    if (!mangled) {
+        static const std::string fallback = "kernel_launch";
+        return fallback;
+    }
+    std::lock_guard lk(demangle_mu_);
+    auto it = demangle_cache_.find(mangled);
+    if (it != demangle_cache_.end()) return it->second;
+    auto [inserted, _] = demangle_cache_.emplace(mangled, DemangleName(mangled));
+    return inserted->second;
+}
+
 std::vector<std::pair<CUpti_CallbackDomain, CUpti_CallbackId>>
 KernelLaunchHandler::requiredCallbacks() const {
     return {
@@ -73,8 +85,7 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
 
         const char* nm =
             cbInfo->symbolName ? cbInfo->symbolName : cbInfo->functionName;
-        if (!nm) nm = "kernel_launch";
-        const std::string demangledName = DemangleName(nm);
+        const std::string& demangledName = cachedDemangle(nm);
         std::snprintf(meta.name, sizeof(meta.name), "%s", demangledName.c_str());
 
         if (backend_->GetOptions().enable_stack_trace) {
@@ -212,7 +223,7 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
     out.device_id = k->deviceId;
     out.stream = static_cast<StreamHandle>(k->streamId);
     out.type = TraceType::KERNEL;
-    const std::string demangledKernelName = DemangleName(k->name ? k->name : "kernel");
+    const std::string& demangledKernelName = cachedDemangle(k->name);
     std::snprintf(out.name, sizeof(out.name), "%s", demangledKernelName.c_str());
     out.cpu_start_ns = baseCpuNs + static_cast<int64_t>(k->start - baseCuptiTs);
     out.duration_ns = static_cast<int64_t>(k->end - k->start);

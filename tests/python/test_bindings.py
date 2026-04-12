@@ -29,7 +29,7 @@ EXPECTED_INIT_OPTIONS_FIELDS = {
     "kernel_sample_rate_ms":  (0,       int),
     "enable_kernel_details":  (False,   bool),
     "enable_debug_output":    (False,   bool),
-    "enable_stack_trace":     (True,    bool),
+    "enable_stack_trace":     (False,   bool),
     "enable_source_collection": (True,  bool),
     "flush_logs_always":      (False,   bool),
 }

@@ -109,7 +109,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
        py::arg("enable_kernel_details")     = false,
        py::arg("enable_debug_output")       = false,
        py::arg("enable_profiling")          = true,
-       py::arg("enable_stack_trace")        = true,
+       py::arg("enable_stack_trace")        = false,
        py::arg("enable_source_collection")  = true,
        py::arg("enable_perf_scope")         = false,
        py::arg("profiling_engine")          = gpufl::ProfilingEngine::PcSamplingWithSass);
