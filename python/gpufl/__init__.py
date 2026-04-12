@@ -71,7 +71,7 @@ except ImportError as e:
             self.backend = BackendKind.Auto
             self.enable_kernel_details = False
             self.enable_debug_output = False
-            self.enable_stack_trace = True
+            self.enable_stack_trace = False
             self.enable_source_collection = True
             self.flush_logs_always = False
             self.profiling_engine = ProfilingEngine.PcSamplingWithSass

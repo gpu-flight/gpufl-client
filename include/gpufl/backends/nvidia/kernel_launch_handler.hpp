@@ -1,5 +1,9 @@
 #pragma once
 
+#include <mutex>
+#include <string>
+#include <unordered_map>
+
 #include "gpufl/backends/nvidia/cupti_backend.hpp"
 #include "gpufl/backends/nvidia/cupti_common.hpp"
 
@@ -22,6 +26,10 @@ class KernelLaunchHandler : public ICuptiHandler {
 
    private:
     CuptiBackend* backend_;
+    // Cache for demangled kernel names — avoids re-demangling on every launch
+    std::mutex demangle_mu_;
+    std::unordered_map<std::string, std::string> demangle_cache_;
+    const std::string& cachedDemangle(const char* mangled);
 };
 
 }  // namespace gpufl
