@@ -36,17 +36,36 @@ python run_benchmark.py
 - **GEMM**: 2048×2048 matrix multiply via cuBLAS (100 iterations). Raw compute, most sensitive to CUPTI overhead.
 - **PyTorch MiniGPT**: 6-layer transformer training (20 steps, FP16). Real-world ML workload with diverse kernels.
 
-## Example Output
+## Benchmark Results
 
-```
-GPU: NVIDIA GeForce RTX 4090 (24.0 GiB)
-GPUFlight: available (v0.1.0.dev)
+Tested on NVIDIA GeForce RTX 5060 Laptop GPU (8.0 GiB), GPUFlight v0.1.0.dev.
 
-CUDA GEMM (N=2048, 100 iters):
-  Mode                       Wall (ms)   GPU (ms)   Overhead
-  Baseline (no gpufl)           1234.5     1200.0          —
-  Monitoring only               1236.1     1200.2      +0.1%
-  PC Sampling                   1245.8     1201.5      +0.9%
-  SASS Metrics                  1260.2     1205.3      +2.1%
-  PcSampling + SASS             1268.4     1208.1      +2.7%
-```
+### CUDA GEMM (N=2048, 100 iterations)
+
+| Mode | Wall (ms) | GPU (ms) | Overhead |
+|------|-----------|----------|----------|
+| Baseline (no gpufl) | 184.3 | 184.2 | — |
+| Monitoring only | 179.8 | 179.7 | ~0% |
+| PC Sampling | 230.2 | 230.0 | +24.9% |
+| SASS Metrics | 225.5 | 225.4 | +22.3% |
+| PcSampling + SASS | 284.1 | 284.0 | +54.1% |
+
+### PyTorch MiniGPT Training (20 steps, FP16)
+
+| Mode | Wall (ms) | GPU (ms) | Overhead |
+|------|-----------|----------|----------|
+| Baseline (no gpufl) | 795.8 | 795.7 | — |
+| Monitoring only | 852.4 | 852.3 | +7.1% |
+| PC Sampling | 6085.6 | 6085.5 | +664.7% |
+| SASS Metrics | 848.3 | 848.3 | +6.6% |
+| PcSampling + SASS | 6011.2 | 6011.1 | +655.4% |
+
+### Key Takeaways
+
+- **Monitoring only / SASS Metrics: ~7% overhead** — acceptable for always-on profiling during development
+- **PC Sampling: high overhead on many-small-kernel workloads** (PyTorch launches thousands of micro-kernels). Use for targeted profiling sessions, not always-on. Set via environment variable:
+  ```bash
+  GPUFL_PROFILING_ENGINE=SassMetrics python train.py  # lightweight
+  GPUFL_PROFILING_ENGINE=PcSamplingWithSass python train.py  # full (default)
+  ```
+- **GEMM (large kernels):** overhead is moderate even with full profiling, because per-kernel CUPTI cost is amortized over longer kernel execution
