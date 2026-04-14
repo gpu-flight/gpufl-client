@@ -347,6 +347,7 @@ if(GPUFL_ENABLE_AMD)
         target_sources(gpufl PRIVATE
             include/gpufl/backends/amd/monitor_adapter_amd.cpp
             include/gpufl/backends/amd/rocprofiler_backend.cpp
+            include/gpufl/backends/amd/engine/dispatch_counter_engine.cpp
         )
         message(STATUS "Found ROCprofiler-SDK support")
     else()

@@ -39,8 +39,14 @@ std::string AmdMonitorAdapter::memcpyKindToString(const uint32_t kind) const {
     }
 }
 
-std::string AmdMonitorAdapter::memoryKindToString(const uint32_t) const {
-    return "Unknown";
+std::string AmdMonitorAdapter::memoryKindToString(const uint32_t kind) const {
+    // Memory kind encodes the agent type of src/dst:
+    //   0 = unknown, 1 = host (pageable), 2 = device (GPU VRAM)
+    switch (kind) {
+        case 1:  return "Pageable";
+        case 2:  return "Device";
+        default: return "Unknown";
+    }
 }
 
 IMonitorBackend* AmdMonitorAdapter::backend() {

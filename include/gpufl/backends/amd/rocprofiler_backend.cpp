@@ -24,9 +24,11 @@
 #include <unistd.h>
 #include <zlib.h>
 
+#include "gpufl/backends/amd/engine/dispatch_counter_engine.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/monitor.hpp"
+#include "gpufl/core/stack_trace.hpp"
 #include "gpufl/core/ring_buffer.hpp"
 #include "gpufl/core/trace_type.hpp"
 
@@ -257,6 +259,32 @@ int RocprofilerBackend::toolInitialize() {
         return -1;
     }
 
+    // Create profiling engine based on user configuration.
+    // On AMD, PC sampling and counter collection cannot coexist in the same
+    // context, so PcSamplingWithSass falls back to dispatch counters.
+    if (opts_.profiling_engine != ProfilingEngine::None && primary_gpu_agent_.handle != 0) {
+        switch (opts_.profiling_engine) {
+            case ProfilingEngine::PcSampling:
+                // TODO: engine_ = std::make_unique<AmdPcSamplingEngine>();
+                GFL_LOG_DEBUG("[ROCProfilerBackend] PC sampling engine requested (not yet implemented)");
+                break;
+            case ProfilingEngine::SassMetrics:
+            case ProfilingEngine::PcSamplingWithSass:
+            case ProfilingEngine::RangeProfiler:
+                engine_ = std::make_unique<DispatchCounterEngine>();
+                break;
+            default:
+                break;
+        }
+        if (engine_) {
+            if (!engine_->initialize(context_, primary_gpu_agent_, opts_)) {
+                GFL_LOG_ERROR("[ROCProfilerBackend] Profiling engine initialization failed — "
+                              "continuing in monitoring-only mode");
+                engine_.reset();
+            }
+        }
+    }
+
     tool_registered_.store(true, std::memory_order_release);
     return 0;
 }
@@ -275,19 +303,38 @@ void RocprofilerBackend::start() {
     if (!initialized_.load() || context_.handle == 0 || active_.load()) return;
     if (CheckStatus(rocprofiler_start_context(context_), "rocprofiler_start_context")) {
         active_.store(true);
+        if (engine_) engine_->start();
     }
 }
 
 void RocprofilerBackend::stop() {
     if (!active_.exchange(false) || context_.handle == 0) return;
+    if (engine_) engine_->stop();
     (void) rocprofiler_stop_context(context_);
     flushBuffers();
+}
+
+void RocprofilerBackend::DrainProfilingData() {
+    if (engine_) engine_->drain();
+}
+
+void RocprofilerBackend::OnPerfScopeStart(const char* name) {
+    if (engine_) engine_->onScopeStart(name);
+}
+
+void RocprofilerBackend::OnPerfScopeStop(const char* name) {
+    if (engine_) engine_->onScopeStop(name);
 }
 
 void RocprofilerBackend::shutdown() {
     if (!initialized_.exchange(false)) return;
 
     stop();
+
+    if (engine_) {
+        engine_->shutdown();
+        engine_.reset();
+    }
 
     if (client_finalize_) {
         rocprofiler_client_id_t client_id = {
@@ -429,7 +476,14 @@ std::string RocprofilerBackend::resolveKernelName(const uint64_t kernel_id) cons
     std::lock_guard<std::mutex> lock(kernel_meta_mutex_);
     if (auto itr = kernel_metadata_.find(kernel_id); itr != kernel_metadata_.end() &&
         !itr->second.name.empty()) {
-        return itr->second.name;
+        const auto& mangled = itr->second.name;
+        // Check demangle cache (avoids repeated abi::__cxa_demangle calls)
+        if (auto dit = demangle_cache_.find(mangled); dit != demangle_cache_.end()) {
+            return dit->second;
+        }
+        auto demangled = core::DemangleName(mangled.c_str());
+        demangle_cache_[mangled] = demangled;
+        return demangled;
     }
 
     char buffer[64] = {};
@@ -460,6 +514,11 @@ rocprofiler_status_t RocprofilerBackend::queryAgentsShim(
         if (agent->type == ROCPROFILER_AGENT_TYPE_GPU) {
             int dev_id = std::max(agent->logical_node_type_id, 0);
             backend->gpu_device_ids_[agent->id.handle] = dev_id;
+
+            // Track the first GPU agent for profiling engine initialization
+            if (backend->primary_gpu_agent_.handle == 0) {
+                backend->primary_gpu_agent_ = agent->id;
+            }
 
             GpuArchProps props{};
             props.wave_front_size = agent->wave_front_size > 0 ? agent->wave_front_size : 64;
@@ -577,9 +636,14 @@ void RocprofilerBackend::handleKernelDispatch(
     out.api_exit_ns = out.cpu_start_ns + out.duration_ns;
     out.corr_id = TruncateCorrelationId(correlation_id.internal);
     out.has_details = true;
-    out.grid_x = static_cast<int>(info.grid_size.x);
-    out.grid_y = static_cast<int>(info.grid_size.y);
-    out.grid_z = static_cast<int>(info.grid_size.z);
+    // ROCprofiler grid_size is total threads (not blocks like CUDA).
+    // Convert to block count by dividing by workgroup size.
+    const auto wg_x = (std::max)(info.workgroup_size.x, 1u);
+    const auto wg_y = (std::max)(info.workgroup_size.y, 1u);
+    const auto wg_z = (std::max)(info.workgroup_size.z, 1u);
+    out.grid_x = static_cast<int>(info.grid_size.x / wg_x);
+    out.grid_y = static_cast<int>(info.grid_size.y / wg_y);
+    out.grid_z = static_cast<int>(info.grid_size.z / wg_z);
     out.block_x = static_cast<int>(info.workgroup_size.x);
     out.block_y = static_cast<int>(info.workgroup_size.y);
     out.block_z = static_cast<int>(info.workgroup_size.z);
@@ -709,6 +773,15 @@ void RocprofilerBackend::handleMemoryCopy(
     out.copy_kind = classifyMemcpyKind(data.src_agent_id, data.dst_agent_id);
     out.corr_id = TruncateCorrelationId(data.correlation_id.internal);
     std::snprintf(out.name, sizeof(out.name), "%s", CopyKindName(out.copy_kind));
+
+    // Classify src/dst memory kind from agent type (1=host, 2=device)
+    {
+        std::lock_guard<std::mutex> lock(agent_mutex_);
+        const auto src_it = agent_types_.find(data.src_agent_id.handle);
+        const auto dst_it = agent_types_.find(data.dst_agent_id.handle);
+        out.src_kind = (src_it != agent_types_.end() && src_it->second == ROCPROFILER_AGENT_TYPE_GPU) ? 2 : 1;
+        out.dst_kind = (dst_it != agent_types_.end() && dst_it->second == ROCPROFILER_AGENT_TYPE_GPU) ? 2 : 1;
+    }
 
     if (data.correlation_id.external.value != 0) {
         std::lock_guard<std::mutex> lock(external_scope_mutex_);

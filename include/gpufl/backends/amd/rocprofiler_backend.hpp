@@ -15,6 +15,7 @@
 #include <rocprofiler-sdk/fwd.h>
 #include <rocprofiler-sdk/registration.h>
 
+#include "gpufl/backends/amd/engine/amd_profiling_engine.hpp"
 #include "gpufl/core/activity_record.hpp"
 #include "gpufl/core/monitor_backend.hpp"
 
@@ -31,12 +32,19 @@ class RocprofilerBackend final : public IMonitorBackend {
     void stop() override;
 
     bool IsMonitoringMode() override { return initialized_.load(); }
-    bool IsProfilingMode() override { return false; }
+    bool IsProfilingMode() override { return engine_ != nullptr; }
 
     void OnScopeStart(const char* name) override;
     void OnScopeStop(const char* name) override;
+    void DrainProfilingData() override;
+    void OnPerfScopeStart(const char* name) override;
+    void OnPerfScopeStop(const char* name) override;
 
     void flushBuffers();
+
+    // Expose context and agent for engine initialization
+    rocprofiler_context_id_t context() const { return context_; }
+    rocprofiler_agent_id_t primaryGpuAgent() const { return primary_gpu_agent_; }
 
     static bool IsAvailable(std::string* reason = nullptr);
 
@@ -96,6 +104,7 @@ class RocprofilerBackend final : public IMonitorBackend {
 
     mutable std::mutex kernel_meta_mutex_;
     std::unordered_map<uint64_t, KernelMetadata> kernel_metadata_;
+    mutable std::unordered_map<std::string, std::string> demangle_cache_;
     mutable std::mutex external_scope_mutex_;
     std::unordered_map<uint64_t, ExternalScopeMetadata> external_scope_metadata_;
 
@@ -121,8 +130,11 @@ class RocprofilerBackend final : public IMonitorBackend {
     MonitorOptions opts_{};
     rocprofiler_context_id_t context_{};
     rocprofiler_buffer_id_t buffer_{};
+    rocprofiler_agent_id_t primary_gpu_agent_{};
     uint32_t client_handle_{0};
     rocprofiler_client_finalize_t client_finalize_{nullptr};
+
+    std::unique_ptr<AmdProfilingEngine> engine_;
 
     std::atomic<bool> initialized_{false};
     std::atomic<bool> active_{false};
