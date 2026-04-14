@@ -128,6 +128,11 @@ class DictionaryManager {
 
     // cubin_crc → raw bytes (populated once per cubin, flushed via flushDisassembly)
     std::unordered_map<uint64_t, std::vector<uint8_t>> pending_disasm_cubins_;
+
+    // Batch ID counter for profile_sample_batch records emitted from
+    // AMD DWARF source mapping (avoids collision with monitor batch IDs
+    // by starting at a high offset).
+    uint64_t disasm_batch_id_ = 1000000;
 };
 
 }  // namespace gpufl
