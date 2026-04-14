@@ -3,7 +3,7 @@
 #include <cstdlib>
 #include <iostream>
 
-#include "../../include/gpufl/core/monitor.hpp"
+#include "gpufl/core/monitor.hpp"
 #include "gpufl/gpufl.hpp"
 
 static bool checkHip(const hipError_t status, const char* what) {
