@@ -25,11 +25,22 @@
 namespace gpufl {
 namespace {
 
+/// Dictionary updates go to ALL channels because every channel's data
+/// references dictionary IDs (function_id, metric_id, scope_name_id).
 struct DictLine final : IJsonSerializable {
     std::string json;
     explicit DictLine(std::string j) : json(std::move(j)) {}
     std::string buildJson() const override { return json; }
     Channel channel() const override { return Channel::All; }
+};
+
+/// Disassembly and source content go to Device channel only.
+/// These are large payloads that don't need to be tripled across all logs.
+struct DeviceLine final : IJsonSerializable {
+    std::string json;
+    explicit DeviceLine(std::string j) : json(std::move(j)) {}
+    std::string buildJson() const override { return json; }
+    Channel channel() const override { return Channel::Device; }
 };
 
 void appendDict(std::ostringstream& oss, const char* key,
@@ -97,7 +108,7 @@ void DictionaryManager::flushSourceContent(Logger& logger,
             oss << '"' << model::jsonEscape(ln) << '"';
         }
         oss << "]}";
-        logger.write(DictLine{oss.str()});
+        logger.write(DeviceLine{oss.str()});
     }
 }
 
@@ -352,7 +363,7 @@ void DictionaryManager::flushDisassembly(Logger& logger,
                 oss << '}';
             }
             oss << "]}";
-            logger.write(DictLine{oss.str()});
+            logger.write(DeviceLine{oss.str()});
         }
     }
 }
