@@ -37,6 +37,14 @@ set(CMAKE_HIP_ARCHITECTURES OFF)
 find_package(HIP REQUIRED)
 find_package(hip QUIET CONFIG)
 
+# Include device debug info (-g) so gpufl can correlate ISA instructions
+# back to source lines (similar to NVIDIA's -lineinfo for SASS).
+# This embeds DWARF metadata in the GPU code object but does NOT affect
+# runtime performance — the GPU executes identical instructions.
+# Only binary size increases. Recommended for profiling; omit in production
+# builds to reduce binary size.
+list(APPEND HIP_HIPCC_FLAGS "-g")
+
 set(AMD_EXAMPLE_SOURCES
   check_device.cpp
   gpufl_scope_demo.cpp

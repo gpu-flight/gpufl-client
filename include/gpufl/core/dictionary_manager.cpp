@@ -1,5 +1,6 @@
 #include "gpufl/core/dictionary_manager.hpp"
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -191,14 +192,15 @@ void DictionaryManager::flushDisassembly(Logger& logger,
             continue;
 #else
             // Discover llvm-objdump path
+            // Use -l to include DWARF source line info for source correlation
             const char* rocmPath = std::getenv("ROCM_PATH");
             if (rocmPath && rocmPath[0]) {
                 std::snprintf(cmd, sizeof(cmd),
-                              "%s/llvm/bin/llvm-objdump -d %s 2>/dev/null",
+                              "%s/llvm/bin/llvm-objdump -d -l %s 2>/dev/null",
                               rocmPath, tmpPathStr.c_str());
             } else {
                 std::snprintf(cmd, sizeof(cmd),
-                              "/opt/rocm/llvm/bin/llvm-objdump -d %s 2>/dev/null",
+                              "/opt/rocm/llvm/bin/llvm-objdump -d -l %s 2>/dev/null",
                               tmpPathStr.c_str());
             }
 #endif
@@ -236,11 +238,20 @@ void DictionaryManager::flushDisassembly(Logger& logger,
             continue;
         }
 
-        std::unordered_map<std::string,
-                           std::vector<std::pair<uint32_t, std::string>>>
-            funcEntries;
+        // Per-instruction entry with optional DWARF source info (AMD -l flag).
+        struct DisasmEntry {
+            uint32_t pc;
+            std::string sass;
+            std::string source_file;   // empty if no DWARF
+            uint32_t source_line = 0;
+        };
+
+        std::unordered_map<std::string, std::vector<DisasmEntry>> funcEntries;
         std::string currentFunc;
         uint64_t currentFuncBase = 0;
+        // Tracked DWARF source location (AMD -l output)
+        std::string currentSourceFile;
+        uint32_t currentSourceLine = 0;
         char lineBuf[2048];
         while (std::fgets(lineBuf, sizeof(lineBuf), pipe)) {
             std::string raw = lineBuf;
@@ -250,7 +261,8 @@ void DictionaryManager::flushDisassembly(Logger& logger,
             if (raw.empty()) continue;
 
             if (isAmd) {
-                // AMD llvm-objdump format:
+                // AMD llvm-objdump -d -l format:
+                // Source line: "; /path/to/source.hip:42"
                 // Function: "0000000000001F00 <_Z15vectorAddKernelPKiS0_Pii>:"
                 // Instruction: "\ts_clause 0x1  // 000000001F00: BF850001"
                 if (raw.rfind("Disassembly of", 0) == 0) continue;
@@ -267,13 +279,33 @@ void DictionaryManager::flushDisassembly(Logger& logger,
                     catch (...) { currentFuncBase = 0; }
                     if (!funcEntries.count(currentFunc))
                         funcEntries[currentFunc] = {};
+                    // Reset source tracking for new function
+                    currentSourceFile.clear();
+                    currentSourceLine = 0;
                     continue;
                 }
 
-                // Comment-only lines ("; %bb.0:")
+                // Comment/annotation lines starting with ';'
                 size_t firstNonWs = raw.find_first_not_of(" \t");
-                if (firstNonWs != std::string::npos && raw[firstNonWs] == ';')
+                if (firstNonWs != std::string::npos && raw[firstNonWs] == ';') {
+                    // DWARF source line annotation from -l flag:
+                    // "; /path/to/source.hip:42"
+                    std::string comment = raw.substr(firstNonWs + 1);
+                    size_t cs = comment.find_first_not_of(" \t");
+                    if (cs != std::string::npos && comment[cs] == '/') {
+                        // Absolute path — find the last ':' for line number
+                        size_t lastColon = comment.rfind(':');
+                        if (lastColon != std::string::npos && lastColon > cs) {
+                            std::string path = comment.substr(cs, lastColon - cs);
+                            try {
+                                currentSourceLine = static_cast<uint32_t>(
+                                    std::stoul(comment.substr(lastColon + 1)));
+                                currentSourceFile = path;
+                            } catch (...) {}
+                        }
+                    }
                     continue;
+                }
 
                 if (currentFunc.empty()) continue;
 
@@ -296,7 +328,8 @@ void DictionaryManager::flushDisassembly(Logger& logger,
                 ins = ins.substr(insStart);
                 while (!ins.empty() && (ins.back() == ' ' || ins.back() == '\t'))
                     ins.pop_back();
-                funcEntries[currentFunc].emplace_back(pc, std::move(ins));
+                funcEntries[currentFunc].push_back(
+                    {pc, std::move(ins), currentSourceFile, currentSourceLine});
             } else {
                 // NVIDIA nvdisasm format:
                 // Function: "_Z11vectorScalePiii:"
@@ -326,7 +359,7 @@ void DictionaryManager::flushDisassembly(Logger& logger,
                 std::string ins = s.substr(insStart);
                 if (!ins.empty() && ins.back() == ';') ins.pop_back();
                 while (!ins.empty() && ins.back() == ' ') ins.pop_back();
-                funcEntries[currentFunc].emplace_back(pc, std::move(ins));
+                funcEntries[currentFunc].push_back({pc, std::move(ins), {}, 0});
             }
         }
         GFL_LOG_DEBUG("[flushDisassembly] parsed ", funcEntries.size(),
@@ -345,7 +378,14 @@ void DictionaryManager::flushDisassembly(Logger& logger,
         // them into a single entry with "count": N.
         for (auto& [funcName, entries] : funcEntries) {
             if (entries.empty()) continue;
-            auto compressed = SassCompressor::compress(entries);
+
+            // Build (pc, sass) pairs for compression
+            std::vector<std::pair<uint32_t, std::string>> pairs;
+            pairs.reserve(entries.size());
+            for (const auto& e : entries)
+                pairs.emplace_back(e.pc, e.sass);
+
+            auto compressed = SassCompressor::compress(pairs);
             std::ostringstream oss;
             oss << "{\"version\":1,\"type\":\"cubin_disassembly\",\"session_id\":\""
                 << model::jsonEscape(session_id) << "\",\"cubin_crc\":" << crc
@@ -364,6 +404,138 @@ void DictionaryManager::flushDisassembly(Logger& logger,
             }
             oss << "]}";
             logger.write(DeviceLine{oss.str()});
+        }
+
+        // For AMD code objects with DWARF debug info, emit source file content
+        // and a profile_sample_batch that maps pc_offset → source_file:line.
+        // This enables the same source-correlated ISA view as NVIDIA/CUPTI.
+        if (isAmd) {
+            // Collect unique source files and intern them
+            std::unordered_map<std::string, uint32_t> sourceFileIds;
+            for (const auto& [funcName, entries] : funcEntries) {
+                for (const auto& e : entries) {
+                    if (e.source_file.empty() || e.source_line == 0) continue;
+                    if (!sourceFileIds.count(e.source_file)) {
+                        sourceFileIds[e.source_file] =
+                            internSourceFile(e.source_file);
+                    }
+                }
+            }
+
+            if (!sourceFileIds.empty()) {
+                // Intern the metric and all function keys first, then flush
+                // the dictionary and source content so the backend has
+                // all IDs resolved BEFORE we emit profile_sample_batch.
+                const uint32_t mapMetricId = internMetric("isa_inst_present");
+
+                // Pre-intern all function keys
+                for (const auto& [funcName, entries] : funcEntries) {
+                    bool hasSource = false;
+                    std::string primarySourceFile;
+                    std::unordered_map<std::string, uint32_t> fileCounts;
+                    for (const auto& e : entries) {
+                        if (!e.source_file.empty() && e.source_line > 0) {
+                            hasSource = true;
+                            ++fileCounts[e.source_file];
+                        }
+                    }
+                    if (!hasSource) continue;
+                    uint32_t bestCount = 0;
+                    for (const auto& [path, cnt] : fileCounts) {
+                        bool isSys = (path.find("/include/hip/") != std::string::npos ||
+                                      path.find("/opt/rocm") == 0);
+                        bool bestIsSys = (!primarySourceFile.empty() &&
+                            (primarySourceFile.find("/include/hip/") != std::string::npos ||
+                             primarySourceFile.find("/opt/rocm") == 0));
+                        if (primarySourceFile.empty() ||
+                            (!isSys && bestIsSys) ||
+                            (isSys == bestIsSys && cnt > bestCount)) {
+                            primarySourceFile = path;
+                            bestCount = cnt;
+                        }
+                    }
+                    internFunction(funcName + "@" + primarySourceFile);
+                }
+
+                // Flush dictionary + source content NOW so IDs appear
+                // in the log before the profile_sample_batch records.
+                flushDictionary(logger, session_id);
+                flushSourceContent(logger, session_id);
+
+                const auto now_ns = std::chrono::duration_cast<
+                    std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+
+                for (const auto& [funcName, entries] : funcEntries) {
+                    // Check if this function has any source mapping
+                    bool hasSource = false;
+                    for (const auto& e : entries) {
+                        if (!e.source_file.empty() && e.source_line > 0) {
+                            hasSource = true;
+                            break;
+                        }
+                    }
+                    if (!hasSource) continue;
+
+                    // Determine the primary source file for the function key.
+                    // Pick the most frequent source file, preferring user code
+                    // over system headers (e.g., HIP runtime).
+                    std::unordered_map<std::string, uint32_t> fileCounts;
+                    for (const auto& e : entries) {
+                        if (!e.source_file.empty() && e.source_line > 0)
+                            ++fileCounts[e.source_file];
+                    }
+                    std::string primarySourceFile;
+                    uint32_t bestCount = 0;
+                    for (const auto& [path, cnt] : fileCounts) {
+                        // Prefer non-system paths (skip /opt/rocm, /include/hip)
+                        bool isSys = (path.find("/include/hip/") != std::string::npos ||
+                                      path.find("/opt/rocm") == 0);
+                        bool bestIsSys = (!primarySourceFile.empty() &&
+                            (primarySourceFile.find("/include/hip/") != std::string::npos ||
+                             primarySourceFile.find("/opt/rocm") == 0));
+                        if (primarySourceFile.empty() ||
+                            (!isSys && bestIsSys) ||
+                            (isSys == bestIsSys && cnt > bestCount)) {
+                            primarySourceFile = path;
+                            bestCount = cnt;
+                        }
+                    }
+                    const std::string funcKey = funcName + "@" + primarySourceFile;
+                    const uint32_t functionId = internFunction(funcKey);
+
+                    // Build profile_sample_batch JSON
+                    std::ostringstream poss;
+                    poss << "{\"version\":1,\"type\":\"profile_sample_batch\""
+                         << ",\"session_id\":\"" << model::jsonEscape(session_id)
+                         << "\",\"batch_id\":" << (++disasm_batch_id_)
+                         << ",\"base_time_ns\":" << now_ns
+                         << ",\"columns\":[\"dt_ns\",\"corr_id\",\"device_id\","
+                            "\"function_id\",\"pc_offset\",\"metric_id\","
+                            "\"metric_value\",\"stall_reason\",\"sample_kind\","
+                            "\"scope_name_id\",\"source_file_id\","
+                            "\"source_line\"]"
+                         << ",\"rows\":[";
+                    bool pfirst = true;
+                    for (const auto& e : entries) {
+                        if (e.source_file.empty() || e.source_line == 0) continue;
+                        // Skip AMD padding instructions from source mapping
+                        if (e.sass.compare(0, 10, "s_code_end") == 0 ||
+                            e.sass.compare(0, 5, "s_nop") == 0) continue;
+                        auto it = sourceFileIds.find(e.source_file);
+                        if (it == sourceFileIds.end()) continue;
+                        if (!pfirst) poss << ',';
+                        pfirst = false;
+                        poss << "[0,0,0," << functionId << ',' << e.pc << ','
+                             << mapMetricId << ",1,0,2,0,"
+                             << it->second << ',' << e.source_line << ']';
+                    }
+                    poss << "]}";
+                    if (!pfirst) {
+                        logger.write(DictLine{poss.str()});
+                    }
+                }
+            }
         }
     }
 }
