@@ -18,7 +18,9 @@ def test_pipeline():
     try:
         print("2. Initializing GPUFL...")
         # Passing 0 for interval
-        res = gfl.init("CI_Test_App", log_base_path, True, 50)
+        engine_none = getattr(gfl.ProfilingEngine, 'None_', None) or getattr(gfl.ProfilingEngine, 'None')
+        res = gfl.init("CI_Test_App", log_base_path, True, 50,
+                       profiling_engine=engine_none)
         print(f"   Result: {res}")
         if res is False:
             print("\n[CI-INFO] GPUFL initialized in Stub Mode (No GPU detected).")

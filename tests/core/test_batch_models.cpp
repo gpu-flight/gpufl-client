@@ -19,8 +19,9 @@ TEST(BatchModels, DeviceMetricBatchIncludesClockSm) {
     gpufl::model::DeviceMetricBatchModel model(batch, "s", 1);
     const std::string json = model.buildJson();
 
+    EXPECT_NE(json.find("\"total_mib\""), std::string::npos);
     EXPECT_NE(json.find("\"clock_sm\""), std::string::npos);
-    EXPECT_NE(json.find("[0,0,77,33,70,150000,2048,1987]"), std::string::npos);
+    EXPECT_NE(json.find("[0,0,77,33,70,150000,2048,0,1987]"), std::string::npos);
 }
 
 TEST(BatchModels, DeviceMetricBatchIncludesExtendedColumnsWhenPresent) {
@@ -43,6 +44,6 @@ TEST(BatchModels, DeviceMetricBatchIncludesExtendedColumnsWhenPresent) {
 
     EXPECT_NE(json.find("\"fan_speed_pct\""), std::string::npos);
     EXPECT_NE(json.find("\"clock_mem\""), std::string::npos);
-    EXPECT_NE(json.find("[0,0,77,33,70,150000,2048,1987,42,0,0,0,0,1200,0,0,0]"),
+    EXPECT_NE(json.find("[0,0,77,33,70,150000,2048,0,1987,42,0,0,0,0,1200,0,0,0]"),
               std::string::npos);
 }

@@ -1,5 +1,6 @@
 #include "gpufl.hpp"
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -101,6 +102,17 @@ bool init(const InitOptions& opts) {
     mOpts.collect_kernel_details = opts.enable_kernel_details;
     mOpts.enable_debug_output = opts.enable_debug_output;
     mOpts.profiling_engine = opts.profiling_engine;
+
+    // Allow environment variable override: GPUFL_PROFILING_ENGINE
+    if (const char* envEngine = std::getenv("GPUFL_PROFILING_ENGINE")) {
+        const std::string val(envEngine);
+        if (val == "None")               mOpts.profiling_engine = ProfilingEngine::None;
+        else if (val == "PcSampling")    mOpts.profiling_engine = ProfilingEngine::PcSampling;
+        else if (val == "SassMetrics")   mOpts.profiling_engine = ProfilingEngine::SassMetrics;
+        else if (val == "RangeProfiler") mOpts.profiling_engine = ProfilingEngine::RangeProfiler;
+        else if (val == "PcSamplingWithSass") mOpts.profiling_engine = ProfilingEngine::PcSamplingWithSass;
+        GFL_LOG_DEBUG("GPUFL_PROFILING_ENGINE override: ", val);
+    }
     mOpts.kernel_sample_rate_ms = opts.kernel_sample_rate_ms;
     if (mOpts.profiling_engine != ProfilingEngine::None) {
         mOpts.collect_kernel_details = true;
