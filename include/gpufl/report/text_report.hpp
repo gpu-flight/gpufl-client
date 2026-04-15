@@ -6,10 +6,15 @@
 #include <unordered_map>
 #include <vector>
 
-#include "gpufl/report/json_reader.hpp"
+#include "gpufl/core/json/json.hpp"
 
 namespace gpufl {
 namespace report {
+
+// Bring JSON types into report namespace for backward compatibility
+using gpufl::json::JsonValue;
+using gpufl::json::parseJson;
+using gpufl::json::loadJsonLines;
 
 class TextReport {
    public:

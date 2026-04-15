@@ -72,7 +72,8 @@ PYBIND11_MODULE(_gpufl_client, m) {
                      bool enable_stack_trace,
                      bool enable_source_collection,
                      bool enable_perf_scope,
-                     gpufl::ProfilingEngine profiling_engine_override) -> bool {
+                     gpufl::ProfilingEngine profiling_engine_override,
+                     std::string config_file) -> bool {
 
         gpufl::InitOptions opts;
         opts.app_name              = app_name;
@@ -85,6 +86,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
         opts.enable_debug_output   = enable_debug_output;
         opts.enable_stack_trace    = enable_stack_trace;
         opts.enable_source_collection = enable_source_collection;
+        opts.config_file             = config_file;
 
         // If caller explicitly set profiling_engine, use it; otherwise derive
         // from the legacy bool flags for backward compatibility.
@@ -112,7 +114,8 @@ PYBIND11_MODULE(_gpufl_client, m) {
        py::arg("enable_stack_trace")        = false,
        py::arg("enable_source_collection")  = true,
        py::arg("enable_perf_scope")         = false,
-       py::arg("profiling_engine")          = gpufl::ProfilingEngine::PcSamplingWithSass);
+       py::arg("profiling_engine")          = gpufl::ProfilingEngine::PcSamplingWithSass,
+       py::arg("config_file")              = "");
 
     m.def("system_start", [](std::string name) { gpufl::systemStart(std::move(name)); },
         py::arg("name") = "system");

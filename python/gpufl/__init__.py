@@ -75,6 +75,7 @@ except ImportError as e:
             self.enable_source_collection = True
             self.flush_logs_always = False
             self.profiling_engine = ProfilingEngine.PcSamplingWithSass
+            self.config_file = ""
 
     class Scope:
         def __init__(self, *args): pass
@@ -89,4 +90,70 @@ except Exception as e:
     raise e
 
 __version__ = "0.1.0.dev"
-__all__ = ["Scope", "init", "shutdown", "system_start", "system_stop", "BackendKind", "InitOptions"]
+
+# ── Remote Configuration ──────────────────────────────────────────────────────
+
+_REMOTE_CONFIG_FIELDS = {
+    'profiling_engine': lambda v: getattr(ProfilingEngine, v, None) or getattr(ProfilingEngine, v + '_', None),
+    'system_sample_rate_ms': int,
+    'kernel_sample_rate_ms': int,
+    'enable_stack_trace': bool,
+    'enable_kernel_details': bool,
+    'enable_source_collection': bool,
+    'flush_logs_always': bool,
+}
+
+def _fetch_remote_config(url, api_key, config_name=None):
+    """Fetch profiling config from GPUFlight backend. Returns dict or empty."""
+    try:
+        import urllib.request, json
+        endpoint = f"{url.rstrip('/')}/api/v1/config"
+        if config_name:
+            endpoint += f"?config={urllib.parse.quote(config_name)}"
+        req = urllib.request.Request(endpoint,
+            headers={"X-API-Key": api_key, "Accept": "application/json"})
+        resp = urllib.request.urlopen(req, timeout=5)
+        data = json.loads(resp.read())
+        if isinstance(data, dict):
+            return data
+    except Exception as e:
+        print(f"[GPUFL] Remote config fetch failed: {e}", file=sys.stderr)
+    return {}
+
+# Wrap the C++ init to support remote_config
+_original_init = init
+
+def init(*args, remote_config=None, api_key=None, config_name=None, **kwargs):
+    """Initialize GPUFlight. Optionally fetch config from remote backend.
+
+    Args:
+        remote_config: Backend URL (e.g. "https://api.gpuflight.com")
+        api_key: API key for authentication (e.g. "gpfl_xxxxxxxxxxxx")
+        config_name: Named config to fetch (e.g. "production", "debug-full")
+        **kwargs: All other InitOptions fields passed to C++ init
+    """
+    # Check env vars as fallback
+    if not remote_config:
+        remote_config = os.environ.get('GPUFL_REMOTE_CONFIG')
+    if not api_key:
+        api_key = os.environ.get('GPUFL_API_KEY')
+    if not config_name:
+        config_name = os.environ.get('GPUFL_CONFIG_NAME')
+
+    # Fetch and merge remote config
+    if remote_config and api_key:
+        config = _fetch_remote_config(remote_config, api_key, config_name)
+        if config:
+            print(f"[GPUFL] Remote config applied: {config}", file=sys.stderr)
+            for key, converter in _REMOTE_CONFIG_FIELDS.items():
+                if key in config and key not in kwargs:
+                    try:
+                        val = converter(config[key])
+                        if val is not None:
+                            kwargs[key] = val
+                    except (ValueError, TypeError):
+                        pass
+
+    return _original_init(*args, **kwargs)
+
+__all__ = ["Scope", "init", "shutdown", "system_start", "system_stop", "BackendKind", "InitOptions", "ProfilingEngine"]
