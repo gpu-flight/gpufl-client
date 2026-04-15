@@ -1,12 +1,35 @@
-#include "gpufl/report/json_reader.hpp"
+#include "gpufl/core/json/json.hpp"
 
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
+#include <iomanip>
+#include <sstream>
 #include <stdexcept>
 
 namespace gpufl {
-namespace report {
+namespace json {
+
+// ── escape ─────────────────────────────────────────────────────────────────
+
+std::string escape(const std::string& s) {
+    std::ostringstream oss;
+    for (unsigned char c : s) {
+        switch (c) {
+            case '\\': oss << "\\\\"; break;
+            case '"':  oss << "\\\""; break;
+            case '\n': oss << "\\n";  break;
+            case '\r': oss << "\\r";  break;
+            case '\t': oss << "\\t";  break;
+            default:
+                if (c < 0x20) oss << "\\u" << std::hex << std::setw(4)
+                                  << std::setfill('0') << static_cast<int>(c)
+                                  << std::dec;
+                else          oss << c;
+        }
+    }
+    return oss.str();
+}
 
 // ── Static defaults ─────────────────────────────────────────────────────────
 
@@ -315,6 +338,17 @@ JsonValue parseJson(const std::string& input) {
     }
 }
 
+JsonValue loadFile(const std::string& path) {
+    if (path.empty()) return JsonValue::null();
+
+    std::ifstream file(path);
+    if (!file.is_open()) return JsonValue::null();
+
+    std::ostringstream ss;
+    ss << file.rdbuf();
+    return parseJson(ss.str());
+}
+
 std::vector<JsonValue> loadJsonLines(const std::string& path) {
     std::vector<JsonValue> records;
     if (path.empty()) return records;
@@ -331,5 +365,5 @@ std::vector<JsonValue> loadJsonLines(const std::string& path) {
     return records;
 }
 
-}  // namespace report
+}  // namespace json
 }  // namespace gpufl

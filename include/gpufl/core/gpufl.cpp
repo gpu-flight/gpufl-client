@@ -2,7 +2,6 @@
 
 #include <cstdlib>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -11,6 +10,7 @@
 #include "gpufl/backends/host_collector.hpp"
 #include "gpufl/core/backend_factory.hpp"
 #include "gpufl/core/common.hpp"
+#include "gpufl/core/config_file_loader.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/events.hpp"
 #include "gpufl/core/logger/logger.hpp"
@@ -46,6 +46,7 @@ MonitorBackendKind ToMonitorBackendKind(const BackendKind backend) {
     }
 }
 
+
 }  // namespace
 
 static std::string defaultLogPath_(const std::string& app) {
@@ -64,7 +65,19 @@ static uint64_t nextScopeId_() {
 
 bool init(const InitOptions& opts) {
     g_opts = opts;
-    DebugLogger::setEnabled(opts.enable_debug_output);
+
+    // Read config file early — before anything uses the options
+    {
+        std::string configPath = g_opts.config_file;
+        if (configPath.empty()) {
+            if (const char* env = std::getenv("GPUFL_CONFIG_FILE")) configPath = env;
+        }
+        if (!configPath.empty()) {
+            ConfigFileLoader::apply(g_opts, configPath);
+        }
+    }
+
+    DebugLogger::setEnabled(g_opts.enable_debug_output);
     GFL_LOG_DEBUG("Initializing...");
     if (runtime()) {
         GFL_LOG_DEBUG("Runtime already exists, shutting down first...");
@@ -72,18 +85,18 @@ bool init(const InitOptions& opts) {
     }
 
     auto rt = std::make_unique<Runtime>();
-    rt->app_name = opts.app_name.empty() ? "gpufl" : opts.app_name;
+    rt->app_name = g_opts.app_name.empty() ? "gpufl" : g_opts.app_name;
     rt->session_id = detail::GenerateSessionId();
     rt->logger = std::make_shared<Logger>();
     rt->host_collector = std::make_unique<HostCollector>();
 
     const std::string logPath =
-        opts.log_path.empty() ? defaultLogPath_(rt->app_name) : opts.log_path;
+        g_opts.log_path.empty() ? defaultLogPath_(rt->app_name) : g_opts.log_path;
 
     Logger::Options logOpts;
     logOpts.base_path = logPath;
-    logOpts.system_sample_rate_ms = opts.system_sample_rate_ms;
-    logOpts.flush_always = opts.flush_logs_always;
+    logOpts.system_sample_rate_ms = g_opts.system_sample_rate_ms;
+    logOpts.flush_always = g_opts.flush_logs_always;
 
     g_lastLogPath = logPath;
     g_lastAppName = rt->app_name;
@@ -99,9 +112,9 @@ bool init(const InitOptions& opts) {
 
     GFL_LOG_DEBUG("Initializing Monitor (CUPTI)...");
     MonitorOptions mOpts;
-    mOpts.collect_kernel_details = opts.enable_kernel_details;
-    mOpts.enable_debug_output = opts.enable_debug_output;
-    mOpts.profiling_engine = opts.profiling_engine;
+    mOpts.collect_kernel_details = g_opts.enable_kernel_details;
+    mOpts.enable_debug_output = g_opts.enable_debug_output;
+    mOpts.profiling_engine = g_opts.profiling_engine;
 
     // Allow environment variable override: GPUFL_PROFILING_ENGINE
     if (const char* envEngine = std::getenv("GPUFL_PROFILING_ENGINE")) {
@@ -113,13 +126,13 @@ bool init(const InitOptions& opts) {
         else if (val == "PcSamplingWithSass") mOpts.profiling_engine = ProfilingEngine::PcSamplingWithSass;
         GFL_LOG_DEBUG("GPUFL_PROFILING_ENGINE override: ", val);
     }
-    mOpts.kernel_sample_rate_ms = opts.kernel_sample_rate_ms;
+    mOpts.kernel_sample_rate_ms = g_opts.kernel_sample_rate_ms;
     if (mOpts.profiling_engine != ProfilingEngine::None) {
         mOpts.collect_kernel_details = true;
     }
-    mOpts.enable_stack_trace = opts.enable_stack_trace;
-    mOpts.enable_source_collection = opts.enable_source_collection;
-    mOpts.backend_kind = ToMonitorBackendKind(opts.backend);
+    mOpts.enable_stack_trace = g_opts.enable_stack_trace;
+    mOpts.enable_source_collection = g_opts.enable_source_collection;
+    mOpts.backend_kind = ToMonitorBackendKind(g_opts.backend);
     Monitor::Initialize(mOpts);
 
     GFL_LOG_DEBUG("Starting Monitor...");
@@ -131,7 +144,7 @@ bool init(const InitOptions& opts) {
     // Runtime backend selection
     std::string backendReason;
     auto backendCollectors =
-        CreateBackendCollectors(opts.backend, &backendReason);
+        CreateBackendCollectors(g_opts.backend, &backendReason);
     rt_ptr->unified_gpu_collector = std::move(backendCollectors.unified_collector);
     rt_ptr->collector = std::move(backendCollectors.telemetry_collector);
     rt_ptr->static_info_collector =
@@ -161,7 +174,7 @@ bool init(const InitOptions& opts) {
     rt_ptr->logger->write(model::InitEventModel(ie));
 
     // Start sampler if enabled and collector exists
-    if (opts.sampling_auto_start && rt_ptr->logger) {
+    if (g_opts.sampling_auto_start && rt_ptr->logger) {
         SystemStartEvent e;
         e.pid = gpufl::detail::GetPid();
         e.app = rt_ptr->app_name;
@@ -172,11 +185,11 @@ bool init(const InitOptions& opts) {
         if (rt_ptr->host_collector) e.host = rt_ptr->host_collector->sample();
         rt_ptr->logger->write(model::SystemStartModel(e));
     }
-    if (opts.sampling_auto_start && opts.system_sample_rate_ms > 0 &&
+    if (g_opts.sampling_auto_start && g_opts.system_sample_rate_ms > 0 &&
         rt_ptr->collector) {
         rt_ptr->sampler.start(rt_ptr->app_name, rt_ptr->session_id,
                               rt_ptr->logger, rt_ptr->collector,
-                              opts.system_sample_rate_ms, rt_ptr->app_name,
+                              g_opts.system_sample_rate_ms, rt_ptr->app_name,
                               rt_ptr->host_collector.get());
     }
 
