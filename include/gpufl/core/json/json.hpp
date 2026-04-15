@@ -7,10 +7,12 @@
 #include <vector>
 
 namespace gpufl {
-namespace report {
+namespace json {
 
-// Minimal JSON value type for reading NDJSON log files.
-// Supports: null, bool, int64, double, string, array, object.
+/// Escape a string for safe JSON embedding (handles \, ", \n, \r, \t, control chars).
+std::string escape(const std::string& s);
+
+// Minimal JSON value type — supports null, bool, int64, double, string, array, object.
 class JsonValue {
    public:
     using Object = std::map<std::string, JsonValue>;
@@ -80,10 +82,13 @@ class JsonValue {
     static const Object kEmptyObject;
 };
 
-// Parse a single JSON string into a JsonValue. Returns null on failure.
+/// Parse a single JSON string into a JsonValue. Returns null on failure.
 JsonValue parseJson(const std::string& input);
 
-// Parse an NDJSON file into a vector of JsonValue objects.
+/// Read a file and parse as a single JSON document. Returns null on failure.
+JsonValue loadFile(const std::string& path);
+
+/// Parse an NDJSON file into a vector of JsonValue objects.
 std::vector<JsonValue> loadJsonLines(const std::string& path);
 
 // ── Template implementations ────────────────────────────────────────────────
@@ -146,5 +151,5 @@ inline bool JsonValue::value(const std::string& key, const bool& def) const {
     return it->second.get_bool(def);
 }
 
-}  // namespace report
+}  // namespace json
 }  // namespace gpufl

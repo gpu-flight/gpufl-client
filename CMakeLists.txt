@@ -68,7 +68,8 @@ target_sources(gpufl PRIVATE
     include/gpufl/core/debug_logger.cpp
     include/gpufl/core/stack_trace.cpp
     include/gpufl/core/scope_registry.cpp
-    include/gpufl/report/json_reader.cpp
+    include/gpufl/core/json/json.cpp
+    include/gpufl/core/config_file_loader.cpp
     include/gpufl/report/hint_engine.cpp
     include/gpufl/report/text_report.cpp
 )
@@ -117,6 +118,7 @@ else()
     )
 endif()
 target_sources(gpufl PRIVATE include/gpufl/core/logger/file_compressor.cpp)
+
 
 # -----------------------
 # Backends

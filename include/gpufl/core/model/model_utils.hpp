@@ -6,26 +6,13 @@
 #include <vector>
 
 #include "gpufl/core/events.hpp"
+#include "gpufl/core/json/json.hpp"
 
 namespace gpufl::model {
 
+/// Alias for backward compatibility — delegates to gpufl::json::escape().
 inline std::string jsonEscape(const std::string& s) {
-    std::ostringstream oss;
-    for (unsigned char c : s) {
-        switch (c) {
-            case '\\': oss << "\\\\"; break;
-            case '"':  oss << "\\\""; break;
-            case '\n': oss << "\\n";  break;
-            case '\r': oss << "\\r";  break;
-            case '\t': oss << "\\t";  break;
-            default:
-                if (c < 0x20) oss << "\\u" << std::hex << std::setw(4)
-                                  << std::setfill('0') << static_cast<int>(c)
-                                  << std::dec;
-                else          oss << c;
-        }
-    }
-    return oss.str();
+    return gpufl::json::escape(s);
 }
 
 inline std::string hostToJson(const HostSample& h) {

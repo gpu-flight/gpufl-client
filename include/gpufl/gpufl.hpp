@@ -24,6 +24,9 @@ struct InitOptions {
     bool enable_source_collection = true;  // collect source file content for source/SASS correlation
     bool flush_logs_always = false;
     ProfilingEngine profiling_engine = ProfilingEngine::PcSamplingWithSass;
+    std::string config_file = "";         // Path to JSON config file (Docker/K8s workflow)
+    std::string remote_config_url = "";  // Backend URL for remote config (Python handles fetch)
+    std::string api_key = "";            // API key for remote config auth
 };
 
 struct BackendProbeResult {
