@@ -121,11 +121,6 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
             cbInfo->functionParams != nullptr) {
             if (domain == CUPTI_CB_DOMAIN_RUNTIME_API &&
                 cbid == CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_v7000) {
-                GFL_LOG_DEBUG("[KernelLaunchHandler] details path domain=",
-                              static_cast<int>(domain),
-                              " cbid=", static_cast<int>(cbid),
-                              " corr=", cbInfo->correlationId,
-                              " params=", cbInfo->functionParams);
                 meta.has_details = true;
                 const auto* params =
                     (cudaLaunchKernel_v7000_params*)(cbInfo->functionParams);
@@ -138,11 +133,6 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
                 meta.dyn_shared = static_cast<int>(params->sharedMem);
             } else if (domain == CUPTI_CB_DOMAIN_DRIVER_API &&
                        cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel) {
-                GFL_LOG_DEBUG("[KernelLaunchHandler] details path domain=",
-                              static_cast<int>(domain),
-                              " cbid=", static_cast<int>(cbid),
-                              " corr=", cbInfo->correlationId,
-                              " params=", cbInfo->functionParams);
                 meta.has_details = true;
                 const auto* params =
                     (cuLaunchKernel_params*)cbInfo->functionParams;

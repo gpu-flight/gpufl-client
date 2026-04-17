@@ -88,13 +88,14 @@ std::string resolveCopyKind(int kind) {
     return (it != kCopyKindNames.end()) ? it->second : "Unknown(" + std::to_string(kind) + ")";
 }
 
+// Values match CUpti_ActivityPCSamplingStallReason enum from cupti_activity.h
 const std::map<int, std::string> kStallNames = {
-    {2,  "Instruction Fetch"},  {3,  "Execution Dependency"},
-    {4,  "Memory Dependency"},  {5,  "Texture"},
-    {6,  "Sync"},               {7,  "Constant Memory"},
-    {8,  "Pipe Busy"},          {9,  "Memory Throttle"},
-    {10, "Branch Resolving"},   {11, "Wait"},
-    {12, "Barrier"},            {13, "Sleeping"},
+    {2,  "Instruction Fetch"},       {3,  "Execution Dependency"},
+    {4,  "Memory Dependency"},       {5,  "Texture"},
+    {6,  "Sync"},                    {7,  "Constant Memory"},
+    {8,  "Pipe Busy"},               {9,  "Memory Throttle"},
+    {10, "Not Selected"},            {11, "Other"},
+    {12, "Sleeping"},
 };
 
 std::string resolveStallReason(int reason) {

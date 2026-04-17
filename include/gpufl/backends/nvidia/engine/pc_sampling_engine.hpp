@@ -71,6 +71,7 @@ class PcSamplingEngine final : public IProfilingEngine {
     bool privilege_probed_ = false;
 
     std::unique_ptr<PCSamplingBuffers, PCSamplingDeleter> pc_sampling_buffers_;
+    size_t num_stall_reasons_ = 0;  // original slot count; must reset before each getData
 
     mutable std::mutex                       stall_reason_mu_;
     mutable std::unordered_map<uint32_t, std::string> stall_reason_map_;

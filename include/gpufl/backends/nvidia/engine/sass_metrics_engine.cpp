@@ -157,8 +157,7 @@ void SassMetricsEngine::EnableSassMetrics_() {
                                   cuptiSassMetricsGetProperties(&propParams))) {
             GFL_LOG_DEBUG(
                 "[SassMetricsEngine] Metric not available on this GPU, "
-                "skipping: %s",
-                kSassMetricNames[i]);
+                "skipping: ", kSassMetricNames[i]);
             continue;
         }
         sass_metrics_buffers_->config[validConfigs].metricId = propParams.metric.metricId;
@@ -185,15 +184,19 @@ void SassMetricsEngine::EnableSassMetrics_() {
         CUpti_SassMetricsEnable_Params enableParams = {
             CUpti_SassMetricsEnable_Params_STRUCT_SIZE};
         enableParams.ctx = ctx_.cuda_ctx;
-        // When PC sampling is also active (PcSamplingWithSass), SASS lazy
-        // patching intercepts cuLaunchKernel at the same level as
-        // KERNEL_SERIALIZED PC sampling — causing a deadlock. Use eager
-        // patching (=0) so cubins are patched at module-load time before any
-        // kernel launch, eliminating the conflict and correlation ID
-        // mismatches.
-        enableParams.enableLazyPatching =
-            (opts_.profiling_engine == ProfilingEngine::PcSamplingWithSass) ? 0
-                                                                            : 1;
+        // Always use lazy patching (=1): cubins are patched on their first
+        // cuLaunchKernel call rather than at module-load time, avoiding upfront
+        // cost on unexecuted kernels.
+        //
+        // The original concern was that lazy patching intercepts cuLaunchKernel
+        // at the same level as KERNEL_SERIALIZED PC Sampling (SamplingAPI),
+        // which could deadlock in PcSamplingWithSass mode.  In practice this
+        // conflict is impossible: SamplingAPI requires cuptiPCSamplingEnable(),
+        // but SASS requires cuptiProfilerInitialize() first, and that call
+        // blocks the PC Sampling API.  Whenever SASS enables successfully,
+        // SamplingAPI PC sampling is already disabled, so the deadlock
+        // condition can never be reached.
+        enableParams.enableLazyPatching = 1;
         CUptiResult enableRes = cuptiSassMetricsEnable(&enableParams);
         if (LogCuptiErrorIfFailed(this->name(), "cuptiSassMetricsEnable",
                                   enableRes)) {
