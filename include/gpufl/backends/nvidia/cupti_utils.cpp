@@ -43,6 +43,24 @@ int GetMaxThreadsPerSM(int deviceId) {
     return GetSMProps(deviceId).maxThreadsPerSM;
 }
 
+ComputeCapability GetComputeCapability(int deviceId) {
+    static std::mutex mu;
+    static std::unordered_map<int, ComputeCapability> cache;
+
+    std::lock_guard<std::mutex> lock(mu);
+    auto it = cache.find(deviceId);
+    if (it != cache.end()) return it->second;
+
+    ComputeCapability cc{};
+    cudaDeviceProp prop{};
+    if (cudaGetDeviceProperties(&prop, deviceId) == cudaSuccess) {
+        cc.major = prop.major;
+        cc.minor = prop.minor;
+    }
+    cache[deviceId] = cc;
+    return cc;
+}
+
 void CalculateOccupancy(LaunchMeta& meta, const void* funcPtr) {
     if (!funcPtr) return;
 

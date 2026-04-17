@@ -22,6 +22,28 @@ struct SmProps {
 SmProps GetSMProps(int deviceId);
 
 /**
+ * CUDA compute capability (e.g. {8, 6} for Ampere RTX 3090, {12, 0} for
+ * Blackwell RTX 5060). Used to gate profiling features that have very
+ * different overhead characteristics across GPU generations.
+ */
+struct ComputeCapability {
+    int major = 0;
+    int minor = 0;
+    /** Returns true if this GPU is at least (majorNeeded, minorNeeded). */
+    bool atLeast(int majorNeeded, int minorNeeded) const {
+        if (major != majorNeeded) return major > majorNeeded;
+        return minor >= minorNeeded;
+    }
+    bool valid() const { return major > 0; }
+};
+
+/**
+ * @brief Returns the compute capability of the given CUDA device (cached).
+ * Returns {0, 0} if the query fails.
+ */
+ComputeCapability GetComputeCapability(int deviceId);
+
+/**
  * @brief Gets the maximum number of threads per SM for a given device.
  */
 int GetMaxThreadsPerSM(int deviceId);
