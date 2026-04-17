@@ -97,14 +97,14 @@ void Logger::LogChannel::write(const std::string& line) {
             return;
         }
     }
-    // Write line + newline.  Flush only when explicitly requested
-    // (flush_always) to reduce sync I/O overhead.  The agent's LogTailer
-    // handles partial reads gracefully, so deferred flush is safe.
+    // Write line + newline, then flush so the agent's LogTailer never
+    // observes a partial (mid-record) line. Without this, the tailer can
+    // call readLine() on a buffered-but-unflushed write, get a truncated
+    // JSON, and Jackson throws FAIL_ON_TRAILING_TOKENS errors.
     stream_.write(line.data(), static_cast<std::streamsize>(line.size()));
     stream_.put('\n');
-    if (opt_.flush_always) {
-        stream_.flush();
-    }
+    stream_.flush();  // Always flush at line boundary — writes are already
+                      // rare (one per batched event), cost is negligible.
     current_bytes_ += bytesToWrite;
 }
 
