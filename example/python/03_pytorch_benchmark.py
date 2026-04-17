@@ -1,7 +1,8 @@
-import torch
 import gpufl
-import time
 import os
+import time
+import torch
+
 
 def run_stress_test():
     print("--- GpuFlight: Heavy Stress Test (RTX 5060 Optimized) ---")
@@ -18,13 +19,13 @@ def run_stress_test():
     gpufl.init("Heavy_Stress_App",
                log_path="./stress",
                sampling_auto_start=True,
-               system_sample_rate_ms=15,
-               kernel_sample_rate_ms=15,
+               system_sample_rate_ms=50,
+               kernel_sample_rate_ms=50,
                enable_kernel_details=True,
                enable_debug_output=True,
                enable_profiling=True,
                enable_stack_trace=True,
-               profiling_engine=gpufl.ProfilingEngine.PcSamplingWithSass)
+               profiling_engine=gpufl.ProfilingEngine.PcSampling)
 
     try:
         # 2. Allocate (Uses approx 3GB VRAM)
@@ -71,6 +72,7 @@ def run_stress_test():
     finally:
         gpufl.shutdown()
         print(f"\n[DONE] Logs generated at: {os.path.abspath('./stress.scope.log')}")
+
 
 if __name__ == "__main__":
     run_stress_test()

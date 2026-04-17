@@ -66,10 +66,16 @@ class CuptiBackend : public IMonitorBackend {
     void OnScopeStop(const char* name) override {
         GFL_LOG_DEBUG("OnScopeStop");
         if (engine_) engine_->onScopeStop(name);
-        // After engine scope stop (which does cudaDeviceSynchronize),
-        // flush any pending kernel records with real durations.
+        // FlushPendingKernels() needs all GPU work complete and CUPTI activity
+        // records processed so kernels get real GPU durations, not CPU wall
+        // clock time.  PcSamplingEngine::StopAndCollectPcSampling_ normally
+        // provides the sync, but that path is skipped when PC sampling is
+        // blocked (e.g. Profiler API conflict).  Always sync + flush here so
+        // FlushPendingKernels() sees correct CUPTI data regardless.
         if (opts_.profiling_engine == ProfilingEngine::PcSampling ||
             opts_.profiling_engine == ProfilingEngine::PcSamplingWithSass) {
+            cudaDeviceSynchronize();
+            cuptiActivityFlushAll(1);
             FlushPendingKernels();
         }
     }

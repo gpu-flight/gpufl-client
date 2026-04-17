@@ -100,8 +100,7 @@ void PcSamplingEngine::start() {
     }
 }
 
-void PcSamplingEngine::stop() {
-}
+void PcSamplingEngine::stop() {}
 
 void PcSamplingEngine::drainData() {
     if (pc_sampling_method_ != Method::SamplingAPI) return;
@@ -115,6 +114,16 @@ void PcSamplingEngine::drainData() {
     getDataParams.size = sizeof(CUpti_PCSamplingGetDataParams);
     getDataParams.ctx = ctx_.cuda_ctx;
     getDataParams.pcSamplingData = pc_sampling_buffers_->data;
+
+    // stallReasonCount is both input (available slots) and output (slots
+    // written) in CUpti_PCSamplingPCData.  Reset to original capacity so CUPTI
+    // can write into each entry again.
+    if (num_stall_reasons_ > 0) {
+        const size_t cap = pc_sampling_buffers_->data->collectNumPcs;
+        for (size_t i = 0; i < cap; ++i)
+            pc_sampling_buffers_->pcRecords[i].stallReasonCount =
+                num_stall_reasons_;
+    }
 
     pc_sampling_buffers_->data->totalNumPcs = 0;
     CUptiResult getRes = cuptiPCSamplingGetData(&getDataParams);
@@ -219,8 +228,7 @@ bool PcSamplingEngine::EnableSamplingFeatures_() {
     CUptiResult enableRes = cuptiPCSamplingEnable(&enableParams);
     if (enableRes != CUPTI_SUCCESS &&
         enableRes != CUPTI_ERROR_INVALID_OPERATION) {
-        LogCuptiErrorIfFailed(this->name(), "cuptiPCSamplingEnable",
-                              enableRes);
+        LogCuptiErrorIfFailed(this->name(), "cuptiPCSamplingEnable", enableRes);
         if (IsInsufficientPrivilege(enableRes)) {
             sampling_api_blocked_.store(true);
             pc_sampling_method_ = Method::None;
@@ -229,6 +237,13 @@ bool PcSamplingEngine::EnableSamplingFeatures_() {
                 "sampling for this session.");
         }
         return false;
+    }
+    if (enableRes == CUPTI_ERROR_INVALID_OPERATION) {
+        // Typically means PC sampling is already enabled, or the Profiler API
+        // (cuptiProfilerInitialize) was called first and may conflict.
+        GFL_LOG_DEBUG("[PC Sampling] cuptiPCSamplingEnable returned "
+                      "INVALID_OPERATION — possibly already enabled or "
+                      "conflicting with Profiler API; continuing.");
     }
 
     if (!pc_sampling_buffers_) {
@@ -299,6 +314,7 @@ bool PcSamplingEngine::EnableSamplingFeatures_() {
         pc_sampling_buffers_->data->collectNumPcs = kMaxPcs;
         pc_sampling_buffers_->data->pPcData = pc_sampling_buffers_->pcRecords;
         pc_sampling_buffers_->data->totalNumPcs = 0;
+        num_stall_reasons_ = numStallReasons;
     }
 
     CUpti_PCSamplingConfigurationInfo configInfo[7] = {};
@@ -351,7 +367,7 @@ bool PcSamplingEngine::EnableSamplingFeatures_() {
     configParams.numAttributes = 7;
     configParams.pPCSamplingConfigurationInfo = configInfo;
 
-    CUptiResult configRes =
+    const CUptiResult configRes =
         cuptiPCSamplingSetConfigurationAttribute(&configParams);
     if (configRes != CUPTI_SUCCESS &&
         configRes != CUPTI_ERROR_INVALID_OPERATION) {
@@ -380,10 +396,12 @@ bool PcSamplingEngine::EnableSamplingFeatures_() {
         probeParams.ctx = ctx_.cuda_ctx;
         probeParams.pcSamplingData = pc_sampling_buffers_->data;
         CUptiResult probeRes = cuptiPCSamplingGetData(&probeParams);
-        if (IsInsufficientPrivilege(probeRes)) {
+        if (IsInsufficientPrivilege(probeRes) ||
+            probeRes == CUPTI_ERROR_NOT_INITIALIZED) {
             GFL_LOG_DEBUG(
-                "[PC Sampling] Privilege probe failed — disabling "
-                "PC sampling for this session.");
+                "[PC Sampling] Probe failed (", probeRes, ") — "
+                "PC sampling unavailable on this GPU/driver combination "
+                "(may conflict with Profiler API); disabling.");
             sampling_api_blocked_.store(true);
             pc_sampling_method_ = Method::None;
             return false;
@@ -411,8 +429,7 @@ void PcSamplingEngine::StartPcSampling_() {
     int expected = 0;
     if (!pc_sampling_ref_count_.compare_exchange_strong(expected, 1)) {
         const int refs = pc_sampling_ref_count_.fetch_add(1) + 1;
-        GFL_LOG_DEBUG("[PC Sampling] already active (RefCount=",
-                      refs, ")");
+        GFL_LOG_DEBUG("[PC Sampling] already active (RefCount=", refs, ")");
         return;
     }
 
@@ -461,15 +478,34 @@ void PcSamplingEngine::StopAndCollectPcSampling_() {
     getDataParams.pcSamplingData = pc_sampling_buffers_->data;
 
     while (true) {
+        // stallReasonCount is both input (available slots) and output (slots
+        // written).  If the previous getData call wrote fewer than
+        // num_stall_reasons_ stall reasons (including 0), those entries now
+        // have a smaller capacity from CUPTI's perspective.  Reset to the
+        // original allocation size so CUPTI can always fill at least one
+        // record, preventing an infinite loop where hasMore is true but
+        // totalNumPcs=0.
+        if (num_stall_reasons_ > 0) {
+            const size_t cap = pc_sampling_buffers_->data->collectNumPcs;
+            for (size_t i = 0; i < cap; ++i)
+                pc_sampling_buffers_->pcRecords[i].stallReasonCount =
+                    num_stall_reasons_;
+        }
+
         pc_sampling_buffers_->data->totalNumPcs = 0;
         CUptiResult getRes = cuptiPCSamplingGetData(&getDataParams);
         const bool hasMore = (getRes == CUPTI_ERROR_OUT_OF_MEMORY);
 
         if (getRes != CUPTI_SUCCESS && !hasMore) {
-            if (IsInsufficientPrivilege(getRes)) {
+            if (IsInsufficientPrivilege(getRes) ||
+                getRes == CUPTI_ERROR_NOT_INITIALIZED) {
+                // NOT_INITIALIZED: Profiler API (cuptiProfilerInitialize) was
+                // called before PC Sampling API — they are mutually exclusive
+                // on Turing+ GPUs.  Disable to suppress repeated errors.
                 GFL_LOG_DEBUG(
-                    "[PC Sampling] Insufficient privileges for getData - "
-                    "skipping remaining data for this scope.");
+                    "[PC Sampling] getData failed (", getRes, ") — "
+                    "disabling PC sampling for this session.");
+                sampling_api_blocked_.store(true);
             } else {
                 LogCuptiErrorIfFailed(this->name(), "cuptiPCSamplingGetData",
                                       getRes);
@@ -518,7 +554,7 @@ void PcSamplingEngine::StopAndCollectPcSampling_() {
                         const uint8_t* cubinData = nullptr;
                         size_t cubinSize = 0;
                         if (ctx_.cubin_mu && ctx_.cubin_by_crc) {
-                            std::lock_guard<std::mutex> lk(*ctx_.cubin_mu);
+                            std::lock_guard lk(*ctx_.cubin_mu);
                             auto it = ctx_.cubin_by_crc->find(pc.cubinCrc);
                             if (it != ctx_.cubin_by_crc->end()) {
                                 cubinData = it->second.data.data();
@@ -527,25 +563,23 @@ void PcSamplingEngine::StopAndCollectPcSampling_() {
                         }
                         if (cubinData) {
                             GFL_LOG_DEBUG("start getting source correlation");
-                            auto sourceCorr =
+                            auto [fileName, dirName, lineNumber] =
                                 nvidia::CuptiSass::sampleSourceCorrelation(
-                                    cubinData, cubinSize,
-                                    out.function_name, pc.pcOffset);
-                            if (!sourceCorr.fileName.empty()) {
+                                    cubinData, cubinSize, out.function_name,
+                                    pc.pcOffset);
+                            if (!fileName.empty()) {
                                 const std::string fullPath =
-                                    sourceCorr.dirName.empty()
-                                        ? sourceCorr.fileName
-                                        : sourceCorr.dirName + "/" +
-                                              sourceCorr.fileName;
+                                    dirName.empty() ? fileName
+                                                    : dirName + "/" + fileName;
                                 std::snprintf(out.source_file,
                                               sizeof(out.source_file), "%s",
                                               fullPath.c_str());
-                                out.source_line = sourceCorr.lineNumber;
+                                out.source_line = lineNumber;
                             }
                         }
 
                         {
-                            std::lock_guard<std::mutex> lk(stall_reason_mu_);
+                            std::lock_guard lk(stall_reason_mu_);
                             auto it = stall_reason_map_.find(out.stall_reason);
                             if (it != stall_reason_map_.end()) {
                                 out.reason_name = it->second;
