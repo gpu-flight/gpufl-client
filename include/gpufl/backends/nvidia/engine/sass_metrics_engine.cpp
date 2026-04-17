@@ -12,7 +12,10 @@
 #include "gpufl/core/activity_record.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
+#include "gpufl/core/logger/logger.hpp"
+#include "gpufl/core/model/lifecycle_model.hpp"
 #include "gpufl/core/ring_buffer.hpp"
+#include "gpufl/core/runtime.hpp"
 
 namespace gpufl {
 
@@ -158,6 +161,7 @@ void SassMetricsEngine::EnableSassMetrics_() {
             GFL_LOG_DEBUG(
                 "[SassMetricsEngine] Metric not available on this GPU, "
                 "skipping: ", kSassMetricNames[i]);
+            skipped_metrics_.push_back(kSassMetricNames[i]);
             continue;
         }
         sass_metrics_buffers_->config[validConfigs].metricId = propParams.metric.metricId;
@@ -226,6 +230,19 @@ void SassMetricsEngine::EnableSassMetrics_() {
         return;
     }
     GFL_LOG_DEBUG("[SassMetricsEngine] SASS Metrics Enabled");
+
+    // Emit sass_config event so the backend can distinguish "metric not
+    // supported on this GPU" from "metric produced no data for this kernel".
+    if (Runtime* rt = runtime(); rt && rt->logger) {
+        SassConfigEvent evt;
+        evt.session_id = rt->session_id;
+        evt.ts_ns = static_cast<int64_t>(detail::GetTimestampNs());
+        evt.device_id = ctx_.device_id;
+        for (const auto& [id, name] : metric_id_to_name_)
+            evt.configured_metrics.push_back(name);
+        evt.skipped_metrics = skipped_metrics_;
+        rt->logger->write(model::SassConfigModel(evt));
+    }
 }
 
 void SassMetricsEngine::StopAndCollectSassMetrics_() {

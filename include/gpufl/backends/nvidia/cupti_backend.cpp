@@ -277,7 +277,12 @@ void CuptiBackend::FlushPendingKernels() {
         out.type = TraceType::KERNEL;
         std::snprintf(out.name, sizeof(out.name), "%s", m.name);
         out.cpu_start_ns = m.api_enter_ns;
-        out.duration_ns = flushNs - m.api_enter_ns;
+        // GPU duration is unknown for synthetic records — CUPTI never delivered
+        // an activity record for this correlation ID, so we have no GPU timestamps.
+        // The kernel completed before cudaDeviceSynchronize() returned, but the
+        // actual execution time is unavailable.  Using 0 avoids inflating the
+        // Total GPU Time in the report with CPU-side timing artifacts.
+        out.duration_ns = 0;
         out.corr_id = static_cast<unsigned>(corr);
         out.api_start_ns = m.api_enter_ns;
         out.api_exit_ns = m.api_exit_ns > 0 ? m.api_exit_ns : flushNs;

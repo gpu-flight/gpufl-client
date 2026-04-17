@@ -21,4 +21,12 @@ private:
     const ShutdownEvent& e_;
 };
 
+struct SassConfigModel final : IJsonSerializable {
+    explicit SassConfigModel(const SassConfigEvent& e) : e_(e) {}
+    std::string buildJson() const override;
+    Channel channel() const override { return Channel::Device; }
+private:
+    const SassConfigEvent& e_;
+};
+
 }  // namespace gpufl::model
