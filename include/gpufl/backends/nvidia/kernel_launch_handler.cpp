@@ -177,8 +177,6 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
         GFL_LOG_ERROR("[KernelLaunchHandler] null activity record");
         return false;
     }
-    GFL_LOG_DEBUG("[KernelLaunchHandler] activity begin kind=",
-                  static_cast<int>(record->kind));
     if (record->kind != CUPTI_ACTIVITY_KIND_KERNEL &&
         record->kind != CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL) {
         return false;
@@ -233,9 +231,6 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
     {
         const uint64_t corr = k->correlationId;
         out.corr_id = corr;
-        GFL_LOG_DEBUG("[KernelLaunchHandler] activity kernel corr=", corr,
-                      " device=", k->deviceId, " stream=", k->streamId,
-                      " start=", k->start, " end=", k->end);
         std::lock_guard lk(backend_->meta_mu_);
         if (auto it = backend_->meta_by_corr_.find(corr);
             it != backend_->meta_by_corr_.end()) {
@@ -334,9 +329,6 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
 
     g_monitorBuffer.Push(out);
     backend_->kernel_activity_emitted_.fetch_add(1, std::memory_order_relaxed);
-    GFL_LOG_DEBUG("[KernelLaunchHandler] activity pushed corr=", out.corr_id,
-                  " duration_ns=", out.duration_ns,
-                  " has_details=", out.has_details);
     return true;
 }
 

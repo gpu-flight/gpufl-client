@@ -35,4 +35,24 @@ std::string ShutdownEventModel::buildJson() const {
     return oss.str();
 }
 
+std::string SassConfigModel::buildJson() const {
+    std::ostringstream oss;
+    oss << "{\"version\":1,\"type\":\"sass_config\""
+        << ",\"session_id\":\"" << jsonEscape(e_.session_id) << "\""
+        << ",\"ts_ns\":"        << e_.ts_ns
+        << ",\"device_id\":"    << e_.device_id
+        << ",\"configured_metrics\":[";
+    for (size_t i = 0; i < e_.configured_metrics.size(); ++i) {
+        if (i) oss << ',';
+        oss << "\"" << jsonEscape(e_.configured_metrics[i]) << "\"";
+    }
+    oss << "],\"skipped_metrics\":[";
+    for (size_t i = 0; i < e_.skipped_metrics.size(); ++i) {
+        if (i) oss << ',';
+        oss << "\"" << jsonEscape(e_.skipped_metrics[i]) << "\"";
+    }
+    oss << "]}";
+    return oss.str();
+}
+
 }  // namespace gpufl::model
