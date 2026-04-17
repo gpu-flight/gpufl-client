@@ -133,6 +133,33 @@ bool init(const InitOptions& opts) {
     mOpts.enable_stack_trace = g_opts.enable_stack_trace;
     mOpts.enable_source_collection = g_opts.enable_source_collection;
     mOpts.backend_kind = ToMonitorBackendKind(g_opts.backend);
+
+    // Auto-tune kernel_sample_rate_ms on older NVIDIA GPUs where SASS metric
+    // overhead per kernel launch is much higher. A default 50ms on sm_86 can
+    // lead to hundreds of captured kernels per second each carrying
+    // instrumentation replay cost; bump to 200ms so users get a workable
+    // profile without wild slowdowns. Users can still explicitly set a lower
+    // value in InitOptions or via config file.
+#if GPUFL_HAS_CUDA || defined(__CUDACC__)
+    if (mOpts.kernel_sample_rate_ms > 0 && mOpts.kernel_sample_rate_ms < 200 &&
+        (mOpts.profiling_engine == ProfilingEngine::SassMetrics ||
+         mOpts.profiling_engine == ProfilingEngine::PcSamplingWithSass)) {
+        cudaDeviceProp prop{};
+        int devId = 0;
+        if (cudaGetDevice(&devId) == cudaSuccess &&
+            cudaGetDeviceProperties(&prop, devId) == cudaSuccess) {
+            const bool preSm120 = prop.major < 12;
+            if (preSm120 && mOpts.kernel_sample_rate_ms == g_opts.kernel_sample_rate_ms) {
+                GFL_LOG_DEBUG("[gpufl] Auto-tuning kernel_sample_rate_ms 50 -> 200 "
+                              "on sm_", prop.major, prop.minor,
+                              " (SASS metrics have significant per-launch overhead "
+                              "on pre-sm_120 GPUs). Set the value explicitly to override.");
+                mOpts.kernel_sample_rate_ms = 200;
+            }
+        }
+    }
+#endif
+
     Monitor::Initialize(mOpts);
 
     GFL_LOG_DEBUG("Starting Monitor...");
