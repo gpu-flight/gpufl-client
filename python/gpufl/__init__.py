@@ -74,7 +74,7 @@ except ImportError as e:
             self.enable_stack_trace = False
             self.enable_source_collection = True
             self.flush_logs_always = False
-            self.profiling_engine = ProfilingEngine.PcSamplingWithSass
+            self.profiling_engine = ProfilingEngine.PcSampling
             self.config_file = ""
 
     class Scope:

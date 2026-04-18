@@ -23,7 +23,14 @@ struct InitOptions {
     bool enable_stack_trace = false;
     bool enable_source_collection = true;  // collect source file content for source/SASS correlation
     bool flush_logs_always = false;
-    ProfilingEngine profiling_engine = ProfilingEngine::PcSamplingWithSass;
+    // Default: PC Sampling alone. The cubin-disassembly pipeline
+    // (ResourceHandler + nvdisasm) already provides SASS listings and
+    // source correlation, so PC Sampling gives users the full SASS view
+    // plus stall reasons. Opt into SassMetrics or PcSamplingWithSass only
+    // when per-instruction execution/divergence counters are needed —
+    // those paths use CUPTI kernel replay and are ~100× more expensive
+    // on pre-sm_120 GPUs.
+    ProfilingEngine profiling_engine = ProfilingEngine::PcSampling;
     std::string config_file = "";         // Path to JSON config file (Docker/K8s workflow)
     std::string remote_config_url = "";  // Backend URL for remote config (Python handles fetch)
     std::string api_key = "";            // API key for remote config auth
