@@ -19,7 +19,16 @@ set(GPUFL_TEST_SOURCES
 if(GPUFL_ENABLE_NVIDIA AND GPUFL_HAS_CUPTI)
   list(APPEND GPUFL_TEST_SOURCES
     backends/nvidia/test_nvidia_backend.cpp
+    common/log_utils.cpp
   )
+  # The engine-coverage test drives a real CUDA kernel; only include it when
+  # CUDA language is available.
+  if(GPUFL_HAS_CUDA)
+    list(APPEND GPUFL_TEST_SOURCES
+      backends/nvidia/test_engine_coverage.cpp
+      common/test_kernel.cu
+    )
+  endif()
 endif()
 
 if(GPUFL_ENABLE_NVIDIA AND GPUFL_HAS_CUDA)
