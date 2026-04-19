@@ -6,13 +6,17 @@
 #include <cupti_sass_metrics.h>
 
 #include <cstdio>
+#include <cstring>
 #include <vector>
 
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
 #include "gpufl/core/activity_record.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
+#include "gpufl/core/logger/logger.hpp"
+#include "gpufl/core/model/lifecycle_model.hpp"
 #include "gpufl/core/ring_buffer.hpp"
+#include "gpufl/core/runtime.hpp"
 
 namespace gpufl {
 
@@ -25,6 +29,18 @@ std::vector<const char*> kSassMetricNames = {
     "smsp__sass_sectors_mem_global_op_ld_ideal",  // fallback: load ideal (sm_86)
     "smsp__sass_sectors_mem_global_op_st_ideal",  // fallback: store ideal (sm_86)
 };
+
+/** Metrics that CUPTI accepts on pre-sm_120 GPUs but incur massive per-launch
+ *  overhead due to separate kernel replay passes (one per metric class).
+ *  Measured ~120x slowdown on RTX 3090 (sm_86) for tiny-kernel workloads.
+ *  We proactively skip these on older hardware so users keep functional
+ *  profiling (instruction + thread + actual-sectors counts) at reasonable cost.
+ *  The frontend surfaces the skip via sass_config.skipped_metrics. */
+bool IsExpensiveOnPreSm120(const char* name) {
+    if (!name) return false;
+    return std::strcmp(name, "smsp__sass_sectors_mem_global_op_ld_ideal") == 0
+        || std::strcmp(name, "smsp__sass_sectors_mem_global_op_st_ideal") == 0;
+}
 
 bool IsInsufficientPrivilege(CUptiResult res) {
     if (res == CUPTI_ERROR_INSUFFICIENT_PRIVILEGES) return true;
@@ -147,8 +163,29 @@ void SassMetricsEngine::EnableSassMetrics_() {
                         sizeof(CUpti_SassMetrics_Config)));
     }
 
+    // Proactively skip fallback sector-ideal metrics on pre-sm_120 GPUs.
+    // CUPTI accepts them but each requires a separate kernel replay pass,
+    // causing ~120x per-launch slowdown (measured on RTX 3090 sm_86 with a
+    // 2000-launch tiny-kernel workload: 120s vs ~1s on RTX 5060 sm_120).
+    // Users keep instruction/thread/actual-sector metrics; coalescing efficiency
+    // is unavailable and surfaced via sass_config.skipped_metrics (the frontend
+    // shows a hardware-limitation banner in the Memory tab).
+    ComputeCapability cc = GetComputeCapability(static_cast<int>(ctx_.device_id));
+    const bool skipExpensive = cc.valid() && !cc.atLeast(12, 0);
+    if (skipExpensive) {
+        GFL_LOG_DEBUG(
+            "[SassMetricsEngine] GPU compute capability sm_", cc.major, cc.minor,
+            " (< sm_120) — skipping sector-ideal fallback metrics to avoid "
+            "kernel-replay overhead. Coalescing efficiency will be unavailable.");
+    }
+
     size_t validConfigs = 0;
     for (size_t i = 0; i < kSassMetricNames.size(); ++i) {
+        // Proactive skip for known-expensive metrics on older GPUs.
+        if (skipExpensive && IsExpensiveOnPreSm120(kSassMetricNames[i])) {
+            skipped_metrics_.push_back(kSassMetricNames[i]);
+            continue;
+        }
         CUpti_SassMetrics_GetProperties_Params propParams = {
             CUpti_SassMetrics_GetProperties_Params_STRUCT_SIZE};
         propParams.pChipName = ctx_.chip_name.c_str();
@@ -157,8 +194,8 @@ void SassMetricsEngine::EnableSassMetrics_() {
                                   cuptiSassMetricsGetProperties(&propParams))) {
             GFL_LOG_DEBUG(
                 "[SassMetricsEngine] Metric not available on this GPU, "
-                "skipping: %s",
-                kSassMetricNames[i]);
+                "skipping: ", kSassMetricNames[i]);
+            skipped_metrics_.push_back(kSassMetricNames[i]);
             continue;
         }
         sass_metrics_buffers_->config[validConfigs].metricId = propParams.metric.metricId;
@@ -185,15 +222,19 @@ void SassMetricsEngine::EnableSassMetrics_() {
         CUpti_SassMetricsEnable_Params enableParams = {
             CUpti_SassMetricsEnable_Params_STRUCT_SIZE};
         enableParams.ctx = ctx_.cuda_ctx;
-        // When PC sampling is also active (PcSamplingWithSass), SASS lazy
-        // patching intercepts cuLaunchKernel at the same level as
-        // KERNEL_SERIALIZED PC sampling — causing a deadlock. Use eager
-        // patching (=0) so cubins are patched at module-load time before any
-        // kernel launch, eliminating the conflict and correlation ID
-        // mismatches.
-        enableParams.enableLazyPatching =
-            (opts_.profiling_engine == ProfilingEngine::PcSamplingWithSass) ? 0
-                                                                            : 1;
+        // Always use lazy patching (=1): cubins are patched on their first
+        // cuLaunchKernel call rather than at module-load time, avoiding upfront
+        // cost on unexecuted kernels.
+        //
+        // The original concern was that lazy patching intercepts cuLaunchKernel
+        // at the same level as KERNEL_SERIALIZED PC Sampling (SamplingAPI),
+        // which could deadlock in PcSamplingWithSass mode.  In practice this
+        // conflict is impossible: SamplingAPI requires cuptiPCSamplingEnable(),
+        // but SASS requires cuptiProfilerInitialize() first, and that call
+        // blocks the PC Sampling API.  Whenever SASS enables successfully,
+        // SamplingAPI PC sampling is already disabled, so the deadlock
+        // condition can never be reached.
+        enableParams.enableLazyPatching = 1;
         CUptiResult enableRes = cuptiSassMetricsEnable(&enableParams);
         if (LogCuptiErrorIfFailed(this->name(), "cuptiSassMetricsEnable",
                                   enableRes)) {
@@ -223,6 +264,19 @@ void SassMetricsEngine::EnableSassMetrics_() {
         return;
     }
     GFL_LOG_DEBUG("[SassMetricsEngine] SASS Metrics Enabled");
+
+    // Emit sass_config event so the backend can distinguish "metric not
+    // supported on this GPU" from "metric produced no data for this kernel".
+    if (Runtime* rt = runtime(); rt && rt->logger) {
+        SassConfigEvent evt;
+        evt.session_id = rt->session_id;
+        evt.ts_ns = static_cast<int64_t>(detail::GetTimestampNs());
+        evt.device_id = ctx_.device_id;
+        for (const auto& [id, name] : metric_id_to_name_)
+            evt.configured_metrics.push_back(name);
+        evt.skipped_metrics = skipped_metrics_;
+        rt->logger->write(model::SassConfigModel(evt));
+    }
 }
 
 void SassMetricsEngine::StopAndCollectSassMetrics_() {

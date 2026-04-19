@@ -121,11 +121,6 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
             cbInfo->functionParams != nullptr) {
             if (domain == CUPTI_CB_DOMAIN_RUNTIME_API &&
                 cbid == CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_v7000) {
-                GFL_LOG_DEBUG("[KernelLaunchHandler] details path domain=",
-                              static_cast<int>(domain),
-                              " cbid=", static_cast<int>(cbid),
-                              " corr=", cbInfo->correlationId,
-                              " params=", cbInfo->functionParams);
                 meta.has_details = true;
                 const auto* params =
                     (cudaLaunchKernel_v7000_params*)(cbInfo->functionParams);
@@ -138,11 +133,6 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
                 meta.dyn_shared = static_cast<int>(params->sharedMem);
             } else if (domain == CUPTI_CB_DOMAIN_DRIVER_API &&
                        cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel) {
-                GFL_LOG_DEBUG("[KernelLaunchHandler] details path domain=",
-                              static_cast<int>(domain),
-                              " cbid=", static_cast<int>(cbid),
-                              " corr=", cbInfo->correlationId,
-                              " params=", cbInfo->functionParams);
                 meta.has_details = true;
                 const auto* params =
                     (cuLaunchKernel_params*)cbInfo->functionParams;
@@ -187,8 +177,6 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
         GFL_LOG_ERROR("[KernelLaunchHandler] null activity record");
         return false;
     }
-    GFL_LOG_DEBUG("[KernelLaunchHandler] activity begin kind=",
-                  static_cast<int>(record->kind));
     if (record->kind != CUPTI_ACTIVITY_KIND_KERNEL &&
         record->kind != CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL) {
         return false;
@@ -243,9 +231,6 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
     {
         const uint64_t corr = k->correlationId;
         out.corr_id = corr;
-        GFL_LOG_DEBUG("[KernelLaunchHandler] activity kernel corr=", corr,
-                      " device=", k->deviceId, " stream=", k->streamId,
-                      " start=", k->start, " end=", k->end);
         std::lock_guard lk(backend_->meta_mu_);
         if (auto it = backend_->meta_by_corr_.find(corr);
             it != backend_->meta_by_corr_.end()) {
@@ -344,9 +329,6 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
 
     g_monitorBuffer.Push(out);
     backend_->kernel_activity_emitted_.fetch_add(1, std::memory_order_relaxed);
-    GFL_LOG_DEBUG("[KernelLaunchHandler] activity pushed corr=", out.corr_id,
-                  " duration_ns=", out.duration_ns,
-                  " has_details=", out.has_details);
     return true;
 }
 

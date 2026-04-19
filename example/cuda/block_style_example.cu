@@ -1,27 +1,26 @@
-#include <iostream>
 #include <cuda_runtime.h>
-#include "gpufl/gpufl.hpp"
+
+#include <iostream>
+
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/monitor.hpp"
+#include "gpufl/gpufl.hpp"
 
-__global__
-void vectorAdd(int* a, int* b, int* c, int n) {
+__global__ void vectorAdd(int* a, int* b, int* c, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         c[idx] = a[idx] + b[idx];
     }
 }
 
-__global__
-void vectorMul(int* a, int* b, int* c, int n) {
+__global__ void vectorMul(int* a, int* b, int* c, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         c[idx] = a[idx] * b[idx];
     }
 }
 
-__global__
-void vectorScale(int* a, int scale, int n) {
+__global__ void vectorScale(int* a, int scale, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         int val = a[idx];
@@ -42,6 +41,7 @@ int main() {
     opts.enable_kernel_details = true;
     opts.sampling_auto_start = true;
     opts.enable_debug_output = true;
+    opts.enable_source_collection = true;
     opts.profiling_engine = gpufl::ProfilingEngine::PcSamplingWithSass;
 
     if (!gpufl::init(opts)) {
@@ -52,7 +52,7 @@ int main() {
     std::cout << "=== GPUFl Block-Style API Demo ===" << std::endl;
     std::cout << "Logs: " << opts.log_path << "\n" << std::endl;
 
-    const int n = 1 << 22; // 4M elements
+    const int n = 1 << 22;  // 4M elements
     const size_t bytes = n * sizeof(int);
 
     // Allocate memory
