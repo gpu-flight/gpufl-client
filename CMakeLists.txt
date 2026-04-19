@@ -57,6 +57,7 @@ target_sources(gpufl PRIVATE
     include/gpufl/core/model/scope_event_model.cpp
     include/gpufl/core/model/profile_sample_model.cpp
     include/gpufl/core/model/perf_metric_model.cpp
+    include/gpufl/core/model/nvtx_marker_model.cpp
     include/gpufl/core/model/system_event_model.cpp
     include/gpufl/core/sampler.cpp
     include/gpufl/core/runtime.cpp
@@ -186,6 +187,35 @@ if(GPUFL_ENABLE_NVIDIA)
                     target_include_directories(gpufl PRIVATE ${CUPTI_INCLUDE_DIR})
                     set(GPUFL_HAS_CUPTI 1)
                     message(STATUS "Found CUPTI manually: ${CUPTI_LIBRARY}")
+                endif()
+            endif()
+
+            # --------------------------------------------------------
+            # NVTX (NVIDIA Tools Extension) — lets GFL_SCOPE emit ranges
+            # visible to Nsight Systems and captured via CUPTI marker
+            # activity, plus lets the PyTorch integration (gpufl.torch)
+            # bridge dispatch events into the profiling pipeline.
+            # Shipped with the CUDA toolkit; no new external dependency.
+            # --------------------------------------------------------
+            if (TARGET CUDA::nvToolsExt)
+                target_link_libraries(gpufl PRIVATE CUDA::nvToolsExt)
+                target_compile_definitions(gpufl PRIVATE GPUFL_HAS_NVTX=1)
+                message(STATUS "Found NVTX via CUDAToolkit target (CUDA::nvToolsExt)")
+            else()
+                # Older CUDA toolkits ship NVTX as header-only at
+                # include/nvtx3/ — just adding the include dir is enough
+                # for the nvtxRangePushA/Pop APIs (no library to link).
+                find_path(NVTX3_INCLUDE_DIR NAMES nvtx3/nvToolsExt.h nvToolsExt.h
+                    HINTS "${CUDAToolkit_INCLUDE_DIRS}"
+                          "${CUDAToolkit_ROOT}/include"
+                          "$ENV{CUDA_PATH}/include"
+                )
+                if(NVTX3_INCLUDE_DIR)
+                    target_include_directories(gpufl PRIVATE ${NVTX3_INCLUDE_DIR})
+                    target_compile_definitions(gpufl PRIVATE GPUFL_HAS_NVTX=1)
+                    message(STATUS "Found NVTX headers at ${NVTX3_INCLUDE_DIR}")
+                else()
+                    message(STATUS "NVTX not found — GFL_SCOPE will not emit NVTX ranges")
                 endif()
             endif()
 

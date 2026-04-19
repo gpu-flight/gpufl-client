@@ -27,7 +27,18 @@ Homepage = "https://github.com/gpufl/gpufl-client"
 Issues = "https://github.com/gpufl/gpufl-client/issues"
 
 [project.optional-dependencies]
+# PyTorch integration — first-class. Uses TorchDispatchMode (stable
+# since torch 2.1) to capture op-level events as NVTX ranges.
+torch = ["torch>=2.1", "requests>=2.28"]
+
+# The following are v1 STUBS — modules import cleanly and raise a
+# helpful NotImplementedError explaining the workaround (manual NVTX).
+# Full implementations ship post-launch. See gpufl/<name>/__init__.py.
+cupy = ["cupy-cuda12x>=12"]
+jax  = ["jax>=0.4"]
+triton = ["triton>=2.1"]
 numba = ["numba", "numpy"]
+
 viz = [
     "pandas>=1.5",
     "matplotlib>=3.7"
@@ -35,6 +46,17 @@ viz = [
 analyzer = [
     "pandas >= 1.5",
     "rich"
+]
+
+# Convenience "install everything" extra. Typical use:
+#   pip install gpufl[all]
+all = [
+    "torch>=2.1", "requests>=2.28",
+    "cupy-cuda12x>=12",
+    "jax>=0.4",
+    "triton>=2.1",
+    "numba", "numpy",
+    "pandas>=1.5", "matplotlib>=3.7", "rich",
 ]
 
 [tool.scikit-build]

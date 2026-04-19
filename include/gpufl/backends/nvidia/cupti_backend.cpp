@@ -46,6 +46,19 @@ namespace {
 std::mutex g_sourceLocatorMu;
 std::unordered_map<uint32_t, std::pair<std::string, uint32_t>> g_sourceLocatorMap;
 std::unordered_map<uint32_t, std::string> g_functionNameMap;
+
+// NVTX marker pairing. CUPTI delivers each NVTX range as two separate
+// activity records: one with flags=START, one with flags=END, both
+// sharing the same id. We pair them here in the buffer-completion
+// callback to emit a single NvtxMarkerEvent with start, end, and
+// duration. Map entry value: (name, start_timestamp, domain).
+struct NvtxOpen {
+    std::string name;
+    std::string domain;
+    uint64_t start_ts = 0;
+};
+std::mutex g_nvtxMu;
+std::unordered_map<uint32_t, NvtxOpen> g_nvtxOpen;
 }  // namespace
 
 namespace {
@@ -179,6 +192,14 @@ void CuptiBackend::start() {
     // FUNCTION records carry the function name indexed by functionId in
     // CUpti_ActivityPCSampling3; needed for source correlation on ActivityAPI.
     CUPTI_CHECK(cuptiActivityEnable(CUPTI_ACTIVITY_KIND_FUNCTION));
+    // MARKER records capture NVTX push/pop ranges. We enable this
+    // unconditionally because:
+    //   - GFL_SCOPE itself now emits NVTX ranges (see gpufl.cpp)
+    //   - PyTorch / cuDNN / cuBLAS / NCCL emit NVTX automatically
+    //   - The cost is ~zero when no NVTX traffic exists
+    // Paired START/END records are merged into NvtxMarkerEvent below
+    // in BufferCompleted.
+    CUPTI_CHECK(cuptiActivityEnable(CUPTI_ACTIVITY_KIND_MARKER));
 
     // Enable activity kinds required by registered handlers (always on)
     {
@@ -428,6 +449,68 @@ void CUPTIAPI CuptiBackend::BufferCompleted(CUcontext context,
                             }
                         }
                         g_monitorBuffer.Push(out);
+                    } else if (record->kind == CUPTI_ACTIVITY_KIND_MARKER) {
+                        // NVTX markers arrive as paired START/END records.
+                        // Pair them by id to emit one ActivityRecord per
+                        // completed range (TraceType::NVTX_MARKER, consumed
+                        // by CollectorLoop → NvtxMarkerModel JSON).
+                        auto* m = reinterpret_cast<
+                            const CUpti_ActivityMarker2*>(record);
+                        const bool isStart =
+                            (m->flags & CUPTI_ACTIVITY_FLAG_MARKER_START) != 0;
+                        const bool isEnd =
+                            (m->flags & CUPTI_ACTIVITY_FLAG_MARKER_END)   != 0;
+
+                        if (isStart) {
+                            NvtxOpen entry;
+                            entry.name     = m->name   ? m->name   : "";
+                            entry.domain   = m->domain ? m->domain : "";
+                            entry.start_ts = m->timestamp;
+                            std::lock_guard<std::mutex> lk(g_nvtxMu);
+                            g_nvtxOpen[m->id] = std::move(entry);
+                        } else if (isEnd) {
+                            NvtxOpen entry;
+                            bool found = false;
+                            {
+                                std::lock_guard<std::mutex> lk(g_nvtxMu);
+                                auto it = g_nvtxOpen.find(m->id);
+                                if (it != g_nvtxOpen.end()) {
+                                    entry = std::move(it->second);
+                                    g_nvtxOpen.erase(it);
+                                    found = true;
+                                }
+                            }
+                            if (found) {
+                                ActivityRecord out{};
+                                out.type = TraceType::NVTX_MARKER;
+                                std::snprintf(out.name, sizeof(out.name),
+                                              "%s", entry.name.c_str());
+                                // Convert CUPTI timestamp (ns, monotonic
+                                // but different epoch) to wall-clock ns
+                                // using the same base delta other records
+                                // use elsewhere in this callback.
+                                const int64_t start_wall =
+                                    static_cast<int64_t>(entry.start_ts) -
+                                    static_cast<int64_t>(baseCuptiTs) +
+                                    baseCpuNs;
+                                const int64_t end_wall =
+                                    static_cast<int64_t>(m->timestamp) -
+                                    static_cast<int64_t>(baseCuptiTs) +
+                                    baseCpuNs;
+                                out.cpu_start_ns = start_wall;
+                                out.duration_ns  = end_wall - start_wall;
+                                out.corr_id      = m->id;
+                                // Domain stored in user_scope slot for now
+                                // (CollectorLoop passes it to the event).
+                                std::snprintf(out.user_scope,
+                                              sizeof(out.user_scope), "%s",
+                                              entry.domain.c_str());
+                                g_monitorBuffer.Push(out);
+                            }
+                        }
+                        // Other flag values (e.g. SYNC-only points) are
+                        // ignored in v1; can be added as instantaneous
+                        // events later if needed.
                     }
                 }
             } else if (st == CUPTI_ERROR_MAX_LIMIT_REACHED) {
