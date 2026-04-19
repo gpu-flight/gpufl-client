@@ -81,6 +81,14 @@ struct ShutdownEvent {
     int64_t ts_ns = 0;
 };
 
+struct SassConfigEvent {
+    std::string session_id;
+    int64_t ts_ns = 0;
+    uint32_t device_id = 0;
+    std::vector<std::string> configured_metrics;  // metrics successfully enabled
+    std::vector<std::string> skipped_metrics;     // metrics CUPTI rejected for this GPU
+};
+
 struct KernelEvent {
     int pid = 0;
     std::string app;

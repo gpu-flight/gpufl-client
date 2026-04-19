@@ -11,7 +11,10 @@
 
 #include <cstring>
 #include <exception>
+#include <mutex>
 #include <set>
+#include <unordered_map>
+#include <utility>
 
 #include "gpufl/backends/nvidia/cuda_collector.hpp"
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
@@ -33,6 +36,17 @@
 
 namespace gpufl {
 std::atomic<gpufl::CuptiBackend*> g_activeBackend{nullptr};
+
+namespace {
+// Persistent maps for ActivityAPI PC sampling companion records.
+// SOURCE_LOCATOR records map sourceLocatorId → (fileName, lineNumber).
+// FUNCTION records map functionId → functionName.
+// Both arrive in the same buffer as PC_SAMPLING records and must outlive
+// individual BufferCompleted calls.
+std::mutex g_sourceLocatorMu;
+std::unordered_map<uint32_t, std::pair<std::string, uint32_t>> g_sourceLocatorMap;
+std::unordered_map<uint32_t, std::string> g_functionNameMap;
+}  // namespace
 
 namespace {
 bool IsInsufficientPrivilege(CUptiResult res) {
@@ -162,6 +176,9 @@ void CuptiBackend::start() {
     kernel_activity_throttled_.store(0, std::memory_order_relaxed);
 
     CUPTI_CHECK(cuptiActivityEnable(CUPTI_ACTIVITY_KIND_SOURCE_LOCATOR));
+    // FUNCTION records carry the function name indexed by functionId in
+    // CUpti_ActivityPCSampling3; needed for source correlation on ActivityAPI.
+    CUPTI_CHECK(cuptiActivityEnable(CUPTI_ACTIVITY_KIND_FUNCTION));
 
     // Enable activity kinds required by registered handlers (always on)
     {
@@ -260,7 +277,12 @@ void CuptiBackend::FlushPendingKernels() {
         out.type = TraceType::KERNEL;
         std::snprintf(out.name, sizeof(out.name), "%s", m.name);
         out.cpu_start_ns = m.api_enter_ns;
-        out.duration_ns = flushNs - m.api_enter_ns;
+        // GPU duration is unknown for synthetic records — CUPTI never delivered
+        // an activity record for this correlation ID, so we have no GPU timestamps.
+        // The kernel completed before cudaDeviceSynchronize() returned, but the
+        // actual execution time is unavailable.  Using 0 avoids inflating the
+        // Total GPU Time in the report with CPU-side timing artifacts.
+        out.duration_ns = 0;
         out.corr_id = static_cast<unsigned>(corr);
         out.api_start_ns = m.api_enter_ns;
         out.api_exit_ns = m.api_exit_ns > 0 ? m.api_exit_ns : flushNs;
@@ -353,21 +375,60 @@ void CUPTIAPI CuptiBackend::BufferCompleted(CUcontext context,
                         break;
                     }
                 }
-                if (!handled &&
-                    record->kind == CUPTI_ACTIVITY_KIND_PC_SAMPLING) {
-                    auto* pc =
-                        reinterpret_cast<CUpti_ActivityPCSampling3*>(record);
-                    ActivityRecord out{};
-                    out.type = TraceType::PC_SAMPLE;
-                    out.corr_id = pc->correlationId;
-                    std::snprintf(out.sample_kind, sizeof(out.sample_kind),
-                                  "%s", "pc_sampling");
-                    out.samples_count = pc->samples;
-                    out.stall_reason = pc->stallReason;
-                    out.device_id =
-                        reinterpret_cast<const CUpti_ActivityKernel11*>(record)
-                            ->deviceId;
-                    g_monitorBuffer.Push(out);
+                if (!handled) {
+                    if (record->kind ==
+                        CUPTI_ACTIVITY_KIND_SOURCE_LOCATOR) {
+                        auto* sl = reinterpret_cast<
+                            const CUpti_ActivitySourceLocator*>(record);
+                        if (sl->fileName) {
+                            std::lock_guard lk(g_sourceLocatorMu);
+                            g_sourceLocatorMap[sl->id] = {sl->fileName,
+                                                          sl->lineNumber};
+                        }
+                    } else if (record->kind == CUPTI_ACTIVITY_KIND_FUNCTION) {
+                        auto* fn = reinterpret_cast<
+                            const CUpti_ActivityFunction*>(record);
+                        if (fn->name) {
+                            std::lock_guard lk(g_sourceLocatorMu);
+                            g_functionNameMap[fn->id] = fn->name;
+                        }
+                    } else if (record->kind ==
+                               CUPTI_ACTIVITY_KIND_PC_SAMPLING) {
+                        auto* pc = reinterpret_cast<
+                            CUpti_ActivityPCSampling3*>(record);
+                        ActivityRecord out{};
+                        out.type = TraceType::PC_SAMPLE;
+                        out.corr_id = pc->correlationId;
+                        out.pc_offset =
+                            static_cast<uint32_t>(pc->pcOffset);
+                        std::snprintf(out.sample_kind,
+                                      sizeof(out.sample_kind), "%s",
+                                      "pc_sampling");
+                        out.samples_count = pc->samples;
+                        out.stall_reason = pc->stallReason;
+                        out.device_id = backend->device_id_;
+                        {
+                            std::lock_guard lk(g_sourceLocatorMu);
+                            auto slIt = g_sourceLocatorMap.find(
+                                pc->sourceLocatorId);
+                            if (slIt != g_sourceLocatorMap.end()) {
+                                std::snprintf(
+                                    out.source_file,
+                                    sizeof(out.source_file), "%s",
+                                    slIt->second.first.c_str());
+                                out.source_line = slIt->second.second;
+                            }
+                            auto fnIt =
+                                g_functionNameMap.find(pc->functionId);
+                            if (fnIt != g_functionNameMap.end()) {
+                                std::snprintf(
+                                    out.function_name,
+                                    sizeof(out.function_name), "%s",
+                                    fnIt->second.c_str());
+                            }
+                        }
+                        g_monitorBuffer.Push(out);
+                    }
                 }
             } else if (st == CUPTI_ERROR_MAX_LIMIT_REACHED) {
                 break;
