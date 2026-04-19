@@ -16,6 +16,7 @@
 #include "gpufl/core/logger/logger.hpp"
 #include "gpufl/core/model/batch_models.hpp"
 #include "gpufl/core/model/memcpy_event_model.hpp"
+#include "gpufl/core/model/nvtx_marker_model.hpp"
 #include "gpufl/core/monitor_adapter.hpp"
 #include "gpufl/core/ring_buffer.hpp"
 #include "gpufl/core/runtime.hpp"
@@ -272,6 +273,23 @@ void CollectorLoop() {
             if (needs_flush) {
                 flushBatches(*rt->logger, rt->session_id);
             }
+        } else if (rec.type == TraceType::NVTX_MARKER) {
+            // NVTX range captured via CUPTI_ACTIVITY_KIND_MARKER. Emitted
+            // directly as a single event (not batched) — NVTX traffic at
+            // scale is primarily from PyTorch and framework internals,
+            // which we're comfortable serializing per-event for now.
+            // Consider batching if volume becomes a problem.
+            NvtxMarkerEvent ev;
+            ev.pid         = detail::GetPid();
+            ev.app         = rt->app_name;
+            ev.session_id  = rt->session_id;
+            ev.name        = rec.name;
+            ev.domain      = rec.user_scope;   // stashed here by cupti_backend
+            ev.start_ns    = rec.cpu_start_ns;
+            ev.end_ns      = rec.cpu_start_ns + duration_ns;
+            ev.duration_ns = duration_ns;
+            ev.marker_id   = rec.corr_id;
+            rt->logger->write(model::NvtxMarkerModel(ev));
         }
 
         return true;
