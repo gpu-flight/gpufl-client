@@ -1,7 +1,13 @@
-import gpufl
+# IMPORTANT: import torch (and other GPU frameworks) BEFORE importing gpufl.
+# Both gpufl and PyTorch bundle a CUPTI version; importing gpufl first loads
+# CUDA 13.x CUPTI (2025.4) before PyTorch loads its own CUPTI (e.g. 2025.1),
+# causing a CUPTI version conflict that leads to a crash during profiling.
+# Correct order: framework first, then profiler.
 import os
 import time
-import torch
+import torch       # load framework (and its CUPTI) before gpufl
+import gpufl       # now gpufl's CUPTI loads into an already-initialized CUDA ctx
+import gpufl.torch
 
 
 def run_stress_test():
@@ -11,9 +17,9 @@ def run_stress_test():
         print("[ERROR] PyTorch (CUDA) not found. Did you install the cu124 version?")
         return
 
+    gpufl.torch.attach()
     device = torch.device("cuda")
     print(f"Target: {torch.cuda.get_device_name(0)}")
-
     # 1. Init GpuFlight
     # 15ms is the fastest reliable timer on Windows
     gpufl.init("Heavy_Stress_App",
@@ -71,6 +77,7 @@ def run_stress_test():
 
     finally:
         gpufl.shutdown()
+        gpufl.torch.detach()
         print(f"\n[DONE] Logs generated at: {os.path.abspath('./stress.scope.log')}")
 
 

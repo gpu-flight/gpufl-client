@@ -9,12 +9,25 @@
 #include <cupti_range_profiler.h>
 #endif
 
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <mutex>
 #include <set>
+#include <string>
 #include <unordered_map>
 #include <utility>
+
+// Platform-specific includes for runtime NVTX injection path discovery.
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <psapi.h>  // EnumProcessModules / GetModuleFileNameA
+#elif defined(__linux__)
+#include <dlfcn.h>
+#endif
 
 #include "gpufl/backends/nvidia/cuda_collector.hpp"
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
@@ -200,6 +213,124 @@ void CuptiBackend::start() {
     // Paired START/END records are merged into NvtxMarkerEvent below
     // in BufferCompleted.
     CUPTI_CHECK(cuptiActivityEnable(CUPTI_ACTIVITY_KIND_MARKER));
+
+    // NVTX v3 injection — register CUPTI as the NVTX provider.
+    //
+    // NVTX v3 (header-only since CUDA 11, mandatory in CUDA 13) works via
+    // a lazy injection mechanism: on the *first* nvtxRangePushA/Pop call, it
+    // reads the NVTX_INJECTION64_PATH environment variable, loads that DLL,
+    // and calls its "InitializeInjectionNvtx2" export. CUPTI exports this
+    // function, so pointing the env var at the already-loaded CUPTI DLL
+    // makes every subsequent NVTX call route through CUPTI and produce
+    // CUPTI_ACTIVITY_KIND_MARKER records.
+    //
+    // If NVTX_INJECTION64_PATH is not set, nvtxRangePushA is a silent no-op
+    // (all calls go to the null provider) and no MARKER records are ever
+    // produced, regardless of cuptiActivityEnable(MARKER) being called.
+    //
+    // We discover the CUPTI DLL path at runtime from the address of a CUPTI
+    // function that is already loaded in this process — robust to non-standard
+    // install locations and doesn't require CUDA_PATH to be set.
+    // We only set the env var if it hasn't been set externally, so a user who
+    // wants to use a custom injection library can still do so.
+#if GPUFL_HAS_NVTX
+    if (!getenv("NVTX_INJECTION64_PATH")) {
+        // Discover the CUPTI DLL path by finding the loaded module that:
+        //   (a) exports "InitializeInjectionNvtx2" (the symbol NVTX v3 calls)
+        //   (b) is the same CUPTI we linked against — i.e., it lives under
+        //       the CUDA toolkit (CUDA_PATH), NOT under a framework bundle.
+        //
+        // Context: PyTorch ships its own cupti64_*.dll under lib/. If we
+        // blindly pick the first module that exports InitializeInjectionNvtx2
+        // we may get PyTorch's CUPTI, which has a different subscriber context
+        // than the CUDA toolkit CUPTI our backend already runs under.
+        // Using the wrong CUPTI as the NVTX injection DLL causes CUPTI to
+        // deliver NVTX marker records to the wrong subscriber (silent loss),
+        // and in some cases causes a crash at the CUDA runtime boundary due
+        // to two CUPTI instances both intercepting the same operations.
+        //
+        // Strategy: two-pass scan.
+        //   Pass 0: prefer the module whose path begins with CUDA_PATH.
+        //   Pass 1: accept any module that exports InitializeInjectionNvtx2
+        //           (fallback for systems where CUDA_PATH is not set).
+#if defined(_WIN32)
+        const char* cudaPath = getenv("CUDA_PATH");
+        HMODULE hMods[512];
+        DWORD cbNeeded = 0;
+        HANDLE hProcess = GetCurrentProcess();
+        if (EnumProcessModules(hProcess, hMods, sizeof(hMods), &cbNeeded)) {
+            DWORD count = cbNeeded / sizeof(HMODULE);
+            if (count > 512) count = 512;
+
+            char chosen[MAX_PATH] = {};
+            for (DWORD pass = 0; pass < 2 && chosen[0] == '\0'; ++pass) {
+                for (DWORD i = 0; i < count; ++i) {
+                    if (!GetProcAddress(hMods[i], "InitializeInjectionNvtx2"))
+                        continue;
+                    char modPath[MAX_PATH] = {};
+                    DWORD len = GetModuleFileNameA(hMods[i], modPath, MAX_PATH);
+                    if (len == 0 || len >= MAX_PATH) continue;
+
+                    if (pass == 0 && cudaPath) {
+                        // Accept only if under the CUDA toolkit path
+                        if (_strnicmp(modPath, cudaPath, strlen(cudaPath)) == 0) {
+                            strncpy_s(chosen, modPath, MAX_PATH - 1);
+                            break;
+                        }
+                    } else if (pass == 1) {
+                        // Fallback: take the first we can find
+                        strncpy_s(chosen, modPath, MAX_PATH - 1);
+                        break;
+                    }
+                }
+            }
+            if (chosen[0]) {
+                _putenv_s("NVTX_INJECTION64_PATH", chosen);
+                GFL_LOG_DEBUG("[CuptiBackend] NVTX injection path: {}", chosen);
+            }
+        }
+#elif defined(__linux__)
+        // On Linux, libcupti.so is loaded once. dlsym(RTLD_DEFAULT, ...) finds
+        // whichever .so was loaded first; prefer CUDA_PATH if set.
+        const char* cudaPath = getenv("CUDA_PATH");
+        void* sym = nullptr;
+
+        if (cudaPath) {
+            // Build the expected libcupti.so path under CUDA_PATH
+            std::string soPath = std::string(cudaPath) + "/extras/CUPTI/lib64/libcupti.so";
+            void* hCupti = dlopen(soPath.c_str(), RTLD_NOLOAD | RTLD_LAZY);
+            if (!hCupti) {
+                soPath = std::string(cudaPath) + "/lib64/libcupti.so";
+                hCupti = dlopen(soPath.c_str(), RTLD_NOLOAD | RTLD_LAZY);
+            }
+            if (hCupti) {
+                sym = dlsym(hCupti, "InitializeInjectionNvtx2");
+                if (sym) {
+                    Dl_info info{};
+                    if (dladdr(sym, &info) && info.dli_fname && info.dli_fname[0]) {
+                        setenv("NVTX_INJECTION64_PATH", info.dli_fname, 0);
+                        GFL_LOG_DEBUG("[CuptiBackend] NVTX injection path: {}",
+                                      info.dli_fname);
+                    }
+                }
+                dlclose(hCupti);
+            }
+        }
+        if (!sym) {
+            // Fallback: find any loaded .so that exports the symbol
+            sym = dlsym(RTLD_DEFAULT, "InitializeInjectionNvtx2");
+            if (sym) {
+                Dl_info info{};
+                if (dladdr(sym, &info) && info.dli_fname && info.dli_fname[0]) {
+                    setenv("NVTX_INJECTION64_PATH", info.dli_fname, 0);
+                    GFL_LOG_DEBUG("[CuptiBackend] NVTX injection path: {}",
+                                  info.dli_fname);
+                }
+            }
+        }
+#endif
+    }
+#endif  // GPUFL_HAS_NVTX
 
     // Enable activity kinds required by registered handlers (always on)
     {

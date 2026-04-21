@@ -1,6 +1,26 @@
 import os
 import sys
 
+# Import-order guard: gpufl and PyTorch each bundle a CUPTI version.
+# If gpufl is imported before torch, two incompatible CUPTI DLLs end up
+# loaded and conflict during profiling (crash in cubin callback).
+# Detect torch already being imported and warn if we loaded before it.
+if os.name == 'nt' and 'torch' not in sys.modules:
+    # torch not yet imported — emit a one-time advisory.  We don't raise
+    # here because headless / CPU-only code should still work.
+    import warnings
+    warnings.warn(
+        "[gpufl] Import order advisory: 'import torch' should come before "
+        "'import gpufl' to avoid a CUPTI version conflict. "
+        "When gpufl loads first on Windows, CUDA 13+ CUPTI (bundled with gpufl) "
+        "initialises before PyTorch's own CUPTI, which can crash on the first "
+        "CUDA kernel launch under profiling. "
+        "Reorder your imports: torch → gpufl.",
+        ImportWarning,
+        stacklevel=2,
+    )
+    del warnings
+
 # 1. Windows DLL Handling — ensure CUDA and CUPTI DLLs are findable.
 # os.add_dll_directory() alone is insufficient for some Python builds;
 # we also prepend to PATH as a belt-and-suspenders approach.
@@ -9,8 +29,23 @@ if os.name == 'nt':
     if cuda_path:
         _dll_dirs = [
             os.path.join(cuda_path, 'bin'),
+            # CUDA 13+: runtime DLLs (cudart, cublas, curand, ...) moved
+            # under bin/x64/. Keep bin/ above it for older toolkits.
+            os.path.join(cuda_path, 'bin', 'x64'),
             os.path.join(cuda_path, 'extras', 'CUPTI', 'lib64'),
         ]
+        # CUPTI transitively depends on zlib.dll, which CUDA does NOT ship
+        # but Nsight tools do. Add their bin dirs as a fallback so imports
+        # work out of the box on a typical dev box.
+        import glob as _glob
+        for nsight_glob in [
+            r'C:\Program Files\NVIDIA Corporation\Nsight Compute *\host\windows-desktop-win7-x64',
+            r'C:\Program Files\NVIDIA Corporation\Nsight Systems *\host-windows-x64',
+        ]:
+            for p in _glob.glob(nsight_glob):
+                if os.path.isfile(os.path.join(p, 'zlib.dll')):
+                    _dll_dirs.append(p)
+                    break  # one per glob is enough
         for d in _dll_dirs:
             if os.path.isdir(d):
                 try:
