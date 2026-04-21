@@ -197,25 +197,38 @@ if(GPUFL_ENABLE_NVIDIA)
             # bridge dispatch events into the profiling pipeline.
             # Shipped with the CUDA toolkit; no new external dependency.
             # --------------------------------------------------------
+            # NVTX detection strategy (robust across CUDA 11/12/13):
+            #   1. CUDA 11/12: `CUDA::nvToolsExt` imported target exists and
+            #      links the legacy nvToolsExt DLL/SO. Use it.
+            #   2. CUDA 13+: NVTX is header-only under `include/nvtx3/`.
+            #      The CUDAToolkit include dir is propagated via CUDA::cudart
+            #      (already linked above), so the header is findable — just
+            #      define GPUFL_HAS_NVTX=1 and let `#include <nvtx3/nvToolsExt.h>`
+            #      resolve through cudart's transitive include.
+            #   3. Fallback find_path as a last resort for unusual layouts.
             if (TARGET CUDA::nvToolsExt)
                 target_link_libraries(gpufl PRIVATE CUDA::nvToolsExt)
                 target_compile_definitions(gpufl PRIVATE GPUFL_HAS_NVTX=1)
                 message(STATUS "Found NVTX via CUDAToolkit target (CUDA::nvToolsExt)")
             else()
-                # Older CUDA toolkits ship NVTX as header-only at
-                # include/nvtx3/ — just adding the include dir is enough
-                # for the nvtxRangePushA/Pop APIs (no library to link).
-                find_path(NVTX3_INCLUDE_DIR NAMES nvtx3/nvToolsExt.h nvToolsExt.h
+                # Force-fresh the search (don't reuse cached NOTFOUND from a prior configure)
+                unset(NVTX3_INCLUDE_DIR CACHE)
+                find_path(NVTX3_INCLUDE_DIR NAMES nvtx3/nvToolsExt.h
                     HINTS "${CUDAToolkit_INCLUDE_DIRS}"
                           "${CUDAToolkit_ROOT}/include"
                           "$ENV{CUDA_PATH}/include"
+                    NO_DEFAULT_PATH
                 )
                 if(NVTX3_INCLUDE_DIR)
                     target_include_directories(gpufl PRIVATE ${NVTX3_INCLUDE_DIR})
                     target_compile_definitions(gpufl PRIVATE GPUFL_HAS_NVTX=1)
                     message(STATUS "Found NVTX headers at ${NVTX3_INCLUDE_DIR}")
                 else()
-                    message(STATUS "NVTX not found — GFL_SCOPE will not emit NVTX ranges")
+                    # Last-resort: if CUDAToolkit is present at all, the header
+                    # is in its include dir via CUDA::cudart's transitive
+                    # propagation. Just define the macro; include will resolve.
+                    target_compile_definitions(gpufl PRIVATE GPUFL_HAS_NVTX=1)
+                    message(STATUS "NVTX: relying on CUDA::cudart transitive include for <nvtx3/nvToolsExt.h>")
                 endif()
             endif()
 
@@ -293,7 +306,9 @@ if(GPUFL_ENABLE_NVIDIA)
     endif()
 
     if(WIN32)
-        target_link_libraries(gpufl PRIVATE dbghelp pdh)
+        # dbghelp: stack traces. pdh: PDH GPU/CPU perf counters.
+        # psapi: EnumProcessModules for runtime NVTX injection path discovery.
+        target_link_libraries(gpufl PRIVATE dbghelp pdh psapi)
     endif()
 
     #
