@@ -31,7 +31,7 @@ def run_stress_test():
                enable_debug_output=True,
                enable_profiling=True,
                enable_stack_trace=True,
-               profiling_engine=gpufl.ProfilingEngine.PcSampling)
+               profiling_engine=gpufl.ProfilingEngine.PcSamplingWithSass)
 
     try:
         # 2. Allocate (Uses approx 3GB VRAM)
