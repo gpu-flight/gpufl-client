@@ -1,5 +1,10 @@
 # GPUFlight Client Library (gpufl)
 
+**The Flight Recorder for GPU Production Workloads.**
+
+`gpufl` is a lightweight, high-performance C++ observability library designed for always-on monitoring of GPU applications.
+Unlike traditional profilers (Nsight) that stop the world, GPUFlight is designed to run in production with minimal overhead, capturing kernel telemetry and logical scopes into structured logs.
+
 ## Project Status: Active Research & Development
 GPU Flight is currently in an early **"Active Research"** phase. The core architecture and C++ engine are being rapidly iterated upon.
 
@@ -8,16 +13,11 @@ To ensure the integrity of the initial design, **we are not currently accepting 
 - Documentation improvements and typo fixes.
 - Feature requests and architectural suggestions via GitHub Issues.
 
-**The Flight Recorder for GPU Production Workloads.**
-
 ## Live Demo
 
 Try the portal with real session data — no sign-up required:
 
 **[https://gpufl-front.vercel.app/demo/gdemo_4R98GA5MzYdosqvNsUqdp_MaUgEcDHABS2C5PHbCDQE](https://gpufl-front.vercel.app/demo/gdemo_4R98GA5MzYdosqvNsUqdp_MaUgEcDHABS2C5PHbCDQE)**
-
-`gpufl` is a lightweight, high-performance C++ observability library designed for always-on monitoring of GPU applications.
-Unlike traditional profilers (Nsight) that stop the world, GPUFlight is designed to run in production with minimal overhead, capturing kernel telemetry and logical scopes into structured logs.
 
 ## Key Features
 

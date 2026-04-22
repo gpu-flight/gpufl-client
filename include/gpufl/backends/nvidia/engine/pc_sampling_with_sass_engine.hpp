@@ -45,7 +45,8 @@ class PcSamplingWithSassEngine final : public IProfilingEngine {
    private:
     std::unique_ptr<PcSamplingEngine>  pc_;
     std::unique_ptr<SassMetricsEngine> sass_;
-    bool sass_ok_ = false;  // true only if SASS engine started successfully
+    bool sass_ok_ = false;       // true only if SASS engine started successfully
+    bool skip_pc_scope_ = false;  // SamplingAPI + SASS conflict → skip PC scope work
 };
 
 }  // namespace gpufl
