@@ -4,6 +4,7 @@
 #include <cupti.h>
 #include <cupti_pcsampling.h>
 
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -24,7 +25,7 @@
 namespace gpufl {
 
 namespace {
-bool IsInsufficientPrivilege(CUptiResult res) {
+bool IsInsufficientPrivilege(const CUptiResult res) {
     if (res == CUPTI_ERROR_INSUFFICIENT_PRIVILEGES) return true;
 #ifdef CUPTI_ERROR_VIRTUALIZED_DEVICE_INSUFFICIENT_PRIVILEGES
     if (res == CUPTI_ERROR_VIRTUALIZED_DEVICE_INSUFFICIENT_PRIVILEGES)
@@ -32,11 +33,92 @@ bool IsInsufficientPrivilege(CUptiResult res) {
 #endif
     return false;
 }
+
+constexpr size_t kPcSamplingConfigAttrCount = 7;
+
+std::array<CUpti_PCSamplingConfigurationInfo, kPcSamplingConfigAttrCount>
+BuildPcSamplingConfig(const uint32_t samplingPeriod,
+                      CUpti_PCSamplingData* const samplingData) {
+    std::array<CUpti_PCSamplingConfigurationInfo, kPcSamplingConfigAttrCount>
+        configInfo{};
+
+    size_t configCount = 0;
+    auto addConfig = [&](const CUpti_PCSamplingConfigurationInfo& info) {
+        configInfo[configCount++] = info;
+    };
+
+    // CONTINUOUS mode: avoids deadlock between KERNEL_SERIALIZED and
+    // cudaDeviceSynchronize().  Kernel activity records are re-enabled
+    // explicitly after PC sampling configuration.
+    {
+        CUpti_PCSamplingConfigurationInfo info = {};
+        info.attributeType =
+            CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_COLLECTION_MODE;
+        info.attributeData.collectionModeData.collectionMode =
+            CUPTI_PC_SAMPLING_COLLECTION_MODE_CONTINUOUS;
+        addConfig(info);
+    }
+    {
+        CUpti_PCSamplingConfigurationInfo info = {};
+        info.attributeType =
+            CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_SAMPLING_PERIOD;
+        info.attributeData.samplingPeriodData.samplingPeriod = samplingPeriod;
+        addConfig(info);
+    }
+    {
+        CUpti_PCSamplingConfigurationInfo info = {};
+        info.attributeType =
+            CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_SCRATCH_BUFFER_SIZE;
+        info.attributeData.scratchBufferSizeData.scratchBufferSize =
+            256 * 1024 * 1024;
+        addConfig(info);
+    }
+    {
+        CUpti_PCSamplingConfigurationInfo info = {};
+        info.attributeType =
+            CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_HARDWARE_BUFFER_SIZE;
+        info.attributeData.hardwareBufferSizeData.hardwareBufferSize =
+            256 * 1024 * 1024;
+        addConfig(info);
+    }
+
+    // CUPTI auto-managed start/stop.  With enableStartStopControl=0, CUPTI
+    // samples automatically per kernel.  We reset the session between scopes
+    // (disable + re-enable) to ensure each scope gets fresh stall data.
+    // Note: enableStartStopControl=1 (explicit Start/Stop) returns zero data
+    // on Blackwell/WDDM — a CUPTI platform limitation.
+    {
+        CUpti_PCSamplingConfigurationInfo info = {};
+        info.attributeType =
+            CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_ENABLE_START_STOP_CONTROL;
+        info.attributeData.enableStartStopControlData.enableStartStopControl =
+            0;
+        addConfig(info);
+    }
+    {
+        CUpti_PCSamplingConfigurationInfo info = {};
+        info.attributeType =
+            CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_SAMPLING_DATA_BUFFER;
+        info.attributeData.samplingDataBufferData.samplingDataBuffer =
+            samplingData;
+        addConfig(info);
+    }
+    {
+        CUpti_PCSamplingConfigurationInfo info = {};
+        info.attributeType =
+            CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_OUTPUT_DATA_FORMAT;
+        info.attributeData.outputDataFormatData.outputDataFormat =
+            CUPTI_PC_SAMPLING_OUTPUT_DATA_FORMAT_PARSED;
+        addConfig(info);
+    }
+
+    return configInfo;
+}
 }  // namespace
 
 // ---- PCSamplingDeleter -----------------------------------------------------
 
-void PCSamplingDeleter::operator()(PCSamplingBuffers* b) const {
+void PCSamplingDeleter::operator()(const PCSamplingBuffers* b) const {
     if (!b) return;
     if (b->pcRecords && b->data) {
         const size_t maxPcs = b->data->collectNumPcs;
@@ -100,7 +182,25 @@ void PcSamplingEngine::start() {
     }
 }
 
-void PcSamplingEngine::stop() {}
+void PcSamplingEngine::stop() {
+    // Disable the SamplingAPI session before the activity flush in
+    // CuptiBackend::stop().  While the SamplingAPI is armed, any CUPTI
+    // data-retrieval call (FlushAll, GetData, Disable) can permanently
+    // kill the subscriber callback on driver 590+.  Disabling here — in
+    // the correct order (before flush) — ensures cuptiActivityFlushAll
+    // delivers real kernel activity records with correct GPU durations.
+    if (pc_sampling_method_ == Method::SamplingAPI &&
+        sampling_api_ready_.load() && ctx_.cuda_ctx) {
+        if (sampling_api_started_.load()) {
+            StopAndCollectPcSampling_();
+        }
+        CUpti_PCSamplingDisableParams dp = {};
+        dp.size = sizeof(CUpti_PCSamplingDisableParams);
+        dp.ctx = ctx_.cuda_ctx;
+        cuptiPCSamplingDisable(&dp);
+        sampling_api_ready_.store(false);
+    }
+}
 
 void PcSamplingEngine::drainData() {
     if (pc_sampling_method_ != Method::SamplingAPI) return;
@@ -126,8 +226,9 @@ void PcSamplingEngine::drainData() {
     }
 
     pc_sampling_buffers_->data->totalNumPcs = 0;
-    CUptiResult getRes = cuptiPCSamplingGetData(&getDataParams);
-    if (getRes != CUPTI_SUCCESS && getRes != CUPTI_ERROR_OUT_OF_MEMORY) return;
+    if (const CUptiResult getRes = cuptiPCSamplingGetData(&getDataParams);
+        getRes != CUPTI_SUCCESS && getRes != CUPTI_ERROR_OUT_OF_MEMORY)
+        return;
 
     auto numPcs = pc_sampling_buffers_->data->totalNumPcs;
     if (numPcs == 0) return;
@@ -161,9 +262,9 @@ void PcSamplingEngine::drainData() {
                     }
 
                     {
-                        std::lock_guard<std::mutex> lk(stall_reason_mu_);
-                        auto it = stall_reason_map_.find(out.stall_reason);
-                        if (it != stall_reason_map_.end()) {
+                        std::lock_guard lk(stall_reason_mu_);
+                        if (auto it = stall_reason_map_.find(out.stall_reason);
+                            it != stall_reason_map_.end()) {
                             out.reason_name = it->second;
                         } else {
                             out.reason_name =
@@ -179,11 +280,20 @@ void PcSamplingEngine::drainData() {
 }
 
 void PcSamplingEngine::shutdown() {
+    // Collect any deferred SamplingAPI data before teardown.
+    // For SamplingAPI with enableStartStopControl=0, onScopeStop is a no-op
+    // (to avoid killing CUPTI callbacks), so the accumulated samples are
+    // collected here where callback corruption no longer matters.
+    if (sampling_api_started_.load() &&
+        pc_sampling_method_ == Method::SamplingAPI) {
+        StopAndCollectPcSampling_();
+    }
+
     if (sampling_api_ready_.load() && ctx_.cuda_ctx) {
         CUpti_PCSamplingDisableParams disableParams = {};
         disableParams.size = sizeof(CUpti_PCSamplingDisableParams);
         disableParams.ctx = ctx_.cuda_ctx;
-        CUptiResult disableRes = cuptiPCSamplingDisable(&disableParams);
+        const CUptiResult disableRes = cuptiPCSamplingDisable(&disableParams);
         if (disableRes != CUPTI_SUCCESS &&
             disableRes != CUPTI_ERROR_NOT_INITIALIZED &&
             !IsInsufficientPrivilege(disableRes)) {
@@ -204,7 +314,10 @@ void PcSamplingEngine::onScopeStart(const char* /*name*/) {
 }
 
 void PcSamplingEngine::onScopeStop(const char* /*name*/) {
-    StopAndCollectPcSampling_();
+    // Intentionally a no-op: per-scope stop/collect is disabled.
+    // SamplingAPI collection is deferred to stop()/shutdown() to avoid callback
+    // corruption on some driver versions, and non-SamplingAPI paths do not use
+    // StopAndCollectPcSampling_().
 }
 
 // ---- Private helpers -------------------------------------------------------
@@ -241,9 +354,10 @@ bool PcSamplingEngine::EnableSamplingFeatures_() {
     if (enableRes == CUPTI_ERROR_INVALID_OPERATION) {
         // Typically means PC sampling is already enabled, or the Profiler API
         // (cuptiProfilerInitialize) was called first and may conflict.
-        GFL_LOG_DEBUG("[PC Sampling] cuptiPCSamplingEnable returned "
-                      "INVALID_OPERATION — possibly already enabled or "
-                      "conflicting with Profiler API; continuing.");
+        GFL_LOG_DEBUG(
+            "[PC Sampling] cuptiPCSamplingEnable returned "
+            "INVALID_OPERATION — possibly already enabled or "
+            "conflicting with Profiler API; continuing.");
     }
 
     if (!pc_sampling_buffers_) {
@@ -281,7 +395,7 @@ bool PcSamplingEngine::EnableSamplingFeatures_() {
 
             CUptiResult res = cuptiPCSamplingGetStallReasons(&getParams);
             if (res == CUPTI_SUCCESS) {
-                std::lock_guard<std::mutex> lk(stall_reason_mu_);
+                std::lock_guard lk(stall_reason_mu_);
                 for (size_t i = 0; i < numStallReasons; i++) {
                     stall_reason_map_[stallIndices[i]] =
                         std::string(stallReasonNames[i]);
@@ -317,55 +431,15 @@ bool PcSamplingEngine::EnableSamplingFeatures_() {
         num_stall_reasons_ = numStallReasons;
     }
 
-    CUpti_PCSamplingConfigurationInfo configInfo[7] = {};
-    configInfo[0].attributeType =
-        CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_COLLECTION_MODE;
-    // CONTINUOUS mode: avoids deadlock between KERNEL_SERIALIZED and
-    // cudaDeviceSynchronize().  Kernel activity records are re-enabled
-    // explicitly after PC sampling configuration.
-    configInfo[0].attributeData.collectionModeData.collectionMode =
-        CUPTI_PC_SAMPLING_COLLECTION_MODE_CONTINUOUS;
-
-    configInfo[1].attributeType =
-        CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_SAMPLING_PERIOD;
-    configInfo[1].attributeData.samplingPeriodData.samplingPeriod =
-        opts_.pc_sampling_period;
-
-    configInfo[2].attributeType =
-        CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_SCRATCH_BUFFER_SIZE;
-    configInfo[2].attributeData.scratchBufferSizeData.scratchBufferSize =
-        256 * 1024 * 1024;
-
-    configInfo[3].attributeType =
-        CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_HARDWARE_BUFFER_SIZE;
-    configInfo[3].attributeData.hardwareBufferSizeData.hardwareBufferSize =
-        256 * 1024 * 1024;
-
-    // CUPTI auto-managed start/stop.  With enableStartStopControl=0, CUPTI
-    // samples automatically per kernel.  We reset the session between scopes
-    // (disable + re-enable) to ensure each scope gets fresh stall data.
-    // Note: enableStartStopControl=1 (explicit Start/Stop) returns zero data
-    // on Blackwell/WDDM — a CUPTI platform limitation.
-    configInfo[4].attributeType =
-        CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_ENABLE_START_STOP_CONTROL;
-    configInfo[4]
-        .attributeData.enableStartStopControlData.enableStartStopControl = 0;
-
-    configInfo[5].attributeType =
-        CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_SAMPLING_DATA_BUFFER;
-    configInfo[5].attributeData.samplingDataBufferData.samplingDataBuffer =
-        pc_sampling_buffers_->data;
-
-    configInfo[6].attributeType =
-        CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_OUTPUT_DATA_FORMAT;
-    configInfo[6].attributeData.outputDataFormatData.outputDataFormat =
-        CUPTI_PC_SAMPLING_OUTPUT_DATA_FORMAT_PARSED;
+    auto configInfo = BuildPcSamplingConfig(opts_.pc_sampling_period,
+                                            pc_sampling_buffers_->data);
 
     CUpti_PCSamplingConfigurationInfoParams configParams = {};
     configParams.size = CUpti_PCSamplingConfigurationInfoParamsSize;
     configParams.ctx = ctx_.cuda_ctx;
-    configParams.numAttributes = 7;
-    configParams.pPCSamplingConfigurationInfo = configInfo;
+    configParams.numAttributes =
+        static_cast<decltype(configParams.numAttributes)>(configInfo.size());
+    configParams.pPCSamplingConfigurationInfo = configInfo.data();
 
     const CUptiResult configRes =
         cuptiPCSamplingSetConfigurationAttribute(&configParams);
@@ -399,7 +473,8 @@ bool PcSamplingEngine::EnableSamplingFeatures_() {
         if (IsInsufficientPrivilege(probeRes) ||
             probeRes == CUPTI_ERROR_NOT_INITIALIZED) {
             GFL_LOG_DEBUG(
-                "[PC Sampling] Probe failed (", probeRes, ") — "
+                "[PC Sampling] Probe failed (", probeRes,
+                ") — "
                 "PC sampling unavailable on this GPU/driver combination "
                 "(may conflict with Profiler API); disabling.");
             sampling_api_blocked_.store(true);
@@ -426,8 +501,8 @@ void PcSamplingEngine::StartPcSampling_() {
         return;
     }
 
-    int expected = 0;
-    if (!pc_sampling_ref_count_.compare_exchange_strong(expected, 1)) {
+    if (int expected = 0;
+        !pc_sampling_ref_count_.compare_exchange_strong(expected, 1)) {
         const int refs = pc_sampling_ref_count_.fetch_add(1) + 1;
         GFL_LOG_DEBUG("[PC Sampling] already active (RefCount=", refs, ")");
         return;
@@ -451,7 +526,8 @@ void PcSamplingEngine::StopAndCollectPcSampling_() {
     if (refs > 1) {
         GFL_LOG_DEBUG("[PC Sampling] still active (RefCount=", refs - 1, ")");
         return;
-    } else if (refs < 1) {
+    }
+    if (refs < 1) {
         GFL_LOG_ERROR("[PC Sampling] RefCount underflow!");
         pc_sampling_ref_count_.store(0);
         return;
@@ -502,9 +578,9 @@ void PcSamplingEngine::StopAndCollectPcSampling_() {
                 // NOT_INITIALIZED: Profiler API (cuptiProfilerInitialize) was
                 // called before PC Sampling API — they are mutually exclusive
                 // on Turing+ GPUs.  Disable to suppress repeated errors.
-                GFL_LOG_DEBUG(
-                    "[PC Sampling] getData failed (", getRes, ") — "
-                    "disabling PC sampling for this session.");
+                GFL_LOG_DEBUG("[PC Sampling] getData failed (", getRes,
+                              ") — "
+                              "disabling PC sampling for this session.");
                 sampling_api_blocked_.store(true);
             } else {
                 LogCuptiErrorIfFailed(this->name(), "cuptiPCSamplingGetData",
