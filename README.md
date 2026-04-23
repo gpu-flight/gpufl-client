@@ -13,11 +13,16 @@ To ensure the integrity of the initial design, **we are not currently accepting 
 - Documentation improvements and typo fixes.
 - Feature requests and architectural suggestions via GitHub Issues.
 
+**The Flight Recorder for GPU Production Workloads.**
+
 ## Live Demo
 
 Try the portal with real session data — no sign-up required:
 
 **[https://gpufl-front.vercel.app/demo/gdemo_4R98GA5MzYdosqvNsUqdp_MaUgEcDHABS2C5PHbCDQE](https://gpufl-front.vercel.app/demo/gdemo_4R98GA5MzYdosqvNsUqdp_MaUgEcDHABS2C5PHbCDQE)**
+
+`gpufl` is a **low-overhead, always-on** C++ observability library for GPU applications. Built on CUPTI (NVIDIA) and rocprofiler-sdk (AMD), it captures kernel telemetry, SASS-level profiling, and system metrics with under 2% overhead in monitoring mode.
+Unlike traditional profilers (Nsight) that stop the world with 20-200x slowdown, GPUFlight is designed to run continuously in production — capturing kernel telemetry and logical scopes into structured logs.
 
 ## Key Features
 

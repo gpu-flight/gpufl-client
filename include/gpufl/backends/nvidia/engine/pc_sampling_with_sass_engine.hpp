@@ -42,6 +42,19 @@ class PcSamplingWithSassEngine final : public IProfilingEngine {
     void onScopeStart(const char* name) override;
     void onScopeStop(const char* name)  override;
 
+    /** Insufficient if EITHER sub-engine was blocked — the composite
+     *  requires both to be fully operational. */
+    bool hasInsufficientPrivileges() const override {
+        return (pc_   && pc_->hasInsufficientPrivileges())
+            || (sass_ && sass_->hasInsufficientPrivileges());
+    }
+
+    /** Operational if at least the PC sampling sub-engine started
+     *  (SASS falling back is non-fatal; PC samples alone are useful). */
+    bool isOperational() const override {
+        return pc_ && pc_->isOperational();
+    }
+
    private:
     std::unique_ptr<PcSamplingEngine>  pc_;
     std::unique_ptr<SassMetricsEngine> sass_;

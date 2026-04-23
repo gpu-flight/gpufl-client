@@ -42,6 +42,26 @@ class IMonitorBackend {
 
     virtual bool IsProfilingMode() = 0;
 
+    /**
+     * @brief True if the selected profiling engine attempted to start but
+     *        was blocked by CUPTI_ERROR_INSUFFICIENT_PRIVILEGES (or the
+     *        virtualized equivalent). Checked by gpufl::init() after
+     *        start() to surface a clear user-facing error rather than
+     *        letting kernel launches crash with a half-initialized CUPTI.
+     *
+     *        Default: false (backends that don't track this return false
+     *        and fall back to the previous best-effort behavior).
+     */
+    virtual bool HasInsufficientPrivileges() const { return false; }
+
+    /**
+     * @brief True when the profiling engine (if any) is producing data.
+     *        None / monitoring-only backends return true (they don't do
+     *        profiling, so they aren't blocked). Used by the frontend
+     *        via session metadata to explain why PC samples are missing.
+     */
+    virtual bool IsProfilingOperational() const { return true; }
+
     virtual void OnScopeStart(const char* name) {}
     virtual void OnScopeStop(const char* name) {}
 
