@@ -786,7 +786,7 @@ void TextReport::writeScopeSummary(std::ostringstream& out) const {
 
         if (!stats.empty()) {
             auto ranked = sortedTopN(stats, 0, [](const AggStats& s) { return s.total; });
-            out << "  Scope Timing:\n";
+            out << "  Scope Timing (wall clock - CPU + GPU + sync + JIT):\n";
             out << "  " << std::left << std::setw(30) << "Scope"
                 << std::right << std::setw(6) << "Calls"
                 << std::setw(12) << "Total" << std::setw(12) << "Avg" << std::setw(12) << "Max" << "\n";
@@ -812,7 +812,7 @@ void TextReport::writeScopeSummary(std::ostringstream& out) const {
 
         if (!scopeGpu.empty()) {
             auto ranked = sortedTopN(scopeGpu, 0, [](const AggStats& s) { return s.total; });
-            out << "\n  GPU Time by Scope:\n";
+            out << "\n  GPU Time by Scope (kernel execution only - SM time from CUPTI):\n";
             out << "  " << std::left << std::setw(30) << "Scope"
                 << std::right << std::setw(8) << "Kernels"
                 << std::setw(14) << "GPU Time" << std::setw(12) << "Avg" << "\n";
@@ -822,6 +822,16 @@ void TextReport::writeScopeSummary(std::ostringstream& out) const {
                     << std::right << std::setw(8) << sg.count
                     << std::setw(14) << fmtDuration(sg.total)
                     << std::setw(12) << fmtDuration(sg.avg()) << "\n";
+        }
+
+        // Brief footnote clarifying the two columns — the difference is
+        // commonly asked and easy to misread. Kept to two lines so it
+        // doesn't dominate the report.
+        if (!scopeGpu.empty()) {
+            out << "\n  Note: Scope Timing is what your CPU thread saw "
+                   "(includes JIT, sync, launch overhead).\n";
+            out << "        GPU Time is pure kernel execution on the SM. "
+                   "Use GPU Time to compare kernel perf.\n";
         }
     }
 }
