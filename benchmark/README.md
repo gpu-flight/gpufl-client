@@ -65,7 +65,7 @@ Tested on NVIDIA GeForce RTX 5060 Laptop GPU (8.0 GiB), GPUFlight v0.1.0.dev.
 - **Monitoring only / SASS Metrics: ~7% overhead** — acceptable for always-on profiling during development
 - **PC Sampling: high overhead on many-small-kernel workloads** (PyTorch launches thousands of micro-kernels). Use for targeted profiling sessions, not always-on. Set via environment variable:
   ```bash
-  GPUFL_PROFILING_ENGINE=SassMetrics python train.py  # lightweight
+  GPUFL_PROFILING_ENGINE=SassMetrics python train.py  # low-overhead
   GPUFL_PROFILING_ENGINE=PcSamplingWithSass python train.py  # full (default)
   ```
 - **GEMM (large kernels):** overhead is moderate even with full profiling, because per-kernel CUPTI cost is amortized over longer kernel execution

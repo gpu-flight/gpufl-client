@@ -72,6 +72,32 @@ class IProfilingEngine {
     virtual std::optional<PerfMetricEvent> takeLastPerfEvent() {
         return std::nullopt;
     }
+
+    /**
+     * @brief True if this engine attempted to start but was denied by
+     * CUPTI with CUPTI_ERROR_INSUFFICIENT_PRIVILEGES (or the virtualized
+     * equivalent).
+     *
+     * On Windows this typically means the user is not an administrator
+     * AND "Allow access to the GPU performance counters to all users" is
+     * not enabled in the NVIDIA Control Panel. On Linux this means the
+     * user is not in the `nvidia` group or the `NVreg_RestrictProfilingToAdminUsers`
+     * kernel-module parameter is set.
+     *
+     * Callers (notably `gpufl::init`) check this after start() to emit
+     * a user-facing warning and degrade gracefully rather than crashing
+     * on the first kernel launch when CUPTI is half-initialized.
+     *
+     * Default: false (engine doesn't require special privileges, e.g.
+     * the None engine).
+     */
+    virtual bool hasInsufficientPrivileges() const { return false; }
+
+    /**
+     * @brief True if this engine started successfully and is producing
+     * data. False if start() was skipped, failed, or the engine is None.
+     */
+    virtual bool isOperational() const { return true; }
 };
 
 }  // namespace gpufl

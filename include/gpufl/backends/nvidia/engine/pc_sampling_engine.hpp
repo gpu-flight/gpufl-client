@@ -48,6 +48,20 @@ class PcSamplingEngine final : public IProfilingEngine {
         return pc_sampling_method_ == Method::SamplingAPI;
     }
 
+    /**
+     * True when cuptiPCSamplingEnable or cuptiActivityEnable(PC_SAMPLING)
+     * returned CUPTI_ERROR_INSUFFICIENT_PRIVILEGES during start(). Used
+     * by `gpufl::init()` to surface a clear error to the user.
+     */
+    bool hasInsufficientPrivileges() const override {
+        return sampling_api_blocked_.load(std::memory_order_relaxed);
+    }
+
+    /** Operational means we have an active method (not None) AND we're not blocked. */
+    bool isOperational() const override {
+        return pc_sampling_method_ != Method::None
+               && !sampling_api_blocked_.load(std::memory_order_relaxed);
+    }
 
    private:
     enum class Method {
