@@ -1,6 +1,6 @@
 # gpufl-monitor — Standalone GPU Monitoring Daemon
 
-`gpufl-monitor` is a lightweight always-on daemon that continuously samples GPU and host metrics (utilization, memory, temperature, power, CPU, RAM) and writes them as JSONL event logs. A bundled Java agent (`gpufl-agent`) tails those logs and ships the data to a GPUFlight backend.
+`gpufl-monitor` is a **low-overhead, always-on** daemon that continuously samples GPU and host metrics (utilization, memory, temperature, power, CPU, RAM) via NVML (NVIDIA) or ROCm SMI (AMD) and writes them as JSONL event logs. A bundled Java agent (`gpufl-agent`) tails those logs and ships the data to a GPUFlight backend.
 
 Both processes run inside a single Docker container managed by `supervisord`.
 

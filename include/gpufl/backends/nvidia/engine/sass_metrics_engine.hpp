@@ -26,6 +26,17 @@ class SassMetricsEngine final : public IProfilingEngine {
 
     bool isEnabled() const { return enabled_; }
 
+    /**
+     * True when cuptiProfilerInitialize / cuptiSassMetricsEnable returned
+     * CUPTI_ERROR_INSUFFICIENT_PRIVILEGES during start(). Surfaces up to
+     * gpufl::init() so the user sees a clear error + recovery steps.
+     */
+    bool hasInsufficientPrivileges() const override {
+        return insufficient_privileges_;
+    }
+
+    bool isOperational() const override { return enabled_; }
+
    private:
     void EnableSassMetrics_();
     void StopAndCollectSassMetrics_();
@@ -44,6 +55,7 @@ class SassMetricsEngine final : public IProfilingEngine {
     std::vector<std::string> skipped_metrics_;
     bool enabled_ = false;
     bool config_set_ = false;
+    bool insufficient_privileges_ = false;
 };
 
 }  // namespace gpufl

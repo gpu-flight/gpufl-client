@@ -91,6 +91,7 @@ void SassMetricsEngine::start() {
     if (LogCuptiErrorIfFailed(this->name(), "cuptiProfilerInitialize",
                               initRes)) {
         if (IsInsufficientPrivilege(initRes)) {
+            insufficient_privileges_ = true;
             GFL_LOG_ERROR(
                 "[SassMetricsEngine] Insufficient privileges for CUPTI "
                 "SASS metrics. Skipping SASS instrumentation.");
@@ -251,6 +252,7 @@ void SassMetricsEngine::EnableSassMetrics_() {
                 config_set_ = false;
             }
             if (IsInsufficientPrivilege(enableRes)) {
+                insufficient_privileges_ = true;
                 GFL_LOG_ERROR(
                     "[SassMetricsEngine] Insufficient privileges for CUPTI "
                     "SASS metrics. Skipping SASS instrumentation.");
