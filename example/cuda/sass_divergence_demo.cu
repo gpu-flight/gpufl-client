@@ -148,7 +148,7 @@ int main() {
     opts.enable_debug_output = true;
     opts.sampling_auto_start = true;
     opts.enable_stack_trace = true;
-    opts.profiling_engine = gpufl::ProfilingEngine::PcSamplingWithSass;
+    opts.profiling_engine = gpufl::ProfilingEngine::PcSampling;
 
     if (!gpufl::init(opts)) {
         std::cerr << "Failed to initialize gpufl" << std::endl;

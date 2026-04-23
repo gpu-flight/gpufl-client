@@ -20,7 +20,7 @@ struct PCSamplingBuffers {
 };
 
 struct PCSamplingDeleter {
-    void operator()(PCSamplingBuffers* b) const;
+    void operator()(const PCSamplingBuffers* b) const;
 };
 
 // ---- Engine ----------------------------------------------------------------
