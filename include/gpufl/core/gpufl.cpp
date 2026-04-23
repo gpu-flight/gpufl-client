@@ -1,5 +1,6 @@
 #include "gpufl.hpp"
 
+#include <atomic>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
@@ -48,8 +49,108 @@
 #endif
 
 #if GPUFL_HAS_NVTX
-#define GPUFL_NVTX_PUSH(name) ::nvtxRangePushA((name))
-#define GPUFL_NVTX_POP()      ::nvtxRangePop()
+// Guard flag: NVTX function-pointer table may contain null entries
+// before init() has wired up CUPTI's injection, and after shutdown()
+// has torn it down (or if CUPTI crashed mid-session). Calling
+// nvtxRangePushA/Pop through a null entry produces an access
+// violation (0xC0000005 reading 0x00000000).
+//
+// We flip this flag to true at the end of `init()` on success, and
+// back to false at the start of `shutdown()`. ScopedMonitor destructors
+// firing outside that window (e.g. during static teardown at process
+// exit, or before init was ever called) skip NVTX entirely.
+namespace gpufl {
+std::atomic<bool> g_nvtx_available{false};
+}  // namespace gpufl
+
+// SEH-protected NVTX wrappers (Windows / MSVC).
+//
+// Access violations from NVTX are Windows STRUCTURED exceptions, not
+// C++ exceptions — a normal try/catch cannot intercept them. We wrap
+// the call in __try/__except and map any caught exception to rc = -1.
+//
+// IMPORTANT: these helpers MUST NOT contain C++ objects with
+// destructors. MSVC forbids __try/__except in functions that also
+// need C++ unwinding. Keep them minimal — just the raw NVTX call.
+#if defined(_MSC_VER)
+namespace gpufl {
+namespace detail {
+
+// Separate TU-local symbols so link-time code-gen can't inline our SEH
+// around the caller's cleanup. `noinline` makes the intent explicit.
+__declspec(noinline) inline int SafeNvtxRangePushA(const char* name) {
+    __try {
+        return ::nvtxRangePushA(name);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        // An AV here means NVTX's injection table has a null entry.
+        // Mark NVTX unavailable so the rest of the session skips it.
+        g_nvtx_available.store(false, std::memory_order_release);
+        return -1;
+    }
+}
+
+__declspec(noinline) inline int SafeNvtxRangePop() {
+    __try {
+        return ::nvtxRangePop();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_nvtx_available.store(false, std::memory_order_release);
+        return -1;
+    }
+}
+
+}  // namespace detail
+}  // namespace gpufl
+#define GPUFL_SAFE_NVTX_PUSH(name) ::gpufl::detail::SafeNvtxRangePushA((name))
+#define GPUFL_SAFE_NVTX_POP()      ::gpufl::detail::SafeNvtxRangePop()
+#else
+// Non-MSVC: rely on the guard flag alone. Clang/GCC on Linux can also
+// trap SIGSEGV via signal handlers, but NVTX injection issues on
+// Linux are rare enough that we don't add complexity here.
+#define GPUFL_SAFE_NVTX_PUSH(name) ::nvtxRangePushA((name))
+#define GPUFL_SAFE_NVTX_POP()      ::nvtxRangePop()
+#endif  // _MSC_VER
+#endif  // GPUFL_HAS_NVTX
+
+#if GPUFL_HAS_NVTX
+// nvtxRangePushA returns the 0-based nesting level on success, or a
+// negative value on error (injection not initialized, internal NVTX
+// error, etc). We route failures through GFL_LOG_ERROR — the project's
+// standard logger — rather than fprintf. A static std::atomic<bool>
+// guard caps the message at one per process so a persistent failure
+// doesn't spam every GFL_SCOPE enter/exit.
+#define GPUFL_NVTX_PUSH(name)                                                   \
+    do {                                                                        \
+        if (!::gpufl::g_nvtx_available.load(std::memory_order_acquire)) break;  \
+        int _gpufl_nvtx_rc = GPUFL_SAFE_NVTX_PUSH((name));                      \
+        if (_gpufl_nvtx_rc < 0) {                                               \
+            static std::atomic<bool> _gpufl_nvtx_push_logged{false};            \
+            if (!_gpufl_nvtx_push_logged.exchange(true)) {                      \
+                GFL_LOG_ERROR(                                                  \
+                    "nvtxRangePushA failed (rc=", _gpufl_nvtx_rc,               \
+                    ") for '", (name),                                          \
+                    "' — NVTX markers will not be captured for this session. " \
+                    "Verify the CUPTI library exports "                         \
+                    "InitializeInjectionNvtx2 and that "                        \
+                    "NVTX_INJECTION64_PATH points to it.");                     \
+            }                                                                   \
+        }                                                                       \
+    } while (0)
+
+#define GPUFL_NVTX_POP()                                                        \
+    do {                                                                        \
+        if (!::gpufl::g_nvtx_available.load(std::memory_order_acquire)) break;  \
+        int _gpufl_nvtx_rc = GPUFL_SAFE_NVTX_POP();                             \
+        if (_gpufl_nvtx_rc < 0) {                                               \
+            static std::atomic<bool> _gpufl_nvtx_pop_logged{false};             \
+            if (!_gpufl_nvtx_pop_logged.exchange(true)) {                       \
+                GFL_LOG_ERROR(                                                  \
+                    "nvtxRangePop failed (rc=", _gpufl_nvtx_rc,                 \
+                    ") — unbalanced push/pop, NVTX injection not "             \
+                    "initialized, or caught structured exception from "         \
+                    "NVTX injection table.");                                   \
+            }                                                                   \
+        }                                                                       \
+    } while (0)
 #else
 #define GPUFL_NVTX_PUSH(name) ((void)0)
 #define GPUFL_NVTX_POP()      ((void)0)
@@ -252,6 +353,13 @@ bool init(const InitOptions& opts) {
     // Intentionally disabled — shutdown order must be explicit to avoid CUPTI
     // teardown races std::atexit(shutdown);
 
+#if GPUFL_HAS_NVTX
+    // Enable NVTX push/pop now that CUPTI has wired up its injection.
+    // Before this point, nvtxRangePop could dereference a null entry in
+    // NVTX's function-pointer table and crash with an access violation.
+    g_nvtx_available.store(true, std::memory_order_release);
+#endif
+
     GFL_LOG_DEBUG("Initialization complete!");
     return true;
 }
@@ -295,6 +403,14 @@ void systemStop(std::string name) {
 }
 
 void shutdown() {
+#if GPUFL_HAS_NVTX
+    // Flip the NVTX guard BEFORE tearing down CUPTI so any late scope
+    // destructors (e.g. scopes still unwinding, or scopes running in
+    // other threads during shutdown) skip the NVTX calls and cannot
+    // crash when CUPTI's injection table is torn down.
+    g_nvtx_available.store(false, std::memory_order_release);
+#endif
+
     Monitor::Stop();
     Monitor::Shutdown();
     Runtime* rt = runtime();
@@ -334,7 +450,7 @@ ScopedMonitor::ScopedMonitor(std::string name)
 ScopedMonitor::ScopedMonitor(std::string name, std::string tag)
     : ScopedMonitor(std::move(name), std::move(tag), false) {}
 
-ScopedMonitor::ScopedMonitor(std::string name, bool deep_profiling)
+ScopedMonitor::ScopedMonitor(std::string name, const bool deep_profiling)
     : ScopedMonitor(std::move(name), "", deep_profiling) {}
 
 ScopedMonitor::ScopedMonitor(std::string name, std::string tag,

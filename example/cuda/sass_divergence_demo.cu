@@ -176,6 +176,37 @@ int main() {
     dim3 block(256);
     dim3 grid((n + block.x - 1) / block.x);
 
+    // Warmup inside its own scope. This absorbs the one-time startup
+    // costs that would otherwise inflate scope 1's wall-clock time:
+    //   - PTX -> SASS JIT compilation of all 5 kernels (~30 ms)
+    //   - Cubin load into the device (~10 ms)
+    //   - CUDA context initialization for the GPU (~5-10 ms)
+    //   - GPU clock ramp-up from idle P8 to P0 (~5 ms)
+    //   - PC Sampling engine first-time config (~30-40 ms on Blackwell,
+    //     this is where the 36-stall-reason mapping happens — see
+    //     [PcSamplingEngine] Configuring PC Sampling... in debug output)
+    //
+    // Putting this in a scope (rather than outside any scope) means:
+    //   (a) the scope pays all startup costs — the 5 "real" scopes below
+    //       become pure kernel-launch + execution + sync time;
+    //   (b) kernels render as "0_warmup" in the report instead of the
+    //       confusing "global" user_scope;
+    //   (c) you can see exactly how expensive CUDA cold-start is — useful
+    //       data for your own apps.
+    //
+    // Every serious CUDA profiler (Nsight, CUB/CUTLASS benchmarks) runs
+    // a warmup before measurement for exactly these reasons.
+    std::cout << "  [warmup] Priming CUDA context and JIT cache..." << std::endl;
+    GFL_SCOPE("0_warmup") {
+        uniformWork<<<grid, block>>>(d_out, d_in, n);
+        branchByWarpLane<<<grid, block>>>(d_out, d_in, n);
+        branchByWarpQuad<<<grid, block>>>(d_out, d_in, n);
+        earlyExit<<<grid, block>>>(d_out, d_in, 0.5f, n);
+        indirectBranch<<<grid, block>>>(d_out, d_in, n);
+        CHECK_CUDA(cudaGetLastError());
+        CHECK_CUDA(cudaDeviceSynchronize());
+    }
+
     // --- Kernel 1: Baseline (no divergence) ---
     std::cout << "  [1/5] uniformWork — no divergence" << std::endl;
     GFL_SCOPE("1_uniform_work") {

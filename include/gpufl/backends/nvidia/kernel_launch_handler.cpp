@@ -160,6 +160,12 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
                 existing = meta;
             }
         }
+        // Diagnostic: confirm every kernel launch fires this callback.
+        // If "GPU Time by Scope" shows only N kernels but this logs M>N,
+        // the loss is downstream (activity records / FlushPendingKernels).
+        GFL_LOG_DEBUG("[KernelLaunchHandler] API_ENTER corr=",
+                      cbInfo->correlationId, " name=", meta.name,
+                      " scope=", meta.user_scope);
     } else if (cbInfo->callbackSite == CUPTI_API_EXIT) {
         const int64_t exitNs = detail::GetTimestampNs();
         std::lock_guard<std::mutex> lk(backend_->meta_mu_);
@@ -184,6 +190,12 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
 
     const auto* k = reinterpret_cast<const CUpti_ActivityKernel11*>(record);
     backend_->kernel_activity_seen_.fetch_add(1, std::memory_order_relaxed);
+
+    // Diagnostic: log every real activity record as it arrives.
+    GFL_LOG_DEBUG("[KernelLaunchHandler] ACTIVITY_RECORD corr=",
+                  k->correlationId, " name=", k->name,
+                  " start=", k->start, " end=", k->end,
+                  " dur=", (k->end - k->start));
 
     const bool shouldThrottleKernels =
         backend_->opts_.kernel_sample_rate_ms > 0 &&
@@ -241,7 +253,11 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
                       std::begin(out.user_scope));
             out.api_start_ns = m.api_enter_ns;
             out.api_exit_ns = m.api_exit_ns;
-            if (m.has_details) {
+            // Snapshot `has_details` before the erase below — we still need
+            // it to decide whether to compute occupancy. Erasing first
+            // would invalidate `m` (dangling reference).
+            const bool hadDetails = m.has_details;
+            if (hadDetails) {
                 out.has_details = true;
                 out.grid_x = m.grid_x;
                 out.grid_y = m.grid_y;
@@ -323,6 +339,12 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
                 std::snprintf(out.limiting_resource,
                               sizeof(out.limiting_resource), "%s", limiting);
             }
+            // Always erase after processing — previously this was nested
+            // inside `if (hadDetails)`, so launches without grid/block
+            // metadata left stale entries in meta_by_corr_. At session
+            // stop() FlushPendingKernels would then emit synthetic
+            // duplicates for kernels that already had real activity
+            // records emitted here. Move erase out of the conditional.
             backend_->meta_by_corr_.erase(it);
         }
     }
