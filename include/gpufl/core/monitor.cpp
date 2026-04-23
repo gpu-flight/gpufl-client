@@ -55,10 +55,23 @@ static std::mutex g_scopeBatchMu;
 static std::atomic<uint64_t> g_nextScopeInstanceId{1};
 
 static void flushBatches(Logger& logger, const std::string& session_id) {
+    // Dictionary MUST be written before any batch that references its
+    // name_id / kernel_id / function_id / metric_id entries, otherwise
+    // readers see rows that reference undefined dictionary IDs.
+    //
+    // We call flushDictionary twice: once at the top for source content
+    // and disassembly (which also reference dict IDs but are rare), and
+    // again immediately before each batch emission. This closes a race
+    // where the app thread could intern a new scope name AFTER the
+    // initial flushDictionary call but BEFORE the batch flush — the
+    // new name would be pushed into g_scopeBatch but remain dirty in
+    // the dict, producing an ordering bug where scope_event_batch
+    // references name_ids 2-5 before their dict_update is emitted.
     g_dictManager.flushDictionary(logger, session_id);
     g_dictManager.flushSourceContent(logger, session_id);
     g_dictManager.flushDisassembly(logger, session_id);
     if (!g_kernelBatch.empty()) {
+        g_dictManager.flushDictionary(logger, session_id);
         logger.write(model::KernelEventBatchModel(
             g_kernelBatch, session_id, ++g_kernelBatchId));
         g_kernelBatch.clear();
@@ -70,12 +83,25 @@ static void flushBatches(Logger& logger, const std::string& session_id) {
         g_pendingDetails.clear();
     }
     if (!g_memcpyBatch.empty()) {
+        g_dictManager.flushDictionary(logger, session_id);
         logger.write(model::MemcpyEventBatchModel(
             g_memcpyBatch, session_id, ++g_memcpyBatchId));
         g_memcpyBatch.clear();
     }
     {
+        // Hold g_scopeBatchMu across BOTH the dict flush and the batch
+        // write. This blocks app threads in PushScopeRow until we're
+        // done. Since app threads always intern a name BEFORE pushing
+        // the corresponding row (see ScopedMonitor ctor in gpufl.cpp),
+        // any dirty dict entry at the moment we take this lock is
+        // guaranteed to correspond either to a row already in
+        // g_scopeBatch or to a row that won't be pushed until after we
+        // release. Flushing dict here emits exactly the names the
+        // outgoing batch references.
         std::lock_guard lk(g_scopeBatchMu);
+        if (!g_scopeBatch.empty() || !g_profileBatch.empty()) {
+            g_dictManager.flushDictionary(logger, session_id);
+        }
         if (!g_scopeBatch.empty()) {
             logger.write(model::ScopeEventBatchModel(
                 g_scopeBatch, session_id, ++g_scopeBatchId));

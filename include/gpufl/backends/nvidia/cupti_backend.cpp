@@ -9,6 +9,7 @@
 #include <cupti_range_profiler.h>
 #endif
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
@@ -17,6 +18,7 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 // Platform-specific includes for runtime NVTX injection path discovery.
 #if defined(_WIN32)
@@ -429,19 +431,49 @@ void CuptiBackend::FlushPendingKernels() {
         std::lock_guard lk(meta_mu_);
         pending = std::move(meta_by_corr_);
     }
-    for (auto& [corr, m] : pending) {
+    GFL_LOG_DEBUG("[FlushPendingKernels] draining ", pending.size(),
+                  " synthetic kernel(s) at flushNs=", flushNs);
+
+    // Build an order-by-api-enter index so we can approximate per-kernel
+    // GPU time as the interval between this kernel's dispatch and the
+    // next kernel's dispatch (or the scope flush time for the last one).
+    //
+    // CUPTI did NOT deliver activity records for these kernels (common on
+    // Blackwell with PC Sampling SamplingAPI: PC Sampling captures the
+    // kernel stream, so KERNEL activity kinds stay dormant). Without GPU
+    // timestamps we fall back to host-side dispatch intervals — an
+    // imperfect proxy that nonetheless reflects the actual sequential
+    // execution pattern for typical single-stream workloads and is
+    // strictly better than reporting 0.
+    std::vector<uint64_t> orderedCorr;
+    orderedCorr.reserve(pending.size());
+    for (const auto& [corr, _] : pending) orderedCorr.push_back(corr);
+    std::sort(orderedCorr.begin(), orderedCorr.end(),
+              [&](uint64_t a, uint64_t b) {
+                  return pending[a].api_enter_ns < pending[b].api_enter_ns;
+              });
+
+    for (size_t i = 0; i < orderedCorr.size(); ++i) {
+        const uint64_t corr = orderedCorr[i];
+        auto& m = pending[corr];
         ActivityRecord out{};
         out.device_id = device_id_;
         out.stream = 0;
         out.type = TraceType::KERNEL;
         std::snprintf(out.name, sizeof(out.name), "%s", m.name);
         out.cpu_start_ns = m.api_enter_ns;
-        // GPU duration is unknown for synthetic records — CUPTI never delivered
-        // an activity record for this correlation ID, so we have no GPU timestamps.
-        // The kernel completed before cudaDeviceSynchronize() returned, but the
-        // actual execution time is unavailable.  Using 0 avoids inflating the
-        // Total GPU Time in the report with CPU-side timing artifacts.
-        out.duration_ns = 0;
+
+        // Synthetic duration: interval until the next kernel's dispatch
+        // (they run sequentially on the default stream of single-stream
+        // workloads, so one's completion roughly aligns with the next
+        // one's dispatch return) — or flushNs for the last kernel
+        // (it completed between its dispatch and our post-sync flush).
+        const int64_t nextEnterNs = (i + 1 < orderedCorr.size())
+            ? pending[orderedCorr[i + 1]].api_enter_ns
+            : flushNs;
+        int64_t synthDur = nextEnterNs - m.api_enter_ns;
+        if (synthDur < 0) synthDur = 0;  // clock skew guard
+        out.duration_ns = synthDur;
         out.corr_id = static_cast<unsigned>(corr);
         out.api_start_ns = m.api_enter_ns;
         out.api_exit_ns = m.api_exit_ns > 0 ? m.api_exit_ns : flushNs;
@@ -483,6 +515,10 @@ void CuptiBackend::FlushPendingKernels() {
             std::snprintf(out.limiting_resource,
                           sizeof(out.limiting_resource), "%s", "warps");
         }
+        GFL_LOG_DEBUG("[FlushPendingKernels] synth corr=", corr,
+                      " name=", out.name,
+                      " scope=", out.user_scope,
+                      " dur=", out.duration_ns, "ns");
         g_monitorBuffer.Push(out);
         kernel_activity_seen_.fetch_add(1, std::memory_order_relaxed);
         kernel_activity_emitted_.fetch_add(1, std::memory_order_relaxed);
