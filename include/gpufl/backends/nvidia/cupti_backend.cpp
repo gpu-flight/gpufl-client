@@ -255,8 +255,15 @@ void CuptiBackend::stop() {
     if (!initialized_) return;
     active_.store(false);
 
+    // Stop the engine BEFORE flushing activity records.  PcSamplingEngine::stop()
+    // disables the SamplingAPI session — while it's armed, cuptiActivityFlushAll
+    // returns zero kernel records on driver 590+.
+    if (engine_) engine_->stop();
+
+    cudaDeviceSynchronize();
     LogCuptiIfUnexpected("Perfworks", "cuptiActivityFlushAll",
                          cuptiActivityFlushAll(1));
+    FlushPendingKernels();
 
     {
         std::set<CUpti_ActivityKind> kinds;
