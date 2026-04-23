@@ -518,9 +518,19 @@ void PcSamplingEngine::StartPcSampling_() {
 }
 
 void PcSamplingEngine::StopAndCollectPcSampling_() {
-    if (pc_sampling_method_ != Method::SamplingAPI) return;
+    GFL_LOG_DEBUG("[PC Sampling] StopAndCollect entry: method=",
+                  static_cast<int>(pc_sampling_method_),
+                  " refCount=", pc_sampling_ref_count_.load(),
+                  " started=", sampling_api_started_.load());
+    if (pc_sampling_method_ != Method::SamplingAPI) {
+        GFL_LOG_DEBUG("[PC Sampling] StopAndCollect: exit — method != SamplingAPI");
+        return;
+    }
 
-    if (pc_sampling_ref_count_.load() <= 0) return;
+    if (pc_sampling_ref_count_.load() <= 0) {
+        GFL_LOG_DEBUG("[PC Sampling] StopAndCollect: exit — refCount <= 0");
+        return;
+    }
 
     int refs = pc_sampling_ref_count_.fetch_sub(1);
     if (refs > 1) {
@@ -533,7 +543,10 @@ void PcSamplingEngine::StopAndCollectPcSampling_() {
         return;
     }
 
-    if (!sampling_api_started_.exchange(false)) return;
+    if (!sampling_api_started_.exchange(false)) {
+        GFL_LOG_DEBUG("[PC Sampling] StopAndCollect: exit — sampling_api_started was false");
+        return;
+    }
 
     if (!ctx_.cuda_ctx || !IsContextValid(ctx_.cuda_ctx)) {
         GFL_LOG_ERROR("[GPUFL] Aborting PC Sampling: Context invalid.");
