@@ -26,6 +26,35 @@
 #include <cuda_runtime.h>
 #endif
 
+// NVTX (NVIDIA Tools Extension) — zero-overhead annotation library.
+// When GPUFL_HAS_NVTX is defined (see CMakeLists NVTX block), GFL_SCOPE
+// emits a paired nvtxRangePushA/Pop around its body. The range is:
+//   - visible to Nsight Systems (cross-tool validation),
+//   - captured by GPUFlight's own CUPTI marker path (unified pipeline
+//     with framework-emitted NVTX from PyTorch / cuDNN / etc.),
+//   - zero-overhead when no profiler is attached.
+// This is additive to the native scope_event — see plan's
+// "GFL_SCOPE and NVTX are complementary layers" section.
+#if GPUFL_HAS_NVTX
+// Modern CUDA toolkits ship NVTX under the nvtx3/ prefix (CUDA 11.0+);
+// older toolkits have it at the top level. Try v3 first, fall back.
+#  if __has_include(<nvtx3/nvToolsExt.h>)
+#    include <nvtx3/nvToolsExt.h>
+#  elif __has_include(<nvToolsExt.h>)
+#    include <nvToolsExt.h>
+#  else
+#    undef GPUFL_HAS_NVTX
+#  endif
+#endif
+
+#if GPUFL_HAS_NVTX
+#define GPUFL_NVTX_PUSH(name) ::nvtxRangePushA((name))
+#define GPUFL_NVTX_POP()      ::nvtxRangePop()
+#else
+#define GPUFL_NVTX_PUSH(name) ((void)0)
+#define GPUFL_NVTX_POP()      ((void)0)
+#endif
+
 namespace gpufl {
 std::atomic<int> g_systemSampleRateMs{0};
 InitOptions g_opts;
@@ -335,9 +364,20 @@ ScopedMonitor::ScopedMonitor(std::string name, std::string tag,
     if (g_opts.profiling_engine != ProfilingEngine::None) {
         Monitor::BeginPerfScope(name_.c_str());
     }
+
+    // Emit an NVTX range alongside the native scope_event. This makes the
+    // scope visible to Nsight Systems and captured uniformly via CUPTI's
+    // marker activity path (same pipeline that picks up PyTorch /
+    // cuDNN / NCCL framework ranges). No-op if NVTX isn't available.
+    GPUFL_NVTX_PUSH(name_.c_str());
 }
 
 ScopedMonitor::~ScopedMonitor() {
+    // Pop the NVTX range first — symmetric with the push in the
+    // constructor. Safe to call even if runtime() is gone; NVTX keeps
+    // its own internal range stack.
+    GPUFL_NVTX_POP();
+
     const Runtime* rt = runtime();
     if (!rt || !rt->logger) return;
 
