@@ -143,20 +143,22 @@ void fetchRemoteConfig(const std::string& base_url,
         return;
     }
 
-    std::unique_ptr<httplib::Client> cli;
+    // Use the unified httplib::Client(scheme_host_port) constructor —
+    // internally dispatches to SSLClient when scheme is https AND
+    // CPPHTTPLIB_OPENSSL_SUPPORT is defined. Avoids the type mismatch
+    // between unique_ptr<SSLClient> and unique_ptr<Client> (those are
+    // sibling types in cpp-httplib, not parent/child).
+#if !GPUFL_HTTPLIB_TLS
     if (scheme == "https") {
-#if GPUFL_HTTPLIB_TLS
-        cli = std::make_unique<httplib::SSLClient>(
-                host, port > 0 ? port : 443);
-#else
         GFL_LOG_ERROR(
             "[fetchRemoteConfig] https:// remote config requires OpenSSL "
             "(rebuild gpufl with OpenSSL available). Skipping fetch.");
         return;
-#endif
-    } else {
-        cli = std::make_unique<httplib::Client>(host, port > 0 ? port : 80);
     }
+#endif
+    std::string scheme_host_port = scheme + "://" + host;
+    if (port > 0) scheme_host_port += ":" + std::to_string(port);
+    auto cli = std::make_unique<httplib::Client>(scheme_host_port);
     cli->set_connection_timeout(5, 0);
     cli->set_read_timeout(5, 0);
 
