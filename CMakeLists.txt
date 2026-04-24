@@ -50,6 +50,9 @@ target_sources(gpufl PRIVATE
     include/gpufl/core/sass_compressor.cpp
     include/gpufl/core/logger/logger.cpp
     include/gpufl/core/logger/log_rotator.cpp
+    include/gpufl/core/logger/file_log_sink.cpp
+    include/gpufl/core/logger/http_log_sink.cpp
+    include/gpufl/core/remote_config.cpp
     include/gpufl/core/model/batch_models.cpp
     include/gpufl/core/model/lifecycle_model.cpp
     include/gpufl/core/model/kernel_event_model.cpp
@@ -119,6 +122,43 @@ else()
     )
 endif()
 target_sources(gpufl PRIVATE include/gpufl/core/logger/file_compressor.cpp)
+
+
+# -----------------------
+# cpp-httplib — HTTP client for direct-to-backend log upload (HttpLogSink).
+#
+# Single-header library. Fetched once via FetchContent so every build gets
+# the same version regardless of the host system. HTTPS support is gated
+# on OpenSSL availability (optional) — without OpenSSL we compile HTTP-only
+# and log a warning so the user knows HTTPS endpoints will fail.
+# -----------------------
+include(FetchContent)
+FetchContent_Declare(
+    httplib
+    GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
+    GIT_TAG        v0.18.5
+)
+# cpp-httplib's CMakeLists defines build flags for its own tests / examples.
+# Turn them off so we only build the header-only interface target.
+set(HTTPLIB_COMPILE OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(httplib)
+
+find_package(OpenSSL QUIET)
+if(OpenSSL_FOUND)
+    message(STATUS "Found OpenSSL: ${OPENSSL_VERSION} — HttpLogSink HTTPS enabled")
+    target_compile_definitions(gpufl PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT=1)
+    target_link_libraries(gpufl PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+    set(GPUFL_HTTPLIB_TLS 1)
+else()
+    message(WARNING
+        "OpenSSL not found — HttpLogSink will support HTTP only. "
+        "Users pointing remote_config at an https:// endpoint will see "
+        "upload failures. Install OpenSSL (apt: libssl-dev, vcpkg: openssl, "
+        "brew: openssl) to enable TLS.")
+    set(GPUFL_HTTPLIB_TLS 0)
+endif()
+target_compile_definitions(gpufl PRIVATE GPUFL_HTTPLIB_TLS=${GPUFL_HTTPLIB_TLS})
+target_link_libraries(gpufl PRIVATE httplib::httplib)
 
 
 # -----------------------

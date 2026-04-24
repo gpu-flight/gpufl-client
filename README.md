@@ -33,6 +33,7 @@ Unlike traditional profilers (Nsight) that stop the world with 20-200x slowdown,
 - **Profiling Engines**: Choose from PC Sampling (stall analysis), SASS Metrics (instruction-level divergence), or Range Profiler (hardware counters) — one engine per session.
 - **System Monitoring**: Collects GPU utilization, VRAM, temperature, power, and clock speeds via NVML.
 - **Sidecar Ready**: Outputs structured NDJSON logs with automatic rotation and gzip compression.
+- **Direct Upload**: Opt-in `remote_upload=True` mode POSTs telemetry straight to the GPUFlight backend — ideal for local dev, SSH, and Jupyter workflows where running the sidecar agent is overkill.
 - **Vendor Agnostic Design**: Architecture ready for AMD (ROCm) support.
 
 ---
@@ -138,6 +139,86 @@ GFL_SCOPE("training_step") {
 
 gpufl::shutdown();
 ```
+
+---
+
+## Talking to the Backend
+
+`gpufl` can optionally interact with the GPUFlight backend in two
+independent ways, both opt-in:
+
+| Capability | Opt in via | What happens |
+|---|---|---|
+| **Fetch remote named config** | `config_name="..."` | `gpufl.init()` does a one-off `GET /api/v1/config?config=<name>` before monitoring starts and applies the returned fields to your `InitOptions`. |
+| **Direct log upload** | `remote_upload=True` | A background thread POSTs every NDJSON line to `/api/v1/events/<type>` in parallel with the on-disk write. Intended for local / SSH / Jupyter workflows. |
+
+Both require `backend_url` + `api_key` to be set. **Setting those two
+fields alone does nothing** — you must opt into at least one of the
+two capabilities above.
+
+### Configuration precedence
+
+When multiple sources set the same field, higher beats lower:
+
+```
+5. The kwargs you pass to gpufl.init()            ← highest
+4. Env vars (GPUFL_BACKEND_URL, GPUFL_API_KEY, ...)
+3. Local config file (config_file=...)
+2. Remote named config (when config_name is set)
+1. Built-in defaults                              ← lowest
+```
+
+### Quick start
+
+```python
+import gpufl
+
+# Just live upload — no remote config fetch
+gpufl.init("my_app",
+           log_path="./logs",
+           backend_url="https://api.gpuflight.com",
+           api_key="gpfl_xxxxxxxxxxxx",
+           remote_upload=True)
+
+# Just remote config fetch — no upload (production uses the sidecar)
+gpufl.init("my_app",
+           backend_url="https://api.gpuflight.com",
+           api_key="gpfl_xxxxxxxxxxxx",
+           config_name="production")
+
+# Both
+gpufl.init("my_app",
+           backend_url="https://api.gpuflight.com",
+           api_key="gpfl_xxxxxxxxxxxx",
+           config_name="production",
+           remote_upload=True)
+```
+
+Or via environment:
+
+```bash
+export GPUFL_BACKEND_URL=https://api.gpuflight.com
+export GPUFL_API_KEY=gpfl_xxxxxxxxxxxx
+export GPUFL_CONFIG_NAME=production     # opt into remote config
+export GPUFL_REMOTE_UPLOAD=1            # opt into live upload
+python my_training_script.py
+```
+
+### Upload mechanics
+
+- The client writes NDJSON to disk as usual AND POSTs each line in
+  parallel via a dedicated background thread — no added latency on the
+  measurement hot path.
+- Best-effort delivery: 3 retries with exponential backoff per line,
+  then drop. The on-disk NDJSON is still there, so a monitor daemon
+  (or manual re-upload) can always back-fill.
+- An invalid or unauthorized API key disables live upload for the
+  session; the file sink keeps working.
+
+For production workloads with guaranteed delivery, pipe delivery, or
+cross-process fan-in, keep using the `gpufl-monitor` sidecar agent —
+it's the same NDJSON on the wire, just decoupled from the measurement
+process.
 
 ---
 

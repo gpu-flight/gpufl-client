@@ -143,6 +143,9 @@ int main() {
     gpufl::InitOptions opts;
     opts.app_name = "sass_divergence_demo";
     opts.log_path = "sass_divergence";
+    opts.api_key = "gpfl_L6ODhcTS-C5jc4w9wi4uasGJIQW0Cs3Q";
+    opts.backend_url = "http://localhost:8080";
+    opts.remote_upload = true;
     opts.system_sample_rate_ms = 10;
     opts.enable_kernel_details = true;
     opts.enable_debug_output = true;
