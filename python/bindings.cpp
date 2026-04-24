@@ -55,7 +55,16 @@ PYBIND11_MODULE(_gpufl_client, m) {
         .def_readwrite("enable_debug_output",   &gpufl::InitOptions::enable_debug_output)
         .def_readwrite("enable_stack_trace",    &gpufl::InitOptions::enable_stack_trace)
         .def_readwrite("enable_source_collection", &gpufl::InitOptions::enable_source_collection)
-        .def_readwrite("profiling_engine",      &gpufl::InitOptions::profiling_engine);
+        .def_readwrite("profiling_engine",      &gpufl::InitOptions::profiling_engine)
+        // Backend interactions — see InitOptions.backend_url / config_name
+        // / api_key / remote_upload docs for precedence and semantics.
+        // backend_url is the BASE URL of the GPUFlight backend; config
+        // fetch and log upload are each opt-in separately (via
+        // config_name and remote_upload respectively).
+        .def_readwrite("backend_url",           &gpufl::InitOptions::backend_url)
+        .def_readwrite("api_key",               &gpufl::InitOptions::api_key)
+        .def_readwrite("config_name",           &gpufl::InitOptions::config_name)
+        .def_readwrite("remote_upload",         &gpufl::InitOptions::remote_upload);
 
     // Convenience wrapper: accepts either the new profiling_engine enum or the
     // legacy enable_profiling / enable_perf_scope booleans for source compat.
@@ -73,7 +82,11 @@ PYBIND11_MODULE(_gpufl_client, m) {
                      bool enable_source_collection,
                      bool enable_perf_scope,
                      gpufl::ProfilingEngine profiling_engine_override,
-                     std::string config_file) -> bool {
+                     std::string config_file,
+                     std::string backend_url,
+                     std::string api_key,
+                     std::string config_name,
+                     bool remote_upload) -> bool {
 
         gpufl::InitOptions opts;
         opts.app_name              = app_name;
@@ -87,6 +100,10 @@ PYBIND11_MODULE(_gpufl_client, m) {
         opts.enable_stack_trace    = enable_stack_trace;
         opts.enable_source_collection = enable_source_collection;
         opts.config_file             = config_file;
+        opts.backend_url             = std::move(backend_url);
+        opts.api_key                 = std::move(api_key);
+        opts.config_name             = std::move(config_name);
+        opts.remote_upload           = remote_upload;
 
         // If caller explicitly set profiling_engine, use it; otherwise derive
         // from the legacy bool flags for backward compatibility.
@@ -119,7 +136,11 @@ PYBIND11_MODULE(_gpufl_client, m) {
        py::arg("enable_source_collection")  = true,
        py::arg("enable_perf_scope")         = false,
        py::arg("profiling_engine")          = gpufl::ProfilingEngine::PcSampling,
-       py::arg("config_file")              = "");
+       py::arg("config_file")              = "",
+       py::arg("backend_url")              = "",
+       py::arg("api_key")                  = "",
+       py::arg("config_name")              = "",
+       py::arg("remote_upload")            = false);
 
     m.def("system_start", [](std::string name) { gpufl::systemStart(std::move(name)); },
         py::arg("name") = "system");
