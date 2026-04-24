@@ -31,9 +31,72 @@ struct InitOptions {
     // those paths use CUPTI kernel replay and are ~100× more expensive
     // on pre-sm_120 GPUs.
     ProfilingEngine profiling_engine = ProfilingEngine::PcSampling;
-    std::string config_file = "";         // Path to JSON config file (Docker/K8s workflow)
-    std::string remote_config_url = "";  // Backend URL for remote config (Python handles fetch)
-    std::string api_key = "";            // API key for remote config auth
+
+    // ── Configuration sources, in precedence order (low → high) ────────────
+    //
+    //   1. InitOptions defaults (these field initializers)
+    //   2. Remote named config (opt-in: requires backend_url + api_key + config_name)
+    //   3. Local config file (if config_file path is set)
+    //   4. Programmatic overrides (env vars, auto-tuning in gpufl::init)
+    //   5. The caller's explicit field sets in InitOptions
+    //
+    // Source (2) only runs when `config_name` is non-empty — merely
+    // setting `backend_url` + `api_key` does NOT trigger a fetch. This
+    // keeps the config-merge path predictable: you opt into remote
+    // config by name.
+
+    /** Path to a local JSON config file. See ConfigFileLoader. */
+    std::string config_file = "";
+
+    /**
+     * GPUFlight backend base URL — e.g. "https://api.gpuflight.com" or
+     * "http://localhost:8080". Used by:
+     *   - log upload (when {@link remote_upload} is true) → POSTs to
+     *     `<backend_url>/api/v1/events/<type>`.
+     *   - remote named-config fetch (when {@link config_name} is set) →
+     *     GETs `<backend_url>/api/v1/config?config=<name>`.
+     *
+     * Setting this alone does nothing; you must also opt into at least
+     * one of the two capabilities via `remote_upload` or `config_name`.
+     */
+    std::string backend_url = "";
+
+    /**
+     * API key used for BOTH remote config fetch and log upload (for v1).
+     * Sent as `X-API-Key` on the config GET and
+     * `Authorization: Bearer <key>` on event POSTs — matching the
+     * existing backend auth paths. May split later if config and
+     * ingestion need independent keys.
+     */
+    std::string api_key = "";
+
+    /**
+     * Name of the remote config to fetch (e.g. "production", "debug").
+     * When non-empty AND both {@link backend_url} and {@link api_key}
+     * are set, `gpufl::init()` performs a synchronous HTTP GET against
+     * `<backend_url>/api/v1/config?config=<name>` and applies the
+     * returned field overrides to this InitOptions BEFORE the monitor
+     * is initialized. Empty means "no remote fetch" — your local
+     * config wins without any network round-trip.
+     */
+    std::string config_name = "";
+
+    /**
+     * When true, gpufl::init() attaches an HttpLogSink to the logger so
+     * every NDJSON line is POSTed directly to the backend at
+     * {@code <backend_url>/api/v1/events/<type>} using
+     * {@code Authorization: Bearer <api_key>}.
+     *
+     * Intended for interactive contexts (local dev, SSH, Jupyter) where
+     * deploying the monitor daemon is heavy. The file-based NDJSON logs
+     * are still written in parallel, so no data is lost if the backend
+     * is unreachable — the agent daemon (or a manual upload tool) can
+     * back-fill later.
+     *
+     * Requires both {@link backend_url} and {@link api_key} to be set;
+     * ignored otherwise. Env-var override: {@code GPUFL_REMOTE_UPLOAD=1}.
+     */
+    bool remote_upload = false;
 };
 
 struct BackendProbeResult {

@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -14,7 +15,15 @@
 #include "gpufl/core/config_file_loader.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/events.hpp"
+#include "gpufl/core/logger/http_log_sink.hpp"
 #include "gpufl/core/logger/logger.hpp"
+#include "gpufl/core/remote_config.hpp"
+// NOTE: we intentionally do NOT include <httplib.h> in this TU.
+// httplib pulls in <winsock2.h>, which collides with the legacy
+// <winsock.h> included transitively by <windows.h> (used below for
+// VEH + admin detection). The fetchRemoteConfig() implementation lives
+// in remote_config.cpp, which includes httplib first and avoids
+// windows.h entirely. See plan file for details.
 #include "gpufl/core/model/lifecycle_model.hpp"
 #include "gpufl/core/model/perf_metric_model.hpp"
 #include "gpufl/core/model/system_event_model.hpp"
@@ -176,6 +185,12 @@ MonitorBackendKind ToMonitorBackendKind(const BackendKind backend) {
     }
 }
 
+// fetchRemoteConfig + its helpers (urlEncode, parseBackendBaseUrl,
+// applyRemoteConfigToOpts) live in remote_config.cpp now — kept out of
+// this TU so the httplib include chain (which pulls in winsock2.h on
+// Windows) never collides with this file's <windows.h> usage for VEH
+// and admin elevation checks. gpufl.cpp just declares its intent by
+// including the header above and calling through.
 
 }  // namespace
 
@@ -207,6 +222,45 @@ bool init(const InitOptions& opts) {
         }
     }
 
+    // Fetch remote named config — a dict of InitOptions overrides hosted
+    // at `<backend_url>/api/v1/config?config=<config_name>`. Mirrors what
+    // the Python _fetch_remote_config() used to do; moved into C++ so
+    // pure C++ consumers (e.g. compiled sass_divergence_demo) get the
+    // same capability without a Python wrapper.
+    //
+    // Opt-in: we ONLY fetch when config_name is non-empty. Setting
+    // backend_url + api_key alone is not enough — it could mean the
+    // user only wants log upload, or nothing remote at all. Requiring
+    // a name makes the fetch predictable and keeps "set the URL for
+    // upload" from silently triggering a config pull.
+    {
+        std::string url  = g_opts.backend_url;
+        std::string key  = g_opts.api_key;
+        std::string name = g_opts.config_name;
+        // Env-var fallbacks so scripts / containers can set these
+        // without touching code.
+        if (url.empty()) {
+            if (const char* e = std::getenv("GPUFL_BACKEND_URL")) url = e;
+            // Legacy name — accept for one release to ease migration.
+            else if (const char* e2 = std::getenv("GPUFL_REMOTE_CONFIG")) url = e2;
+        }
+        if (key.empty()) {
+            if (const char* e = std::getenv("GPUFL_API_KEY")) key = e;
+        }
+        if (name.empty()) {
+            if (const char* e = std::getenv("GPUFL_CONFIG_NAME")) name = e;
+        }
+        // Reflect env-var-resolved values back onto g_opts so downstream
+        // consumers (HttpLogSink wiring below) see consistent values.
+        g_opts.backend_url  = url;
+        g_opts.api_key      = key;
+        g_opts.config_name  = name;
+
+        if (!name.empty() && !url.empty() && !key.empty()) {
+            fetchRemoteConfig(url, key, name, g_opts);
+        }
+    }
+
     DebugLogger::setEnabled(g_opts.enable_debug_output);
     GFL_LOG_DEBUG("Initializing...");
     if (runtime()) {
@@ -235,6 +289,34 @@ bool init(const InitOptions& opts) {
     if (!rt->logger->open(logOpts)) {
         GFL_LOG_ERROR("Failed to open logger at: ", logPath);
         return false;
+    }
+
+    // Optional HttpLogSink — posts every NDJSON line directly to the
+    // backend alongside the file sink. Used for interactive contexts
+    // (local dev, SSH, Jupyter) where deploying the monitor daemon is
+    // heavy. File sink still writes normally so nothing is lost.
+    bool remote_upload_enabled = g_opts.remote_upload;
+    if (const char* env = std::getenv("GPUFL_REMOTE_UPLOAD")) {
+        // Any non-empty, non-"0"/"false" value turns it on.
+        const std::string v(env);
+        remote_upload_enabled =
+            !v.empty() && v != "0" && v != "false" && v != "False";
+    }
+    if (remote_upload_enabled) {
+        if (g_opts.backend_url.empty() || g_opts.api_key.empty()) {
+            GFL_LOG_ERROR(
+                "remote_upload=true but backend_url or api_key is empty "
+                "— skipping HttpLogSink. Set GPUFL_BACKEND_URL + "
+                "GPUFL_API_KEY (or pass backend_url / api_key kwargs).");
+        } else {
+            HttpLogSink::Options httpOpts;
+            httpOpts.base_url = g_opts.backend_url;
+            httpOpts.api_key = g_opts.api_key;
+            rt->logger->addSink(
+                std::make_unique<HttpLogSink>(std::move(httpOpts)));
+            GFL_LOG_DEBUG(
+                "HttpLogSink attached — uploading to ", g_opts.backend_url);
+        }
     }
 
     set_runtime(std::move(rt));

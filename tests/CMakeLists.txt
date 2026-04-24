@@ -14,6 +14,7 @@ set(GPUFL_TEST_SOURCES
     core/test_analyzer.cpp
     core/test_batch_models.cpp
     core/test_monitor.cpp
+    core/test_http_log_sink.cpp
 )
 
 if(GPUFL_ENABLE_NVIDIA AND GPUFL_HAS_CUPTI)
@@ -77,10 +78,17 @@ if(CUPTI_INCLUDE_DIR)
 endif()
 
 # 5. Link libraries
-target_link_libraries(gpufl_tests PRIVATE 
-    gtest_main 
+target_link_libraries(gpufl_tests PRIVATE
+    gtest_main
     gpufl
 )
+
+# HttpLogSink tests spin up an embedded httplib::Server; link the test
+# binary against the same httplib::httplib interface target the main
+# library uses so headers and TLS config stay consistent.
+if(TARGET httplib::httplib)
+    target_link_libraries(gpufl_tests PRIVATE httplib::httplib)
+endif()
 
 if(TARGET CUDA::cudart)
     target_link_libraries(gpufl_tests PRIVATE CUDA::cudart CUDA::cuda_driver)
