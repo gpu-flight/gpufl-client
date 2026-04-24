@@ -55,28 +55,31 @@ bool parseBaseUrl(const std::string& url,
     return !host.empty() && (scheme == "http" || scheme == "https");
 }
 
-/** Build a connected httplib client for the given scheme/host/port. */
+/** Build a connected httplib client for the given scheme/host/port.
+ *
+ * Uses the unified `httplib::Client(scheme_host_port)` constructor,
+ * which internally delegates to SSLClient when the URL scheme is
+ * `https://` (and CPPHTTPLIB_OPENSSL_SUPPORT was defined at build
+ * time). Constructing the wrapper Client directly avoids the type
+ * mismatch that bit us on Linux CI: `SSLClient` does NOT inherit
+ * from `Client` in cpp-httplib — they're siblings that both wrap
+ * `ClientImpl` — so `unique_ptr<SSLClient>` can't be assigned into
+ * `unique_ptr<Client>`.
+ */
 std::unique_ptr<httplib::Client> makeClient(
         const std::string& scheme, const std::string& host, int port,
         int connect_timeout_ms, int read_timeout_ms) {
-    std::unique_ptr<httplib::Client> cli;
+#if !GPUFL_HTTPLIB_TLS
     if (scheme == "https") {
-#if GPUFL_HTTPLIB_TLS
-        cli = std::make_unique<httplib::SSLClient>(
-                host, port > 0 ? port : 443);
-        // For dev / self-signed backends. Production should set this to
-        // true via env — but we don't wire a toggle in v1.
-        cli->enable_server_certificate_verification(true);
-#else
         GFL_LOG_ERROR(
             "[HttpLogSink] https:// requested but OpenSSL was not linked "
             "at build time. Falling back to http:// — TLS uploads will "
             "fail until gpufl is rebuilt with OpenSSL available.");
-        cli = std::make_unique<httplib::Client>(host, port > 0 ? port : 80);
-#endif
-    } else {
-        cli = std::make_unique<httplib::Client>(host, port > 0 ? port : 80);
     }
+#endif
+    std::string scheme_host_port = scheme + "://" + host;
+    if (port > 0) scheme_host_port += ":" + std::to_string(port);
+    auto cli = std::make_unique<httplib::Client>(scheme_host_port);
     cli->set_connection_timeout(0, connect_timeout_ms * 1000);
     cli->set_read_timeout(0, read_timeout_ms * 1000);
     cli->set_keep_alive(true);
