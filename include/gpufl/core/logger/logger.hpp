@@ -1,18 +1,32 @@
 #pragma once
 
 #include <cstddef>
-#include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "gpufl/core/model/serializable.hpp"
 
 namespace gpufl {
 
-class IFileCompressor;
-class LogFileRotator;
+class ILogSink;
 
+/**
+ * Central log dispatcher — every event emitted via the runtime goes
+ * through Logger::write(), which broadcasts the serialized NDJSON
+ * line to every registered {@link ILogSink}.
+ *
+ * The default session uses a single {@link FileLogSink} (preserves
+ * the original per-channel file layout on disk). Additional sinks
+ * (e.g. {@link HttpLogSink} for direct-to-backend upload) can be
+ * attached via {@link addSink}.
+ *
+ * Thread safety: {@link write} is safe to call from any thread.
+ * The sink vector itself is only modified from the init() / shutdown()
+ * path (no concurrent addSink during writes in practice) and is
+ * locked with a mutex on reads anyway.
+ */
 class Logger {
    public:
     struct Options {
@@ -27,44 +41,36 @@ class Logger {
     Logger();
     ~Logger();
 
+    /**
+     * Initialize the logger with the default FileLogSink attached.
+     * Returns false if the base_path is empty (the file sink cannot
+     * open without a path).
+     */
     bool open(const Options& opt);
+
+    /**
+     * Close and release all attached sinks. Safe to call multiple
+     * times; safe to call on an already-closed logger.
+     */
     void close();
 
+    /**
+     * Attach an additional sink. Ownership transfers to the Logger.
+     * Call before the first write() to avoid lost lines — sinks added
+     * after events have already flowed will not back-fill.
+     */
+    void addSink(std::unique_ptr<ILogSink> sink);
+
+    /**
+     * Serialize the model and broadcast to all sinks on the model's
+     * declared channel(s).
+     */
     void write(const IJsonSerializable& model);
 
    private:
-    class LogChannel {
-       public:
-        LogChannel(std::string name, Options opt);
-        ~LogChannel();
-
-        void write(const std::string& line);
-        void close();
-        bool isOpen() const;
-
-       private:
-        void ensureOpenLocked();
-        void rotateLocked();
-        void closeLocked();
-
-        std::string name_;
-        Options opt_;
-        std::unique_ptr<IFileCompressor> compressor_;
-        std::unique_ptr<LogFileRotator> rotator_;
-
-        std::ofstream stream_;
-        size_t current_bytes_ = 0;
-
-        mutable std::mutex mu_;
-        bool opened_ = false;
-    };
-
-    LogChannel* resolveChannel(Channel ch)const;
-
     Options opt_;
-    std::unique_ptr<LogChannel> chanDevice_;
-    std::unique_ptr<LogChannel> chanScope_;
-    std::unique_ptr<LogChannel> chanSystem_;
+    std::vector<std::unique_ptr<ILogSink>> sinks_;
+    mutable std::mutex sinks_mu_;
 };
 
 }  // namespace gpufl

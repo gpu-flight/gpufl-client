@@ -111,6 +111,10 @@ except ImportError as e:
             self.flush_logs_always = False
             self.profiling_engine = ProfilingEngine.PcSampling
             self.config_file = ""
+            self.backend_url = ""
+            self.api_key = ""
+            self.config_name = ""
+            self.remote_upload = False
 
     class Scope:
         def __init__(self, *args): pass
@@ -127,67 +131,96 @@ except Exception as e:
 __version__ = "0.1.0.dev"
 
 # ── Remote Configuration ──────────────────────────────────────────────────────
+#
+# Remote config fetch and direct log upload are BOTH implemented in the
+# C++ core now (see include/gpufl/core/gpufl.cpp :: fetchRemoteConfig
+# and include/gpufl/core/logger/http_log_sink.cpp). This Python wrapper
+# is a thin pass-through: it translates the user-facing kwargs into
+# InitOptions fields and lets the C++ init() do the work.
+#
+# Previously the Python side ran its own urllib-based config fetch,
+# which was fine but duplicated the logic. We consolidated into C++
+# so that pure-C++ consumers (e.g. compiled demos like
+# sass_divergence_demo) get the same capability without spawning a
+# Python interpreter, and the behavior is consistent across the two
+# call paths.
 
-_REMOTE_CONFIG_FIELDS = {
-    'profiling_engine': lambda v: getattr(ProfilingEngine, v, None) or getattr(ProfilingEngine, v + '_', None),
-    'system_sample_rate_ms': int,
-    'kernel_sample_rate_ms': int,
-    'enable_stack_trace': bool,
-    'enable_kernel_details': bool,
-    'enable_source_collection': bool,
-    'flush_logs_always': bool,
-}
-
-def _fetch_remote_config(url, api_key, config_name=None):
-    """Fetch profiling config from GPUFlight backend. Returns dict or empty."""
-    try:
-        import urllib.request, json
-        endpoint = f"{url.rstrip('/')}/api/v1/config"
-        if config_name:
-            endpoint += f"?config={urllib.parse.quote(config_name)}"
-        req = urllib.request.Request(endpoint,
-            headers={"X-API-Key": api_key, "Accept": "application/json"})
-        resp = urllib.request.urlopen(req, timeout=5)
-        data = json.loads(resp.read())
-        if isinstance(data, dict):
-            return data
-    except Exception as e:
-        print(f"[GPUFL] Remote config fetch failed: {e}", file=sys.stderr)
-    return {}
-
-# Wrap the C++ init to support remote_config
+# Wrap the C++ init to pass through backend_url / remote_upload kwargs
+# and env vars into the underlying InitOptions.
 _original_init = init
 
-def init(*args, remote_config=None, api_key=None, config_name=None, **kwargs):
-    """Initialize GPUFlight. Optionally fetch config from remote backend.
+def init(*args, backend_url=None, api_key=None, config_name=None,
+         remote_upload=None, remote_config=None, **kwargs):
+    """Initialize GPUFlight.
+
+    Configuration precedence (low → high). Each layer may override the
+    previous; your explicit field sets on this call always win:
+
+      1. InitOptions defaults (built-in).
+      2. Remote named config (opt-in: requires backend_url + api_key +
+         config_name; setting only backend_url does NOT trigger a fetch).
+      3. Local config file (config_file=...).
+      4. Env vars (GPUFL_BACKEND_URL / GPUFL_API_KEY / GPUFL_CONFIG_NAME /
+         GPUFL_REMOTE_UPLOAD / GPUFL_PROFILING_ENGINE / GPUFL_CONFIG_FILE).
+      5. The kwargs you pass to this function.
 
     Args:
-        remote_config: Backend URL (e.g. "https://api.gpuflight.com")
-        api_key: API key for authentication (e.g. "gpfl_xxxxxxxxxxxx")
-        config_name: Named config to fetch (e.g. "production", "debug-full")
-        **kwargs: All other InitOptions fields passed to C++ init
+        backend_url: Base URL of the GPUFlight backend
+            (e.g. "https://api.gpuflight.com"). On its own it does
+            nothing — opt into a capability via `config_name`
+            (remote config fetch) and/or `remote_upload=True` (live
+            NDJSON upload to `<backend_url>/api/v1/events/<type>`).
+        api_key: API key used for BOTH config fetch and log upload
+            (single key for v1).
+        config_name: Name of the remote config profile to fetch
+            (e.g. "production"). Leave empty for no remote fetch.
+        remote_upload: When truthy, attaches the C++ HttpLogSink so
+            every NDJSON line is POSTed live to the backend in parallel
+            with the disk write. Env: `GPUFL_REMOTE_UPLOAD=1`.
+            Defaults to False.
+        remote_config: **DEPRECATED alias** for `backend_url`. Accepted
+            for backward compatibility with the older kwarg name; will
+            be removed in a future release.
+        **kwargs: All other InitOptions fields passed to C++ init.
     """
-    # Check env vars as fallback
-    if not remote_config:
-        remote_config = os.environ.get('GPUFL_REMOTE_CONFIG')
+    # Deprecated-alias handling. If the caller still passes
+    # `remote_config=`, treat it as `backend_url`. If both are passed
+    # and they differ, prefer the new name and emit a warning.
+    if remote_config is not None and backend_url is None:
+        import warnings
+        warnings.warn(
+            "gpufl.init(remote_config=...) is deprecated; rename to "
+            "backend_url=... (same meaning: base URL of the backend).",
+            DeprecationWarning, stacklevel=2)
+        backend_url = remote_config
+
+    # Resolve env-var fallbacks. Doing this in Python lets explicit
+    # kwargs win over env; the C++ layer also does env fallback for
+    # the pure-C++ code path (e.g. sass_divergence_demo), so either
+    # side resolving the values is sufficient.
+    if not backend_url:
+        backend_url = (os.environ.get('GPUFL_BACKEND_URL')
+                       or os.environ.get('GPUFL_REMOTE_CONFIG'))
     if not api_key:
         api_key = os.environ.get('GPUFL_API_KEY')
     if not config_name:
         config_name = os.environ.get('GPUFL_CONFIG_NAME')
+    if remote_upload is None:
+        env_upload = os.environ.get('GPUFL_REMOTE_UPLOAD', '').strip().lower()
+        remote_upload = env_upload in ('1', 'true', 'yes', 'on')
 
-    # Fetch and merge remote config
-    if remote_config and api_key:
-        config = _fetch_remote_config(remote_config, api_key, config_name)
-        if config:
-            print(f"[GPUFL] Remote config applied: {config}", file=sys.stderr)
-            for key, converter in _REMOTE_CONFIG_FIELDS.items():
-                if key in config and key not in kwargs:
-                    try:
-                        val = converter(config[key])
-                        if val is not None:
-                            kwargs[key] = val
-                    except (ValueError, TypeError):
-                        pass
+    # Forward to the underlying C++ init via the pybind11 binding. C++
+    # handles the remote config GET (synchronous, 5s timeout,
+    # best-effort) when config_name is non-empty, and attaches
+    # HttpLogSink when remote_upload is true.
+    if backend_url and 'backend_url' not in kwargs:
+        kwargs['backend_url'] = backend_url
+    if api_key and 'api_key' not in kwargs:
+        kwargs['api_key'] = api_key
+    if config_name and 'config_name' not in kwargs:
+        kwargs['config_name'] = config_name
+    if remote_upload and 'remote_upload' not in kwargs:
+        kwargs['remote_upload'] = True
 
     return _original_init(*args, **kwargs)
 
