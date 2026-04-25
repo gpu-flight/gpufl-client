@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <thread>
 #include <type_traits>
 
 namespace gpufl {
@@ -36,15 +37,35 @@ class RingBuffer {
         size_t index = headIdx & MASK;
 
         Slot* slot = &buffer_[index];
-        SlotState expected = SlotState::FREE;
 
-        // Try to transition FREE -> WRITING
+        // Wait for the slot to become FREE. On wraparound the slot still
+        // holds READY data the consumer hasn't drained yet — without this
+        // backpressure, bursty producers (e.g. SASS metric drain pushing
+        // thousands of samples in a tight loop) overrun the ring and
+        // silently drop later records (kernel activity records that arrive
+        // last at cuptiActivityFlushAll were the original symptom).
+        //
+        // Bounded wait so a truly stuck consumer cannot deadlock CUPTI
+        // callback threads. ~100 spins (~µs) then ~1000 yields (~1 ms
+        // total) is comfortably long enough for the collector to drain
+        // a few records and short enough that an actually-dead consumer
+        // doesn't block CUPTI for noticeable time.
+        constexpr int kSpinAttempts = 100;
+        constexpr int kYieldAttempts = 1000;
+        for (int i = 0; i < kSpinAttempts; ++i) {
+            if (slot->state.load(std::memory_order_acquire) == SlotState::FREE)
+                break;
+        }
+        for (int i = 0; i < kYieldAttempts; ++i) {
+            if (slot->state.load(std::memory_order_acquire) == SlotState::FREE)
+                break;
+            std::this_thread::yield();
+        }
+
+        SlotState expected = SlotState::FREE;
         if (!slot->state.compare_exchange_strong(expected, SlotState::WRITING,
                                                  std::memory_order_acquire,
                                                  std::memory_order_relaxed)) {
-            // Failure: The buffer is full (the tail hasn't caught up),
-            // or another thread is still messing with this slot (rare race).
-            // For a profiler, we DROP the packet
             return false;
         }
 

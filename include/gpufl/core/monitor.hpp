@@ -14,8 +14,12 @@ namespace gpufl {
 
 /// Size of the global monitor ring buffer.  Must be large enough to hold
 /// a full SASS metrics flush: N_PCs × 4_metrics × N_SM_instances.
-/// 8192 supports kernels with ~2K unique PC offsets without data loss.
-inline constexpr size_t kMonitorBufferSize = 8192;
+/// 65536 supports kernels with ~16K unique PC offsets without data loss
+/// and absorbs multi-scope SASS bursts before the consumer drains them
+/// — at 8192 the buffer overran during sass_divergence_demo's 6 scopes
+/// and dropped the kernel activity records that arrive last at
+/// cuptiActivityFlushAll().
+inline constexpr size_t kMonitorBufferSize = 65536;
 
 /// Global ring buffer shared between profiling engines (producers) and
 /// the monitor collector thread (consumer).  Declared here so all
