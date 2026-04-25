@@ -13,6 +13,7 @@
 
 #include <cuda_runtime.h>
 
+#include <cstdlib>
 #include <iostream>
 
 #include "gpufl/core/common.hpp"
@@ -143,7 +144,7 @@ int main() {
     gpufl::InitOptions opts;
     opts.app_name = "sass_divergence_demo";
     opts.log_path = "sass_divergence";
-    opts.api_key = "gpfl_L6ODhcTS-C5jc4w9wi4uasGJIQW0Cs3Q";
+    if (const char* k = std::getenv("GPUFL_API_KEY")) opts.api_key = k;
     opts.backend_url = "http://localhost:8080";
     opts.remote_upload = true;
     opts.system_sample_rate_ms = 10;

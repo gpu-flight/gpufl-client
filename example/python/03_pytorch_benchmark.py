@@ -20,8 +20,12 @@ def run_stress_test():
     gpufl.torch.attach()
     device = torch.device("cuda")
     print(f"Target: {torch.cuda.get_device_name(0)}")
-    # 1. Init GpuFlight
-    # 15ms is the fastest reliable timer on Windows
+
+    api_key = os.environ.get("GPUFL_API_KEY", "")
+    backend_url = os.environ.get("GPUFL_BACKEND_URL", "http://localhost:8080")
+    remote_upload = bool(api_key)
+    print(f"Remote upload: {remote_upload}")
+
     gpufl.init("Heavy_Stress_App",
                log_path="./stress",
                sampling_auto_start=True,
@@ -31,6 +35,9 @@ def run_stress_test():
                enable_debug_output=True,
                enable_profiling=True,
                enable_stack_trace=True,
+               remote_upload=remote_upload,
+               api_key=api_key,
+               backend_url=backend_url,
                profiling_engine=gpufl.ProfilingEngine.PcSamplingWithSass)
 
     try:
