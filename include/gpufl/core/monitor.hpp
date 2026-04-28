@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "gpufl/core/activity_record.hpp"
 #include "gpufl/core/events.hpp"
@@ -12,14 +13,17 @@
 
 namespace gpufl {
 
-/// Size of the global monitor ring buffer.  Must be large enough to hold
-/// a full SASS metrics flush: N_PCs × 4_metrics × N_SM_instances.
-/// 65536 supports kernels with ~16K unique PC offsets without data loss
-/// and absorbs multi-scope SASS bursts before the consumer drains them
-/// — at 8192 the buffer overran during sass_divergence_demo's 6 scopes
-/// and dropped the kernel activity records that arrive last at
-/// cuptiActivityFlushAll().
-inline constexpr size_t kMonitorBufferSize = 65536;
+/// Size of the global monitor ring buffer.
+///
+/// The ring buffer decouples CUPTI callback threads (which must return
+/// fast) from the collector thread.  After SASS metric drain was moved
+/// off the ring buffer onto a direct-to-batch path (Monitor::PushProfileSamples,
+/// taken on the user thread inside onScopeStop), the only remaining
+/// producers are CUPTI callbacks: kernel activity records, memcpy
+/// activity records, NVTX markers, and PC sampling drain.  These are
+/// well below the 8K ceiling in normal use.  RingBuffer::Push retains
+/// a brief spin/yield on overrun as defense in depth.
+inline constexpr size_t kMonitorBufferSize = 8192;
 
 /// Global ring buffer shared between profiling engines (producers) and
 /// the monitor collector thread (consumer).  Declared here so all
@@ -57,6 +61,28 @@ struct MonitorOptions {
     uint32_t pc_sampling_period = 12;  // log2 exponent: 2^N GPU cycles between samples (valid: 5-31; 12 = 4096 cycles)
     ProfilingEngine profiling_engine = ProfilingEngine::None;
     MonitorBackendKind backend_kind = MonitorBackendKind::Auto;
+};
+
+/**
+ * @brief Input shape for Monitor::PushProfileSamples.
+ *
+ * Mirrors the field set produced by the CollectorLoop's PC_SAMPLE branch
+ * when translating an ActivityRecord into a ProfileSampleBatchRow — the
+ * dictionary interns (function, metric, source_file) happen inside
+ * PushProfileSamples so callers don't need access to the dict manager.
+ */
+struct ProfileSampleInput {
+    int64_t  ts_ns         = 0;
+    uint32_t corr_id       = 0;
+    uint32_t device_id     = 0;
+    std::string function_key;   // "function_name@source_file"
+    uint32_t pc_offset     = 0;
+    std::string metric_name;    // populated for SASS samples; empty for PC sampling
+    uint64_t metric_value  = 0;
+    uint32_t stall_reason  = 0;  // populated for PC sampling; 0 for SASS
+    uint8_t  sample_kind   = 0;  // 0 = pc_sampling, 1 = sass_metric
+    std::string source_file;
+    uint32_t source_line   = 0;
 };
 
 /**
@@ -135,6 +161,26 @@ class Monitor {
      * @brief Push a pre-built ScopeBatchRow into the scope batch buffer.
      */
     static void PushScopeRow(const ScopeBatchRow& row);
+
+    /**
+     * @brief Bulk-push profile samples (SASS metric rows, etc.) directly
+     * into the profile batch buffer.
+     *
+     * Bypasses the lock-free g_monitorBuffer ring — intended for producers
+     * that run on the user's app thread (inside onScopeStop) and emit
+     * thousands of samples in a tight loop.  Routing those bursts through
+     * the ring buffer overruns it and silently drops later activity records
+     * (kernel records arriving from CUPTI activity flush).
+     *
+     * Single bulk call per drain amortizes the g_scopeBatchMu cost over
+     * the entire burst.  The 250 ms periodic flush in CollectorLoop picks
+     * up the pushed rows; this function never triggers a flush itself
+     * (would deadlock on g_scopeBatchMu re-entry).
+     *
+     * Safe to call from any thread.
+     */
+    static void PushProfileSamples(
+        const std::vector<ProfileSampleInput>& samples);
 
    private:
     Monitor() = delete;

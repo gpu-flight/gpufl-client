@@ -469,4 +469,38 @@ void Monitor::PushScopeRow(const ScopeBatchRow& row) {
     g_scopeBatch.push(row);
 }
 
+void Monitor::PushProfileSamples(
+    const std::vector<ProfileSampleInput>& samples) {
+    if (samples.empty()) return;
+    // PC samples (and SASS samples) are scope-attributed via the most
+    // recently begun scope.  This thread (the user app thread inside
+    // onScopeStop) is the SAME thread that pushed the scope-begin row
+    // earlier in ScopedMonitor's ctor, so g_activeScopeNameId is already
+    // set to the correct ID for these samples.
+    const uint32_t scope_name_id =
+        g_activeScopeNameId.load(std::memory_order_relaxed);
+    // Single lock acquisition for the entire burst — replaces what was
+    // previously thousands of g_monitorBuffer.Push() calls per scope drain.
+    // DO NOT call flushBatches() from inside this lock: flushBatches itself
+    // takes g_scopeBatchMu (via lock_guard, not recursive), so re-entry
+    // would deadlock.  CollectorLoop's 250 ms periodic drain handles flush.
+    std::lock_guard lk(g_scopeBatchMu);
+    for (const auto& s : samples) {
+        ProfileSampleBatchRow row;
+        row.ts_ns          = s.ts_ns;
+        row.corr_id        = s.corr_id;
+        row.device_id      = s.device_id;
+        row.function_id    = g_dictManager.internFunction(s.function_key);
+        row.pc_offset      = s.pc_offset;
+        row.metric_id      = g_dictManager.internMetric(s.metric_name);
+        row.metric_value   = s.metric_value;
+        row.stall_reason   = s.stall_reason;
+        row.sample_kind    = s.sample_kind;
+        row.scope_name_id  = scope_name_id;
+        row.source_file_id = g_dictManager.internSourceFile(s.source_file);
+        row.source_line    = s.source_line;
+        g_profileBatch.push(row);
+    }
+}
+
 }  // namespace gpufl
