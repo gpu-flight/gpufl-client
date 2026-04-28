@@ -233,8 +233,18 @@ void DispatchCounterEngine::recordCallback(
     if (!engine || !record_data || record_count == 0) return;
 
     const auto& info = dispatch_data.dispatch_info;
+    (void)info;  // reserved for future agent_id → device_id resolution
     const auto corr_id = dispatch_data.correlation_id.internal;
+    const int64_t now_ns =
+        static_cast<int64_t>(dispatch_data.start_timestamp);
 
+    // Build the callback's records into a single bulk push.  Same
+    // direct-to-batch path the NVIDIA SASS engine now uses — keeps
+    // PC_SAMPLE traffic off the lock-free g_monitorBuffer ring (which
+    // exists for CUPTI/rocprofiler buffer-completed handoff and was
+    // overrunning when bulk producers used it for high-volume metrics).
+    std::vector<ProfileSampleInput> samples;
+    samples.reserve(record_count);
     for (size_t i = 0; i < record_count; ++i) {
         const auto& rec = record_data[i];
 
@@ -255,26 +265,18 @@ void DispatchCounterEngine::recordCallback(
         }
         if (counter_name.empty()) continue;
 
-        // Emit as ActivityRecord — same format as NVIDIA SASS metrics
-        ActivityRecord out{};
-        out.type = TraceType::PC_SAMPLE;
-        out.device_id = 0;  // TODO: resolve from agent_id
-        out.cpu_start_ns = static_cast<int64_t>(dispatch_data.start_timestamp);
-        out.duration_ns = static_cast<int64_t>(
-            dispatch_data.end_timestamp >= dispatch_data.start_timestamp
-                ? dispatch_data.end_timestamp - dispatch_data.start_timestamp
-                : 0);
-        out.corr_id = static_cast<uint32_t>(corr_id & 0xFFFFFFFF);
-        out.metric_value = static_cast<uint64_t>(rec.counter_value);
-        std::snprintf(out.metric_name, sizeof(out.metric_name), "%s",
-                      counter_name.c_str());
-        std::snprintf(out.sample_kind, sizeof(out.sample_kind), "sass_metric");
-
-        // Kernel name is resolved later by the monitor's CollectorLoop
-        // via correlation ID → kernel dispatch mapping
-
-        g_monitorBuffer.Push(out);
+        ProfileSampleInput s;
+        s.ts_ns        = now_ns;
+        s.corr_id      = static_cast<uint32_t>(corr_id & 0xFFFFFFFF);
+        s.device_id    = 0;  // TODO: resolve from agent_id
+        s.sample_kind  = 1;  // sass_metric
+        s.metric_name  = counter_name;
+        s.metric_value = static_cast<uint64_t>(rec.counter_value);
+        // Kernel/function attribution is resolved later via correlation ID;
+        // function_key / source_file are left empty (function_id = "@").
+        samples.push_back(std::move(s));
     }
+    Monitor::PushProfileSamples(samples);
 }
 
 }  // namespace gpufl::amd
