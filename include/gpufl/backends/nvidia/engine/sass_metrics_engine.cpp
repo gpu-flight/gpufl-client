@@ -15,6 +15,7 @@
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/logger/logger.hpp"
 #include "gpufl/core/model/lifecycle_model.hpp"
+#include "gpufl/core/monitor.hpp"
 #include "gpufl/core/ring_buffer.hpp"
 #include "gpufl/core/runtime.hpp"
 
@@ -26,8 +27,10 @@ std::vector<const char*> kSassMetricNames = {
     "smsp__sass_thread_inst_executed",
     "smsp__sass_sectors_mem_global",
     "smsp__sass_sectors_mem_global_ideal",        // sm_120+: aggregate ideal
-    "smsp__sass_sectors_mem_global_op_ld_ideal",  // fallback: load ideal (sm_86)
-    "smsp__sass_sectors_mem_global_op_st_ideal",  // fallback: store ideal (sm_86)
+    "smsp__sass_sectors_mem_global_op_ld_ideal",  // fallback: load ideal
+                                                  // (sm_86)
+    "smsp__sass_sectors_mem_global_op_st_ideal",  // fallback: store ideal
+                                                  // (sm_86)
 };
 
 /** Metrics that CUPTI accepts on pre-sm_120 GPUs but incur massive per-launch
@@ -38,8 +41,9 @@ std::vector<const char*> kSassMetricNames = {
  *  The frontend surfaces the skip via sass_config.skipped_metrics. */
 bool IsExpensiveOnPreSm120(const char* name) {
     if (!name) return false;
-    return std::strcmp(name, "smsp__sass_sectors_mem_global_op_ld_ideal") == 0
-        || std::strcmp(name, "smsp__sass_sectors_mem_global_op_st_ideal") == 0;
+    return std::strcmp(name, "smsp__sass_sectors_mem_global_op_ld_ideal") ==
+               0 ||
+           std::strcmp(name, "smsp__sass_sectors_mem_global_op_st_ideal") == 0;
 }
 
 bool IsInsufficientPrivilege(CUptiResult res) {
@@ -168,16 +172,19 @@ void SassMetricsEngine::EnableSassMetrics_() {
     // CUPTI accepts them but each requires a separate kernel replay pass,
     // causing ~120x per-launch slowdown (measured on RTX 3090 sm_86 with a
     // 2000-launch tiny-kernel workload: 120s vs ~1s on RTX 5060 sm_120).
-    // Users keep instruction/thread/actual-sector metrics; coalescing efficiency
-    // is unavailable and surfaced via sass_config.skipped_metrics (the frontend
-    // shows a hardware-limitation banner in the Memory tab).
-    ComputeCapability cc = GetComputeCapability(static_cast<int>(ctx_.device_id));
+    // Users keep instruction/thread/actual-sector metrics; coalescing
+    // efficiency is unavailable and surfaced via sass_config.skipped_metrics
+    // (the frontend shows a hardware-limitation banner in the Memory tab).
+    ComputeCapability cc =
+        GetComputeCapability(static_cast<int>(ctx_.device_id));
     const bool skipExpensive = cc.valid() && !cc.atLeast(12, 0);
     if (skipExpensive) {
         GFL_LOG_DEBUG(
-            "[SassMetricsEngine] GPU compute capability sm_", cc.major, cc.minor,
+            "[SassMetricsEngine] GPU compute capability sm_", cc.major,
+            cc.minor,
             " (< sm_120) — skipping sector-ideal fallback metrics to avoid "
-            "kernel-replay overhead. Coalescing efficiency will be unavailable.");
+            "kernel-replay overhead. Coalescing efficiency will be "
+            "unavailable.");
     }
 
     size_t validConfigs = 0;
@@ -195,11 +202,13 @@ void SassMetricsEngine::EnableSassMetrics_() {
                                   cuptiSassMetricsGetProperties(&propParams))) {
             GFL_LOG_DEBUG(
                 "[SassMetricsEngine] Metric not available on this GPU, "
-                "skipping: ", kSassMetricNames[i]);
+                "skipping: ",
+                kSassMetricNames[i]);
             skipped_metrics_.push_back(kSassMetricNames[i]);
             continue;
         }
-        sass_metrics_buffers_->config[validConfigs].metricId = propParams.metric.metricId;
+        sass_metrics_buffers_->config[validConfigs].metricId =
+            propParams.metric.metricId;
         sass_metrics_buffers_->config[validConfigs].outputGranularity =
             CUPTI_SASS_METRICS_OUTPUT_GRANULARITY_GPU;
         metric_id_to_name_[propParams.metric.metricId] = kSassMetricNames[i];
@@ -319,6 +328,16 @@ void SassMetricsEngine::StopAndCollectSassMetrics_() {
 
     CUptiResult flushRes = cuptiSassMetricsFlushData(&flushParams);
     if (flushRes == CUPTI_SUCCESS) {
+        // Build the entire burst locally, then push in a single bulk call.
+        // Bypassing g_monitorBuffer (which the per-sample loop used to use)
+        // avoids ring-buffer overrun: a multi-thousand-sample SASS drain
+        // saturated the 8K ring faster than the collector could drain it,
+        // silently dropping the kernel activity records that arrive last
+        // at cuptiActivityFlushAll().  Routing this drain straight into
+        // g_profileBatch under g_scopeBatchMu eliminates the contention.
+        std::vector<ProfileSampleInput> samples;
+        samples.reserve(nRecords * nInstances);
+        const int64_t now_ns = detail::GetTimestampNs();
         for (size_t i = 0; i < nRecords; ++i) {
             char srcFile[256]{};
             uint32_t srcLine = 0;
@@ -365,36 +384,32 @@ void SassMetricsEngine::StopAndCollectSassMetrics_() {
                 }
             }
 
+            const std::string functionName =
+                data[i].functionName ? data[i].functionName : "unknown";
+            const std::string sourceFile = hasSource ? srcFile : std::string();
+            // function_key matches the format CollectorLoop's PC_SAMPLE
+            // branch used (function_name + "@" + source_file) — keeps
+            // function_id values stable across the refactor.
+            const std::string functionKey = functionName + "@" + sourceFile;
             for (size_t j = 0; j < nInstances; ++j) {
-                const auto& inst = data[i].pInstanceValues[j];
-                ActivityRecord out{};
-                out.type = TraceType::PC_SAMPLE;
-                out.cpu_start_ns = detail::GetTimestampNs();
-                out.device_id = ctx_.device_id;
-                out.pc_offset = data[i].pcOffset;
-                std::snprintf(out.sample_kind, sizeof(out.sample_kind), "%s",
-                              "sass_metric");
-                std::snprintf(
-                    out.function_name, sizeof(out.function_name), "%s",
-                    data[i].functionName ? data[i].functionName : "unknown");
-                if (hasSource) {
-                    std::snprintf(out.source_file, sizeof(out.source_file),
-                                  "%s", srcFile);
-                    out.source_line = srcLine;
-                }
-                auto itName = metric_id_to_name_.find(inst.metricId);
-                if (itName != metric_id_to_name_.end()) {
-                    std::snprintf(out.metric_name, sizeof(out.metric_name),
-                                  "%s", itName->second.c_str());
-                } else {
-                    std::snprintf(
-                        out.metric_name, sizeof(out.metric_name), "metric_%llu",
-                        static_cast<unsigned long long>(inst.metricId));
-                }
-                out.metric_value = inst.value;
-                g_monitorBuffer.Push(out);
+                const auto& [metricId, value] = data[i].pInstanceValues[j];
+                ProfileSampleInput s;
+                s.ts_ns = now_ns;
+                s.device_id = ctx_.device_id;
+                s.pc_offset = data[i].pcOffset;
+                s.sample_kind = 1;  // sass_metric
+                s.function_key = functionKey;
+                auto itName = metric_id_to_name_.find(metricId);
+                s.metric_name = itName != metric_id_to_name_.end()
+                                    ? itName->second
+                                    : "metric_" + std::to_string(metricId);
+                s.metric_value = value;
+                s.source_file = sourceFile;
+                s.source_line = hasSource ? srcLine : 0;
+                samples.push_back(std::move(s));
             }
         }
+        Monitor::PushProfileSamples(samples);
     } else {
         LogCuptiErrorIfFailed(this->name(), "cuptiSassMetricsFlushData",
                               flushRes);
