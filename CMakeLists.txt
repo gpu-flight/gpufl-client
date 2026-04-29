@@ -52,6 +52,7 @@ target_sources(gpufl PRIVATE
     include/gpufl/core/logger/log_rotator.cpp
     include/gpufl/core/logger/file_log_sink.cpp
     include/gpufl/core/logger/http_log_sink.cpp
+    include/gpufl/core/host_info.cpp
     include/gpufl/core/remote_config.cpp
     include/gpufl/core/model/batch_models.cpp
     include/gpufl/core/model/lifecycle_model.cpp
