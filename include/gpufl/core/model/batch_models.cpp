@@ -2,6 +2,7 @@
 
 #include <sstream>
 
+#include "gpufl/core/host_info.hpp"
 #include "gpufl/core/model/model_utils.hpp"
 
 namespace gpufl::model {
@@ -214,9 +215,21 @@ std::string HostMetricBatchModel::buildJson() const {
     if (rows.empty()) return {};
     const int64_t base = rows.front().ts_ns;
 
+    // Hostname / ip_addr are added to the batch ENVELOPE (not per-row)
+    // so the backend can copy them onto every host_metric record at
+    // ingestion time. A file-tailing agent reading this NDJSON gets
+    // the host label without needing to call gethostname() itself —
+    // important when the agent runs on a different machine than the
+    // workload (sidecar / centralized collector). Per-row replication
+    // would waste bytes; the value is constant for a session.
+    const std::string hostname = gpufl::getLocalHostname();
+    const std::string ipAddr   = gpufl::getLocalIpAddr();
+
     std::ostringstream oss;
     oss << "{\"version\":1,\"type\":\"host_metric_batch\""
         << ",\"session_id\":\"" << jsonEscape(session_id_) << '"'
+        << ",\"hostname\":\""   << jsonEscape(hostname)    << '"'
+        << ",\"ip_addr\":\""    << jsonEscape(ipAddr)      << '"'
         << ",\"batch_id\":" << batch_id_ << ",\"base_time_ns\":" << base
         << ",\"columns\":[\"dt_ns\",\"cpu_pct_x100\",\"ram_used_mib\",\"ram_"
            "total_mib\"]"
