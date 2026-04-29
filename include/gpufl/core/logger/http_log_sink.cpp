@@ -10,6 +10,7 @@
 #include <httplib.h>
 
 #include "gpufl/core/debug_logger.hpp"
+#include "gpufl/core/host_info.hpp"
 #include "gpufl/core/json/json.hpp"
 
 namespace gpufl {
@@ -227,7 +228,7 @@ void HttpLogSink::workerLoop() {
         // backend's EventIngestionController expects:
         //
         //   {"data":"<NDJSON string>","agentSendingTime":<ms>,
-        //    "hostname":"","ipAddr":""}
+        //    "hostname":"<localhost>","ipAddr":"<local-ip>"}
         //
         // `data` is a STRING (the NDJSON line JSON-escaped), NOT nested
         // JSON — matches com.gpuflight.gpuflbackend.model.EventWrapper
@@ -236,20 +237,29 @@ void HttpLogSink::workerLoop() {
         // crashes in SystemEventServiceImpl.addSystemEvent() trying to
         // readValue(null, ...). This wrapping matches what the monitor
         // daemon / agent does for production file-tailing ingestion.
+        //
+        // hostname + ipAddr are populated via getLocalHostname() /
+        // getLocalIpAddr(). InitEventServiceImpl reads these off
+        // EventWrapper and writes them onto SessionEntity, so the
+        // dashboard's Sessions page can label each session by host.
+        // Field names use camelCase (ipAddr, not ip_addr) to match the
+        // EventWrapper Java record's default Jackson binding.
         const long long nowMs =
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count();
+        const std::string& hostName = getLocalHostname();
+        const std::string& ipAddr   = getLocalIpAddr();
         std::string wrapped;
-        wrapped.reserve(line.size() + 128);
+        wrapped.reserve(line.size() + 128 + hostName.size() + ipAddr.size());
         wrapped.append("{\"data\":\"");
         wrapped.append(json::escape(line));
         wrapped.append("\",\"agentSendingTime\":");
         wrapped.append(std::to_string(nowMs));
-        // hostname / ipAddr are informational labels only; leave empty
-        // — the backend doesn't require them for ingestion and setting
-        // them here would require per-platform gethostname()/getaddr
-        // boilerplate for no user-visible benefit.
-        wrapped.append(",\"hostname\":\"\",\"ipAddr\":\"\"}");
+        wrapped.append(",\"hostname\":\"");
+        wrapped.append(json::escape(hostName));
+        wrapped.append("\",\"ipAddr\":\"");
+        wrapped.append(json::escape(ipAddr));
+        wrapped.append("\"}");
 
         // Retry loop with exponential backoff: 50ms, 200ms, 1s. Budget
         // comes from Options; a 401/403 aborts immediately (retry won't
