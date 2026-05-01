@@ -17,6 +17,9 @@
 #include "gpufl/core/model/batch_models.hpp"
 #include "gpufl/core/model/memcpy_event_model.hpp"
 #include "gpufl/core/model/nvtx_marker_model.hpp"
+#include "gpufl/core/model/synchronization_event_model.hpp"
+#include "gpufl/core/model/memory_alloc_event_model.hpp"
+#include "gpufl/core/model/graph_launch_event_model.hpp"
 #include "gpufl/core/monitor_adapter.hpp"
 #include "gpufl/core/ring_buffer.hpp"
 #include "gpufl/core/runtime.hpp"
@@ -144,6 +147,10 @@ void CollectorLoop() {
                 row.dyn_shared  = rec.dyn_shared;
                 row.num_regs    = rec.num_regs;
                 row.has_details = rec.has_details ? 1 : 0;
+                // Pre-stamped by KernelLaunchHandler; both fields are
+                // 0 when no framework was tracking this launch.
+                row.external_kind = rec.external_kind;
+                row.external_id   = rec.external_id;
                 g_kernelBatch.push(row);
 
                 if (rec.has_details) {
@@ -316,6 +323,61 @@ void CollectorLoop() {
             ev.duration_ns = duration_ns;
             ev.marker_id   = rec.corr_id;
             rt->logger->write(model::NvtxMarkerModel(ev));
+        } else if (rec.type == TraceType::GRAPH_LAUNCH) {
+            // cudaGraphLaunch with aggregate timing. Emit per-event;
+            // volume is so low (tens to low hundreds per session) that
+            // batching would be pointless overhead.
+            GraphLaunchEvent ev;
+            ev.pid          = detail::GetPid();
+            ev.app          = rt->app_name;
+            ev.session_id   = rt->session_id;
+            ev.start_ns     = rec.cpu_start_ns;
+            ev.end_ns       = rec.cpu_start_ns + duration_ns;
+            ev.duration_ns  = duration_ns;
+            ev.graph_id     = rec.graph_id;
+            ev.device_id    = rec.device_id;
+            ev.stream_id    = static_cast<uint32_t>(rec.stream);
+            ev.corr_id      = rec.corr_id;
+            rt->logger->write(model::GraphLaunchEventModel(ev));
+        } else if (rec.type == TraceType::MEMORY_ALLOC) {
+            // cudaMalloc / cudaFree / cudaMallocAsync / etc.
+            // Per-event emission, Scope channel. Mirrors the F2 sync
+            // path structurally — same translation pattern from
+            // ActivityRecord onto the public event struct.
+            MemoryAllocEvent ev;
+            ev.pid          = detail::GetPid();
+            ev.app          = rt->app_name;
+            ev.session_id   = rt->session_id;
+            ev.start_ns     = rec.cpu_start_ns;
+            ev.duration_ns  = duration_ns;       // 0 in v1
+            ev.memory_op    = rec.memory_op;
+            ev.memory_kind  = rec.memory_kind;
+            ev.address      = rec.address;
+            ev.bytes        = rec.bytes;
+            ev.device_id    = rec.device_id;
+            ev.stream_id    = static_cast<uint32_t>(rec.stream);
+            ev.corr_id      = rec.corr_id;
+            rt->logger->write(model::MemoryAllocEventModel(ev));
+        } else if (rec.type == TraceType::SYNCHRONIZATION) {
+            // cudaStreamSynchronize / cudaDeviceSynchronize / etc.
+            // Mirrors the NVTX path above structurally — same per-event
+            // emission, same Scope channel. The CUPTI fields were
+            // stashed onto ActivityRecord by the BufferCompleted
+            // handler in cupti_backend.cpp; we just translate them
+            // into the public event struct.
+            SynchronizationEvent ev;
+            ev.pid          = detail::GetPid();
+            ev.app          = rt->app_name;
+            ev.session_id   = rt->session_id;
+            ev.start_ns     = rec.cpu_start_ns;
+            ev.end_ns       = rec.cpu_start_ns + duration_ns;
+            ev.duration_ns  = duration_ns;
+            ev.sync_type    = rec.sync_type;
+            ev.stream_id    = static_cast<uint32_t>(rec.stream);
+            ev.event_id     = rec.sync_event_id;
+            ev.context_id   = static_cast<uint32_t>(rec.scope_depth);
+            ev.corr_id      = rec.corr_id;
+            rt->logger->write(model::SynchronizationEventModel(ev));
         }
 
         return true;

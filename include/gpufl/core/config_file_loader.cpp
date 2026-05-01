@@ -40,6 +40,8 @@ void ConfigFileLoader::apply(InitOptions& opts, const std::string& path) {
         opts.enable_source_collection = cfg.value<bool>("enable_source_collection", opts.enable_source_collection);
     if (cfg.contains("enable_debug_output"))
         opts.enable_debug_output = cfg.value<bool>("enable_debug_output", opts.enable_debug_output);
+    if (cfg.contains("enable_external_correlation"))
+        opts.enable_external_correlation = cfg.value<bool>("enable_external_correlation", opts.enable_external_correlation);
 }
 
 }  // namespace gpufl

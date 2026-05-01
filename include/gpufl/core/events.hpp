@@ -131,6 +131,12 @@ struct KernelEvent {
     int scope_depth = 0;
 
     std::string stack_trace;
+
+    // External correlation stamped onto this kernel by the framework
+    // (PyTorch / TF / JAX). external_id == 0 means no framework tracked
+    // this launch; kernel_event_model.cpp omits the columns when zero.
+    uint8_t  external_kind = 0;
+    uint64_t external_id   = 0;
 };
 
 struct MemcpyEvent {
@@ -279,6 +285,15 @@ struct KernelBatchRow {
     int      dyn_shared  = 0;
     int      num_regs    = 0;
     uint8_t  has_details = 0;  // 1 → a kernel_detail event follows with same corr_id
+
+    // Framework-emitted external correlation, sourced from
+    // CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION records. Stamped onto
+    // the kernel by KernelLaunchHandler::handleActivityRecord; ferried
+    // through the ActivityRecord into this row by CollectorLoop.
+    // external_id == 0 means "no framework was tracking this kernel"
+    // and the column is omitted from the JSON to keep the wire compact.
+    uint8_t  external_kind = 0;
+    uint64_t external_id   = 0;
 };
 
 struct KernelDetailRow {
@@ -412,4 +427,117 @@ struct NvtxMarkerEvent {
     int64_t duration_ns = 0;    // Redundant with end-start; kept for convenience
     uint32_t marker_id = 0;     // CUPTI marker ID (for debug / dedup)
 };
+
+/**
+ * One CUDA graph launch event captured by CUPTI's
+ * CUPTI_ACTIVITY_KIND_GRAPH_TRACE stream.
+ *
+ * `cudaGraphLaunch` is the launch mechanism torch.compile / CUDA
+ * Graphs / Triton-CUDA-graph-mode use to batch many kernels into a
+ * single host-side launch call, eliminating per-kernel overhead.
+ * This event tells the dashboard that a chunk of GPU work happened
+ * as a fused graph rather than as N independent kernel launches.
+ *
+ * Per-event JSON. Volume is very low — even an inference loop that
+ * launches a graph per request typically yields fewer events than
+ * any other CUPTI stream we capture. Channel::Scope
+ *
+ * `corr_id` matches the driver-API call that issued the launch
+ * (cuGraphLaunch). It does NOT match the per-node kernel records —
+ * each kernel inside the graph keeps its own correlationId. To pair
+ * "kernel K was part of graph G", the backend (or dashboard) needs
+ * a temporal join on [start_ns, end_ns] + same stream — that's
+ * deliberate v2 work, out of scope here.
+ */
+struct GraphLaunchEvent {
+    int pid = 0;
+    std::string app;
+    std::string session_id;
+    int64_t start_ns = 0;
+    int64_t end_ns = 0;
+    int64_t duration_ns = 0;
+    uint32_t graph_id = 0;
+    uint32_t device_id = 0;
+    uint32_t stream_id = 0;
+    uint32_t corr_id = 0;
+};
+
+/**
+ * One CUDA memory-management event captured by CUPTI's
+ * CUPTI_ACTIVITY_KIND_MEMORY2 stream.
+ *
+ * Covers cudaMalloc / cudaFree / cudaMallocAsync / cudaFreeAsync /
+ * cudaMallocManaged / cudaMallocHost (and their driver-API cousins).
+ * One event per call. Note that cudaMallocAsync is associated with a
+ * stream and the reported {@code start_ns} is the host call time
+ * (not the GPU completion time) — the host-side cost is what users
+ * actually pay for in their python/c++ code.
+ *
+ * Per-event JSON. Volume in PyTorch workloads is typically <1k events
+ * per session because torch's caching allocator absorbs most python-
+ * level allocations; only large-block CUDA-level mallocs reach this
+ * stream. TensorFlow eager mode is the high-volume edge case — if it
+ * becomes a problem the gating flag {@code enable_memory_tracking}
+ * lets users opt out without losing other CUPTI streams.
+ *
+ * The {@code address} field is the VA returned by cudaMalloc (or
+ * being freed by cudaFree). Pairing alloc → free across the session
+ * for leak / fragmentation analysis is a v2 follow-up; v1 just
+ * stores raw events.
+ */
+struct MemoryAllocEvent {
+    int pid = 0;
+    std::string app;
+    std::string session_id;
+    int64_t start_ns = 0;
+    int64_t duration_ns = 0;     // host-side; usually tiny but non-zero
+    uint8_t  memory_op = 0;       // 1 = ALLOC, 2 = FREE
+    uint8_t  memory_kind = 0;     // CUpti_ActivityMemoryKind
+    uint64_t address = 0;
+    uint64_t bytes = 0;
+    uint32_t device_id = 0;
+    uint32_t stream_id = 0;       // for cudaMallocAsync; 0 otherwise
+    uint32_t corr_id = 0;
+};
+
+/**
+ * CUDA synchronization event captured by CUPTI.
+ *
+ * One event per cudaStreamSynchronize / cudaDeviceSynchronize /
+ * cudaEventSynchronize / cuStreamWaitEvent call (and their driver-API
+ * cousins). The wall-clock duration here is the CPU-side time the
+ * thread was blocked — which is the exact metric that explains GPU
+ * underutilization on workloads that interleave host-side python with
+ * synchronous waits (PyTorch's `torch.cuda.synchronize()` between
+ * forward / backward; eager-mode TF; manual debugging code).
+ *
+ * Per-event JSON (not batched). Volume is hundreds-to-thousands per
+ * session in typical workloads — well within per-event capacity. If a
+ * user runs a stress test that produces millions of syncs, switching
+ * to a batched columnar format is a one-file change (mirrors the
+ * KernelEventBatch pattern).
+ *
+ * `sync_type` is the integer from CUPTI's CUpti_ActivitySynchronizationType
+ * enum; the dashboard renders it as a human label
+ * (EventSynchronize / StreamWaitEvent / StreamSynchronize / ContextSynchronize).
+ *
+ * `corr_id` joins to KernelEvent.corr_id, letting the dashboard
+ * answer questions like "this matmul kernel finished at T1; the
+ * `cudaStreamSynchronize` waiting for it returned at T2 — that
+ * (T2 - kernel_end) gap is host-side overhead, not GPU work."
+ */
+struct SynchronizationEvent {
+    int pid = 0;
+    std::string app;
+    std::string session_id;
+    int64_t start_ns = 0;
+    int64_t end_ns = 0;
+    int64_t duration_ns = 0;
+    uint8_t  sync_type = 0;       // CUpti_ActivitySynchronizationType
+    uint32_t stream_id = 0;       // 0 for context-wide / device sync
+    uint32_t event_id = 0;        // 0 for non-event syncs
+    uint32_t corr_id = 0;         // links to KernelEvent.corr_id
+    uint32_t context_id = 0;
+};
+
 }  // namespace gpufl

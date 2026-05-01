@@ -41,6 +41,19 @@ struct ActivityRecord {
     int max_active_blocks = 0;
     unsigned int corr_id = 0;
 
+    // External-correlation stamp from CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION.
+    // Populated in `KernelLaunchHandler::handleActivityRecord` by looking
+    // up the kernel's `corr_id` in the global external-correlation map
+    // (see g_extCorrMap in cupti_backend.cpp). external_id == 0 means no
+    // framework was tracking this kernel.
+    //
+    // CUpti_ExternalCorrelationKind values (from <cupti_activity.h>):
+    //   0 = INVALID, 1 = UNKNOWN, 2 = OPENACC, 3 = CUSTOM0..CUSTOM3,
+    //   8 = CUSTOM_RESERVED1, ... (frameworks pick one).
+    // We store as uint8_t to keep ActivityRecord small.
+    uint8_t  external_kind = 0;
+    uint64_t external_id = 0;
+
     char source_file[256]{};
     uint32_t source_line = 0;
     char function_name[256]{};
@@ -72,6 +85,50 @@ struct ActivityRecord {
     uint32_t copy_kind = 0;  // backend-specific memcpy kind
     uint32_t src_kind = 0;   // backend-specific memory kind
     uint32_t dst_kind = 0;   // backend-specific memory kind
+
+    // Graph-launch specific. graph_id is the CUPTI graphId field
+    // (uint32 unique id of the captured graph). Same graph re-launched
+    // multiple times in a training loop shares the same graph_id;
+    // backend can aggregate by it to surface "this graph launched 50x,
+    // total 4.2s" insights.
+    uint32_t graph_id = 0;
+
+    // Memory-allocation specific.
+    //
+    // memory_op: 1 = ALLOC, 2 = FREE. Mirrors CUpti_ActivityMemoryOperationType
+    // (we collapse the variants we don't surface in v1 — release-async
+    // and so on — into the two top-level buckets; the dashboard only
+    // distinguishes alloc-vs-free in its first iteration).
+    //
+    // memory_kind values mirror CUpti_ActivityMemoryKind:
+    //   0 = UNKNOWN, 1 = PAGEABLE_HOST, 2 = PINNED_HOST, 3 = DEVICE,
+    //   4 = ARRAY, 5 = MANAGED, 6 = DEVICE_STATIC, 7 = MANAGED_STATIC.
+    // Backend stores the raw integer; frontend maps to a label.
+    //
+    // address is the GPU virtual address (uint64) returned by cudaMalloc
+    // (or freed by cudaFree). Stored as uint64 because Blackwell-class
+    // addresses can be large; the dashboard renders it as 0x-prefixed
+    // hex.
+    uint8_t  memory_op = 0;
+    uint8_t  memory_kind = 0;
+    uint64_t address = 0;
+
+    // Synchronization-event specific.
+    //
+    // sync_type encodes which CUPTI synchronization variant fired —
+    // stored as uint8_t to keep ActivityRecord small. Values mirror
+    // CUpti_ActivitySynchronizationType (cupti_activity.h):
+    //   0 = UNKNOWN, 1 = EVENT_SYNCHRONIZE, 2 = STREAM_WAIT_EVENT,
+    //   3 = STREAM_SYNCHRONIZE, 4 = CONTEXT_SYNCHRONIZE.
+    // Mapping to user-readable names happens in SynchronizationEventModel
+    // — backend stores the integer, frontend renders the label.
+    //
+    // sync_event_id is the CUPTI eventId (cudaEvent_t handle) for
+    // EVENT_SYNCHRONIZE / STREAM_WAIT_EVENT records; zero for stream-
+    // and context-wide syncs. Useful for grouping back-to-back waits
+    // on the same event in the dashboard.
+    uint8_t  sync_type = 0;
+    uint32_t sync_event_id = 0;
 };
 
 }  // namespace gpufl

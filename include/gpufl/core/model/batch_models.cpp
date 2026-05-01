@@ -14,13 +14,14 @@ std::string KernelEventBatchModel::buildJson() const {
     if (rows.empty()) return {};
     const int64_t base = rows.front().start_ns;
 
+    // external_kind / external_id added as trailing columns.
     std::ostringstream oss;
     oss << "{\"version\":1,\"type\":\"kernel_event_batch\""
         << ",\"session_id\":\"" << jsonEscape(session_id_) << '"'
         << ",\"batch_id\":" << batch_id_ << ",\"base_time_ns\":" << base
         << ",\"columns\":[\"dt_ns\",\"kernel_id\",\"stream_id\","
            "\"duration_ns\",\"corr_id\",\"dyn_shared\",\"num_regs\",\"has_"
-           "details\"]"
+           "details\",\"external_kind\",\"external_id\"]"
         << ",\"rows\":[";
 
     bool first = true;
@@ -30,7 +31,9 @@ std::string KernelEventBatchModel::buildJson() const {
         oss << '[' << (r.start_ns - base) << ',' << r.kernel_id << ','
             << r.stream_id << ',' << r.duration_ns << ',' << r.corr_id << ','
             << r.dyn_shared << ',' << r.num_regs << ','
-            << static_cast<int>(r.has_details) << ']';
+            << static_cast<int>(r.has_details) << ','
+            << static_cast<int>(r.external_kind) << ','
+            << r.external_id << ']';
     }
     oss << "]}";
     return oss.str();
@@ -222,8 +225,8 @@ std::string HostMetricBatchModel::buildJson() const {
     // important when the agent runs on a different machine than the
     // workload (sidecar / centralized collector). Per-row replication
     // would waste bytes; the value is constant for a session.
-    const std::string hostname = gpufl::getLocalHostname();
-    const std::string ipAddr   = gpufl::getLocalIpAddr();
+    const std::string hostname = getLocalHostname();
+    const std::string ipAddr   = getLocalIpAddr();
 
     std::ostringstream oss;
     oss << "{\"version\":1,\"type\":\"host_metric_batch\""
