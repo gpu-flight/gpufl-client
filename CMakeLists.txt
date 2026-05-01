@@ -62,6 +62,9 @@ target_sources(gpufl PRIVATE
     include/gpufl/core/model/profile_sample_model.cpp
     include/gpufl/core/model/perf_metric_model.cpp
     include/gpufl/core/model/nvtx_marker_model.cpp
+    include/gpufl/core/model/synchronization_event_model.cpp
+    include/gpufl/core/model/memory_alloc_event_model.cpp
+    include/gpufl/core/model/graph_launch_event_model.cpp
     include/gpufl/core/model/system_event_model.cpp
     include/gpufl/core/sampler.cpp
     include/gpufl/core/runtime.cpp

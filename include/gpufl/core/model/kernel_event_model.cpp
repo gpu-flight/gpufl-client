@@ -44,8 +44,15 @@ std::string KernelEventModel::buildJson() const {
         << ",\"local_mem_per_thread_bytes\":" << e_.local_mem_per_thread
         << ",\"cache_config_requested\":"  << static_cast<int>(e_.cache_config_requested)
         << ",\"cache_config_executed\":"   << static_cast<int>(e_.cache_config_executed)
-        << ",\"shared_mem_executed_bytes\":" << e_.shared_mem_executed
-        << "}";
+        << ",\"shared_mem_executed_bytes\":" << e_.shared_mem_executed;
+    // only emit external_* when present; keeps the JSON small for the
+    // common no-framework case and is wire-compatible (the backend treats
+    // missing fields as null/0).
+    if (e_.external_id != 0) {
+        oss << ",\"external_kind\":" << static_cast<int>(e_.external_kind)
+            << ",\"external_id\":"   << e_.external_id;
+    }
+    oss << "}";
     return oss.str();
 }
 

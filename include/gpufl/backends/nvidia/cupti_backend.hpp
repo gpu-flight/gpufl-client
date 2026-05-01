@@ -134,4 +134,13 @@ class CuptiBackend : public IMonitorBackend {
     std::unique_ptr<IProfilingEngine> engine_;
 };
 
+// External-correlation lookup. Defined in cupti_backend.cpp (the
+// map lives in that TU's anonymous namespace alongside the BufferCompleted
+// dispatch that populates it). Returns true iff a record was found and
+// stamped into the output params; the entry is then erased so a stale
+// kernel→corr mapping can't outlive the launch.
+bool LookupAndPopExternalCorrelation(uint32_t corr_id,
+                                     uint8_t* kind_out,
+                                     uint64_t* id_out);
+
 }  // namespace gpufl
