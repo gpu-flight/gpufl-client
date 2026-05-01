@@ -344,6 +344,13 @@ bool init(const InitOptions& opts) {
     }
     mOpts.enable_stack_trace = g_opts.enable_stack_trace;
     mOpts.enable_source_collection = g_opts.enable_source_collection;
+    // Propagate the framework-correlation flag to the backend so
+    // CuptiBackend::start can decide whether to enable
+    // CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION.
+    mOpts.enable_external_correlation = g_opts.enable_external_correlation;
+    mOpts.enable_synchronization      = g_opts.enable_synchronization;
+    mOpts.enable_memory_tracking      = g_opts.enable_memory_tracking;
+    mOpts.enable_cuda_graphs_tracking = g_opts.enable_cuda_graphs_tracking;
     mOpts.backend_kind = ToMonitorBackendKind(g_opts.backend);
 
     // Auto-tune kernel_sample_rate_ms on older NVIDIA GPUs where SASS metric

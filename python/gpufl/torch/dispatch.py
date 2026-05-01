@@ -43,6 +43,66 @@ class _GpuflDispatchMode:
         except ImportError as e:
             raise RuntimeError(_TORCH_IMPORT_ERROR_MESSAGE) from e
 
+        # Lazy-bind the push/pop. `_gpufl_client` is the C++ extension;
+        # if it's not available (no-GPU stub install) or it's an older
+        # build that predates bindings, we fall back to no-op lambdas
+        # so the dispatch hook still runs — but we WARN loudly because
+        # this almost always means the user forgot to reinstall the
+        # extension after pulling the changes, and silently degrading
+        # to "no chips" is the worst possible UX.
+        try:
+            from gpufl._gpufl_client import (
+                _push_external_corr_id as _push_ext,
+                _pop_external_corr_id  as _pop_ext,
+            )
+        except ImportError as e:
+            import warnings
+            warnings.warn(
+                "[gpufl.torch] CUPTI external-correlation bindings not found "
+                f"in the loaded gpufl extension ({e}). The dashboard's 'op #N' "
+                "chips on kernel rows will be absent until you rebuild + "
+                "reinstall the gpufl Python extension "
+                "(typically: `pip install . --force-reinstall --no-cache-dir`). "
+                "NVTX-based attribution is unaffected and continues to work.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            def _push_ext(kind, id_):  # type: ignore
+                pass
+            def _pop_ext(kind):        # type: ignore
+                pass
+
+        # CUpti_ExternalCorrelationKind values (from <cupti_activity.h>):
+        #   1 = UNKNOWN, 2 = OPENACC, 3 = CUSTOM0 (used by torch.profiler),
+        #   4 = CUSTOM1 (we reserve this for gpufl), 5 = CUSTOM2.
+        # Picking CUSTOM1 keeps us out of conflict if torch.profiler is
+        # also active in the same process (each kind has its own stack).
+        _GPUFL_CORR_KIND = 4
+
+        # Per-process op-name → 64-bit id table. The id is what the
+        # dashboard's KernelTable surfaces in its "op #N" chip; making
+        # it a stable hash of the op name means every `aten::matmul`
+        # call across the session shares the same N, which is the
+        # property users want when grouping kernels by op.
+        _op_id_cache: dict[str, int] = {}
+        def _op_id_for(name: str) -> int:
+            cached = _op_id_cache.get(name)
+            if cached is not None:
+                return cached
+            # FNV-1a 64-bit. Stable across runs, no cryptographic claim;
+            # collision risk for our op-name space is effectively zero.
+            h = 0xcbf29ce484222325
+            for b in name.encode("utf-8"):
+                h ^= b
+                h = (h * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF
+            # Avoid 0 — that's the "no attribution" sentinel in the
+            # backend / dashboard. If the hash hits 0 (vanishingly
+            # unlikely), nudge to 1.
+            if h == 0:
+                h = 1
+            _op_id_cache[name] = h
+            return h
+
         class GpuflDispatchMode(TorchDispatchMode):
             def __torch_dispatch__(self, func, types, args=(), kwargs=None):
                 # Skip meta tensors / fake tensors — they don't launch
@@ -63,11 +123,22 @@ class _GpuflDispatchMode:
                 range_name = (f"torch::{op_name}@{site}"
                               if site is not None else f"torch::{op_name}")
 
+                # push a CUPTI external-correlation id derived from
+                # the op name BEFORE the dispatch runs. Every CUDA kernel
+                # launched inside this op (most aten ops launch one or
+                # more kernels) will be tagged with this id, surfacing
+                # in the dashboard as the "op #N" chip on each kernel
+                # row. We push the same id we use for the NVTX label,
+                # so the two attribution mechanisms agree.
+                op_id = _op_id_for(op_name)
+                _push_ext(_GPUFL_CORR_KIND, op_id)
+
                 nvtx.range_push(range_name)
                 try:
                     return func(*args, **kwargs)
                 finally:
                     nvtx.range_pop()
+                    _pop_ext(_GPUFL_CORR_KIND)
 
         return GpuflDispatchMode
 

@@ -55,6 +55,12 @@ PYBIND11_MODULE(_gpufl_client, m) {
         .def_readwrite("enable_debug_output",   &gpufl::InitOptions::enable_debug_output)
         .def_readwrite("enable_stack_trace",    &gpufl::InitOptions::enable_stack_trace)
         .def_readwrite("enable_source_collection", &gpufl::InitOptions::enable_source_collection)
+        // feature gates — surfaced on the InitOptions class so
+        // power users can tweak them via the dataclass-style API.
+        .def_readwrite("enable_external_correlation", &gpufl::InitOptions::enable_external_correlation)
+        .def_readwrite("enable_synchronization",      &gpufl::InitOptions::enable_synchronization)
+        .def_readwrite("enable_memory_tracking",      &gpufl::InitOptions::enable_memory_tracking)
+        .def_readwrite("enable_cuda_graphs_tracking", &gpufl::InitOptions::enable_cuda_graphs_tracking)
         .def_readwrite("profiling_engine",      &gpufl::InitOptions::profiling_engine)
         // Backend interactions — see InitOptions.backend_url / config_name
         // / api_key / remote_upload docs for precedence and semantics.
@@ -86,7 +92,16 @@ PYBIND11_MODULE(_gpufl_client, m) {
                      std::string backend_url,
                      std::string api_key,
                      std::string config_name,
-                     bool remote_upload) -> bool {
+                     bool remote_upload,
+                     // Defaults match
+                     // InitOptions::*; surface them here so the
+                     // function-style init() call stays the canonical
+                     // way users twiddle these without falling back to
+                     // the InitOptions object.
+                     bool enable_external_correlation,
+                     bool enable_synchronization,
+                     bool enable_memory_tracking,
+                     bool enable_cuda_graphs_tracking) -> bool {
 
         gpufl::InitOptions opts;
         opts.app_name              = app_name;
@@ -104,6 +119,10 @@ PYBIND11_MODULE(_gpufl_client, m) {
         opts.api_key                 = std::move(api_key);
         opts.config_name             = std::move(config_name);
         opts.remote_upload           = remote_upload;
+        opts.enable_external_correlation = enable_external_correlation;
+        opts.enable_synchronization      = enable_synchronization;
+        opts.enable_memory_tracking      = enable_memory_tracking;
+        opts.enable_cuda_graphs_tracking = enable_cuda_graphs_tracking;
 
         // If caller explicitly set profiling_engine, use it; otherwise derive
         // from the legacy bool flags for backward compatibility.
@@ -140,7 +159,11 @@ PYBIND11_MODULE(_gpufl_client, m) {
        py::arg("backend_url")              = "",
        py::arg("api_key")                  = "",
        py::arg("config_name")              = "",
-       py::arg("remote_upload")            = false);
+       py::arg("remote_upload")            = false,
+       py::arg("enable_external_correlation") = true,
+       py::arg("enable_synchronization")      = true,
+       py::arg("enable_memory_tracking")      = false,
+       py::arg("enable_cuda_graphs_tracking") = false);
 
     m.def("system_start", [](std::string name) { gpufl::systemStart(std::move(name)); },
         py::arg("name") = "system");
@@ -149,6 +172,26 @@ PYBIND11_MODULE(_gpufl_client, m) {
         py::arg("name") = "system");
 
     m.def("shutdown", &gpufl::shutdown);
+
+    // F1 (External Correlation) active push/pop. Used by
+    // gpufl.torch.attach()'s TorchDispatchMode to tag every aten op's
+    // kernels with a stable id derived from the op name — gives the
+    // dashboard's "op #N" chip without requiring users to enable
+    // torch.profiler.profile() (which is heavy and intended for
+    // one-off trace export, not always-on telemetry).
+    //
+    // We expose with a leading underscore to signal "internal API
+    // for the gpufl.torch package, not a stable user-facing surface."
+    m.def("_push_external_corr_id",
+          [](uint32_t kind, uint64_t id) {
+              gpufl::pushExternalCorrelation(kind, id);
+          },
+          py::arg("kind"), py::arg("id"));
+    m.def("_pop_external_corr_id",
+          [](uint32_t kind) {
+              gpufl::popExternalCorrelation(kind);
+          },
+          py::arg("kind"));
 
     // --------------------------
 

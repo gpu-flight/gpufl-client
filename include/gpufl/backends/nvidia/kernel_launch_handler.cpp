@@ -240,6 +240,41 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
     out.cache_config_executed = k->cacheConfig.config.executed;
     out.shared_mem_executed = k->sharedMemoryExecuted;
 
+    // stamp framework op id (PyTorch / TF / JAX / OPENACC) onto this
+    // kernel if the framework was actively pushing external correlation
+    // for this thread. Lookup is pop-on-read, so this also keeps the
+    // map from accumulating stale entries across long sessions.
+    //
+    // Diagnostic: track hit / miss counters so we can tell whether the
+    // F1 chain is broken at "no correlation records arrived" vs "they
+    // arrived but with mismatched corr_ids" vs "matching but ordering
+    // races (kernel processed before its correlation record)".
+    {
+        uint8_t  ext_kind = 0;
+        uint64_t ext_id   = 0;
+        const bool hit = LookupAndPopExternalCorrelation(
+            k->correlationId, &ext_kind, &ext_id);
+        if (hit) {
+            out.external_kind = ext_kind;
+            out.external_id   = ext_id;
+            static std::atomic<int> g_ec_hit{0};
+            const int n = g_ec_hit.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (n <= 5 || n % 100 == 0) {
+                GFL_LOG_DEBUG(
+                    "[KernelHandler] external lookup HIT #", n,
+                    " corr=", k->correlationId, " ext_id=", ext_id);
+            }
+        } else {
+            static std::atomic<int> g_ec_miss{0};
+            const int n = g_ec_miss.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (n <= 5 || n % 500 == 0) {
+                GFL_LOG_DEBUG(
+                    "[KernelHandler] external lookup MISS #", n,
+                    " corr=", k->correlationId);
+            }
+        }
+    }
+
     {
         const uint64_t corr = k->correlationId;
         out.corr_id = corr;
