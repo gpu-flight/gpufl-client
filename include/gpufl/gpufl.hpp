@@ -23,6 +23,48 @@ struct InitOptions {
     bool enable_stack_trace = false;
     bool enable_source_collection = true;  // collect source file content for source/SASS correlation
     bool flush_logs_always = false;
+    // Enable CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION so frameworks
+    // (PyTorch's torch.profiler, TF's profile.trace, JAX, XLA) that
+    // bracket their ops with cuptiActivityPushExternalCorrelationId can
+    // tag every kernel with their op id. When the framework isn't
+    // pushing, CUPTI emits zero records — no overhead. Default-on
+    // because it's both useful and free in the absence of frameworks;
+    // disable only if running on a CUPTI version that errors on the
+    // kind (logs a soft-warning if so, doesn't crash).
+    bool enable_external_correlation = true;
+    // Enable CUPTI_ACTIVITY_KIND_SYNCHRONIZATION so that every
+    // cudaStreamSynchronize / cudaDeviceSynchronize / cudaEventSynchronize
+    // / cuStreamWaitEvent call gets a wall-clock timed record. The
+    // primary insight: time spent here = host blocked on GPU = a
+    // direct measure of GPU underutilization. Default-on because the
+    // overhead is small (one record per sync call, mid volume) and
+    // the answer it unlocks ("X% of your wall time is `cudaStreamSync`")
+    // is a top-five most-asked question. If a workload performs
+    // millions of synchronizations and the volume becomes a problem,
+    // disable this flag — the rest of the pipeline keeps working.
+    bool enable_synchronization = true;
+    // Enable CUPTI_ACTIVITY_KIND_MEMORY2 to capture cudaMalloc /
+    // cudaFree / cudaMallocAsync / cudaMallocManaged / cudaMallocHost
+    // with timing, address, size, and kind. **Default-off** in v1
+    // because TensorFlow eager mode and similar can produce a high
+    // record rate, and we want a couple of internal sessions to
+    // validate overhead before flipping it on by default. PyTorch
+    // workloads with the caching allocator typically generate <1k
+    // events per session, so it's safe to enable manually for those
+    // (and that's why we surface the toggle prominently rather than
+    // burying it in a config file).
+    bool enable_memory_tracking = false;
+    // Enable CUPTI_ACTIVITY_KIND_GRAPH_TRACE to capture per-launch
+    // timing for cudaGraphLaunch calls. **Default-off** in v1 because
+    // CUDA Graphs interact with PC Sampling on some Blackwell driver
+    // builds (graph launch can reset the sampling buffer). Opt-in
+    // until we've validated on a couple of internal sessions; will
+    // flip to default-on in a follow-up release.
+    //
+    // Cost when off: zero — we never call cuptiActivityEnable for
+    // the kind. Cost when on: one record per cudaGraphLaunch (very
+    // low volume).
+    bool enable_cuda_graphs_tracking = false;
     // Default: PC Sampling alone. The cubin-disassembly pipeline
     // (ResourceHandler + nvdisasm) already provides SASS listings and
     // source correlation, so PC Sampling gives users the full SASS view
@@ -112,6 +154,20 @@ BackendProbeResult probeRocm();
 
 void systemStart(std::string name = "system");
 void systemStop(std::string name = "system");
+
+// F1 (External Correlation) — active push/pop for callers that want to
+// tag CUDA work with an op id WITHOUT relying on a framework profiler
+// being active. Used by `gpufl.torch.attach()` to stamp every aten
+// dispatch's kernels with a stable id derived from the op name.
+//
+// `kind` follows CUPTI's CUpti_ExternalCorrelationKind enum:
+//   1 = UNKNOWN, 2 = OPENACC, 3 = CUSTOM0 (used by torch.profiler),
+//   4 = CUSTOM1 (used by gpufl.torch.attach), 5 = CUSTOM2.
+//
+// Calls are no-ops on non-CUPTI platforms (AMD ROCm, CPU-only fallback)
+// — safe to call from cross-platform code.
+void pushExternalCorrelation(uint32_t kind, uint64_t id);
+void popExternalCorrelation(uint32_t kind);
 
 // Start global runtime. Returns true on success.
 bool init(const InitOptions& opts);

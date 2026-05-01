@@ -120,6 +120,9 @@ void applyRemoteConfigToOpts(const json::JsonValue& cfg, InitOptions& opts) {
     updateIfPresent("flush_logs_always", [&](const json::JsonValue& v) {
         if (v.is_bool()) opts.flush_logs_always = v.get_bool();
     });
+    updateIfPresent("enable_external_correlation", [&](const json::JsonValue& v) {
+        if (v.is_bool()) opts.enable_external_correlation = v.get_bool();
+    });
 }
 
 }  // namespace

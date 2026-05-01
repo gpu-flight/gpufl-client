@@ -35,6 +35,17 @@ def run_stress_test():
                enable_debug_output=True,
                enable_profiling=True,
                enable_stack_trace=True,
+               # opt-in to memory tracking. Default-off in v1
+               # because TF eager and similar workloads can produce
+               # high record volume; PyTorch with the caching
+               # allocator stays comfortably under 1k events per
+               # session, so it's safe to flip on for this benchmark.
+               enable_memory_tracking=True,
+               # opt-in to CUDA graphs tracking. Default-off in v1
+               # because CUDA Graphs interact with PC sampling on some
+               # Blackwell driver builds; we've tested it here so
+               # it's safe to enable for this benchmark.
+               enable_cuda_graphs_tracking=True,
                remote_upload=remote_upload,
                api_key=api_key,
                backend_url=backend_url,
@@ -61,6 +72,13 @@ def run_stress_test():
         print(f"Starting {iterations} iterations of Matrix Multiplication...")
         print("This should take about 5-10 seconds. Check Task Manager!")
 
+        # NOTE: gpufl.torch.attach() above already pushes CUPTI external
+        # correlation IDs around every aten dispatch (see
+        # python/gpufl/torch/dispatch.py). That means each kernel
+        # captured here will surface in the dashboard's Kernels tab
+        # with an accent-blue `op #N` chip showing the framework op id —
+        # no separate `torch.profiler.profile()` context needed.
+
         # One big scope for the whole benchmark
         with gpufl.Scope("Heavy_Compute_Loop", "stress"):
             start_t = time.time()
@@ -77,6 +95,45 @@ def run_stress_test():
 
             end_t = time.time()
             print(f"Loop finished in {end_t - start_t:.2f} seconds.")
+
+        # ── F4 demo: capture matmul into a CUDA graph and replay it ───
+        # CUDA Graphs amortize host-side launch overhead by capturing a
+        # sequence of CUDA calls once and replaying them as a single
+        # launch. CUPTI emits one CUPTI_ACTIVITY_KIND_GRAPH_TRACE record
+        # per replay — repeated replays of the same captured graph all
+        # share the same `graph_id`, so the dashboard can aggregate.
+        #
+        # We run this AFTER the regular loop so users get to see both:
+        # eager-mode kernels (op #1, op #2 chips) AND graph launches
+        # (in the InsightsPanel "CUDA graphs" KPI tile).
+        try:
+            with gpufl.Scope("Graph_Replay_Loop", "graph"):
+                print("\nCapturing matmul into a CUDA graph + replaying 20x...")
+                # Warm up the stream before capture (required by torch
+                # CUDA-graph contract; reduces capture-time errors).
+                s = torch.cuda.Stream()
+                s.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(s):
+                    for _ in range(3):
+                        _ = torch.matmul(a, b)
+                torch.cuda.current_stream().wait_stream(s)
+                torch.cuda.synchronize()
+
+                # Capture
+                g = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(g):
+                    c_g = torch.matmul(a, b)
+
+                # Replay
+                for _ in range(20):
+                    g.replay()
+                torch.cuda.synchronize()
+                print("Graph replays finished.")
+        except Exception as e:
+            # CUDA Graph capture is sensitive to PC sampling on some
+            # Blackwell driver builds — log + continue rather than
+            # tearing down the whole benchmark.
+            print(f"[WARN] CUDA graph demo skipped: {e}")
 
     except Exception as e:
         print(f"\n[CRITICAL ERROR] {e}")
