@@ -130,6 +130,46 @@ TEST(HttpLogSink, EnqueuedLinesReachBackendWithAuthAndTypeRouting) {
     EXPECT_EQ(sink.failedCount(),   0u);
 }
 
+// ── Per-session HTTP byte tally ──────────────────────────────────────────────
+//
+// `bytesUploadedCount()` is the running total of request body bytes
+// actually written to the socket on successful 2xx POSTs — exposed
+// for end-of-session bandwidth reporting (logged once at close()).
+// We assert it matches the EXACT sum of body sizes captured by the
+// test server. If they ever diverge it means the sink is double-
+// counting, missing some uploads, or counting failed ones.
+
+TEST(HttpLogSink, BytesUploadedMatchesCapturedBodySizes) {
+    TestServer srv;
+
+    gpufl::HttpLogSink::Options opts;
+    opts.base_url = srv.base_url();
+    opts.api_key  = "gpfl_byte_count_test";
+    gpufl::HttpLogSink sink(std::move(opts));
+
+    // Mix line sizes so we'd notice a wrong-by-constant-offset bug.
+    const std::vector<std::string> lines = {
+        R"({"type":"job_start","app":"benchmark"})",
+        R"({"type":"kernel_event_batch","rows":[{"k":"a"},{"k":"b"},{"k":"c"}]})",
+        R"({"type":"shutdown"})",
+    };
+    for (const auto& l : lines) sink.write(gpufl::Channel::All, l);
+
+    ASSERT_TRUE(waitFor(
+        [&] { return srv.capturedCount() >= lines.size(); },
+        std::chrono::seconds(5)));
+    sink.close();
+
+    std::size_t expectedBytes = 0;
+    for (const auto& c : srv.snapshot()) expectedBytes += c.body.size();
+
+    EXPECT_EQ(sink.bytesUploadedCount(), expectedBytes)
+        << "byte tally must equal sum of POSTed body sizes";
+    // Sanity: the count should be > 0 — guards against the no-op
+    // case where neither the counter NOR the captures saw anything.
+    EXPECT_GT(sink.bytesUploadedCount(), 0u);
+}
+
 // ── Retry on 5xx then give up ────────────────────────────────────────────────
 
 TEST(HttpLogSink, FiveHundredsExhaustRetriesThenDrop) {

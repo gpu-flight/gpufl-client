@@ -1,4 +1,5 @@
 #include "gpufl/core/stack_trace.hpp"
+#include "gpufl/core/itanium_demangle.hpp"
 
 #include <cstdlib>
 #include <sstream>
@@ -15,7 +16,17 @@ namespace gpufl {
 namespace core {
 std::string DemangleName(const char* mangled) {
     if (!mangled || mangled[0] == '\0') return mangled ? mangled : "";
-    // Windows: MSVC-mangled names start with '?'; try UnDecorateSymbolName
+    // CUDA device-side kernel names use Itanium ABI mangling regardless
+    // of host OS (NVCC always emits `_Z…`). MSVC's UnDecorateSymbolName
+    // only understands its own `?…` mangling, so we delegate `_Z`-prefix
+    // names to our portable Itanium demangler — without this, Windows
+    // builds shipped raw mangled kernel names that broke the frontend's
+    // regex-based op-catalog classification (no GEMM / ELEMENTWISE
+    // chips on Windows traces).
+    if (mangled[0] == '_' && mangled[1] == 'Z') {
+        return DemangleItaniumName(mangled);
+    }
+    // Windows: MSVC-mangled names start with '?'; try UnDecorateSymbolName.
     if (mangled[0] == '?') {
         char buf[512];
         DWORD result = UnDecorateSymbolName(mangled, buf, sizeof(buf),
@@ -46,7 +57,7 @@ std::string GetCallStack(int skipFrames) {
 
     bool first = true;
     for (int i = static_cast<int>(frames) - 1; i >= skipFrames; --i) {
-        if (SymFromAddr(process, (DWORD64)(stack[i]), 0, symbol)) {
+        if (SymFromAddr(process, reinterpret_cast<DWORD64>(stack[i]), 0, symbol)) {
             std::string name = symbol->Name;
 
             if (name.empty()) continue;

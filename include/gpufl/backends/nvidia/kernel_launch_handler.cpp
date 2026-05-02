@@ -33,11 +33,30 @@ const std::string& KernelLaunchHandler::cachedDemangle(const char* mangled) {
 
 std::vector<std::pair<CUpti_CallbackDomain, CUpti_CallbackId>>
 KernelLaunchHandler::requiredCallbacks() const {
-    return {
+    // The set of launch APIs that produce a kernel record we want
+    // api_enter_ns / api_exit_ns for. Anything missing here means the
+    // backend stores 0 for the API timestamps, the frontend can't
+    // compute cpu_overhead / queue_latency, and the kernel detail
+    // page falls back to "—" for those metrics. Add new launch CBIDs
+    // here as CUPTI exposes them.
+    //
+    // CUDART_VERSION guards keep the agent buildable against older
+    // CUDA toolkits — the enum value isn't defined if CUPTI predates
+    // the API.
+    std::vector<std::pair<CUpti_CallbackDomain, CUpti_CallbackId>> cbs = {
+        // ── Runtime API ───────────────────────────────────────────
         {CUPTI_CB_DOMAIN_RUNTIME_API,
          CUPTI_RUNTIME_TRACE_CBID_cudaLaunch_v3020},
         {CUPTI_CB_DOMAIN_RUNTIME_API,
          CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_v7000},
+        // Per-thread default stream variants (CUDA 7.0+) — used when
+        // the program is compiled with --default-stream per-thread or
+        // CUDA_API_PER_THREAD_DEFAULT_STREAM is defined.
+        {CUPTI_CB_DOMAIN_RUNTIME_API,
+         CUPTI_RUNTIME_TRACE_CBID_cudaLaunch_ptsz_v7000},
+        {CUPTI_CB_DOMAIN_RUNTIME_API,
+         CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_ptsz_v7000},
+        // ── Driver API ────────────────────────────────────────────
         {CUPTI_CB_DOMAIN_DRIVER_API, CUPTI_DRIVER_TRACE_CBID_cuLaunch},
         {CUPTI_CB_DOMAIN_DRIVER_API, CUPTI_DRIVER_TRACE_CBID_cuLaunchGrid},
         {CUPTI_CB_DOMAIN_DRIVER_API,
@@ -46,6 +65,41 @@ KernelLaunchHandler::requiredCallbacks() const {
         {CUPTI_CB_DOMAIN_DRIVER_API,
          CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel_ptsz},
     };
+
+    // Cooperative kernel launches (CUDA 9.0+) — used by NCCL
+    // collectives and any kernel that needs grid-wide
+    // synchronization via cooperative_groups.
+#if defined(CUDART_VERSION) && CUDART_VERSION >= 9000
+    cbs.push_back({CUPTI_CB_DOMAIN_RUNTIME_API,
+                   CUPTI_RUNTIME_TRACE_CBID_cudaLaunchCooperativeKernel_v9000});
+    cbs.push_back({CUPTI_CB_DOMAIN_RUNTIME_API,
+                   CUPTI_RUNTIME_TRACE_CBID_cudaLaunchCooperativeKernel_ptsz_v9000});
+    cbs.push_back({CUPTI_CB_DOMAIN_RUNTIME_API,
+                   CUPTI_RUNTIME_TRACE_CBID_cudaLaunchCooperativeKernelMultiDevice_v9000});
+    cbs.push_back({CUPTI_CB_DOMAIN_DRIVER_API,
+                   CUPTI_DRIVER_TRACE_CBID_cuLaunchCooperativeKernel});
+    cbs.push_back({CUPTI_CB_DOMAIN_DRIVER_API,
+                   CUPTI_DRIVER_TRACE_CBID_cuLaunchCooperativeKernel_ptsz});
+    cbs.push_back({CUPTI_CB_DOMAIN_DRIVER_API,
+                   CUPTI_DRIVER_TRACE_CBID_cuLaunchCooperativeKernelMultiDevice});
+#endif
+
+    // Modern extensible launch (CUDA 11.6+) — what PyTorch ≥ 1.13,
+    // CUTLASS ≥ 2.10, and most new CUDA samples emit. Was the
+    // primary cause of api_start_ns / api_exit_ns showing up as 0
+    // for users on recent toolkits before this CBID was wired up.
+#if defined(CUDART_VERSION) && CUDART_VERSION >= 11060
+    cbs.push_back({CUPTI_CB_DOMAIN_RUNTIME_API,
+                   CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernelExC_v11060});
+    cbs.push_back({CUPTI_CB_DOMAIN_RUNTIME_API,
+                   CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernelExC_ptsz_v11060});
+    cbs.push_back({CUPTI_CB_DOMAIN_DRIVER_API,
+                   CUPTI_DRIVER_TRACE_CBID_cuLaunchKernelEx});
+    cbs.push_back({CUPTI_CB_DOMAIN_DRIVER_API,
+                   CUPTI_DRIVER_TRACE_CBID_cuLaunchKernelEx_ptsz});
+#endif
+
+    return cbs;
 }
 
 std::vector<CUpti_ActivityKind> KernelLaunchHandler::requiredActivityKinds()
@@ -55,16 +109,53 @@ std::vector<CUpti_ActivityKind> KernelLaunchHandler::requiredActivityKinds()
 
 bool KernelLaunchHandler::shouldHandle(CUpti_CallbackDomain domain,
                                        CUpti_CallbackId cbid) const {
+    // Mirror the CBIDs registered in requiredCallbacks() — anything
+    // missing here gets filtered out before handle() runs and the
+    // corresponding kernel records arrive without API timestamps.
     if (domain == CUPTI_CB_DOMAIN_RUNTIME_API) {
-        return cbid == CUPTI_RUNTIME_TRACE_CBID_cudaLaunch_v3020 ||
-               cbid == CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_v7000;
+        switch (cbid) {
+            case CUPTI_RUNTIME_TRACE_CBID_cudaLaunch_v3020:
+            case CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_v7000:
+            case CUPTI_RUNTIME_TRACE_CBID_cudaLaunch_ptsz_v7000:
+            case CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_ptsz_v7000:
+                return true;
+#if defined(CUDART_VERSION) && CUDART_VERSION >= 9000
+            case CUPTI_RUNTIME_TRACE_CBID_cudaLaunchCooperativeKernel_v9000:
+            case CUPTI_RUNTIME_TRACE_CBID_cudaLaunchCooperativeKernel_ptsz_v9000:
+            case CUPTI_RUNTIME_TRACE_CBID_cudaLaunchCooperativeKernelMultiDevice_v9000:
+                return true;
+#endif
+#if defined(CUDART_VERSION) && CUDART_VERSION >= 11060
+            case CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernelExC_v11060:
+            case CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernelExC_ptsz_v11060:
+                return true;
+#endif
+            default:
+                return false;
+        }
     }
     if (domain == CUPTI_CB_DOMAIN_DRIVER_API) {
-        return cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunch ||
-               cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchGrid ||
-               cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchGridAsync ||
-               cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel ||
-               cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel_ptsz;
+        switch (cbid) {
+            case CUPTI_DRIVER_TRACE_CBID_cuLaunch:
+            case CUPTI_DRIVER_TRACE_CBID_cuLaunchGrid:
+            case CUPTI_DRIVER_TRACE_CBID_cuLaunchGridAsync:
+            case CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel:
+            case CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel_ptsz:
+                return true;
+#if defined(CUDART_VERSION) && CUDART_VERSION >= 9000
+            case CUPTI_DRIVER_TRACE_CBID_cuLaunchCooperativeKernel:
+            case CUPTI_DRIVER_TRACE_CBID_cuLaunchCooperativeKernel_ptsz:
+            case CUPTI_DRIVER_TRACE_CBID_cuLaunchCooperativeKernelMultiDevice:
+                return true;
+#endif
+#if defined(CUDART_VERSION) && CUDART_VERSION >= 11060
+            case CUPTI_DRIVER_TRACE_CBID_cuLaunchKernelEx:
+            case CUPTI_DRIVER_TRACE_CBID_cuLaunchKernelEx_ptsz:
+                return true;
+#endif
+            default:
+                return false;
+        }
     }
     return false;
 }
