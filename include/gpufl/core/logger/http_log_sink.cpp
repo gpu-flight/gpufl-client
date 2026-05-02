@@ -175,6 +175,23 @@ void HttpLogSink::close() {
         if (queue_.empty()) break;
     }
     if (worker_.joinable()) worker_.join();
+
+    // End-of-session bandwidth + delivery summary. Logged once at
+    // close() so users can quickly see how much data this session
+    // actually shipped to the backend without grep-scanning the
+    // per-request DEBUG lines. Uses DEBUG level (matches the rest
+    // of this file) so it shows up only when DebugLogger is enabled
+    // — typical for users investigating bandwidth/cost concerns.
+    const std::size_t enq    = enqueued_.load(std::memory_order_relaxed);
+    const std::size_t up     = uploaded_.load(std::memory_order_relaxed);
+    const std::size_t drp    = dropped_.load(std::memory_order_relaxed);
+    const std::size_t fl     = failed_.load(std::memory_order_relaxed);
+    const std::size_t bytes  = bytes_uploaded_.load(std::memory_order_relaxed);
+    GFL_LOG_DEBUG(
+        "[HttpLogSink] session totals: ",
+        bytes, " bytes sent over HTTP across ",
+        up, " uploaded line(s) "
+        "(enqueued=", enq, ", dropped=", drp, ", failed=", fl, ")");
 }
 
 // --- Worker ---
@@ -189,6 +206,10 @@ void HttpLogSink::workerLoop() {
             "[HttpLogSink] makeClient returned null — worker exiting");
         return;
     }
+    // Per-POST gzip compression was removed — see header note above
+    // Options. Live event POSTs go uncompressed; bandwidth-conscious
+    // users run gpufl-agent against the FileLogSink NDJSON for
+    // batch-compressed uploads (which achieve a much better ratio).
 
     while (true) {
         std::string line;
@@ -336,6 +357,13 @@ void HttpLogSink::workerLoop() {
 
         if (ok) {
             uploaded_.fetch_add(1, std::memory_order_relaxed);
+            // Tally the request body bytes that actually went over
+            // the wire on this successful POST. `wrapped` is the
+            // post-envelope payload (data + agentSendingTime +
+            // hostname + ipAddr) — what the network and the backend
+            // actually saw, not the raw event size.
+            bytes_uploaded_.fetch_add(wrapped.size(),
+                                      std::memory_order_relaxed);
             GFL_LOG_DEBUG(
                 "[HttpLogSink] upload OK (total uploaded=",
                 uploaded_.load() + 1, ")");
