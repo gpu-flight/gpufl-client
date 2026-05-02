@@ -42,9 +42,6 @@ int main() {
     opts.sampling_auto_start = true;
     opts.enable_debug_output = true;
     opts.enable_source_collection = true;
-    if (const char* k = std::getenv("GPUFL_API_KEY")) opts.api_key = k;
-    opts.backend_url = "http://localhost:8080";
-    opts.remote_upload = true;
     opts.profiling_engine = gpufl::ProfilingEngine::PcSamplingWithSass;
 
     if (!gpufl::init(opts)) {
