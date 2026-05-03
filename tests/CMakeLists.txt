@@ -15,6 +15,7 @@ set(GPUFL_TEST_SOURCES
     core/test_batch_models.cpp
     core/test_monitor.cpp
     core/test_http_log_sink.cpp
+    core/test_itanium_demangle.cpp
 )
 
 if(GPUFL_ENABLE_NVIDIA AND GPUFL_HAS_CUPTI)
@@ -58,10 +59,15 @@ if(GPUFL_HAS_CUDA)
 endif()
 
 # 4. CRITICAL: Point to your project's header structure
-target_include_directories(gpufl_tests PRIVATE 
+target_include_directories(gpufl_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/include          # So we can do #include "gpufl/core/..."
     ${CMAKE_SOURCE_DIR}/tests            # So we can do #include "common/..."
 )
+
+# cpp-httplib's CPPHTTPLIB_ZLIB_SUPPORT propagates from gpufl
+# (declared PUBLIC there), so the test target's httplib::Server
+# handles incoming gzipped request bodies the same way the
+# production backend does. No extra config needed here.
 
 if(CUDAToolkit_INCLUDE_DIRS)
   target_include_directories(gpufl_tests PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
