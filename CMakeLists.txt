@@ -75,6 +75,7 @@ target_sources(gpufl PRIVATE
     include/gpufl/core/common.cpp
     include/gpufl/core/debug_logger.cpp
     include/gpufl/core/stack_trace.cpp
+    include/gpufl/core/itanium_demangle.cpp
     include/gpufl/core/scope_registry.cpp
     include/gpufl/core/json/json.cpp
     include/gpufl/core/config_file_loader.cpp
@@ -162,6 +163,17 @@ else()
     set(GPUFL_HTTPLIB_TLS 0)
 endif()
 target_compile_definitions(gpufl PRIVATE GPUFL_HTTPLIB_TLS=${GPUFL_HTTPLIB_TLS})
+# NOTE: cpp-httplib's gzip request-body path (CPPHTTPLIB_ZLIB_SUPPORT)
+# is intentionally NOT defined. HttpLogSink sends uncompressed JSON
+# per event; bandwidth-conscious deployments use gpufl-agent against
+# the rotated NDJSON files (where deflate amortizes its dictionary
+# across the whole file for 10-15× compression vs the ~5× we'd get
+# per-POST). See the architectural note above HttpLogSink::Options
+# in http_log_sink.hpp for the full rationale.
+#
+# ZLIB is still linked above (around line 96) — file_compressor.cpp
+# uses it to gzip rotated NDJSON files written by FileLogSink, which
+# is a separate, working feature.
 target_link_libraries(gpufl PRIVATE httplib::httplib)
 
 

@@ -74,6 +74,19 @@ class HttpLogSink final : public ILogSink {
         int shutdown_drain_ms = 5000;
     };
 
+    // NOTE: Per-POST request-body compression was deliberately removed
+    // from this sink. Per-event gzip on small (200-2000 byte) bodies
+    // only achieves ~5× compression because deflate's window cannot
+    // span HTTP requests — JSON tokens that repeat across events
+    // (`"type"`, `"session_id"`, `"hostname"`, …) get re-encoded each
+    // time. Bandwidth-conscious users should run `gpufl-agent`, which
+    // tails the on-disk NDJSON written by FileLogSink and uploads
+    // whole compressed files in batches, where deflate can amortize
+    // its dictionary across the entire file (10-15× typical). This
+    // sink stays focused on its one job: low-latency live event
+    // delivery for users who want their dashboard to update in
+    // real time.
+
     explicit HttpLogSink(Options opts);
     ~HttpLogSink() override;
 
@@ -105,6 +118,15 @@ class HttpLogSink final : public ILogSink {
     std::size_t failedCount() const {
         return failed_.load(std::memory_order_relaxed);
     }
+    /** Total bytes successfully POSTed across all uploaded lines.
+     *  Counts the OUTER wrapped JSON (the body actually written to
+     *  the socket), so it includes the per-event envelope overhead
+     *  (data field, agentSendingTime, hostname, ipAddr) plus the
+     *  inner NDJSON. Matches what the user actually paid for in
+     *  bandwidth, not the raw event size. */
+    std::size_t bytesUploadedCount() const {
+        return bytes_uploaded_.load(std::memory_order_relaxed);
+    }
 
    private:
     void workerLoop();
@@ -135,6 +157,10 @@ class HttpLogSink final : public ILogSink {
     std::atomic<std::size_t>   dropped_{0};
     std::atomic<std::size_t>   uploaded_{0};
     std::atomic<std::size_t>   failed_{0};
+    // Total HTTP request body bytes actually sent (sum of
+    // `wrapped.size()` across every successful 2xx POST). Logged at
+    // close() as the per-session bandwidth tally.
+    std::atomic<std::size_t>   bytes_uploaded_{0};
 
     // Deduped-warning state so we don't spam the log when the queue
     // is persistently full or auth keeps failing.
