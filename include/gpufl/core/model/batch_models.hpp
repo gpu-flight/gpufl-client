@@ -109,6 +109,43 @@ struct ProfileSampleBatchModel final : IJsonSerializable {
     uint64_t batch_id_;
 };
 
+// ── synchronization_event_batch ───────────────────────────────────────────
+
+struct SynchronizationEventBatchModel final : IJsonSerializable {
+    SynchronizationEventBatchModel(
+            const BatchBuffer<SynchronizationEventBatchRow>& buf,
+            std::string session_id, uint64_t batch_id)
+        : buf_(buf),
+          session_id_(std::move(session_id)),
+          batch_id_(batch_id) {}
+
+    std::string buildJson() const override;
+    Channel channel() const override { return Channel::Scope; }
+
+   private:
+    const BatchBuffer<SynchronizationEventBatchRow>& buf_;
+    std::string session_id_;
+    uint64_t batch_id_;
+};
+
+// ── memory_alloc_event_batch ──────────────────────────────────────────────
+
+struct MemoryAllocEventBatchModel final : IJsonSerializable {
+    MemoryAllocEventBatchModel(const BatchBuffer<MemoryAllocEventBatchRow>& buf,
+                               std::string session_id, uint64_t batch_id)
+        : buf_(buf),
+          session_id_(std::move(session_id)),
+          batch_id_(batch_id) {}
+
+    std::string buildJson() const override;
+    Channel channel() const override { return Channel::Scope; }
+
+   private:
+    const BatchBuffer<MemoryAllocEventBatchRow>& buf_;
+    std::string session_id_;
+    uint64_t batch_id_;
+};
+
 // ── host_metric_batch ─────────────────────────────────────────────────────
 
 struct HostMetricBatchModel final : IJsonSerializable {
