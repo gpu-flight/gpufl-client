@@ -57,6 +57,16 @@ static uint64_t g_profileBatchId = 0;
 static std::mutex g_scopeBatchMu;
 static std::atomic<uint64_t> g_nextScopeInstanceId{1};
 
+// Per-event sync + memory-alloc emissions used to ship as full
+// envelope JSON each time. Now batched + dictionary-encoded
+// (sync's stack_trace interns into function_dict). Both buffers
+// are written only from the CollectorLoop thread, same threading
+// model as g_kernelBatch / g_memcpyBatch.
+static BatchBuffer<SynchronizationEventBatchRow> g_syncBatch;
+static BatchBuffer<MemoryAllocEventBatchRow>     g_memAllocBatch;
+static uint64_t g_syncBatchId     = 0;
+static uint64_t g_memAllocBatchId = 0;
+
 static void flushBatches(Logger& logger, const std::string& session_id) {
     // Dictionary MUST be written before any batch that references its
     // name_id / kernel_id / function_id / metric_id entries, otherwise
@@ -90,6 +100,21 @@ static void flushBatches(Logger& logger, const std::string& session_id) {
         logger.write(model::MemcpyEventBatchModel(
             g_memcpyBatch, session_id, ++g_memcpyBatchId));
         g_memcpyBatch.clear();
+    }
+    if (!g_syncBatch.empty()) {
+        // Sync rows reference function_dict entries via function_id;
+        // dict MUST flush first or backend resolution falls back to
+        // "function#<id>" placeholders.
+        g_dictManager.flushDictionary(logger, session_id);
+        logger.write(model::SynchronizationEventBatchModel(
+            g_syncBatch, session_id, ++g_syncBatchId));
+        g_syncBatch.clear();
+    }
+    if (!g_memAllocBatch.empty()) {
+        // Pure-numeric rows — no dictionary references.
+        logger.write(model::MemoryAllocEventBatchModel(
+            g_memAllocBatch, session_id, ++g_memAllocBatchId));
+        g_memAllocBatch.clear();
     }
     {
         // Hold g_scopeBatchMu across BOTH the dict flush and the batch
@@ -341,43 +366,44 @@ void CollectorLoop() {
             rt->logger->write(model::GraphLaunchEventModel(ev));
         } else if (rec.type == TraceType::MEMORY_ALLOC) {
             // cudaMalloc / cudaFree / cudaMallocAsync / etc.
-            // Per-event emission, Scope channel. Mirrors the F2 sync
-            // path structurally — same translation pattern from
-            // ActivityRecord onto the public event struct.
-            MemoryAllocEvent ev;
-            ev.pid          = detail::GetPid();
-            ev.app          = rt->app_name;
-            ev.session_id   = rt->session_id;
-            ev.start_ns     = rec.cpu_start_ns;
-            ev.duration_ns  = duration_ns;       // 0 in v1
-            ev.memory_op    = rec.memory_op;
-            ev.memory_kind  = rec.memory_kind;
-            ev.address      = rec.address;
-            ev.bytes        = rec.bytes;
-            ev.device_id    = rec.device_id;
-            ev.stream_id    = static_cast<uint32_t>(rec.stream);
-            ev.corr_id      = rec.corr_id;
-            rt->logger->write(model::MemoryAllocEventModel(ev));
+            // Batched into memory_alloc_event_batch — per-event JSON
+            // dropped because the envelope (type/pid/app/session_id)
+            // amortizes far better across a 512-row batch. Pure-
+            // numeric row → no dictionary lookup needed.
+            MemoryAllocEventBatchRow row;
+            row.start_ns    = rec.cpu_start_ns;
+            row.duration_ns = duration_ns;          // 0 in v1
+            row.memory_op   = rec.memory_op;
+            row.memory_kind = rec.memory_kind;
+            row.address     = rec.address;
+            row.bytes       = rec.bytes;
+            row.device_id   = rec.device_id;
+            row.stream_id   = static_cast<uint32_t>(rec.stream);
+            row.corr_id     = rec.corr_id;
+            g_memAllocBatch.push(row);
         } else if (rec.type == TraceType::SYNCHRONIZATION) {
             // cudaStreamSynchronize / cudaDeviceSynchronize / etc.
-            // Mirrors the NVTX path above structurally — same per-event
-            // emission, same Scope channel. The CUPTI fields were
-            // stashed onto ActivityRecord by the BufferCompleted
-            // handler in cupti_backend.cpp; we just translate them
-            // into the public event struct.
-            SynchronizationEvent ev;
-            ev.pid          = detail::GetPid();
-            ev.app          = rt->app_name;
-            ev.session_id   = rt->session_id;
-            ev.start_ns     = rec.cpu_start_ns;
-            ev.end_ns       = rec.cpu_start_ns + duration_ns;
-            ev.duration_ns  = duration_ns;
-            ev.sync_type    = rec.sync_type;
-            ev.stream_id    = static_cast<uint32_t>(rec.stream);
-            ev.event_id     = rec.sync_event_id;
-            ev.context_id   = static_cast<uint32_t>(rec.scope_depth);
-            ev.corr_id      = rec.corr_id;
-            rt->logger->write(model::SynchronizationEventModel(ev));
+            // Batched into synchronization_event_batch. The user call
+            // stack captured by SynchronizationHandler on API_ENTER
+            // (PR-B) gets interned via the existing function_dict so
+            // hot loops with identical stacks ship the string exactly
+            // once via dictionary_update — ~14× wire compression on
+            // the canonical "sync inside a loop" workload.
+            SynchronizationEventBatchRow row;
+            row.start_ns    = rec.cpu_start_ns;
+            row.duration_ns = duration_ns;
+            row.sync_type   = rec.sync_type;
+            row.stream_id   = static_cast<uint32_t>(rec.stream);
+            row.event_id    = rec.sync_event_id;
+            row.context_id  = rec.context_id;
+            row.corr_id     = rec.corr_id;
+            if (rec.stack_id != 0) {
+                row.function_id = g_dictManager.internFunction(
+                        StackRegistry::instance().get(rec.stack_id));
+            } else {
+                row.function_id = 0;
+            }
+            g_syncBatch.push(row);
         }
 
         return true;

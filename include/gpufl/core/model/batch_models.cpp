@@ -249,4 +249,68 @@ std::string HostMetricBatchModel::buildJson() const {
     return oss.str();
 }
 
+// ── SynchronizationEventBatchModel ────────────────────────────────────────
+
+std::string SynchronizationEventBatchModel::buildJson() const {
+    const auto& rows = buf_.rows();
+    if (rows.empty()) return {};
+    const int64_t base = rows.front().start_ns;
+
+    // function_id refers to a name in the function_dict shipped via
+    // dictionary_update — flushBatches() guarantees the dict is
+    // emitted before this batch so the backend can resolve every id.
+    std::ostringstream oss;
+    oss << "{\"version\":1,\"type\":\"synchronization_event_batch\""
+        << ",\"session_id\":\"" << jsonEscape(session_id_) << '"'
+        << ",\"batch_id\":" << batch_id_ << ",\"base_time_ns\":" << base
+        << ",\"columns\":[\"dt_ns\",\"duration_ns\",\"sync_type\","
+           "\"stream_id\",\"event_id\",\"context_id\",\"corr_id\","
+           "\"function_id\"]"
+        << ",\"rows\":[";
+
+    bool first = true;
+    for (const auto& r : rows) {
+        if (!first) oss << ',';
+        first = false;
+        oss << '[' << (r.start_ns - base) << ',' << r.duration_ns << ','
+            << static_cast<int>(r.sync_type) << ',' << r.stream_id << ','
+            << r.event_id << ',' << r.context_id << ',' << r.corr_id << ','
+            << r.function_id << ']';
+    }
+    oss << "]}";
+    return oss.str();
+}
+
+// ── MemoryAllocEventBatchModel ────────────────────────────────────────────
+
+std::string MemoryAllocEventBatchModel::buildJson() const {
+    const auto& rows = buf_.rows();
+    if (rows.empty()) return {};
+    const int64_t base = rows.front().start_ns;
+
+    // All numeric fields → no dictionary lookup needed. address is a
+    // 64-bit GPU virtual address (can exceed 32 bits on Blackwell).
+    std::ostringstream oss;
+    oss << "{\"version\":1,\"type\":\"memory_alloc_event_batch\""
+        << ",\"session_id\":\"" << jsonEscape(session_id_) << '"'
+        << ",\"batch_id\":" << batch_id_ << ",\"base_time_ns\":" << base
+        << ",\"columns\":[\"dt_ns\",\"duration_ns\",\"memory_op\","
+           "\"memory_kind\",\"address\",\"bytes\",\"device_id\",\"stream_id\","
+           "\"corr_id\"]"
+        << ",\"rows\":[";
+
+    bool first = true;
+    for (const auto& r : rows) {
+        if (!first) oss << ',';
+        first = false;
+        oss << '[' << (r.start_ns - base) << ',' << r.duration_ns << ','
+            << static_cast<int>(r.memory_op) << ','
+            << static_cast<int>(r.memory_kind) << ',' << r.address << ','
+            << r.bytes << ',' << r.device_id << ',' << r.stream_id << ','
+            << r.corr_id << ']';
+    }
+    oss << "]}";
+    return oss.str();
+}
+
 }  // namespace gpufl::model

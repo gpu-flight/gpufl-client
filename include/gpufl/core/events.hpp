@@ -276,6 +276,45 @@ struct SystemStopEvent {
 
 // ── Batch row types (used by BatchBuffer, no heap strings) ────────────────
 
+// One synchronization API call — `cudaStreamSynchronize` /
+// `cudaDeviceSynchronize` / `cudaEventSynchronize` / `cuStreamWaitEvent`.
+// Replaces the per-event `SynchronizationEvent` JSON with a packed row
+// inside `synchronization_event_batch`. Cuts wire bytes ~14× on real
+// workloads where the same call site fires repeatedly:
+//   - The per-event envelope (type/pid/app/session_id) amortizes across
+//     up to kMaxRows rows in the batch.
+//   - `stack_trace` (typically 250+ bytes of nearly-identical text per
+//     event in a hot loop) becomes a `function_id` interned via
+//     `DictionaryManager::internFunction` and shipped exactly once per
+//     unique stack via the existing `dictionary_update` flush.
+struct SynchronizationEventBatchRow {
+    int64_t  start_ns    = 0;   // absolute wall clock
+    int64_t  duration_ns = 0;
+    uint8_t  sync_type   = 0;   // CUpti_ActivitySynchronizationType (1..4)
+    uint32_t stream_id   = 0;   // 0 = device-wide / context sync
+    uint32_t event_id    = 0;   // 0 = no event handle
+    uint32_t context_id  = 0;
+    uint32_t corr_id     = 0;
+    uint32_t function_id = 0;   // DictionaryManager::internFunction(stack_trace); 0 = no stack
+};
+
+// One CUPTI MEMORY2 record — `cudaMalloc` / `cudaFree` / `cudaMallocAsync` /
+// etc. Replaces per-event `memory_alloc_event` JSON with a packed row
+// inside `memory_alloc_event_batch`. Pure-numeric fields → no dictionary
+// encoding, just envelope amortization. Saves ~85% on alloc-heavy
+// workloads.
+struct MemoryAllocEventBatchRow {
+    int64_t  start_ns    = 0;
+    int64_t  duration_ns = 0;   // 0 in v1 — CUPTI doesn't emit alloc duration
+    uint8_t  memory_op   = 0;   // 1=ALLOC, 2=FREE
+    uint8_t  memory_kind = 0;   // CUpti_ActivityMemoryKind
+    uint64_t address     = 0;   // GPU virtual address
+    uint64_t bytes       = 0;
+    uint32_t device_id   = 0;
+    uint32_t stream_id   = 0;
+    uint32_t corr_id     = 0;
+};
+
 struct KernelBatchRow {
     int64_t  start_ns    = 0;  // absolute GPU execution start
     uint32_t kernel_id   = 0;  // name dictionary ID
@@ -538,6 +577,14 @@ struct SynchronizationEvent {
     uint32_t event_id = 0;        // 0 for non-event syncs
     uint32_t corr_id = 0;         // links to KernelEvent.corr_id
     uint32_t context_id = 0;
+    // User call stack at the moment cudaStreamSynchronize / etc. fired.
+    // Captured by SynchronizationHandler on the API_ENTER callback when
+    // opts.enable_stack_trace is on, joined to the activity record by
+    // correlationId. Mirrors KernelEvent.stack_trace — same string
+    // format, same downstream wiring (backend stores as inline VARCHAR).
+    // Empty when stack capture is disabled OR the launch API isn't in
+    // SynchronizationHandler's CBID set.
+    std::string stack_trace;
 };
 
 }  // namespace gpufl

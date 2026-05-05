@@ -211,6 +211,7 @@ if(GPUFL_ENABLE_NVIDIA)
                 include/gpufl/backends/nvidia/resource_handler.cpp
                 include/gpufl/backends/nvidia/kernel_launch_handler.cpp
                 include/gpufl/backends/nvidia/mem_transfer_handler.cpp
+                include/gpufl/backends/nvidia/synchronization_handler.cpp
                 include/gpufl/backends/nvidia/monitor_adapter_nvidia.cpp
                 include/gpufl/backends/nvidia/cupti_backend.cpp
                 include/gpufl/backends/nvidia/engine/pc_sampling_engine.cpp
