@@ -41,6 +41,7 @@
 #include "gpufl/backends/nvidia/kernel_launch_handler.hpp"
 #include "gpufl/backends/nvidia/mem_transfer_handler.hpp"
 #include "gpufl/backends/nvidia/resource_handler.hpp"
+#include "gpufl/backends/nvidia/synchronization_handler.hpp"
 #include "gpufl/core/activity_record.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
@@ -230,6 +231,7 @@ void CuptiBackend::initialize(const MonitorOptions& opts) {
     RegisterHandler(std::make_shared<ResourceHandler>(this));
     RegisterHandler(std::make_shared<KernelLaunchHandler>(this));
     RegisterHandler(std::make_shared<MemTransferHandler>(this));
+    RegisterHandler(std::make_shared<SynchronizationHandler>(this));
 
     GFL_LOG_DEBUG("Subscribing to CUPTI...");
     CUPTI_CHECK_RETURN(
@@ -1158,10 +1160,24 @@ void CUPTIAPI CuptiBackend::BufferCompleted(CUcontext context,
                         out.stream        = s->streamId;
                         out.sync_type     = static_cast<uint8_t>(s->type);
                         out.sync_event_id = s->cudaEventId;
-                        // Stash contextId in scope_depth slot for
-                        // CollectorLoop to read (we don't use scope_depth
-                        // for non-kernel records, so the field is free).
-                        out.scope_depth   = static_cast<int>(s->contextId);
+                        out.context_id    = s->contextId;
+                        // Join the user call stack captured by
+                        // SynchronizationHandler on API_ENTER. Erasing
+                        // after lookup keeps sync_meta_by_corr_ bounded
+                        // — sync activity records are 1:1 with the
+                        // API call, unlike kernel correlations that
+                        // can span multiple activity records.
+                        // (BufferCompleted is a static method, so we
+                        // access non-static state through the backend
+                        // pointer captured at line 851.)
+                        {
+                            std::lock_guard lk(backend->sync_meta_mu_);
+                            auto smIt = backend->sync_meta_by_corr_.find(s->correlationId);
+                            if (smIt != backend->sync_meta_by_corr_.end()) {
+                                out.stack_id = smIt->second.stack_id;
+                                backend->sync_meta_by_corr_.erase(smIt);
+                            }
+                        }
                         g_monitorBuffer.Push(out);
                     }
                     // (EXTERNAL_CORRELATION handled in pass 1 above —
