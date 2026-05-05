@@ -30,6 +30,7 @@ std::string SynchronizationEventModel::buildJson() const {
         << ",\"event_id\":"     << e_.event_id
         << ",\"context_id\":"   << e_.context_id
         << ",\"corr_id\":"      << e_.corr_id
+        << ",\"stack_trace\":\"" << jsonEscape(e_.stack_trace) << "\""
         << "}";
     return oss.str();
 }

@@ -129,6 +129,13 @@ struct ActivityRecord {
     // on the same event in the dashboard.
     uint8_t  sync_type = 0;
     uint32_t sync_event_id = 0;
+    // CUDA context handle the sync executed on. Captured from
+    // CUpti_ActivitySynchronization::contextId in the BufferCompleted
+    // handler and forwarded to SynchronizationEvent.context_id by
+    // CollectorLoop. (Was previously stashed in scope_depth — that
+    // worked but blocked the legitimate use of scope_depth on
+    // SYNCHRONIZATION records and obscured intent for readers.)
+    uint32_t context_id = 0;
 };
 
 }  // namespace gpufl

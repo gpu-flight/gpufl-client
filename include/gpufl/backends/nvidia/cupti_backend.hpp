@@ -91,6 +91,7 @@ class CuptiBackend : public IMonitorBackend {
     friend class ResourceHandler;
     friend class KernelLaunchHandler;
     friend class MemTransferHandler;
+    friend class SynchronizationHandler;
 
     // CUPTI callback functions
     static void CUPTIAPI BufferRequested(uint8_t** buffer, size_t* size,
@@ -109,6 +110,18 @@ class CuptiBackend : public IMonitorBackend {
 
     std::mutex meta_mu_;
     std::unordered_map<uint64_t, LaunchMeta> meta_by_corr_;
+
+    // Sync metadata captured by SynchronizationHandler on API_ENTER and
+    // joined to the SYNCHRONIZATION activity record by correlationId in
+    // BufferCompleted. Separate mutex from meta_mu_ so sync API_ENTER
+    // doesn't contend with kernel-launch metadata writes during bursty
+    // workloads (PyTorch eager mode interleaves both heavily).
+    struct SyncMeta {
+        size_t stack_id = 0;
+        int64_t api_enter_ns = 0;
+    };
+    std::mutex sync_meta_mu_;
+    std::unordered_map<uint64_t, SyncMeta> sync_meta_by_corr_;
 
     std::string cached_device_name_ = "Unknown Device";
     CUcontext ctx_ = nullptr;
