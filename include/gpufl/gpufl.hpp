@@ -92,16 +92,36 @@ struct InitOptions {
 
     /**
      * GPUFlight backend base URL — e.g. "https://api.gpuflight.com" or
-     * "http://localhost:8080". Used by:
+     * "http://localhost:8080". Host-only; do NOT include the API
+     * prefix (use {@link api_path} for that). Used by:
      *   - log upload (when {@link remote_upload} is true) → POSTs to
-     *     `<backend_url>/api/v1/events/<type>`.
+     *     `<backend_url><api_path>/events/<type>`.
      *   - remote named-config fetch (when {@link config_name} is set) →
-     *     GETs `<backend_url>/api/v1/config?config=<name>`.
+     *     GETs `<backend_url><api_path>/config?config=<name>`.
      *
      * Setting this alone does nothing; you must also opt into at least
      * one of the two capabilities via `remote_upload` or `config_name`.
      */
     std::string backend_url = "";
+
+    /**
+     * Override for the URL path prefix the agent uses when calling
+     * the backend. Empty (default) → the client uses the version it
+     * was compiled against (currently `/api/v1`, see
+     * {@code gpufl::kDefaultApiPath} in {@code core/version.hpp}).
+     *
+     * Set this only if you're running the backend behind a reverse
+     * proxy / API gateway that mounts it at a non-root path (e.g.
+     * `/profiler/api/v1`). It does NOT let you choose between API
+     * versions — the client library can only emit one wire format,
+     * and pointing it at a path that speaks a different one will
+     * just produce parse errors.
+     *
+     * Normalization: leading slash is added if missing; trailing
+     * slashes are stripped; empty → default. Env-var override:
+     * {@code GPUFL_API_PATH}.
+     */
+    std::string api_path = "";
 
     /**
      * API key used for BOTH remote config fetch and log upload (for v1).
@@ -116,7 +136,7 @@ struct InitOptions {
      * Name of the remote config to fetch (e.g. "production", "debug").
      * When non-empty AND both {@link backend_url} and {@link api_key}
      * are set, `gpufl::init()` performs a synchronous HTTP GET against
-     * `<backend_url>/api/v1/config?config=<name>` and applies the
+     * `<backend_url><api_path>/config?config=<name>` and applies the
      * returned field overrides to this InitOptions BEFORE the monitor
      * is initialized. Empty means "no remote fetch" — your local
      * config wins without any network round-trip.
@@ -126,7 +146,7 @@ struct InitOptions {
     /**
      * When true, gpufl::init() attaches an HttpLogSink to the logger so
      * every NDJSON line is POSTed directly to the backend at
-     * {@code <backend_url>/api/v1/events/<type>} using
+     * {@code <backend_url><api_path>/events/<type>} using
      * {@code Authorization: Bearer <api_key>}.
      *
      * Intended for interactive contexts (local dev, SSH, Jupyter) where
