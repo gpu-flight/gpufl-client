@@ -12,6 +12,7 @@
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/host_info.hpp"
 #include "gpufl/core/json/json.hpp"
+#include "gpufl/core/version.hpp"
 
 namespace gpufl {
 
@@ -206,10 +207,13 @@ void HttpLogSink::workerLoop() {
             "[HttpLogSink] makeClient returned null — worker exiting");
         return;
     }
-    // Per-POST gzip compression was removed — see header note above
-    // Options. Live event POSTs go uncompressed; bandwidth-conscious
-    // users run gpufl-agent against the FileLogSink NDJSON for
-    // batch-compressed uploads (which achieve a much better ratio).
+    // Identification headers built once per worker — the values are
+    // compile-time constants. Attached per-call below (NOT via
+    // set_default_headers) because cpp-httplib auto-injects its own
+    // User-Agent on each send and that beats default_headers in the
+    // merge order — overriding ours. Per-call wins reliably across
+    // cpp-httplib versions.
+    const std::string ua_header = std::string("gpufl/") + kClientVersion;
 
     while (true) {
         std::string line;
@@ -289,15 +293,18 @@ void HttpLogSink::workerLoop() {
         bool ok = false;
         for (int attempt = 0; attempt <= opts_.max_retries; ++attempt) {
             const std::string path =
-                "/api/v1/events/" + std::string(type);
+                opts_.api_path + "/events/" + std::string(type);
             GFL_LOG_DEBUG(
                 "[HttpLogSink] POST attempt=", attempt,
                 " ", scheme_, "://", host_, ":", port_, path,
                 " body_bytes=", wrapped.size(),
                 " (inner_ndjson_bytes=", line.size(), ")");
             httplib::Headers headers = {
-                {"Authorization", "Bearer " + opts_.api_key},
-                {"Content-Type",  "application/json"},
+                {"Authorization",                "Bearer " + opts_.api_key},
+                {"Content-Type",                 "application/json"},
+                {"User-Agent",                   ua_header},
+                {"X-GpuFlight-Client-Version",   kClientVersion},
+                {"X-GpuFlight-Wire-Version",     kWireVersion},
             };
             auto res = client->Post(path.c_str(), headers, wrapped,
                                     "application/json");

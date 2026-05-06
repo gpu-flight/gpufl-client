@@ -7,6 +7,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <thread>
 #include <utility>
 
 #include "gpufl/backends/host_collector.hpp"
@@ -18,6 +19,7 @@
 #include "gpufl/core/logger/http_log_sink.hpp"
 #include "gpufl/core/logger/logger.hpp"
 #include "gpufl/core/remote_config.hpp"
+#include "gpufl/core/version.hpp"
 // NOTE: we intentionally do NOT include <httplib.h> in this TU.
 // httplib pulls in <winsock2.h>, which collides with the legacy
 // <winsock.h> included transitively by <windows.h> (used below for
@@ -223,7 +225,7 @@ bool init(const InitOptions& opts) {
     }
 
     // Fetch remote named config — a dict of InitOptions overrides hosted
-    // at `<backend_url>/api/v1/config?config=<config_name>`. Mirrors what
+    // at `<backend_url><api_path>/config?config=<config_name>`. Mirrors what
     // the Python _fetch_remote_config() used to do; moved into C++ so
     // pure C++ consumers (e.g. compiled sass_divergence_demo) get the
     // same capability without a Python wrapper.
@@ -237,6 +239,7 @@ bool init(const InitOptions& opts) {
         std::string url  = g_opts.backend_url;
         std::string key  = g_opts.api_key;
         std::string name = g_opts.config_name;
+        std::string apiPath = g_opts.api_path;
         // Env-var fallbacks so scripts / containers can set these
         // without touching code.
         if (url.empty()) {
@@ -250,14 +253,21 @@ bool init(const InitOptions& opts) {
         if (name.empty()) {
             if (const char* e = std::getenv("GPUFL_CONFIG_NAME")) name = e;
         }
+        if (apiPath.empty()) {
+            if (const char* e = std::getenv("GPUFL_API_PATH")) apiPath = e;
+        }
+        // Normalize once — every downstream consumer (fetchRemoteConfig,
+        // HttpLogSink, the discovery probe below) just appends after this.
+        apiPath = normalizeApiPath(apiPath);
         // Reflect env-var-resolved values back onto g_opts so downstream
         // consumers (HttpLogSink wiring below) see consistent values.
         g_opts.backend_url  = url;
         g_opts.api_key      = key;
         g_opts.config_name  = name;
+        g_opts.api_path     = apiPath;
 
         if (!name.empty() && !url.empty() && !key.empty()) {
-            fetchRemoteConfig(url, key, name, g_opts);
+            fetchRemoteConfig(url, apiPath, key, name, g_opts);
         }
     }
 
@@ -311,12 +321,26 @@ bool init(const InitOptions& opts) {
         } else {
             HttpLogSink::Options httpOpts;
             httpOpts.base_url = g_opts.backend_url;
-            httpOpts.api_key = g_opts.api_key;
+            httpOpts.api_path = g_opts.api_path;
+            httpOpts.api_key  = g_opts.api_key;
             rt->logger->addSink(
                 std::make_unique<HttpLogSink>(std::move(httpOpts)));
             GFL_LOG_DEBUG(
-                "HttpLogSink attached — uploading to ", g_opts.backend_url);
+                "HttpLogSink attached — uploading to ",
+                g_opts.backend_url, g_opts.api_path);
         }
+    }
+
+    // Fire-and-forget version-discovery probe. Hits
+    // <backend_url><api_path>/info/version with 2s timeouts to detect
+    // client/backend version drift early and emit a clear warning.
+    // Must NEVER block init — detached, bounded by httplib timeouts.
+    // Skipped when backend_url is empty (offline / file-only mode).
+    if (!g_opts.backend_url.empty()) {
+        std::thread([url = g_opts.backend_url,
+                     ap  = g_opts.api_path]() {
+            probeBackendVersion(url, ap);
+        }).detach();
     }
 
     set_runtime(std::move(rt));

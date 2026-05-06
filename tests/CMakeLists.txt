@@ -12,6 +12,7 @@ FetchContent_MakeAvailable(googletest)
 set(GPUFL_TEST_SOURCES
     main_test_runner.cpp
     core/test_analyzer.cpp
+    core/test_api_path_routing.cpp
     core/test_batch_models.cpp
     core/test_monitor.cpp
     core/test_http_log_sink.cpp
