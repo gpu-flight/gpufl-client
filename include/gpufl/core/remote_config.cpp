@@ -166,14 +166,6 @@ void fetchRemoteConfig(const std::string& base_url,
     auto cli = std::make_unique<httplib::Client>(scheme_host_port);
     cli->set_connection_timeout(5, 0);
     cli->set_read_timeout(5, 0);
-    // Identify the client + wire format on every config GET. Same
-    // headers as HttpLogSink uses for event POSTs — server-side filter
-    // logs both endpoints uniformly.
-    cli->set_default_headers({
-        {"User-Agent",                 std::string("gpufl/") + kClientVersion},
-        {"X-GpuFlight-Client-Version", kClientVersion},
-        {"X-GpuFlight-Wire-Version",   kWireVersion},
-    });
 
     // Empty api_path → fall back to the compiled-in default. Caller
     // is expected to pre-normalize for non-default paths.
@@ -183,14 +175,21 @@ void fetchRemoteConfig(const std::string& base_url,
     if (!config_name.empty()) {
         path += "?config=" + urlEncode(config_name);
     }
+    // Identification headers attached per-call (NOT via set_default_headers)
+    // because cpp-httplib auto-injects its own User-Agent on send and that
+    // beats default_headers in the merge order, overriding ours. Per-call
+    // wins reliably across cpp-httplib versions.
     httplib::Headers headers = {
         // Python used X-API-Key; match that here so the same backend
         // auth path (ConfigController :: X-API-Key resolver) is
         // exercised. If we later switch to Authorization: Bearer for
         // both config and upload, flip this in lockstep with the
         // backend's SecurityConfig.
-        {"X-API-Key", api_key},
-        {"Accept",    "application/json"},
+        {"X-API-Key",                  api_key},
+        {"Accept",                     "application/json"},
+        {"User-Agent",                 std::string("gpufl/") + kClientVersion},
+        {"X-GpuFlight-Client-Version", kClientVersion},
+        {"X-GpuFlight-Wire-Version",   kWireVersion},
     };
 
     auto res = cli->Get(path.c_str(), headers);
@@ -236,16 +235,18 @@ void probeBackendVersion(const std::string& base_url,
     httplib::Client cli(scheme_host_port);
     cli.set_connection_timeout(2, 0);
     cli.set_read_timeout(2, 0);
-    cli.set_default_headers({
-        {"User-Agent",                 std::string("gpufl/") + kClientVersion},
-        {"X-GpuFlight-Client-Version", kClientVersion},
-        {"X-GpuFlight-Wire-Version",   kWireVersion},
-    });
 
     const std::string ap = api_path.empty() ? std::string(kDefaultApiPath)
                                             : api_path;
     const std::string path = ap + "/info/version";
-    auto res = cli.Get(path.c_str());
+    // Per-call headers — see fetchRemoteConfig comment above for why
+    // we don't use set_default_headers.
+    httplib::Headers headers = {
+        {"User-Agent",                 std::string("gpufl/") + kClientVersion},
+        {"X-GpuFlight-Client-Version", kClientVersion},
+        {"X-GpuFlight-Wire-Version",   kWireVersion},
+    };
+    auto res = cli.Get(path.c_str(), headers);
     if (!res || res->status < 200 || res->status >= 300) {
         return;  // 404 / network error / older backend — silent
     }
