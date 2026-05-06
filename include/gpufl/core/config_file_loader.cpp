@@ -31,6 +31,10 @@ void ConfigFileLoader::apply(InitOptions& opts, const std::string& path) {
     if (cfg.contains("kernel_sample_rate_ms"))
         opts.kernel_sample_rate_ms = cfg.value<int>("kernel_sample_rate_ms", opts.kernel_sample_rate_ms);
 
+    // String fields
+    if (cfg.contains("api_path") && cfg["api_path"].is_string())
+        opts.api_path = cfg["api_path"].get_string();
+
     // Boolean fields
     if (cfg.contains("enable_stack_trace"))
         opts.enable_stack_trace = cfg.value<bool>("enable_stack_trace", opts.enable_stack_trace);

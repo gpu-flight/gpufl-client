@@ -12,6 +12,7 @@
 
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/json/json.hpp"
+#include "gpufl/core/version.hpp"
 
 namespace gpufl {
 
@@ -135,6 +136,7 @@ void applyRemoteConfigToOpts(const json::JsonValue& cfg, InitOptions& opts) {
 // thread isn't running yet, so the synchronous I/O here is the only
 // blocking step in init(), and it's capped by a 5-second timeout.
 void fetchRemoteConfig(const std::string& base_url,
+                       const std::string& api_path,
                        const std::string& api_key,
                        const std::string& config_name,
                        InitOptions& opts) {
@@ -164,8 +166,20 @@ void fetchRemoteConfig(const std::string& base_url,
     auto cli = std::make_unique<httplib::Client>(scheme_host_port);
     cli->set_connection_timeout(5, 0);
     cli->set_read_timeout(5, 0);
+    // Identify the client + wire format on every config GET. Same
+    // headers as HttpLogSink uses for event POSTs — server-side filter
+    // logs both endpoints uniformly.
+    cli->set_default_headers({
+        {"User-Agent",                 std::string("gpufl/") + kClientVersion},
+        {"X-GpuFlight-Client-Version", kClientVersion},
+        {"X-GpuFlight-Wire-Version",   kWireVersion},
+    });
 
-    std::string path = "/api/v1/config";
+    // Empty api_path → fall back to the compiled-in default. Caller
+    // is expected to pre-normalize for non-default paths.
+    const std::string ap = api_path.empty() ? std::string(kDefaultApiPath)
+                                            : api_path;
+    std::string path = ap + "/config";
     if (!config_name.empty()) {
         path += "?config=" + urlEncode(config_name);
     }
@@ -201,6 +215,64 @@ void fetchRemoteConfig(const std::string& base_url,
     applyRemoteConfigToOpts(cfg, opts);
     GFL_LOG_DEBUG(
         "[fetchRemoteConfig] applied remote config from ", base_url);
+}
+
+// Best-effort version-discovery probe — see remote_config.hpp doc.
+// Must never throw, never block beyond ~4s (2s connect + 2s read), and
+// never disable the agent on failure. Called from a detached thread in
+// gpufl::init().
+void probeBackendVersion(const std::string& base_url,
+                         const std::string& api_path) {
+    std::string scheme, host;
+    int port = -1;
+    if (!parseBackendBaseUrl(base_url, scheme, host, port)) {
+        return;  // bad URL — silent: the main config path will log it
+    }
+#if !GPUFL_HTTPLIB_TLS
+    if (scheme == "https") return;  // can't probe TLS without OpenSSL
+#endif
+    std::string scheme_host_port = scheme + "://" + host;
+    if (port > 0) scheme_host_port += ":" + std::to_string(port);
+    httplib::Client cli(scheme_host_port);
+    cli.set_connection_timeout(2, 0);
+    cli.set_read_timeout(2, 0);
+    cli.set_default_headers({
+        {"User-Agent",                 std::string("gpufl/") + kClientVersion},
+        {"X-GpuFlight-Client-Version", kClientVersion},
+        {"X-GpuFlight-Wire-Version",   kWireVersion},
+    });
+
+    const std::string ap = api_path.empty() ? std::string(kDefaultApiPath)
+                                            : api_path;
+    const std::string path = ap + "/info/version";
+    auto res = cli.Get(path.c_str());
+    if (!res || res->status < 200 || res->status >= 300) {
+        return;  // 404 / network error / older backend — silent
+    }
+    json::JsonValue resp = json::parseJson(res->body);
+    if (!resp.is_object() || !resp.contains("supported")) return;
+    const auto& sup = resp.at("supported");
+    if (!sup.is_array()) return;
+
+    bool found = false;
+    std::string supported_joined;
+    for (const auto& v : sup.get_array()) {
+        if (!v.is_string()) continue;
+        const auto& s = v.get_string();
+        if (!supported_joined.empty()) supported_joined += ",";
+        supported_joined += s;
+        if (s == kWireVersion) { found = true; }
+    }
+    if (!found) {
+        GFL_LOG_ERROR(
+            "[gpufl] client wire-version=", kWireVersion,
+            " not in backend supported=[", supported_joined,
+            "] — uploads may fail. Upgrade the agent or the backend.");
+    } else {
+        GFL_LOG_DEBUG(
+            "[probeBackendVersion] OK: wire=", kWireVersion,
+            " supported=[", supported_joined, "]");
+    }
 }
 
 }  // namespace gpufl

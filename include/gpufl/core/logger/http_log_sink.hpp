@@ -47,10 +47,20 @@ class HttpLogSink final : public ILogSink {
         /**
          * Backend base URL, e.g. "https://api.gpuflight.com" or
          * "http://localhost:8080". A trailing slash is tolerated
-         * but stripped. The sink appends "/api/v1/events/<type>" to
-         * form the target for each line.
+         * but stripped. The sink appends "<api_path>/events/<type>"
+         * to form the target for each line.
          */
         std::string base_url;
+
+        /**
+         * URL path prefix appended after {@link base_url}. Defaults
+         * to the version this client was compiled against. Override
+         * for reverse-proxy / migration scenarios. Must be normalized
+         * by the caller: must start with `/`, must not end with `/`
+         * (unless it's the bare-root case `""`). See
+         * {@code InitOptions::api_path} for the public-facing field.
+         */
+        std::string api_path = "/api/v1";
 
         /**
          * API key used in {@code Authorization: Bearer <api_key>}.

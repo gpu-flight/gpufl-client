@@ -42,6 +42,14 @@ target_include_directories(gpufl
 
 target_compile_features(gpufl INTERFACE cxx_std_17)
 
+# Stamp the CMake project version into the C++ binary so the agent can
+# send it as `User-Agent: gpufl/<v>` and `X-GpuFlight-Client-Version`.
+# Single source of truth = the project() VERSION line at the top of
+# this file. See include/gpufl/core/version.hpp.
+target_compile_definitions(gpufl PRIVATE
+    GPUFL_CLIENT_VERSION="${PROJECT_VERSION}"
+)
+
 # Enable PIC for static library (required when linking into shared libraries like Python modules)
 set_target_properties(gpufl PROPERTIES POSITION_INDEPENDENT_CODE ON)
 

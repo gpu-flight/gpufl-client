@@ -12,6 +12,7 @@
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/host_info.hpp"
 #include "gpufl/core/json/json.hpp"
+#include "gpufl/core/version.hpp"
 
 namespace gpufl {
 
@@ -206,6 +207,16 @@ void HttpLogSink::workerLoop() {
             "[HttpLogSink] makeClient returned null — worker exiting");
         return;
     }
+    // Identify this client (version + wire-format) on every request.
+    // Server-side filter logs these via MDC so deprecation decisions
+    // can be data-driven later. set_default_headers applies to every
+    // subsequent Post(); per-call `Authorization` headers below merge
+    // on top.
+    client->set_default_headers({
+        {"User-Agent",                 std::string("gpufl/") + kClientVersion},
+        {"X-GpuFlight-Client-Version", kClientVersion},
+        {"X-GpuFlight-Wire-Version",   kWireVersion},
+    });
     // Per-POST gzip compression was removed — see header note above
     // Options. Live event POSTs go uncompressed; bandwidth-conscious
     // users run gpufl-agent against the FileLogSink NDJSON for
@@ -289,7 +300,7 @@ void HttpLogSink::workerLoop() {
         bool ok = false;
         for (int attempt = 0; attempt <= opts_.max_retries; ++attempt) {
             const std::string path =
-                "/api/v1/events/" + std::string(type);
+                opts_.api_path + "/events/" + std::string(type);
             GFL_LOG_DEBUG(
                 "[HttpLogSink] POST attempt=", attempt,
                 " ", scheme_, "://", host_, ":", port_, path,
