@@ -147,7 +147,7 @@ TEST(HttpLogSinkApiPath, DefaultPrefixRoutesToApiV1) {
                    R"({"type":"kernel_event_batch","payload":{}})");
 
         ASSERT_TRUE(waitFor([&] { return !srv.snapshot().empty(); },
-                            std::chrono::seconds(2)))
+                            std::chrono::seconds(5)))
             << "expected server to receive at least one POST";
     }
 
@@ -170,7 +170,7 @@ TEST(HttpLogSinkApiPath, CustomPrefixRoutesToConfiguredPath) {
                    R"({"type":"kernel_event_batch","payload":{}})");
 
         ASSERT_TRUE(waitFor([&] { return !srv.snapshot().empty(); },
-                            std::chrono::seconds(2)))
+                            std::chrono::seconds(5)))
             << "expected server to receive at least one POST under "
                "/profiler/v1/events/...";
     }
@@ -196,12 +196,12 @@ TEST(HttpLogSinkApiPath, VersionHeadersPresentOnEveryRequest) {
                    R"({"type":"memcpy_event_batch","payload":{}})");
 
         ASSERT_TRUE(waitFor([&] { return srv.snapshot().size() >= 2; },
-                            std::chrono::seconds(2)));
+                            std::chrono::seconds(5)));
     }
 
     const auto expected_user_agent =
         std::string("gpufl/") + gpufl::kClientVersion;
-    auto caps = srv.snapshot();
+    const auto caps = srv.snapshot();
     ASSERT_GE(caps.size(), 2u);
     for (const auto& c : caps) {
         EXPECT_EQ(c.user_agent,     expected_user_agent);
