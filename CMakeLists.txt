@@ -46,7 +46,16 @@ target_compile_features(gpufl INTERFACE cxx_std_17)
 # send it as `User-Agent: gpufl/<v>` and `X-GpuFlight-Client-Version`.
 # Single source of truth = the project() VERSION line at the top of
 # this file. See include/gpufl/core/version.hpp.
-target_compile_definitions(gpufl PRIVATE
+#
+# PUBLIC (not PRIVATE) so consumers of gpufl — gpufl_tests, daemon/monitor,
+# example apps, and any downstream library user — see the same macro
+# value when compiling against gpufl/core/version.hpp. With PRIVATE, the
+# library's TUs see "0.1.0" but consumer TUs fall back to "0.0.0-dev",
+# causing an ODR-style runtime mismatch (the constexpr inline char*
+# resolves to different values in different TUs). Release builds
+# inline the literal at call sites and the mismatch becomes visible
+# as comparison failures (e.g. test asserting on User-Agent).
+target_compile_definitions(gpufl PUBLIC
     GPUFL_CLIENT_VERSION="${PROJECT_VERSION}"
 )
 
