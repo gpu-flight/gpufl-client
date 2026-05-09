@@ -107,8 +107,8 @@ std::vector<CUpti_ActivityKind> KernelLaunchHandler::requiredActivityKinds()
     return {CUPTI_ACTIVITY_KIND_KERNEL, CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL};
 }
 
-bool KernelLaunchHandler::shouldHandle(CUpti_CallbackDomain domain,
-                                       CUpti_CallbackId cbid) const {
+bool KernelLaunchHandler::shouldHandle(const CUpti_CallbackDomain domain,
+                                       const CUpti_CallbackId cbid) const {
     // Mirror the CBIDs registered in requiredCallbacks() — anything
     // missing here gets filtered out before handle() runs and the
     // corresponding kernel records arrive without API timestamps.
@@ -180,10 +180,10 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
         std::snprintf(meta.name, sizeof(meta.name), "%s", demangledName.c_str());
 
         if (backend_->GetOptions().enable_stack_trace) {
-            const std::string trace = gpufl::core::GetCallStack(2);
+            const std::string trace = core::GetCallStack(2);
             const std::string cleanTrace = detail::SanitizeStackTrace(trace);
             meta.stack_id =
-                gpufl::StackRegistry::instance().getOrRegister(cleanTrace);
+                StackRegistry::instance().getOrRegister(cleanTrace);
         } else {
             meta.stack_id = 0;
         }
@@ -259,7 +259,7 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
                       " scope=", meta.user_scope);
     } else if (cbInfo->callbackSite == CUPTI_API_EXIT) {
         const int64_t exitNs = detail::GetTimestampNs();
-        std::lock_guard<std::mutex> lk(backend_->meta_mu_);
+        std::lock_guard lk(backend_->meta_mu_);
         auto it = backend_->meta_by_corr_.find(cbInfo->correlationId);
         if (it != backend_->meta_by_corr_.end()) {
             it->second.api_exit_ns = exitNs;
@@ -286,7 +286,7 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
     GFL_LOG_DEBUG("[KernelLaunchHandler] ACTIVITY_RECORD corr=",
                   k->correlationId, " name=", k->name,
                   " start=", k->start, " end=", k->end,
-                  " dur=", (k->end - k->start));
+                  " dur=", k->end - k->start);
 
     const bool shouldThrottleKernels =
         backend_->opts_.kernel_sample_rate_ms > 0 &&
@@ -356,7 +356,7 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
                     " corr=", k->correlationId, " ext_id=", ext_id);
             }
         } else {
-            static std::atomic<int> g_ec_miss{0};
+            static std::atomic g_ec_miss{0};
             const int n = g_ec_miss.fetch_add(1, std::memory_order_relaxed) + 1;
             if (n <= 5 || n % 500 == 0) {
                 GFL_LOG_DEBUG(
@@ -419,8 +419,8 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
                                             kRegAllocGranularity
                                       : 0;
                 int regsPerBlock = regsPerWarp * warpsPerBlock;
-                int regBlocks = (regsPerBlock > 0)
-                                    ? (props.regsPerSM / regsPerBlock)
+                int regBlocks = regsPerBlock > 0
+                                    ? props.regsPerSM / regsPerBlock
                                     : warpBlocks;
 
                 // Shared memory limit
@@ -432,8 +432,8 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
                 out.max_active_blocks =
                     std::min({warpBlocks, regBlocks, blockBlocks, smemBlocks});
 
-                auto toOcc = [&](int blocks) -> float {
-                    return (maxWarpsPerSM > 0 && warpsPerBlock > 0)
+                auto toOcc = [&](const int blocks) -> float {
+                    return maxWarpsPerSM > 0 && warpsPerBlock > 0
                                ? std::min(1.0f, static_cast<float>(
                                                     blocks * warpsPerBlock) /
                                                     maxWarpsPerSM)
@@ -454,12 +454,12 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
                     {out.smem_occupancy, "shared_mem"},
                     {out.block_occupancy, "blocks"},
                 };
-                const char* limiting = "warps";
+                auto limiting = "warps";
                 float minOcc = out.warp_occupancy;
-                for (auto& l : limiters) {
-                    if (l.occ < minOcc) {
-                        minOcc = l.occ;
-                        limiting = l.name;
+                for (auto& [occ, name] : limiters) {
+                    if (occ < minOcc) {
+                        minOcc = occ;
+                        limiting = name;
                     }
                 }
                 std::snprintf(out.limiting_resource,

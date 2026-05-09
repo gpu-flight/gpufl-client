@@ -1,7 +1,5 @@
 #pragma once
 
-#include <cuda_runtime.h>
-
 #include <string>
 
 #include "gpufl/backends/nvidia/cupti_common.hpp"
@@ -30,7 +28,7 @@ struct ComputeCapability {
     int major = 0;
     int minor = 0;
     /** Returns true if this GPU is at least (majorNeeded, minorNeeded). */
-    bool atLeast(int majorNeeded, int minorNeeded) const {
+    bool atLeast(const int majorNeeded, const int minorNeeded) const {
         if (major != majorNeeded) return major > majorNeeded;
         return minor >= minorNeeded;
     }
