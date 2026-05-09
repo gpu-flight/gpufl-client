@@ -10,7 +10,7 @@ namespace gpufl::nvidia {
 CudaCollector::CudaCollector() : ISystemCollector() {}
 CudaCollector::~CudaCollector() = default;
 
-std::vector<gpufl::GpuStaticDeviceInfo> CudaCollector::sampleAll() {
+std::vector<GpuStaticDeviceInfo> CudaCollector::sampleAll() {
     std::vector<GpuStaticDeviceInfo> devices;
 
 #if GPUFL_HAS_CUDA || defined(__CUDACC__)

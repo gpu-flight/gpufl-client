@@ -1,22 +1,14 @@
 #include "gpufl/backends/nvidia/cupti_backend.hpp"
 
 #include <cupti_pcsampling.h>
-#include <cupti_profiler_target.h>
-#include <cupti_sass_metrics.h>
-#include <cupti_target.h>
-
-#if GPUFL_HAS_PERFWORKS
-#include <cupti_range_profiler.h>
-#endif
 
 #include <algorithm>
 #include <cstdlib>
-#include <cstring>
 #include <exception>
-#include <thread>
 #include <mutex>
 #include <set>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -46,13 +38,11 @@
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/ring_buffer.hpp"
-#include "gpufl/core/scope_registry.hpp"
 #include "gpufl/core/stack_registry.hpp"
-#include "gpufl/core/stack_trace.hpp"
 #include "gpufl/core/trace_type.hpp"
 
 namespace gpufl {
-std::atomic<gpufl::CuptiBackend*> g_activeBackend{nullptr};
+std::atomic<CuptiBackend*> g_activeBackend{nullptr};
 
 namespace {
 // Persistent maps for ActivityAPI PC sampling companion records.

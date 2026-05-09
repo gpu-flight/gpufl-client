@@ -15,7 +15,7 @@ SmProps GetSMProps(int deviceId) {
     static std::mutex mu;
     static std::unordered_map<int, SmProps> cache;
 
-    std::lock_guard<std::mutex> lock(mu);
+    std::lock_guard lock(mu);
     if (cache.find(deviceId) == cache.end()) {
         cudaDeviceProp prop{};
         SmProps props{};
@@ -39,7 +39,7 @@ SmProps GetSMProps(int deviceId) {
     return cache[deviceId];
 }
 
-int GetMaxThreadsPerSM(int deviceId) {
+int GetMaxThreadsPerSM(const int deviceId) {
     return GetSMProps(deviceId).maxThreadsPerSM;
 }
 
@@ -47,7 +47,7 @@ ComputeCapability GetComputeCapability(int deviceId) {
     static std::mutex mu;
     static std::unordered_map<int, ComputeCapability> cache;
 
-    std::lock_guard<std::mutex> lock(mu);
+    std::lock_guard lock(mu);
     auto it = cache.find(deviceId);
     if (it != cache.end()) return it->second;
 
@@ -68,13 +68,13 @@ void CalculateOccupancy(LaunchMeta& meta, const void* funcPtr) {
     cudaGetDevice(&deviceId);
 
     int numBlocks = 0;
-    cudaError_t err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+    const cudaError_t err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
         &numBlocks, funcPtr, meta.block_x * meta.block_y * meta.block_z,
         meta.dyn_shared);
 
     if (err == cudaSuccess) {
         meta.max_active_blocks = numBlocks;
-        int maxThreadsPerSM = GetSMProps(deviceId).maxThreadsPerSM;
+        const int maxThreadsPerSM = GetSMProps(deviceId).maxThreadsPerSM;
         if (maxThreadsPerSM > 0) {
             meta.occupancy =
                 static_cast<float>(numBlocks *
@@ -84,11 +84,11 @@ void CalculateOccupancy(LaunchMeta& meta, const void* funcPtr) {
     }
 }
 
-bool IsContextValid(CUcontext ctx) {
+bool IsContextValid(const CUcontext ctx) {
     if (!ctx) return false;
     CUcontext current = nullptr;
     if (cuCtxGetCurrent(&current) != CUDA_SUCCESS) return false;
-    return (current == ctx);
+    return current == ctx;
 }
 
 bool EnsureCudaContext(CUcontext* ctx) {
@@ -148,20 +148,20 @@ bool LogCuptiErrorIfFailedImpl(const char* scope, const char* op,
     if (err == CUPTI_SUCCESS) return false;
     const char* errStr = nullptr;
     cuptiGetResultString(err, &errStr);
-    DebugLogger::error("[GPUFL-ERROR] ", (file ? file : "unknown"), ":", line,
-                       ": [", (scope ? scope : "CUPTI"), "] ",
-                       (op ? op : "operation"), " failed: ",
-                       (errStr ? errStr : "unknown"), " (",
+    DebugLogger::error("[GPUFL-ERROR] ", file ? file : "unknown", ":", line,
+                       ": [", scope ? scope : "CUPTI", "] ",
+                       op ? op : "operation", " failed: ",
+                       errStr ? errStr : "unknown", " (",
                        static_cast<int>(err), ")");
     return true;
 }
 
-const char* getChipName(uint32_t deviceId) {
+const char* getChipName(const uint32_t deviceId) {
     CUpti_Device_GetChipName_Params chipNameParams = {
         CUpti_Device_GetChipName_Params_STRUCT_SIZE};
     chipNameParams.deviceIndex = deviceId;
-    CUptiResult res = cuptiDeviceGetChipName(&chipNameParams);
-    if (LogCuptiErrorIfFailed("CUPTI", "cuptiDeviceGetChipName", res)) {
+    if (const CUptiResult res = cuptiDeviceGetChipName(&chipNameParams);
+        LogCuptiErrorIfFailed("CUPTI", "cuptiDeviceGetChipName", res)) {
         return "";
     }
     return chipNameParams.pChipName;
