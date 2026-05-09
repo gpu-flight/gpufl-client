@@ -7,7 +7,6 @@
 #include <array>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <iostream>
 
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
@@ -338,7 +337,7 @@ bool PcSamplingEngine::EnableSamplingFeatures_() {
     CUpti_PCSamplingEnableParams enableParams = {};
     enableParams.size = sizeof(CUpti_PCSamplingEnableParams);
     enableParams.ctx = ctx_.cuda_ctx;
-    CUptiResult enableRes = cuptiPCSamplingEnable(&enableParams);
+    const CUptiResult enableRes = cuptiPCSamplingEnable(&enableParams);
     if (enableRes != CUPTI_SUCCESS &&
         enableRes != CUPTI_ERROR_INVALID_OPERATION) {
         LogCuptiErrorIfFailed(this->name(), "cuptiPCSamplingEnable", enableRes);
