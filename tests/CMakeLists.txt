@@ -21,6 +21,11 @@ set(GPUFL_TEST_SOURCES
     core/test_itanium_demangle.cpp
     core/test_sampler.cpp
     upload/test_upload_logs.cpp
+    # Launcher CLI parser test — portable (no CUDA / no POSIX).
+    # cli_parse.cpp is compiled directly into the test binary so we don't
+    # need to depend on the launcher target (which is Linux-only).
+    launcher/test_cli_parse.cpp
+    ${CMAKE_SOURCE_DIR}/daemon/launcher/cli_parse.cpp
 )
 
 if(GPUFL_ENABLE_NVIDIA AND GPUFL_HAS_CUPTI)
@@ -67,6 +72,7 @@ endif()
 target_include_directories(gpufl_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/include          # So we can do #include "gpufl/core/..."
     ${CMAKE_SOURCE_DIR}/tests            # So we can do #include "common/..."
+    ${CMAKE_SOURCE_DIR}/daemon/launcher  # So launcher tests can #include "cli_parse.hpp"
 )
 
 # cpp-httplib's CPPHTTPLIB_ZLIB_SUPPORT propagates from gpufl

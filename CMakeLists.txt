@@ -33,6 +33,16 @@ option(GPUFL_ENABLE_AMD_ROCPROFILER "Enable AMD rocprofiler-sdk tracing backend 
 
 option(BUILD_GPUFL_EXAMPLE "Build gpufl example application" ON)
 option(BUILD_GPUFL_MONITOR "Build gpufl-monitor standalone daemon" ON)
+# Injection-mode launcher + shared library — Linux + NVIDIA only for v1.
+# Disabled by default off-Linux because LD_PRELOAD / __attribute__((constructor))
+# / fork+execvp don't apply there.
+if(UNIX AND NOT APPLE)
+    option(BUILD_GPUFL_LAUNCHER "Build gpufl launcher binary (gpufl trace)" ON)
+    option(BUILD_GPUFL_INJECT   "Build libgpufl_inject.so shared library" ON)
+else()
+    option(BUILD_GPUFL_LAUNCHER "Build gpufl launcher binary (gpufl trace)" OFF)
+    option(BUILD_GPUFL_INJECT   "Build libgpufl_inject.so shared library" OFF)
+endif()
 option(BUILD_PYTHON "Build Python bindings" OFF)
 option(BUILD_TESTING "Build the testing tree." ON)
 
@@ -540,6 +550,35 @@ target_compile_definitions(gpufl PUBLIC
     GPUFL_HAS_ROCPROFILER_SDK=${GPUFL_HAS_ROCPROFILER_SDK}
 )
 
+# -----------------------
+# libgpufl_inject.so — injection-mode shared library (Linux only).
+#
+# Loaded into a target process by `gpufl trace` via LD_PRELOAD +
+# CUDA_INJECTION64_PATH. A constructor and the NVIDIA-defined
+# InitializeInjection ABI both route through std::call_once into
+# gpufl::init() with injection_mode_default_options() (or the light
+# preset), with env-var overrides applied. See
+# include/gpufl/inject/inject_entry.cpp for the design notes.
+# -----------------------
+if(UNIX AND NOT APPLE AND BUILD_GPUFL_INJECT)
+    add_library(gpufl_inject SHARED
+        include/gpufl/inject/inject_entry.cpp
+    )
+    target_link_libraries(gpufl_inject PRIVATE gpufl::gpufl)
+    set_target_properties(gpufl_inject PROPERTIES
+        OUTPUT_NAME gpufl_inject
+        # Hide internal symbols; only the extern "C" InitializeInjection
+        # entry point is marked visibility("default") in the source.
+        # The .init_array constructor is invoked by ld.so directly and
+        # doesn't need to be a visible symbol.
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN ON
+    )
+    install(TARGETS gpufl_inject
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    )
+endif()
+
 # ---------------------------------------------------------------------------
 # gpufl_copy_runtime_dlls(<target>)
 #
@@ -595,6 +634,10 @@ endif()
 
 if(BUILD_GPUFL_MONITOR AND CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
     add_subdirectory(daemon/monitor)
+endif()
+
+if(BUILD_GPUFL_LAUNCHER AND CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+    add_subdirectory(daemon/launcher)
 endif()
 
 if(BUILD_PYTHON)

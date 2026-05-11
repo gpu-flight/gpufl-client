@@ -274,6 +274,47 @@ bool init(const InitOptions& opts);
 // Stop runtime, flush and close logs.
 void shutdown();
 
+// Comprehensive-profile defaults for "injection" capture mode (the
+// libgpufl_inject.so launcher path). Flips most observability flags on
+// and selects PcSamplingWithSass for the richest per-instruction view.
+// Documented overhead: ~5–15% wall time on heavy CUDA workloads.
+//
+// The launcher's `--profile` flag picks between this and
+// `light_mode_default_options()`; everything else is layered on top
+// (env-var overrides + remote named config) inside gpufl::init().
+inline InitOptions injection_mode_default_options() {
+    InitOptions opts;
+    opts.app_name                    = "gpufl-trace";
+    opts.sampling_auto_start         = true;
+    opts.enable_kernel_details       = true;
+    opts.enable_stack_trace          = true;
+    opts.enable_source_collection    = true;
+    opts.enable_synchronization      = true;
+    opts.enable_memory_tracking      = true;
+    opts.enable_cuda_graphs_tracking = true;
+    opts.enable_external_correlation = true;
+    opts.flush_logs_always           = false;
+    opts.profiling_engine            = ProfilingEngine::PcSamplingWithSass;
+    opts.system_sample_rate_ms       = 100;
+    opts.kernel_sample_rate_ms       = 1000;
+    opts.remote_upload               = false;
+    return opts;
+}
+
+// Lower-overhead injection profile: skips source correlation, memory
+// tracking, CUDA-graphs tracking; drops to plain PcSampling; raises
+// sample intervals ~5x. Roughly ~1–3% overhead on the same workloads.
+inline InitOptions light_mode_default_options() {
+    InitOptions opts = injection_mode_default_options();
+    opts.enable_source_collection    = false;
+    opts.enable_memory_tracking      = false;
+    opts.enable_cuda_graphs_tracking = false;
+    opts.profiling_engine            = ProfilingEngine::PcSampling;
+    opts.system_sample_rate_ms       = 500;
+    opts.kernel_sample_rate_ms       = 5000;
+    return opts;
+}
+
 // Generate a text report from the log files written during this session.
 // Call after shutdown().
 // - No argument: prints the report to console (stdout).
