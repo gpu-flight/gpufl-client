@@ -33,6 +33,13 @@ constexpr const char* kEnvProfilingEngine = "GPUFL_PROFILING_ENGINE";
 // launcher knows uploads are drained. Empty = no completion signal.
 constexpr const char* kEnvCompletionFd = "GPUFL_INJECT_COMPLETION_FD";
 
+// Opt-in: when set to "1", the inject lib's __attribute__((constructor))
+// runs gpufl::init() at ld.so time (before main, before cuInit). Default
+// off because the Phase 0.1 spike showed CUPTI subscribe before cuInit
+// segfaults on no-CUDA targets. With this off, only InitializeInjection
+// (called by libcuda after cuInit) drives init.
+constexpr const char* kEnvUseConstructor = "GPUFL_INJECT_USE_CONSTRUCTOR";
+
 // Profile-name string values (must stay in sync with the launcher's
 // `--profile` flag parsing).
 constexpr const char* kProfileComprehensive = "comprehensive";

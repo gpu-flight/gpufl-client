@@ -126,11 +126,25 @@ void doInjectInit() {
 
 extern "C" {
 
-// First-chance entry: ld.so runs us before main(). Risk: CUPTI
-// subscription before cuInit may not be supported on all driver/CUPTI
-// combinations. The Day-1 spike (Phase 0.1) confirms whether this
-// path can stand alone or whether we must wait for InitializeInjection.
+// First-chance entry: ld.so runs us before main().
+//
+// **Disabled by default.** Phase 0.1 spike (2026-05-11) confirmed
+// what the source plan suspected: CUPTI subscription from a
+// pre-`cuInit` constructor segfaults on no-CUDA targets (the lib is
+// preloaded into `echo`, libcuda is dragged in as a DT_NEEDED, CUPTI
+// subscribe tries to touch driver state that doesn't exist, SIGSEGV).
+// Falling back to `InitializeInjection` only — libcuda calls that
+// after `cuInit`, so a no-CUDA target like `echo` never triggers init
+// (target runs clean, empty trace dir, no crash, matching
+// verification 1.12.4).
+//
+// Set `GPUFL_INJECT_USE_CONSTRUCTOR=1` to opt back in — useful for
+// workloads where the first CUDA call happens deep in third-party
+// code we want to catch the lead-up to, and where the toolchain has
+// been verified to tolerate pre-cuInit subscribe.
 [[gnu::constructor]] static void gpuflInjectCtor() {
+    const char* opt_in = std::getenv("GPUFL_INJECT_USE_CONSTRUCTOR");
+    if (!opt_in || std::strcmp(opt_in, "1") != 0) return;
     std::call_once(g_init_once, doInjectInit);
 }
 
