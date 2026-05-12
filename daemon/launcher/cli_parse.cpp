@@ -138,6 +138,12 @@ TraceParseResult parseTraceArgs(const std::vector<std::string>& argv) {
                         " (expected: pc-sampling | sass-metrics | pc-sampling-with-sass | none)"};
             }
         } else {
+            // A non-flag token before `--` is almost certainly the
+            // caller forgetting the splitter, e.g. `gpufl trace python
+            // train.py`. Distinguish that from a real typo on a flag.
+            if (!tok.empty() && tok[0] != '-') {
+                return {std::nullopt, "missing `--` separator before command"};
+            }
             return {std::nullopt, "unknown flag: " + key};
         }
     }
