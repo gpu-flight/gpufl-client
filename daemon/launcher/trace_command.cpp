@@ -46,21 +46,28 @@ fs::path selfExe() {
     return fs::path(buf);
 }
 
-// Search for libgpufl_inject.so relative to the launcher binary.
-// Build tree: build/daemon/launcher/gpufl + build/libgpufl_inject.so.
-// Install tree (CMake default): bin/gpufl + lib/libgpufl_inject.so.
-// Install one-liner: ~/.local/bin/gpufl + ~/.local/lib/gpufl/libgpufl_inject.so.
-fs::path findInjectLib(const fs::path& exe) {
+// Candidate paths for libgpufl_inject.so relative to the launcher
+// binary, in search order. Centralized so the not-found error can
+// echo back exactly what we tried (saves a debug round-trip).
+//
+// Build tree:        build/daemon/launcher/gpufl  +  build/libgpufl_inject.so
+// Install (CMake):   bin/gpufl                    +  lib/libgpufl_inject.so
+// Install one-liner: ~/.local/bin/gpufl           +  ~/.local/lib/gpufl/libgpufl_inject.so
+std::vector<fs::path> injectLibCandidates(const fs::path& exe) {
     const fs::path dir = exe.parent_path();
     const auto kName = "libgpufl_inject.so";
-    const std::vector candidates = {
-        dir / kName,
-        dir.parent_path() / kName,
-        dir.parent_path() / "lib" / kName,
-        dir.parent_path() / "lib" / "gpufl" / kName,
-        dir.parent_path().parent_path() / "lib" / kName,
+    return {
+        dir / kName,                                          // colocated
+        dir.parent_path() / kName,                            // one up
+        dir.parent_path().parent_path() / kName,              // two up (default CMake build root)
+        dir.parent_path() / "lib" / kName,                    // <build>/<subdir>/../lib
+        dir.parent_path() / "lib" / "gpufl" / kName,          // install one-liner
+        dir.parent_path().parent_path() / "lib" / kName,      // bin/../lib install layout
     };
-    for (const auto& c : candidates) {
+}
+
+fs::path findInjectLib(const fs::path& exe) {
+    for (const auto& c : injectLibCandidates(exe)) {
         if (std::error_code ec; fs::exists(c, ec)) return fs::canonical(c, ec);
     }
     return {};
@@ -119,6 +126,10 @@ int runTrace(const TraceArgs& args) {
         std::fprintf(stderr,
                      "gpufl: cannot find libgpufl_inject.so adjacent to %s\n",
                      exe.string().c_str());
+        std::fprintf(stderr, "       searched:\n");
+        for (const auto& c : injectLibCandidates(exe)) {
+            std::fprintf(stderr, "         %s\n", c.string().c_str());
+        }
         return 3;
     }
 
