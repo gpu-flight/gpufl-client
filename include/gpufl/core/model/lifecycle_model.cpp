@@ -31,8 +31,22 @@ std::string InitEventModel::buildJson() const {
         << ",\"cuda_static_devices\":"
         << staticDevicesToJsonForVendor(e_.gpu_static_device_infos, "NVIDIA")
         << ",\"rocm_static_devices\":"
-        << staticDevicesToJsonForVendor(e_.gpu_static_device_infos, "AMD")
-        << "}";
+        << staticDevicesToJsonForVendor(e_.gpu_static_device_infos, "AMD");
+
+    // session_kind is always
+    // present on V40+ clients; profiling_engine is empty/omitted for
+    // monitor sessions. We always emit session_kind so the backend
+    // can distinguish "V40 client said it's a monitor session" from
+    // "pre-V40 client, fall back to kernel-count heuristic". When
+    // profiling_engine is empty we omit it entirely (cleaner than
+    // emitting `"profiling_engine":""` and forcing the backend to
+    // treat empty-string-vs-null specially).
+    oss << ",\"session_kind\":\"" << jsonEscape(e_.session_kind) << "\"";
+    if (!e_.profiling_engine.empty()) {
+        oss << ",\"profiling_engine\":\"" << jsonEscape(e_.profiling_engine) << "\"";
+    }
+
+    oss << "}";
     return oss.str();
 }
 

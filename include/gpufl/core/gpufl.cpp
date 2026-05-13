@@ -441,6 +441,36 @@ bool init(const InitOptions& opts) {
     }
     ie.host = rt_ptr->host_collector->sample();
 
+    // V40 — derive vendor-agnostic session_kind + vendor-namespaced
+    // profiling_engine string from the resolved MonitorOptions. Used
+    // by the backend to tab-split the Sessions page (trace vs monitor)
+    // and to render an engine-specific badge on session detail.
+    // Keeping the mapping at the InitEvent build site (rather than
+    // inside the enum itself) means the C++ enum stays pure brand
+    // names ("PcSampling") while the wire format is namespaced.
+    switch (mOpts.profiling_engine) {
+        case ProfilingEngine::None:
+            ie.session_kind = "monitor";
+            ie.profiling_engine = "";  // empty string → JSON omits or sends ""
+            break;
+        case ProfilingEngine::PcSampling:
+            ie.session_kind = "trace";
+            ie.profiling_engine = "nvidia.pc_sampling";
+            break;
+        case ProfilingEngine::SassMetrics:
+            ie.session_kind = "trace";
+            ie.profiling_engine = "nvidia.sass_metrics";
+            break;
+        case ProfilingEngine::RangeProfiler:
+            ie.session_kind = "trace";
+            ie.profiling_engine = "nvidia.range_profiler";
+            break;
+        case ProfilingEngine::PcSamplingWithSass:
+            ie.session_kind = "trace";
+            ie.profiling_engine = "nvidia.pc_sampling_with_sass";
+            break;
+    }
+
     rt_ptr->logger->write(model::InitEventModel(ie));
 
     // Start sampler if enabled and collector exists
