@@ -72,6 +72,17 @@ struct InitEvent {
     HostSample host;
     std::vector<DeviceSample> devices;
     std::vector<GpuStaticDeviceInfo> gpu_static_device_infos;
+    // session_kind     : "trace" | "monitor" — vendor-agnostic; the
+    //                    Traces page filters on it.
+    // profiling_engine : vendor-namespaced detail like
+    //                    "nvidia.pc_sampling". Empty string when
+    //                    session_kind = "monitor". Stored verbatim
+    //                    by the backend (no enum, just a label).
+    // Both populated in gpufl::init() from the resolved
+    // MonitorOptions::profiling_engine. The C++ enum → string mapping
+    // lives next to the InitEvent build site (gpufl.cpp).
+    std::string session_kind;
+    std::string profiling_engine;
 };
 
 struct ShutdownEvent {
