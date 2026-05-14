@@ -51,6 +51,8 @@ class TextReport {
         float block_occupancy = -1;
         std::string limiting_resource;
         int static_shared = 0;
+        int local_mem_per_thread = 0;
+        int max_active_blocks = 0;
         std::string user_scope;
     };
 
@@ -135,6 +137,7 @@ class TextReport {
     std::vector<HostMetricRecord> host_metrics_;
     std::vector<ScopeEventRecord> scope_events_;
     std::vector<ProfileSampleRecord> profile_samples_;
+    bool sass_active_ = false;
     int top_n_;
 
     // ── Parsing (constructor helpers) ────────────────────────────────────────
@@ -158,7 +161,7 @@ class TextReport {
 
     // ── Section writers ─────────────────────────────────────────────────────
 
-    void writeHeader(std::ostringstream& out) const;
+    static void writeHeader(std::ostringstream& out) ;
     void writeSessionSummary(std::ostringstream& out) const;
     void writeKernelSummary(std::ostringstream& out) const;
     void writeTopKernels(std::ostringstream& out) const;

@@ -3,6 +3,10 @@
 #include <chrono>
 #include <cuda_runtime.h>
 
+#include "gpufl/core/common.hpp"
+#include "gpufl/core/monitor.hpp"
+#include "gpufl/gpufl.hpp"
+
 __global__ void vectorAddGPU(const int* a, const int* b, int* c, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) {
@@ -17,6 +21,23 @@ void vectorAddCPU(const int* a, const int* b, int* c, int n) {
 }
 
 int main() {
+
+    gpufl::InitOptions opts;
+    opts.app_name = "vector_add_benchmark";
+    opts.log_path = "vector_add_benchmark";
+    opts.system_sample_rate_ms = 50;
+    opts.kernel_sample_rate_ms = 50;
+    opts.enable_kernel_details = true;
+    opts.sampling_auto_start = true;
+    opts.enable_debug_output = true;
+    opts.enable_source_collection = true;
+    opts.profiling_engine = gpufl::ProfilingEngine::None;
+
+    if (!gpufl::init(opts)) {
+        std::cerr << "Failed to initialize gpufl" << std::endl;
+        return 1;
+    }
+
     const int n = 1 << 24; // 16M elements
     const size_t size = n * sizeof(int);
 
@@ -88,6 +109,8 @@ int main() {
     }
     std::cout << "Verification: " << (passed ? "PASSED" : "FAILED") << std::endl;
 
+    gpufl::shutdown();
+    gpufl::generateReport();
     // Cleanup
     cudaFree(d_a);
     cudaFree(d_b);

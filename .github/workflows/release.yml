@@ -53,6 +53,29 @@ jobs:
               )
               init_py.write_text(init_new, encoding="utf-8")
 
+          # Keep the C++ side in lockstep. The CMake project() VERSION is the
+          # single source of truth for GPUFL_CLIENT_VERSION (stamped into the
+          # binary, sent as User-Agent / X-GpuFlight-Client-Version). Without
+          # this, release wheels would ship the tag version in Python metadata
+          # but a stale hardcoded version in the compiled client. CMake's
+          # project(VERSION ...) only accepts numeric major.minor.patch[.tweak],
+          # so strip any PEP 440 suffix (rc/dev/post) for the CMake value — the
+          # full version still lands in the wheel metadata above.
+          m = re.match(r"\d+(?:\.\d+){0,3}", version)
+          cmake_version = m.group(0) if m else version
+          cmakelists = Path("CMakeLists.txt")
+          cm_text = cmakelists.read_text(encoding="utf-8")
+          cm_new, cm_n = re.subn(
+              r'(project\(gpufl_client\s+VERSION\s+)\d+(?:\.\d+)*',
+              rf'\g<1>{cmake_version}',
+              cm_text,
+              count=1,
+              flags=re.DOTALL,
+          )
+          if cm_n != 1:
+              raise SystemExit("Failed to update project(... VERSION) in CMakeLists.txt")
+          cmakelists.write_text(cm_new, encoding="utf-8")
+
       - name: Cache cibuildwheel downloads
         uses: actions/cache@v4
         with:
@@ -167,6 +190,29 @@ jobs:
                   init_text,
               )
               init_py.write_text(init_new, encoding="utf-8")
+
+          # Keep the C++ side in lockstep. The CMake project() VERSION is the
+          # single source of truth for GPUFL_CLIENT_VERSION (stamped into the
+          # binary, sent as User-Agent / X-GpuFlight-Client-Version). Without
+          # this, release wheels would ship the tag version in Python metadata
+          # but a stale hardcoded version in the compiled client. CMake's
+          # project(VERSION ...) only accepts numeric major.minor.patch[.tweak],
+          # so strip any PEP 440 suffix (rc/dev/post) for the CMake value — the
+          # full version still lands in the wheel metadata above.
+          m = re.match(r"\d+(?:\.\d+){0,3}", version)
+          cmake_version = m.group(0) if m else version
+          cmakelists = Path("CMakeLists.txt")
+          cm_text = cmakelists.read_text(encoding="utf-8")
+          cm_new, cm_n = re.subn(
+              r'(project\(gpufl_client\s+VERSION\s+)\d+(?:\.\d+)*',
+              rf'\g<1>{cmake_version}',
+              cm_text,
+              count=1,
+              flags=re.DOTALL,
+          )
+          if cm_n != 1:
+              raise SystemExit("Failed to update project(... VERSION) in CMakeLists.txt")
+          cmakelists.write_text(cm_new, encoding="utf-8")
 
       - name: Build sdist
         run: pipx run build --sdist
