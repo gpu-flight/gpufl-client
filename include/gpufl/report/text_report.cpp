@@ -37,7 +37,7 @@ std::string fmtDuration(double ms) {
     std::ostringstream oss;
     if (ms >= 1000.0)      oss << std::fixed << std::setprecision(2) << (ms / 1000.0) << " s";
     else if (ms >= 1.0)    oss << std::fixed << std::setprecision(2) << ms << " ms";
-    else                   oss << std::fixed << std::setprecision(2) << (ms * 1000.0) << " us";
+    else                   oss << std::fixed << std::setprecision(2) << (ms * 1000.0) << " usec";
     return oss.str();
 }
 
@@ -312,6 +312,8 @@ void TextReport::parseDeviceLog(const std::vector<JsonValue>& records,
             }
         } else if (type == "shutdown" && rec.contains("ts_ns")) {
             info_.end_ns = rec["ts_ns"].as_int();
+        } else if (type == "sass_config") {
+            sass_active_ = true;
         }
     }
 
@@ -332,6 +334,8 @@ void TextReport::mergeKernelDetails(std::unordered_map<unsigned, JsonValue>& det
         k.block_occupancy   = d.value<float>("block_occupancy", -1.0f);
         k.limiting_resource = d.value<std::string>("limiting_resource", "");
         k.static_shared     = d.value<int>("static_shared", 0);
+        k.local_mem_per_thread = d.value<int>("local_mem_per_thread_bytes", 0);
+        k.max_active_blocks    = d.value<int>("max_active_blocks", 0);
         k.user_scope        = d.value<std::string>("user_scope", "");
     }
 }
@@ -390,6 +394,8 @@ void TextReport::parseScopeLog(const std::vector<JsonValue>& records,
                     std::move(rname),
                 });
             }
+        } else if (type == "sass_config") {
+            sass_active_ = true;
         }
     }
 }
@@ -436,6 +442,8 @@ void TextReport::parseSystemLog(const std::vector<JsonValue>& records) {
             }
         } else if (type == "system_stop" && info_.end_ns == 0 && rec.contains("ts_ns")) {
             info_.end_ns = rec["ts_ns"].as_int();
+        } else if (type == "sass_config") {
+            sass_active_ = true;
         }
     }
 }
@@ -458,7 +466,7 @@ std::string TextReport::generate() const {
 
 // ── Section writers ─────────────────────────────────────────────────────────
 
-void TextReport::writeHeader(std::ostringstream& out) const {
+void TextReport::writeHeader(std::ostringstream& out) {
     out << SEP << "\n"
         << std::setw(52) << "GPU Flight Session Report" << "\n"
         << SEP << "\n";
@@ -482,7 +490,7 @@ void TextReport::writeSessionSummary(std::ostringstream& out) const {
         if (info_.shared_mem_per_block > 0)
             out << "    Shared Mem/Block:   " << fmtBytes(info_.shared_mem_per_block) << "\n";
         if (info_.regs_per_block > 0)
-            out << "    Registers/Block:    " << info_.regs_per_block << "\n";
+            out << "    Max Registers/Block: " << info_.regs_per_block << "\n";
         if (info_.l2_cache_size > 0)
             out << "    L2 Cache:           " << fmtBytes(info_.l2_cache_size) << "\n";
     }
@@ -501,6 +509,11 @@ void TextReport::writeKernelSummary(std::ostringstream& out) const {
     auto [minIt, maxIt] = std::minmax_element(durations.begin(), durations.end());
     std::sort(durations.begin(), durations.end());
 
+    auto pctile = [&durations](double p) -> double {
+        if (durations.empty()) return 0.0;
+        return durations[static_cast<size_t>(p * (durations.size() - 1))];
+    };
+
     std::map<std::string, int> uniqueNames;
     for (const auto& k : kernels_) uniqueNames[k.name]++;
 
@@ -510,15 +523,28 @@ void TextReport::writeKernelSummary(std::ostringstream& out) const {
 
     if (info_.start_ns > 0 && info_.end_ns > 0) {
         double sessionMs = (info_.end_ns - info_.start_ns) / 1e6;
-        if (sessionMs > 0)
-            out << "  GPU Busy:             " << std::fixed << std::setprecision(1)
+        if (sessionMs > 0) {
+            // GPU Busy is Sum(kernel durations) / wall-time. Under SASS
+            // instrumentation those durations are inflated, so it no longer
+            // reflects native utilization — label it accordingly.
+            const char* busyLabel = sass_active_
+                ? "  GPU Busy (instrumented): "
+                : "  GPU Busy:             ";
+            out << busyLabel << std::fixed << std::setprecision(1)
                 << (totalMs / sessionMs * 100) << "%\n";
+        }
     }
 
     out << "  Avg Duration:         " << fmtDuration(totalMs / kernels_.size()) << "\n";
     out << "  Median Duration:      " << fmtDuration(durations[durations.size() / 2]) << "\n";
+    out << "  P90 Duration:         " << fmtDuration(pctile(0.90)) << "\n";
+    out << "  P99 Duration:         " << fmtDuration(pctile(0.99)) << "\n";
     out << "  Min Duration:         " << fmtDuration(*minIt) << "\n";
     out << "  Max Duration:         " << fmtDuration(*maxIt) << "\n";
+
+    if (sass_active_)
+        out << "\n  Note: SASS metrics were active - kernel durations include "
+               "instrumentation overhead.\n";
 }
 
 void TextReport::writeTopKernels(std::ostringstream& out) const {
@@ -547,6 +573,29 @@ void TextReport::writeTopKernels(std::ostringstream& out) const {
             << std::setw(12) << fmtDuration(st.avg())
             << std::setw(12) << fmtDuration(st.max_val) << "\n";
     }
+}
+
+// Multiply the integers found in a dimension string like "(65536,1,1)".
+// Returns 0 when no digits are present.
+static long long parseDimProduct(const std::string& dims) {
+    long long product = 1, cur = 0;
+    bool any = false, inNum = false;
+    for (char c : dims) {
+        if (c >= '0' && c <= '9') {
+            cur = cur * 10 + (c - '0');
+            inNum = true;
+        } else if (inNum) {
+            product *= cur;
+            any = true;
+            cur = 0;
+            inNum = false;
+        }
+    }
+    if (inNum) {
+        product *= cur;
+        any = true;
+    }
+    return any ? product : 0;
 }
 
 void TextReport::writeKernelDetails(std::ostringstream& out) const {
@@ -592,6 +641,23 @@ void TextReport::writeKernelDetails(std::ostringstream& out) const {
             out << "    Registers/Thread:   " << rep->num_regs << "\n";
         out << "    Shared Memory:      " << fmtBytes(rep->dyn_shared)
             << " dyn + " << fmtBytes(rep->static_shared) << " static\n";
+
+        if (rep->local_mem_per_thread > 0)
+            out << "    Register Spills:    " << rep->local_mem_per_thread
+                << " B/thread\n";
+        else
+            out << "    Register Spills:    none\n";
+
+        if (rep->max_active_blocks > 0 && info_.sm_count > 0) {
+            long long gridTotal = parseDimProduct(rep->grid);
+            if (gridTotal > 0) {
+                double waves =
+                    static_cast<double>(gridTotal) /
+                    (static_cast<double>(rep->max_active_blocks) * info_.sm_count);
+                out << "    Waves/SM:           " << std::fixed
+                    << std::setprecision(2) << waves << "\n";
+            }
+        }
     }
 }
 
@@ -654,6 +720,10 @@ void TextReport::writeSystemMetrics(std::ostringstream& out) const {
             double sumPcie=0, maxPcie=0; int pcieN=0;
             uint64_t maxMem=0;
             uint64_t lastEnergy=0, firstEnergy=0; bool hasEnergy=false;
+            // Energy via trapezoidal integration of power samples — robust on
+            // Blackwell drivers where the NVML energy counter is unreliable.
+            double energyJ=0, prevPowerMw=0; int64_t prevTsNs=0;
+            bool havePrev=false, hasPower=false;
             uint64_t maxEccCorr=0, maxEccUncorr=0;
             int n=0;
         };
@@ -692,6 +762,14 @@ void TextReport::writeSystemMetrics(std::ostringstream& out) const {
                     if (!a.hasEnergy) { a.firstEnergy = m.energy_uj; a.hasEnergy = true; }
                     a.lastEnergy = m.energy_uj;
                 }
+                if (a.havePrev && m.ts_ns > a.prevTsNs) {
+                    double dtSec = (m.ts_ns - a.prevTsNs) / 1e9;
+                    a.energyJ += (a.prevPowerMw + m.power_mw) / 2.0 * dtSec / 1000.0;
+                }
+                a.prevPowerMw = m.power_mw;
+                a.prevTsNs = m.ts_ns;
+                a.havePrev = true;
+                if (m.power_mw > 0) a.hasPower = true;
                 a.maxEccCorr   = (std::max)(a.maxEccCorr, m.ecc_corrected);
                 a.maxEccUncorr = (std::max)(a.maxEccUncorr, m.ecc_uncorrected);
                 a.n++; return a;
@@ -711,12 +789,24 @@ void TextReport::writeSystemMetrics(std::ostringstream& out) const {
         if (agg.voltN > 0)
             out << "    Voltage:            avg " << std::setprecision(0) << (agg.sumVolt / agg.voltN)
                 << " mV  peak " << agg.maxVolt << " mV\n";
-        if (agg.hasEnergy && agg.lastEnergy > agg.firstEnergy) {
-            double energyJ = (agg.lastEnergy - agg.firstEnergy) / 1e6;
-            if (energyJ >= 1000.0)
-                out << "    Energy:             " << std::setprecision(2) << (energyJ / 1000.0) << " kJ\n";
-            else
-                out << "    Energy:             " << std::setprecision(2) << energyJ << " J\n";
+        {
+            // Prefer power-integrated energy; fall back to the NVML cumulative
+            // counter only when no power samples were collected.
+            double energyJ = 0;
+            bool haveEnergy = false;
+            if (agg.hasPower && agg.energyJ > 0) {
+                energyJ = agg.energyJ;
+                haveEnergy = true;
+            } else if (agg.hasEnergy && agg.lastEnergy > agg.firstEnergy) {
+                energyJ = (agg.lastEnergy - agg.firstEnergy) / 1e6;
+                haveEnergy = true;
+            }
+            if (haveEnergy) {
+                if (energyJ >= 1000.0)
+                    out << "    Energy:             " << std::setprecision(2) << (energyJ / 1000.0) << " kJ\n";
+                else
+                    out << "    Energy:             " << std::setprecision(2) << energyJ << " J\n";
+            }
         }
         if (agg.fanN > 0)
             out << "    Fan Speed:          avg " << std::setprecision(0) << (agg.sumFan / agg.fanN)
