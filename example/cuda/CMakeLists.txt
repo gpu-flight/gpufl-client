@@ -99,6 +99,8 @@ target_link_libraries(list_sass_metrics PRIVATE
 
 target_link_libraries(vector_add_benchmark PRIVATE
         CUDA::cudart
+        gpufl::gpufl
+        CUDA::cupti
 )
 
 
