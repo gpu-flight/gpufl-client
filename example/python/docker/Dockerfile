@@ -23,10 +23,28 @@ RUN pip install --upgrade pip
 # Install PyTorch with CUDA 13.1 support
 RUN pip install torch --index-url https://download.pytorch.org/whl/cu130
 
-# Build gpufl from source so it picks up NVML from the CUDA devel image
-ARG GPUFL_VERSION=main
+# Build gpufl from source so it picks up NVML from the CUDA devel image.
+#
+# Pinning to a released tag (rather than `main`) gives reproducible images
+# and protects users from mid-flight breakage on the active branch.
+ARG GPUFL_VERSION=v0.1.0
+
+# Explicit CUDAToolkit + NVML stub paths.
+#
+# Under scikit-build-core's isolated pip build env, find_package(CUDAToolkit)
+# and the find_library() hint paths in CMakeLists.txt occasionally fail to
+# resolve — at which point CMake silently sets GPUFL_HAS_NVML=0 and the
+# resulting wheel has NO GPU telemetry (job_start emits "devices": []).
+# Pre-setting the cache variables here skips the auto-detection entirely
+# and pins the build to the known-correct paths for the nvidia/cuda devel
+# image. (CMakeLists.txt is hardened in v0.1.1+ to fail loudly on this,
+# but for v0.1.0 the wheel can ship broken without this workaround.)
 RUN git clone --depth 1 --branch ${GPUFL_VERSION} https://github.com/gpu-flight/gpufl-client.git /tmp/gpufl-client \
-    && CMAKE_ARGS="-DBUILD_TESTING=OFF" pip install -v "/tmp/gpufl-client[analyzer,viz]" \
+    && CMAKE_ARGS="-DBUILD_TESTING=OFF \
+                   -DGPUFL_ENABLE_NVIDIA=ON \
+                   -DCUDAToolkit_ROOT=/usr/local/cuda \
+                   -DNVML_LIBRARY=/usr/local/cuda/targets/x86_64-linux/lib/stubs/libnvidia-ml.so" \
+       pip install -v "/tmp/gpufl-client[analyzer,viz]" \
     && rm -rf /tmp/gpufl-client
 
 # Install Jupyter
