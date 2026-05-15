@@ -154,7 +154,6 @@ class TestInitFunction:
             kernel_sample_rate_ms=50,
             enable_kernel_details=True,
             enable_debug_output=False,
-            enable_profiling=True,
             enable_stack_trace=True,
             enable_source_collection=True,
         )
