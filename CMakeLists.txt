@@ -360,13 +360,22 @@ if(GPUFL_ENABLE_NVIDIA)
             endif()
         endif()
     else()
+        # NVML stub library lives under the CUDA toolkit. We search both
+        # the versioned path (cuda-13.1, cuda-12.x, ...) AND the unversioned
+        # /usr/local/cuda symlink that the nvidia/cuda:*-devel base images
+        # ship — earlier this only listed the versioned path, which silently
+        # missed NVML when find_package(CUDAToolkit) failed to populate
+        # CUDAToolkit_ROOT inside scikit-build-core's isolated build env.
         find_library(NVML_LIBRARY NAMES nvidia-ml
                 HINTS
                 "${CUDAToolkit_LIBRARY_ROOT}/stubs"
                 "${CUDAToolkit_ROOT}/targets/x86_64-linux/lib/stubs"
                 "${CUDAToolkit_ROOT}/lib64/stubs"
                 "$ENV{CUDA_PATH}/targets/x86_64-linux/lib/stubs"
+                "/usr/local/cuda/targets/x86_64-linux/lib/stubs"
+                "/usr/local/cuda/lib64/stubs"
                 "/usr/local/cuda-13.1/targets/x86_64-linux/lib/stubs"
+                "/usr/local/cuda-12/targets/x86_64-linux/lib/stubs"
                 "/usr/lib/wsl/lib"  # Common location for WSL2 users
         )
 
@@ -375,7 +384,20 @@ if(GPUFL_ENABLE_NVIDIA)
             target_link_libraries(gpufl PRIVATE ${NVML_LIBRARY})
             message(STATUS "Found NVML (Linux): ${NVML_LIBRARY}")
         else()
-            message(WARNING "NVML not found! GPUFL_HAS_NVML will be 0. (Check CUDA Toolkit 'stubs' folder)")
+            # Fail loudly. A silent fallback ships a wheel with no GPU
+            # telemetry — job_start emits "devices": [] at runtime and the
+            # user has no idea NVML was missing at build time. Force the
+            # caller to either fix the path (-DNVML_LIBRARY=...) or
+            # explicitly opt out (-DGPUFL_ENABLE_NVIDIA=OFF). This trade-off
+            # is intentional: a hard build break here is much cheaper to
+            # diagnose than a silent runtime gap downstream.
+            message(FATAL_ERROR
+                "NVML not found! GPUFL_HAS_NVML would be 0 and the resulting "
+                "library would emit no GPU telemetry at runtime.\n"
+                "  Either: pass -DNVML_LIBRARY=/path/to/libnvidia-ml.so "
+                "(typically under the CUDA toolkit 'stubs' folder),\n"
+                "  Or:     pass -DGPUFL_ENABLE_NVIDIA=OFF to explicitly "
+                "build without NVIDIA telemetry support.")
         endif()
     endif()
 
