@@ -28,20 +28,28 @@ private:
 PYBIND11_MODULE(_gpufl_client, m) {
     m.doc() = "GPUFL Internal C++ Binding";
 
-    py::enum_<gpufl::BackendKind>(m, "BackendKind")
+    // BackendKind / ProfilingEngine both have a "None" value, which is a
+    // Python keyword — accessible as ProfilingEngine.__members__["None"]
+    // but ugly. Add a `None_` Python alias on each enum so users can write
+    // `gpufl.ProfilingEngine.None_` directly. The underscore-suffix is the
+    // standard Python convention for keyword-clashing names (mirrors
+    // pybind11's `class_`, `type_`, etc.).
+    auto backendKindEnum = py::enum_<gpufl::BackendKind>(m, "BackendKind")
         .value("Auto",   gpufl::BackendKind::Auto)
         .value("Nvidia", gpufl::BackendKind::Nvidia)
         .value("Amd",    gpufl::BackendKind::Amd)
         .value("None",   gpufl::BackendKind::None)
         .export_values();
+    backendKindEnum.attr("None_") = backendKindEnum.attr("__members__")[py::str("None")];
 
-    py::enum_<gpufl::ProfilingEngine>(m, "ProfilingEngine")
+    auto profilingEngineEnum = py::enum_<gpufl::ProfilingEngine>(m, "ProfilingEngine")
         .value("None",               gpufl::ProfilingEngine::None)
         .value("PcSampling",         gpufl::ProfilingEngine::PcSampling)
         .value("SassMetrics",        gpufl::ProfilingEngine::SassMetrics)
         .value("RangeProfiler",      gpufl::ProfilingEngine::RangeProfiler)
         .value("PcSamplingWithSass", gpufl::ProfilingEngine::PcSamplingWithSass)
         .export_values();
+    profilingEngineEnum.attr("None_") = profilingEngineEnum.attr("__members__")[py::str("None")];
 
     py::class_<gpufl::InitOptions>(m, "InitOptions")
         .def(py::init<>())
@@ -72,8 +80,12 @@ PYBIND11_MODULE(_gpufl_client, m) {
         .def_readwrite("config_name",           &gpufl::InitOptions::config_name)
         .def_readwrite("remote_upload",         &gpufl::InitOptions::remote_upload);
 
-    // Convenience wrapper: accepts either the new profiling_engine enum or the
-    // legacy enable_profiling / enable_perf_scope booleans for source compat.
+    // Function-style init(). Every C++ InitOptions field that's user-facing
+    // is surfaced as a keyword argument here so callers don't have to
+    // construct an InitOptions object themselves. Pre-v0.1.1 the binding
+    // also accepted legacy `enable_profiling` / `enable_perf_scope` bool
+    // flags — those were removed in favor of the single `profiling_engine`
+    // enum, which is strictly more expressive.
     m.def("init", [](std::string app_name,
                      std::string log_path,
                      bool sampling_auto_start,
@@ -82,22 +94,14 @@ PYBIND11_MODULE(_gpufl_client, m) {
                      gpufl::BackendKind backend,
                      bool enable_kernel_details,
                      bool enable_debug_output,
-                     // Legacy bool args (deprecated — use profiling_engine)
-                     bool enable_profiling,
                      bool enable_stack_trace,
                      bool enable_source_collection,
-                     bool enable_perf_scope,
-                     gpufl::ProfilingEngine profiling_engine_override,
+                     gpufl::ProfilingEngine profiling_engine,
                      std::string config_file,
                      std::string backend_url,
                      std::string api_key,
                      std::string config_name,
                      bool remote_upload,
-                     // Defaults match
-                     // InitOptions::*; surface them here so the
-                     // function-style init() call stays the canonical
-                     // way users twiddle these without falling back to
-                     // the InitOptions object.
                      bool enable_external_correlation,
                      bool enable_synchronization,
                      bool enable_memory_tracking,
@@ -114,52 +118,34 @@ PYBIND11_MODULE(_gpufl_client, m) {
         opts.enable_debug_output   = enable_debug_output;
         opts.enable_stack_trace    = enable_stack_trace;
         opts.enable_source_collection = enable_source_collection;
-        opts.config_file             = config_file;
-        opts.backend_url             = std::move(backend_url);
-        opts.api_key                 = std::move(api_key);
-        opts.config_name             = std::move(config_name);
-        opts.remote_upload           = remote_upload;
+        opts.profiling_engine      = profiling_engine;
+        opts.config_file           = config_file;
+        opts.backend_url           = std::move(backend_url);
+        opts.api_key               = std::move(api_key);
+        opts.config_name           = std::move(config_name);
+        opts.remote_upload         = remote_upload;
         opts.enable_external_correlation = enable_external_correlation;
         opts.enable_synchronization      = enable_synchronization;
         opts.enable_memory_tracking      = enable_memory_tracking;
         opts.enable_cuda_graphs_tracking = enable_cuda_graphs_tracking;
 
-        // If caller explicitly set profiling_engine, use it; otherwise derive
-        // from the legacy bool flags for backward compatibility.
-        // The sentinel is PcSampling (the default). An explicit pass of any
-        // other engine — including PcSamplingWithSass — is treated as
-        // an explicit override, which is the correct behavior now that
-        // PcSamplingWithSass is an opt-in "deep dive" mode.
-        if (profiling_engine_override != gpufl::ProfilingEngine::PcSampling) {
-            // Explicit override was provided (anything != the default)
-            opts.profiling_engine = profiling_engine_override;
-        } else if (!enable_profiling) {
-            opts.profiling_engine = gpufl::ProfilingEngine::None;
-        } else if (enable_perf_scope) {
-            opts.profiling_engine = gpufl::ProfilingEngine::RangeProfiler;
-        } else {
-            opts.profiling_engine = gpufl::ProfilingEngine::PcSampling;
-        }
-
         return gpufl::init(opts);
     }, py::arg("app_name"),
-       py::arg("log_path")                  = "",
-       py::arg("sampling_auto_start")       = false,
-       py::arg("system_sample_rate_ms")     = 0,
-       py::arg("kernel_sample_rate_ms")     = 0,
-       py::arg("backend")                   = gpufl::BackendKind::Auto,
-       py::arg("enable_kernel_details")     = false,
-       py::arg("enable_debug_output")       = false,
-       py::arg("enable_profiling")          = true,
-       py::arg("enable_stack_trace")        = false,
-       py::arg("enable_source_collection")  = true,
-       py::arg("enable_perf_scope")         = false,
-       py::arg("profiling_engine")          = gpufl::ProfilingEngine::PcSampling,
-       py::arg("config_file")              = "",
-       py::arg("backend_url")              = "",
-       py::arg("api_key")                  = "",
-       py::arg("config_name")              = "",
-       py::arg("remote_upload")            = false,
+       py::arg("log_path")                    = "",
+       py::arg("sampling_auto_start")         = false,
+       py::arg("system_sample_rate_ms")       = 0,
+       py::arg("kernel_sample_rate_ms")       = 0,
+       py::arg("backend")                     = gpufl::BackendKind::Auto,
+       py::arg("enable_kernel_details")       = false,
+       py::arg("enable_debug_output")         = false,
+       py::arg("enable_stack_trace")          = false,
+       py::arg("enable_source_collection")    = true,
+       py::arg("profiling_engine")            = gpufl::ProfilingEngine::PcSampling,
+       py::arg("config_file")                 = "",
+       py::arg("backend_url")                 = "",
+       py::arg("api_key")                     = "",
+       py::arg("config_name")                 = "",
+       py::arg("remote_upload")               = false,
        py::arg("enable_external_correlation") = true,
        py::arg("enable_synchronization")      = true,
        py::arg("enable_memory_tracking")      = false,

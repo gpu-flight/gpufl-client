@@ -33,7 +33,6 @@ def run_stress_test():
                kernel_sample_rate_ms=50,
                enable_kernel_details=True,
                enable_debug_output=True,
-               enable_profiling=True,
                enable_stack_trace=True,
                # opt-in to memory tracking. Default-off in v1
                # because TF eager and similar workloads can produce
