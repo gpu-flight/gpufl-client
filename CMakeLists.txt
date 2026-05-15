@@ -374,8 +374,6 @@ if(GPUFL_ENABLE_NVIDIA)
                 "$ENV{CUDA_PATH}/targets/x86_64-linux/lib/stubs"
                 "/usr/local/cuda/targets/x86_64-linux/lib/stubs"
                 "/usr/local/cuda/lib64/stubs"
-                "/usr/local/cuda-13.1/targets/x86_64-linux/lib/stubs"
-                "/usr/local/cuda-12/targets/x86_64-linux/lib/stubs"
                 "/usr/lib/wsl/lib"  # Common location for WSL2 users
         )
 
