@@ -18,7 +18,7 @@ To keep the initial design coherent, **we are not currently accepting major feat
 
 Try the portal with real session data — no sign-up required:
 
-**[https://app.gpuflight.com/share/gpflshr_GWDVZ8lZNxxjeGY60stnrfj85Gzngi6t1UlYItilP0Y](https://app.gpuflight.com/share/gpflshr_GWDVZ8lZNxxjeGY60stnrfj85Gzngi6t1UlYItilP0Y)**
+**[Demo Link](https://app.gpuflight.com/share/gpflshr_GWDVZ8lZNxxjeGY60stnrfj85Gzngi6t1UlYItilP0Y)**
 
 ## Key Features
 
