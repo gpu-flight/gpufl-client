@@ -866,12 +866,12 @@ class GpuFlightSession:
         correlation is available, top kernels by sampled stall pressure.
         """
         if self.scopes.empty or 'type' not in self.scopes.columns:
-            self.console.print("[yellow]No profile sample data found — enable PC sampling or SASS metrics at session init.[/yellow]")
+            self._print_profile_sample_hint()
             return
 
         all_samples = self.scopes[self.scopes['type'] == 'profile_sample'].copy()
         if all_samples.empty:
-            self.console.print("[yellow]No profile sample data found — enable PC sampling or SASS metrics at session init.[/yellow]")
+            self._print_profile_sample_hint()
             return
 
         if 'sample_kind' in all_samples.columns:
@@ -1090,10 +1090,59 @@ class GpuFlightSession:
 
         self.console.print(table)
 
+    # ------------------------------------------------------------------
+    # Empty-state hints — printed when one of the inspect_* methods has
+    # nothing to show. The methods themselves are correct; the data
+    # simply isn't in the logs because the session wasn't configured to
+    # collect it (wrong engine, no scopes, build missing the relevant
+    # CUPTI subsystem, etc.). The hint blocks below name the exact
+    # `init()` kwarg and other preconditions so users can fix the
+    # session config rather than debugging the analyzer.
+    # ------------------------------------------------------------------
+    def _print_profile_sample_hint(self):
+        self.console.print(
+            "[yellow]No profile sample data found.[/yellow]\n"
+            "  To collect PC sampling / SASS metrics:\n"
+            "    1. [bold]profiling_engine[/bold]: pass "
+            "[cyan]ProfilingEngine.PcSampling[/cyan], "
+            "[cyan]ProfilingEngine.SassMetrics[/cyan], or "
+            "[cyan]ProfilingEngine.PcSamplingWithSass[/cyan] to "
+            "[cyan]gpufl.init()[/cyan].\n"
+            "    2. [bold]Scopes required[/bold]: wrap GPU work in "
+            "[cyan]with gpufl.Scope(\"name\"):[/cyan] blocks — sample "
+            "buffers flush only on scope close.\n"
+            "    3. [bold]Hardware[/bold]: PC sampling needs compute "
+            "capability ≥ 7.0 (Volta+); SASS metrics need ≥ 7.5 "
+            "(Turing+).\n"
+            "    4. [bold]Build[/bold]: wheel must include CUPTI "
+            "(NVIDIA backend, full CUDA toolkit at build time)."
+        )
+
+    def _print_perf_metric_hint(self):
+        self.console.print(
+            "[yellow]No perf_metric_event records found in scope log.[/yellow]\n"
+            "  To collect hardware-counter perf metrics:\n"
+            "    1. [bold]profiling_engine[/bold]: pass "
+            "[cyan]ProfilingEngine.RangeProfiler[/cyan] to "
+            "[cyan]gpufl.init()[/cyan].\n"
+            "    2. [bold]Scopes required[/bold]: wrap GPU work in "
+            "[cyan]with gpufl.Scope(\"name\"):[/cyan] blocks — perf "
+            "metrics emit on scope close.\n"
+            "    3. [bold]Mutually exclusive with PC sampling[/bold]: "
+            "RangeProfiler and PcSampling both use hardware perf "
+            "counters; pick one per session.\n"
+            "    4. [bold]Build[/bold]: wheel must have "
+            "[cyan]GPUFL_HAS_PERFWORKS=1[/cyan] — requires the full "
+            "CUPTI/Perfworks SDK (nvperf_host + nvperf_target) at "
+            "CMake configure time.\n"
+            "    5. [bold]Hardware[/bold]: Volta+ for SM throughput / "
+            "DRAM bytes; Turing+ for tensor-core utilization."
+        )
+
     def inspect_perf_metrics(self, top_n: int = 10):
         """Summarize perf_metric_event records from scope logs."""
         if self.perf.empty:
-            self.console.print("[yellow]No perf_metric_event records found in scope log.[/yellow]")
+            self._print_perf_metric_hint()
             return
 
         p = self.perf.copy()
