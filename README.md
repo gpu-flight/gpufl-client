@@ -18,7 +18,7 @@ To keep the initial design coherent, **we are not currently accepting major feat
 
 Try the portal with real session data — no sign-up required:
 
-**[https://gpufl-front.vercel.app/demo/gdemo_4R98GA5MzYdosqvNsUqdp_MaUgEcDHABS2C5PHbCDQE](https://gpufl-front.vercel.app/demo/gdemo_4R98GA5MzYdosqvNsUqdp_MaUgEcDHABS2C5PHbCDQE)**
+**[https://app.gpuflight.com/share/gpflshr_GWDVZ8lZNxxjeGY60stnrfj85Gzngi6t1UlYItilP0Y](https://app.gpuflight.com/share/gpflshr_GWDVZ8lZNxxjeGY60stnrfj85Gzngi6t1UlYItilP0Y)**
 
 ## Key Features
 
