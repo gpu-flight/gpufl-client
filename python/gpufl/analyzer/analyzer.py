@@ -695,7 +695,7 @@ class GpuFlightSession:
         table.add_column("Total Time", justify="right", style="green")
         table.add_column("Occupancy", justify="right", style="magenta")
         table.add_column("Grid/Block", justify="center")
-        table.add_column("Resources (Reg/SMem/DMem/LMem/CMem/Spill)", justify="left")
+        table.add_column("Resources (Reg/SMem/LMem/CMem/Spill)", justify="left")
 
         for (name, *rest), row in summary.iterrows():
             stack_trace = rest[0] if rest else None
@@ -743,10 +743,22 @@ class GpuFlightSession:
             grid_val  = row['grid']  if 'grid'  in row.index and pd.notna(row.get('grid'))  else "n/a"
             block_val = row['block'] if 'block' in row.index and pd.notna(row.get('block')) else "n/a"
 
+            # Shared memory: `static` is compile-time __shared__ arrays;
+            # `dyn` is the third launch arg <<<grid,block,dyn_shared>>>.
+            # Both live in the same physical SM shared-memory space and
+            # together drive smem_occupancy — so we display the SUM as
+            # `SMem` (matching what the occupancy % is computed against)
+            # with the static/dyn breakdown in parentheses for users
+            # tuning either piece. Previously this row showed two
+            # separate `SMem`/`DMem` values which read as "static
+            # shared" vs "device memory" (wrong: it's dyn-shared, not
+            # device global memory) and didn't visually reconcile with
+            # the smem occupancy % above.
+            smem_total = (static_b or 0) + (dyn_b or 0)
             resource_str = (
                 f"{num_regs} regs"
                 + (f" ({occ_breakdown})" if occ_breakdown else "")
-                + f"\nSMem {static_b} B · DMem {dyn_b} B"
+                + f"\nSMem {smem_total} B ({static_b} static + {dyn_b} dyn)"
                 + f"\nLMem {local_b} B · CMem {const_b} B"
                 + spill_str
                 + bottleneck_str
