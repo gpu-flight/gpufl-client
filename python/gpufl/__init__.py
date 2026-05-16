@@ -150,7 +150,7 @@ __version__ = "0.1.0.dev"
 _original_init = init
 
 def init(*args, backend_url=None, api_key=None, config_name=None,
-         remote_upload=None, remote_config=None, **kwargs):
+         remote_upload=None, **kwargs):
     """Initialize GPUFlight.
 
     Configuration precedence (low → high). Each layer may override the
@@ -178,29 +178,14 @@ def init(*args, backend_url=None, api_key=None, config_name=None,
             every NDJSON line is POSTed live to the backend in parallel
             with the disk write. Env: `GPUFL_REMOTE_UPLOAD=1`.
             Defaults to False.
-        remote_config: **DEPRECATED alias** for `backend_url`. Accepted
-            for backward compatibility with the older kwarg name; will
-            be removed in a future release.
         **kwargs: All other InitOptions fields passed to C++ init.
     """
-    # Deprecated-alias handling. If the caller still passes
-    # `remote_config=`, treat it as `backend_url`. If both are passed
-    # and they differ, prefer the new name and emit a warning.
-    if remote_config is not None and backend_url is None:
-        import warnings
-        warnings.warn(
-            "gpufl.init(remote_config=...) is deprecated; rename to "
-            "backend_url=... (same meaning: base URL of the backend).",
-            DeprecationWarning, stacklevel=2)
-        backend_url = remote_config
-
     # Resolve env-var fallbacks. Doing this in Python lets explicit
     # kwargs win over env; the C++ layer also does env fallback for
     # the pure-C++ code path (e.g. sass_divergence_demo), so either
     # side resolving the values is sufficient.
     if not backend_url:
-        backend_url = (os.environ.get('GPUFL_BACKEND_URL')
-                       or os.environ.get('GPUFL_REMOTE_CONFIG'))
+        backend_url = os.environ.get('GPUFL_BACKEND_URL')
     if not api_key:
         api_key = os.environ.get('GPUFL_API_KEY')
     if not config_name:

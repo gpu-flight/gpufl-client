@@ -42,78 +42,84 @@ def _coerce_host_cell(x):
     return {}
 
 def _explode_device_samples(df, gpu_id=0):
+    """Extract per-sample GPU metrics from `device_metric_sample` rows.
+
+    The reader (reader.py) has already exploded `device_metric_batch`
+    envelopes into flat per-sample dicts with absolute `ts_ns`, so this
+    function just filters by event type and remaps the wire column
+    names to the legacy field names the plotters expect. Columns that
+    only appear in the extended-metric batch (e.g. `pcie_bw_bps`,
+    `energy_uj`) are surfaced when present, NaN otherwise.
+    """
     pd = _require_pandas()
     df = _ensure_event_type_col(df)
-
-    target_types = ["scope_sample", "system_sample", "system_start", "system_stop", "kernel_start", "kernel_end", "kernel_event", "init"]
     if "event_type" not in df.columns: return pd.DataFrame()
 
-    d = df[df["event_type"].isin(target_types)].copy()
-    if len(d) == 0: return pd.DataFrame()
+    d = df[df["event_type"] == "device_metric_sample"].copy()
+    if d.empty: return pd.DataFrame()
+    if "device_id" in d.columns:
+        d = d[d["device_id"] == gpu_id]
+    if d.empty: return pd.DataFrame()
 
-    if "devices" in d.columns:
-        d["devices"] = d["devices"].apply(_coerce_devices_cell)
+    # Map columnar wire field names → legacy field names used by plotters.
+    # PCIe split into RX/TX was lost when the wire format moved to
+    # the single `pcie_bw_bps` column; we surface only the combined rate.
+    def _get(col, default=0):
+        if col in d.columns:
+            return pd.to_numeric(d[col], errors="coerce").fillna(default)
+        return pd.Series([default] * len(d), index=d.index)
 
-    rows = []
-    for _, r in d.iterrows():
-        ts = r.get("ts_ns")
-        # If ts_ns is missing, try start_ns (common for kernel_event)
-        if pd.isna(ts):
-            ts = r.get("start_ns")
-        
-        devs = r.get("devices", [])
-        found = None
-        if isinstance(devs, list):
-            for dev in devs:
-                if isinstance(dev, dict) and dev.get("id") == gpu_id:
-                    found = dev
-                    break
-        if found:
-            rows.append({
-                "ts_ns": ts,
-                "util_gpu_pct": found.get("util_gpu_pct", 0),
-                "util_mem_pct": found.get("util_mem_pct", 0),
-                "used_mib": found.get("used_mib", 0),
-                "temp_c": found.get("temp_c", 0),
-                "power_mw": found.get("power_mw", 0),
-                "clk_sm_mhz": found.get("clk_sm_mhz", 0),
-                "pcie_rx_gbps": found.get("pcie_rx_bw_bps", 0) / 1e9,
-                "pcie_tx_gbps": found.get("pcie_tx_bw_bps", 0) / 1e9,
-            })
-
-    out = pd.DataFrame(rows)
+    out = pd.DataFrame({
+        "ts_ns":        pd.to_numeric(d["ts_ns"], errors="coerce"),
+        "util_gpu_pct": _get("gpu_util"),
+        "util_mem_pct": _get("mem_util"),
+        "used_mib":     _get("used_mib"),
+        "total_mib":    _get("total_mib"),
+        "temp_c":       _get("temp_c"),
+        "power_mw":     _get("power_mw"),
+        "clk_sm_mhz":   _get("clock_sm"),
+        # Combined PCIe bandwidth (RX+TX) — the wire format no longer
+        # splits direction; if absent (base shape, not extended), this
+        # stays 0.
+        "pcie_gbps":    _get("pcie_bw_bps") / 1e9,
+        # Cumulative energy counter from the extended shape; users
+        # plotting this should differentiate w.r.t. time to get power-
+        # like behavior. Plotted as-is here so the column is available.
+        "energy_uj":    _get("energy_uj"),
+    })
+    out = out.dropna(subset=["ts_ns"]).sort_values("ts_ns")
     if not out.empty:
-        out = out.dropna(subset=["ts_ns"]).sort_values("ts_ns")
-        min_ts = out["ts_ns"].min()
-        out["t_s_abs"] = (out["ts_ns"] - min_ts) / 1e9
+        out["t_s_abs"] = (out["ts_ns"] - out["ts_ns"].min()) / 1e9
     return out
 
 def _explode_host_samples(df):
+    """Extract per-sample host metrics from `host_metric_sample` rows.
+
+    Per-sample dicts come from `host_metric_batch` expansion (handled in
+    reader.py). The wire stores CPU utilization as `cpu_pct_x100`
+    (i.e. percent × 100 for two-decimal precision); divide by 100 here
+    to restore the conventional 0–100 percent that plotters expect.
+    """
     pd = _require_pandas()
     df = _ensure_event_type_col(df)
-
-    target_types = ["scope_sample", "system_sample", "system_start", "system_stop", "kernel_start", "kernel_event", "init", "shutdown"]
     if "event_type" not in df.columns: return pd.DataFrame()
 
-    d = df[df["event_type"].isin(target_types)].copy()
-    if len(d) == 0 or "host" not in d.columns: return pd.DataFrame()
+    d = df[df["event_type"] == "host_metric_sample"].copy()
+    if d.empty: return pd.DataFrame()
 
-    d["host"] = d["host"].apply(_coerce_host_cell)
-    rows = []
-    for _, r in d.iterrows():
-        h = r["host"]
-        if not h: continue
-        
-        ts = r.get("ts_ns") or r.get("ts_start_ns") or r.get("start_ns")
-        
-        rows.append({
-            "ts_ns": ts,
-            "cpu_pct": h.get("cpu_pct", 0),
-            "ram_used_mib": h.get("ram_used_mib", 0)
-        })
-    out = pd.DataFrame(rows)
+    def _get(col, default=0):
+        if col in d.columns:
+            return pd.to_numeric(d[col], errors="coerce").fillna(default)
+        return pd.Series([default] * len(d), index=d.index)
+
+    out = pd.DataFrame({
+        "ts_ns":        pd.to_numeric(d["ts_ns"], errors="coerce"),
+        "cpu_pct":      _get("cpu_pct_x100") / 100.0,
+        "ram_used_mib": _get("ram_used_mib"),
+        "ram_total_mib": _get("ram_total_mib"),
+    })
+    out = out.dropna(subset=["ts_ns"]).sort_values("ts_ns")
     if not out.empty:
-        out = out.dropna(subset=["ts_ns"]).sort_values("ts_ns")
         out["t_s_abs"] = (out["ts_ns"] - out["ts_ns"].min()) / 1e9
     return out
 
@@ -188,6 +194,100 @@ def _reconstruct_intervals(df, start_type, end_type, name_col="name", fallback_n
                     del stacks[name]
     return intervals
 
+def _scope_intervals(df):
+    """Pair `scope_event` begin/end rows into ordered intervals.
+
+    The wire format emits two `scope_event` rows per scope — one with
+    `phase=0` (begin) and one with `phase=1` (end), both sharing the
+    same `scope_instance_id`. Pairing on the instance id (rather than
+    on the scope name) is correct even for nested scopes with the same
+    name.
+
+    Falls back to an empty list if no `scope_event` rows exist (e.g.
+    the session ran without `with gpufl.Scope(...)` blocks).
+    """
+    pd = _require_pandas()
+    df = _ensure_event_type_col(df)
+    if "event_type" not in df.columns:
+        return []
+    scopes = df[df["event_type"] == "scope_event"].copy()
+    if scopes.empty or "scope_instance_id" not in scopes.columns:
+        return []
+
+    # Sort so begin precedes end within each instance.
+    scopes = scopes.sort_values("ts_ns")
+
+    min_ts = scopes["ts_ns"].min()
+    if pd.isna(min_ts):
+        min_ts = 0
+
+    starts: dict = {}      # scope_instance_id -> (ts_ns, name)
+    intervals = []
+    for _, r in scopes.iterrows():
+        inst = r.get("scope_instance_id")
+        phase = r.get("phase")
+        ts = r.get("ts_ns")
+        name = r.get("name", f"#{r.get('name_id', '?')}")
+        if pd.isna(ts) or pd.isna(inst):
+            continue
+        if phase == 0:
+            starts[inst] = (ts, name)
+        elif phase == 1 and inst in starts:
+            start_ts, start_name = starts.pop(inst)
+            start_sec = (start_ts - min_ts) / 1e9
+            dur_sec = (ts - start_ts) / 1e9
+            intervals.append((start_sec, dur_sec, start_name, {}))
+    return intervals
+
+
+def _kernel_intervals(df):
+    """Extract kernel intervals from expanded `kernel_event` rows.
+
+    Each row already carries `ts_ns` (start) and `duration_ns`, so the
+    interval is a single-row read. `name` is dictionary-resolved by
+    reader.py from `kernel_id`. Extra metadata fields (occupancy,
+    grid/block, regs, shared) come from the kernel_detail records the
+    backend merges separately; in the post-expansion DataFrame they
+    won't be on the same row, so we surface what's available
+    per-launch and leave occupancy off the plot until a kernel_detail
+    join is added.
+    """
+    pd = _require_pandas()
+    df = _ensure_event_type_col(df)
+    if "event_type" not in df.columns:
+        return []
+    kernels = df[df["event_type"] == "kernel_event"].copy()
+    if kernels.empty:
+        return []
+
+    kernels["ts_ns"] = pd.to_numeric(kernels["ts_ns"], errors="coerce")
+    kernels["duration_ns"] = pd.to_numeric(
+        kernels.get("duration_ns", 0), errors="coerce"
+    ).fillna(0)
+    kernels = kernels.dropna(subset=["ts_ns"])
+    if kernels.empty:
+        return []
+
+    min_ts = kernels["ts_ns"].min()
+    intervals = []
+    for _, r in kernels.iterrows():
+        start_sec = (r["ts_ns"] - min_ts) / 1e9
+        dur_sec = r["duration_ns"] / 1e9
+        name = r.get("name", f"#{r.get('kernel_id', '?')}")
+        metrics = {
+            "grid": r.get("grid", ""),
+            "block": r.get("block", ""),
+            "num_regs": r.get("num_regs", 0),
+            "dyn_shared": r.get("dyn_shared", 0),
+            "corr_id": r.get("corr_id", 0),
+            # occupancy lives in kernel_detail (not the batch row); left
+            # unset until reader.py joins kernel_detail by corr_id.
+            "occupancy": 0,
+        }
+        intervals.append((start_sec, dur_sec, name, metrics))
+    return intervals
+
+
 # ==========================================
 # 2. PLOTTERS
 # ==========================================
@@ -205,20 +305,25 @@ def plot_combined_timeline(df, title="GPUFL Timeline"):
     if pd.isna(min_ts): min_ts = 0
 
     # --- Prepare Data ---
-    # Try both "scope_start" and "scope_begin"
-    scope_data = _reconstruct_intervals(df, "scope_start", "scope_end")
+    # v1.0.0+ wire format: scopes come from expanded `scope_event` rows
+    # paired by `scope_instance_id`; kernels from expanded
+    # `kernel_event` rows that carry duration_ns directly. The legacy
+    # `_reconstruct_intervals(scope_start/scope_end, ...)` API is kept
+    # for any older-format logs but no longer the primary path.
+    scope_data = _scope_intervals(df)
     if not scope_data:
-        scope_data = _reconstruct_intervals(df, "scope_begin", "scope_end")
-    
-    if not scope_data:
-        app_data = _reconstruct_intervals(df, "init", "shutdown", name_col="app", fallback_name="App")
-        scope_data.extend(app_data)
+        # Fall back to legacy event names for older log files.
+        scope_data = _reconstruct_intervals(df, "scope_start", "scope_end")
+        if not scope_data:
+            scope_data = _reconstruct_intervals(df, "scope_begin", "scope_end")
+        if not scope_data:
+            scope_data = _reconstruct_intervals(
+                df, "job_start", "shutdown",
+                name_col="app", fallback_name="App",
+            )
 
-    # [NEW] Handle kernel_event
-    kernel_data = _reconstruct_intervals(df, "kernel_event", "kernel_end")
-    if not kernel_data:
-        kernel_data = _reconstruct_intervals(df, "kernel_start", "kernel_end")
-    
+    kernel_data = _kernel_intervals(df)
+
     gpu_samples = _explode_device_samples(df, gpu_id=0)
     host_samples = _explode_host_samples(df)
 
@@ -300,17 +405,28 @@ def plot_combined_timeline(df, title="GPUFL Timeline"):
     ax1.set_title("GPU Metrics", fontsize=10)
     overlay_markers(ax1, y_lim_ref=105)
 
-    # --- Row 2: PCIe Bandwidth (NEW) ---
-    if not gpu_samples.empty:
+    # --- Row 2: PCIe Bandwidth ---
+    # v1.0.0 wire format: `pcie_bw_bps` is a single column carrying the
+    # combined RX+TX rate. The separate RX/TX channels available in the
+    # older per-event format are no longer surfaced by the C++ side, so
+    # this row plots one combined line.
+    if not gpu_samples.empty and "pcie_gbps" in gpu_samples.columns \
+            and gpu_samples["pcie_gbps"].max() > 0:
         t = gpu_samples["t_s_abs"]
-        # Plot RX (Host -> Device) and TX (Device -> Host)
-        ax2.plot(t, gpu_samples["pcie_rx_gbps"], label="PCIe RX (Upload)", color='tab:blue')
-        ax2.plot(t, gpu_samples["pcie_tx_gbps"], label="PCIe TX (Download)", color='tab:cyan', linestyle="--")
-
+        ax2.plot(t, gpu_samples["pcie_gbps"],
+                 label="PCIe BW (RX+TX)", color='tab:blue')
         ax2.set_ylabel("BW (GB/s)")
-        # Dynamically scale Y-axis but keep min at 0
         ax2.set_ylim(bottom=0)
         ax2.legend(loc="upper left", fontsize='x-small')
+    else:
+        # No PCIe data — surface the gap so users don't think the
+        # axis is broken. PCIe only appears in the extended-metric
+        # batch shape, which requires Blackwell-era or driver-side
+        # support for the underlying counters.
+        ax2.set_ylabel("BW (GB/s)")
+        ax2.text(0.5, 0.5, "PCIe bandwidth not collected",
+                 ha='center', va='center', transform=ax2.transAxes,
+                 fontsize=10, color='gray', style='italic')
 
     ax2.grid(True, alpha=0.3)
     ax2.set_title("PCIe Bandwidth", fontsize=10)
