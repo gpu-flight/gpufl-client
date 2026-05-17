@@ -137,14 +137,35 @@ jobs:
         env:
           CIBW_VIRTUALENV_VERSION: "20.27.1"
           CIBW_ENVIRONMENT_LINUX: "CUDA_HOME=/usr/local/cuda PATH=/usr/local/cuda/bin:$PATH CMAKE_ARGS='-DGPUFL_ENABLE_NVIDIA=ON -DGPUFL_ENABLE_AMD=OFF -DBUILD_TESTING=OFF'"
+          # Windows build needs the OpenSSL install path so find_package(OpenSSL)
+          # in CMakeLists.txt succeeds, otherwise HTTPS upload (HttpLogSink)
+          # silently falls back to HTTP-only — see openssl-windows.html in the
+          # manual repo for the user-facing story. CIBW_BEFORE_ALL_WINDOWS
+          # installs choco's openssl package into this path.
+          CIBW_ENVIRONMENT_WINDOWS: >-
+            OPENSSL_ROOT_DIR="C:/Program Files/OpenSSL-Win64"
+            CMAKE_ARGS="-DGPUFL_ENABLE_NVIDIA=ON -DGPUFL_ENABLE_AMD=OFF -DBUILD_TESTING=OFF"
           # cuda-nvml-devel-13-1 ships the libnvidia-ml.so stub under
           # targets/x86_64-linux/lib/stubs/ — without it CMake's NVML probe
           # finds nothing and (since v0.1.1) fails the build loudly. Every
           # release before v0.1.1 silently shipped wheels without NVML
           # because this package was missing here.
+          #
+          # openssl-devel provides the libssl/libcrypto headers + .so stubs
+          # so cpp-httplib's CPPHTTPLIB_OPENSSL_SUPPORT path compiles in.
+          # auditwheel bundles the libssl.so.3 / libcrypto.so.3 SOs into
+          # the wheel under gpufl.libs/ automatically (they're not on the
+          # manylinux_2_28 whitelist and not in our --exclude list).
           CIBW_BEFORE_ALL_LINUX: >-
             curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo > /etc/yum.repos.d/cuda.repo &&
-            dnf install -y --nogpgcheck cuda-nvcc-13-1 cuda-cudart-devel-13-1 cuda-cupti-13-1 cuda-driver-devel-13-1 cuda-nvml-devel-13-1
+            dnf install -y --nogpgcheck cuda-nvcc-13-1 cuda-cudart-devel-13-1 cuda-cupti-13-1 cuda-driver-devel-13-1 cuda-nvml-devel-13-1 openssl-devel
+          # Install OpenSSL on the Windows runner so find_package(OpenSSL)
+          # in CMakeLists.txt succeeds and cpp-httplib gets compiled with
+          # CPPHTTPLIB_OPENSSL_SUPPORT=1. Chocolatey is pre-installed on
+          # GitHub's windows-latest runners; the openssl package installs
+          # to C:\Program Files\OpenSSL-Win64\ (matches OPENSSL_ROOT_DIR
+          # in CIBW_ENVIRONMENT_WINDOWS above).
+          CIBW_BEFORE_ALL_WINDOWS: choco install -y openssl --no-progress
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
           CIBW_BUILD: "cp312-manylinux_x86_64 cp313-manylinux_x86_64 cp312-win_amd64 cp313-win_amd64"
           # libnvidia-ml.so.1 is excluded for the same reason as libcuda.so.1:
@@ -156,7 +177,22 @@ jobs:
           # could not be located"). The toolkit's `libnvidia-ml.so` stub is
           # only the unversioned link-time placeholder — the versioned
           # `.so.1` the SONAME chains to lives on the user's machine.
+          #
+          # libssl/libcrypto are NOT excluded — auditwheel bundles them
+          # under gpufl.libs/ so the wheel ships its own OpenSSL and
+          # HTTPS works on user machines without any system install.
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: "auditwheel repair --plat manylinux_2_28_x86_64 --exclude libcuda.so.1 --exclude libnvidia-ml.so.1 -w {dest_dir} {wheel}"
+          # On Windows, cibuildwheel's default is `delvewheel repair`.
+          # We need delvewheel to find the OpenSSL DLLs (libssl-3-x64.dll,
+          # libcrypto-3-x64.dll) so it copies them into the wheel. The
+          # choco install puts them under C:\Program Files\OpenSSL-Win64\bin\
+          # — give that to delvewheel via --add-path. Without this, the
+          # rebuilt wheel imports cleanly on a system that already has
+          # OpenSSL on PATH but fails on a clean machine.
+          CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: >-
+            delvewheel repair
+            --add-path "C:\\Program Files\\OpenSSL-Win64\\bin"
+            -w {dest_dir} {wheel}
 
       - uses: actions/upload-artifact@v4
         with:

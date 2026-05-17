@@ -23,6 +23,11 @@ namespace {
  * Accepts:  "http://host", "https://host", "http://host:port", "host:port".
  * Strips a trailing slash. Returns false on obviously malformed input.
  */
+int effectivePort(const std::string& scheme, int port) {
+    if (port > 0) return port;
+    return scheme == "https" ? 443 : 80;
+}
+
 bool parseBaseUrl(const std::string& url,
                   std::string& scheme, std::string& host, int& port) {
     std::string u = url;
@@ -72,20 +77,45 @@ std::unique_ptr<httplib::Client> makeClient(
         const std::string& scheme, const std::string& host, int port,
         int connect_timeout_ms, int read_timeout_ms) {
 #if !GPUFL_HTTPLIB_TLS
+    // Without OpenSSL, cpp-httplib's Client(scheme_host_port) ctor
+    // THROWS std::invalid_argument("'https' scheme is not supported.")
+    // for any https:// URL. That throw used to propagate up the worker
+    // thread and abort the whole process (uncaught thread exception →
+    // std::terminate → abort, surfacing as the MSVC "Debug Error!"
+    // dialog). We now refuse the request up front so the sink
+    // gracefully degrades to "file-only" instead of killing the host
+    // application. The user's fix is to install OpenSSL and rebuild —
+    // the diagnostic below tells them exactly that.
     if (scheme == "https") {
         GFL_LOG_ERROR(
-            "[HttpLogSink] https:// requested but OpenSSL was not linked "
-            "at build time. Falling back to http:// — TLS uploads will "
-            "fail until gpufl is rebuilt with OpenSSL available.");
+            "[HttpLogSink] https:// requested but this gpufl build does "
+            "NOT include OpenSSL. Upload disabled for this session; "
+            "file sink continues normally. To enable HTTPS uploads, "
+            "install OpenSSL (vcpkg: `vcpkg install openssl:x64-windows`,"
+            " apt: `libssl-dev`, brew: `openssl`) and rebuild gpufl. "
+            "Or, for local testing only, switch backend_url to http:// "
+            "and point at a non-TLS endpoint.");
+        return nullptr;
     }
 #endif
     std::string scheme_host_port = scheme + "://" + host;
     if (port > 0) scheme_host_port += ":" + std::to_string(port);
-    auto cli = std::make_unique<httplib::Client>(scheme_host_port);
-    cli->set_connection_timeout(0, connect_timeout_ms * 1000);
-    cli->set_read_timeout(0, read_timeout_ms * 1000);
-    cli->set_keep_alive(true);
-    return cli;
+    // Defense in depth: cpp-httplib's Client ctor can still throw on
+    // other malformed URLs (e.g. unknown scheme). Catch here so a bad
+    // URL turns into "upload disabled" rather than process abort.
+    try {
+        auto cli = std::make_unique<httplib::Client>(scheme_host_port);
+        cli->set_connection_timeout(0, connect_timeout_ms * 1000);
+        cli->set_read_timeout(0, read_timeout_ms * 1000);
+        cli->set_keep_alive(true);
+        return cli;
+    } catch (const std::exception& e) {
+        GFL_LOG_ERROR(
+            "[HttpLogSink] httplib::Client construction failed for '",
+            scheme_host_port, "': ", e.what(),
+            ". Upload disabled for this session.");
+        return nullptr;
+    }
 }
 
 }  // namespace
@@ -112,7 +142,8 @@ HttpLogSink::HttpLogSink(Options opts)
     ssl_supported_ = true;
 #endif
     GFL_LOG_DEBUG("[HttpLogSink] parsed URL: scheme=", scheme_,
-                  " host=", host_, " port=", port_,
+                  " host=", host_,
+                  " port=", effectivePort(scheme_, port_),
                   " → worker thread starting");
     running_.store(true, std::memory_order_release);
     worker_ = std::thread([this] { workerLoop(); });
@@ -199,7 +230,8 @@ void HttpLogSink::close() {
 
 void HttpLogSink::workerLoop() {
     GFL_LOG_DEBUG("[HttpLogSink] worker thread running (scheme=", scheme_,
-                  " host=", host_, " port=", port_, ")");
+                  " host=", host_,
+                  " port=", effectivePort(scheme_, port_), ")");
     auto client = makeClient(scheme_, host_, port_,
                              opts_.connect_timeout_ms, opts_.read_timeout_ms);
     if (!client) {
@@ -296,12 +328,17 @@ void HttpLogSink::workerLoop() {
                 opts_.api_path + "/events/" + std::string(type);
             GFL_LOG_DEBUG(
                 "[HttpLogSink] POST attempt=", attempt,
-                " ", scheme_, "://", host_, ":", port_, path,
+                " ", scheme_, "://", host_,
+                ":", effectivePort(scheme_, port_), path,
                 " body_bytes=", wrapped.size(),
                 " (inner_ndjson_bytes=", line.size(), ")");
+            // NOTE: Content-Type is supplied via the 4th Post() argument
+            // below; do NOT also list it in `headers` or cpp-httplib will
+            // emit two Content-Type header lines, which Tomcat joins with
+            // a comma → "application/json,application/json" → Spring
+            // rejects with HttpMediaTypeNotSupportedException.
             httplib::Headers headers = {
                 {"Authorization",                "Bearer " + opts_.api_key},
-                {"Content-Type",                 "application/json"},
                 {"User-Agent",                   ua_header},
                 {"X-GpuFlight-Client-Version",   kClientVersion},
                 {"X-GpuFlight-Wire-Version",     kWireVersion},
@@ -340,6 +377,37 @@ void HttpLogSink::workerLoop() {
                         res->body.substr(0, 200));
                 }
                 auth_failed_.store(true, std::memory_order_release);
+                break;
+            }
+            if (status >= 300 && status < 400) {
+                // 3xx redirect. cpp-httplib doesn't follow redirects
+                // here (cross-scheme http→https needs TLS support and
+                // re-resolving the host), so a redirect almost always
+                // means the user pointed `backend_url` at the wrong
+                // scheme. The most common case in practice: passing
+                // http://api.gpuflight.com to a backend that only
+                // serves https — the LB sends back a 302 to the same
+                // URL with https. Retrying won't help; the next POST
+                // will get the same 302. Surface a clear hint and
+                // drop the line.
+                const std::string location =
+                    res->get_header_value("Location");
+                if (!redirect_warned_.exchange(true)) {
+                    GFL_LOG_ERROR(
+                        "[HttpLogSink] backend returned ", status,
+                        " redirect for ", path,
+                        " — the sink does NOT follow redirects."
+                        " Most likely cause: backend_url is http://"
+                        " but the backend requires https://."
+                        " Configured: scheme=", scheme_,
+                        " host=", host_,
+                        " port=", effectivePort(scheme_, port_),
+                        "; Location header: ",
+                        location.empty() ? "<missing>" : location.substr(0, 200),
+                        ". Fix: pass `backend_url=\"https://", host_,
+                        "\"` (and rebuild gpufl with OpenSSL support"
+                        " if you see a TLS fallback warning above).");
+                }
                 break;
             }
             if (status >= 400 && status < 500) {

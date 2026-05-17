@@ -71,9 +71,29 @@ class HttpLogSink final : public ILogSink {
         /** Bounded in-memory queue depth. Overflow drops oldest. */
         std::size_t queue_capacity = 4096;
 
-        /** Per-request connect + read timeout. */
-        int connect_timeout_ms = 5000;
-        int read_timeout_ms    = 10000;
+        /** Per-request connect + read timeout, in milliseconds.
+         *
+         * `connect_timeout_ms` covers TCP + TLS handshake. 10s gives
+         * room for cold-DNS plus the ~1.5s a fresh TLS handshake can
+         * take on a slow path.
+         *
+         * `read_timeout_ms` covers the wait for the server's response
+         * after the request is fully written. 30s is the standard for
+         * cloud-hosted endpoints (Cloud Run / Lambda) where:
+         *   - a request may land on a freshly-scaled-up replica that
+         *     pays a 5–15s cold-start before processing,
+         *   - server-side ingestion of a multi-KB batch can take
+         *     several seconds under load.
+         *
+         * The previous 10s default was too tight for the batch endpoints
+         * (kernel_event_batch, profile_sample_batch) once they grew past
+         * ~10 KB — POSTs would routinely timeout with httplib::Error=4
+         * (Read) on cold replicas even though the server eventually
+         * succeeded. Bump if you see persistent Read errors in stderr;
+         * lower if you'd rather fail fast on unreachable backends.
+         */
+        int connect_timeout_ms = 10000;
+        int read_timeout_ms    = 30000;
 
         /** Retry budget per line (0 = no retries). */
         int max_retries = 3;
@@ -176,6 +196,11 @@ class HttpLogSink final : public ILogSink {
     // is persistently full or auth keeps failing.
     std::atomic<bool>          overflow_warned_{false};
     std::atomic<bool>          auth_warned_{false};
+    // First 3xx redirect on any POST logs a one-time hint (almost
+    // always "you passed http:// to an https-only backend"); silently
+    // dropped thereafter so a flood of redirects from a misconfigured
+    // session doesn't spam the log.
+    std::atomic<bool>          redirect_warned_{false};
 };
 
 }  // namespace gpufl
