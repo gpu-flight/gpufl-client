@@ -144,15 +144,13 @@ int main() {
     gpufl::InitOptions opts;
     opts.app_name = "sass_divergence_demo";
     opts.log_path = "sass_divergence";
-    if (const char* k = std::getenv("GPUFL_API_KEY")) opts.api_key = k;
-    opts.backend_url = "http://localhost:8080";
-    opts.remote_upload = true;
+    opts.remote_upload = false;
     opts.system_sample_rate_ms = 10;
     opts.enable_kernel_details = true;
     opts.enable_debug_output = true;
     opts.sampling_auto_start = true;
     opts.enable_stack_trace = true;
-    opts.profiling_engine = gpufl::ProfilingEngine::PcSampling;
+    opts.profiling_engine = gpufl::ProfilingEngine::PcSamplingWithSass;
 
     if (!gpufl::init(opts)) {
         std::cerr << "Failed to initialize gpufl" << std::endl;
