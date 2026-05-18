@@ -61,7 +61,6 @@ int main() {
     opts.log_path = "memory_coalescing_demo";
     opts.system_sample_rate_ms = 10;
     opts.kernel_sample_rate_ms = 10;
-    opts.enable_kernel_details = true;
     opts.sampling_auto_start = true;
     opts.enable_debug_output = true;
     opts.profiling_engine = gpufl::ProfilingEngine::PcSamplingWithSass;

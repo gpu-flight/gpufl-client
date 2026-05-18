@@ -31,8 +31,7 @@ def run_stress_test():
                sampling_auto_start=True,
                system_sample_rate_ms=50,
                kernel_sample_rate_ms=50,
-               enable_kernel_details=True,
-               enable_debug_output=True,
+               enable_debug_output=False,
                enable_stack_trace=True,
                # opt-in to memory tracking. Default-off in v1
                # because TF eager and similar workloads can produce
@@ -48,7 +47,7 @@ def run_stress_test():
                remote_upload=remote_upload,
                api_key=api_key,
                backend_url=backend_url,
-               profiling_engine=gpufl.ProfilingEngine.PcSamplingWithSass)
+               profiling_engine=gpufl.ProfilingEngine.PcSampling)
 
     try:
         # 2. Allocate (Uses approx 3GB VRAM)

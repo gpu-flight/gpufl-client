@@ -18,7 +18,6 @@ struct InitOptions {
     int kernel_sample_rate_ms = 0;
     BackendKind backend = BackendKind::Auto;
     bool sampling_auto_start = false;
-    bool enable_kernel_details = false;
     bool enable_debug_output = false;
     bool enable_stack_trace = false;
     bool enable_source_collection = true;  // collect source file content for source/SASS correlation
