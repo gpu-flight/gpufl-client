@@ -297,5 +297,13 @@ To allow non-root users to profile GPU kernels (using CUPTI/PC Sampling) on Linu
 
 ---
 
-*GPU Flight is open source: [github.com/gpu-flight](https://github.com/gpu-flight)*
-*Python package: [pypi.org/project/gpufl](https://pypi.org/project/gpufl/)*
+## Where your logs go
+
+By default the client writes NDJSON to disk. To stream them to a hosted
+dashboard, set `backend_url` + `api_key` (or the `GPUFL_BACKEND_URL` /
+`GPUFL_API_KEY` env vars) and they're delivered live to
+[app.gpuflight.com](https://app.gpuflight.com). Create a workspace at
+[gpuflight.com](https://gpuflight.com)
+
+This client (gpufl-client) is open source. The ingestion service and
+the dashboard UI are proprietary and managed-only today.
