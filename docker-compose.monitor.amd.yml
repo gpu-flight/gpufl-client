@@ -22,9 +22,13 @@ services:
       GPUFL_LOG_TYPES: ${GPUFL_LOG_TYPES:-device,scope,system}
       GPUFL_CURSOR_FILE: ${GPUFL_CURSOR_FILE:-/var/gpufl/monitor/cursor.json}
 
-      # Java agent — publisher (HTTP)
+      # Java agent — publisher (HTTP). Set GPUFL_HTTP_HOST to just the
+      # scheme+host (e.g. https://api.gpuflight.com); the agent builds
+      # the /api/{version}/events/<type> path itself. Override the
+      # version via GPUFL_HTTP_API_VERSION when the backend bumps to v2.
       GPUFL_PUBLISHER_TYPE: ${GPUFL_PUBLISHER_TYPE:-http}
-      GPUFL_HTTP_URL: ${GPUFL_HTTP_URL}
+      GPUFL_HTTP_HOST: ${GPUFL_HTTP_HOST}
+      GPUFL_HTTP_API_VERSION: ${GPUFL_HTTP_API_VERSION:-v1}
       GPUFL_HTTP_TOKEN: ${GPUFL_HTTP_TOKEN:-}
       GPUFL_HTTP_TIMEOUT_SEC: ${GPUFL_HTTP_TIMEOUT_SEC:-10}
 

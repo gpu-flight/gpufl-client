@@ -79,7 +79,7 @@ docker build \
 Copy `.env.example` to `.env` and set the required variables, then:
 
 ```bash
-GPUFL_HTTP_URL=https://your-backend/api/v1/events/ \
+GPUFL_HTTP_HOST=https://your-backend \
 GPUFL_HTTP_TOKEN=gfl_your_token_here \
 docker compose -f docker-compose.monitor.yml up -d
 ```
@@ -99,7 +99,7 @@ docker compose -f docker-compose.monitor.yml down
 ### AMD
 
 ```bash
-GPUFL_HTTP_URL=https://your-backend/api/v1/events/ \
+GPUFL_HTTP_HOST=https://your-backend \
 GPUFL_HTTP_TOKEN=gfl_your_token_here \
 docker compose -f docker-compose.monitor.amd.yml up -d
 ```
@@ -127,7 +127,7 @@ docker run -d \
   --name gpufl-monitor \
   --gpus all \
   --restart unless-stopped \
-  -e GPUFL_HTTP_URL=https://your-backend/api/v1/events/ \
+  -e GPUFL_HTTP_HOST=https://your-backend \
   -e GPUFL_HTTP_TOKEN=gfl_your_token_here \
   -v gpufl-cursor:/var/gpufl/monitor \
   gpufl/monitor:latest
@@ -141,7 +141,7 @@ docker run -d \
   --device /dev/kfd --device /dev/dri \
   --group-add video --group-add render \
   --restart unless-stopped \
-  -e GPUFL_HTTP_URL=https://your-backend/api/v1/events/ \
+  -e GPUFL_HTTP_HOST=https://your-backend \
   -e GPUFL_HTTP_TOKEN=gfl_your_token_here \
   -v gpufl-cursor-amd:/var/gpufl/monitor \
   gpufl/monitor-amd:latest
@@ -175,7 +175,8 @@ The named volume persists the agent's read cursor so it resumes from where it le
 | Variable | Default | Description |
 |---|---|---|
 | `GPUFL_PUBLISHER_TYPE` | `http` | Publisher backend: `http` or `kafka` |
-| `GPUFL_HTTP_URL` | *(required)* | Backend ingest URL, e.g. `https://app.gpuflight.io/api/v1/events/` |
+| `GPUFL_HTTP_HOST` | *(required)* | Backend scheme+host, e.g. `https://api.gpuflight.com`. The agent appends `/api/{version}/events/<type>` automatically. |
+| `GPUFL_HTTP_API_VERSION` | `v1` | Backend API version. Bump when the backend cuts v2 etc. |
 | `GPUFL_HTTP_TOKEN` | *(empty)* | Bearer token for the backend API |
 | `GPUFL_HTTP_TIMEOUT_SEC` | `10` | HTTP request timeout in seconds |
 
