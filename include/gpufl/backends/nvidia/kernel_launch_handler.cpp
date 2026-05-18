@@ -208,8 +208,7 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
             meta.scope_depth = 0;
         }
 
-        if (backend_->GetOptions().collect_kernel_details &&
-            cbInfo->functionParams != nullptr) {
+        if (cbInfo->functionParams != nullptr) {
             if (domain == CUPTI_CB_DOMAIN_RUNTIME_API &&
                 cbid == CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_v7000) {
                 meta.has_details = true;

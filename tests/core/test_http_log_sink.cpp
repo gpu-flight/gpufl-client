@@ -28,6 +28,11 @@ struct TestServer {
         std::string path;
         std::string body;
         std::string authorization;
+        // Captured per-request so we can guard against the regression
+        // where the sink emitted two Content-Type lines that Tomcat
+        // joined into "application/json,application/json" → 415.
+        std::size_t content_type_count{0};
+        std::string content_type;
     };
     std::mutex         mu;
     std::vector<Capture> captured;
@@ -45,6 +50,9 @@ struct TestServer {
                     c.path = req.path;
                     c.body = req.body;
                     c.authorization = req.get_header_value("Authorization");
+                    c.content_type_count =
+                        req.get_header_value_count("Content-Type");
+                    c.content_type = req.get_header_value("Content-Type");
                     captured.push_back(std::move(c));
                 }
                 res.status = forced_status.load();
@@ -130,6 +138,43 @@ TEST(HttpLogSink, EnqueuedLinesReachBackendWithAuthAndTypeRouting) {
     EXPECT_EQ(sink.failedCount(),   0u);
 }
 
+// ── Regression: Content-Type emitted exactly once ───────────────────────────
+//
+// cpp-httplib's Post(path, headers, body, content_type) accepts the
+// content type via BOTH a headers-map entry AND a dedicated 4th
+// argument. If both are set, two Content-Type headers go out, and
+// Spring/Tomcat join them as "application/json,application/json",
+// which fails MIME parsing with HttpMediaTypeNotSupportedException.
+// This test pins the contract: exactly one Content-Type header per
+// POST, value "application/json".
+
+TEST(HttpLogSink, ContentTypeHeaderEmittedExactlyOnce) {
+    TestServer srv;
+
+    gpufl::HttpLogSink::Options opts;
+    opts.base_url = srv.base_url();
+    opts.api_key  = "gpfl_ct_test";
+    gpufl::HttpLogSink sink(std::move(opts));
+
+    sink.write(gpufl::Channel::All,
+               R"({"type":"job_start","app":"ct"})");
+
+    ASSERT_TRUE(waitFor(
+        [&] { return srv.capturedCount() >= 1; },
+        std::chrono::seconds(5)));
+    sink.close();
+
+    auto caps = srv.snapshot();
+    ASSERT_FALSE(caps.empty());
+    for (const auto& c : caps) {
+        EXPECT_EQ(c.content_type_count, 1u)
+            << "expected exactly one Content-Type header; got "
+            << c.content_type_count
+            << " (duplicates → Spring 415 in prod)";
+        EXPECT_EQ(c.content_type, "application/json");
+    }
+}
+
 // ── Per-session HTTP byte tally ──────────────────────────────────────────────
 //
 // `bytesUploadedCount()` is the running total of request body bytes
@@ -193,6 +238,70 @@ TEST(HttpLogSink, FiveHundredsExhaustRetriesThenDrop) {
     sink.close();
     // 1 original attempt + 3 retries = 4 requests on the server side.
     EXPECT_EQ(srv.requests.load(), 4);
+    EXPECT_EQ(sink.uploadedCount(), 0u);
+    EXPECT_EQ(sink.failedCount(),   1u);
+}
+
+// ── Regression: https:// on a non-TLS build degrades, doesn't abort ────────
+//
+// Before the guard in makeClient, passing an https:// URL on a build
+// without OpenSSL caused cpp-httplib's Client ctor to throw
+// `std::invalid_argument("'https' scheme is not supported.")` from the
+// worker thread, which propagated to std::terminate → abort → MSVC
+// "Debug Error!" dialog. Now we refuse the URL up front and the sink
+// degrades to file-only instead of killing the host application.
+// This test is only meaningful on a non-TLS build; on a TLS build the
+// https URL would actually try to dial out, which we don't want in
+// unit tests.
+#if !defined(CPPHTTPLIB_OPENSSL_SUPPORT)
+TEST(HttpLogSink, HttpsWithoutTlsDoesNotAbort) {
+    gpufl::HttpLogSink::Options opts;
+    opts.base_url = "https://api.gpuflight.com";
+    opts.api_key  = "gpfl_test";
+    // Constructor must not crash even though https isn't supported.
+    gpufl::HttpLogSink sink(std::move(opts));
+    // Writing a line must not crash either; it should be silently
+    // dropped after the worker thread exits when makeClient returns
+    // nullptr.
+    sink.write(gpufl::Channel::All,
+               R"({"type":"job_start","app":"x"})");
+    sink.close();
+    EXPECT_EQ(sink.uploadedCount(), 0u);
+}
+#endif
+
+// ── Regression: 3xx redirects don't get retried as 5xx ──────────────────────
+//
+// Before the fix, the retry classifier only special-cased [400, 500);
+// anything else (including 3xx redirects) hit the "5xx retry" branch
+// and burned the retry budget — producing log lines like
+// "5xx response (302) — retrying after 50ms". The real-world trigger
+// was passing `backend_url=http://api.gpuflight.com` to an https-only
+// backend, which sends a 302 to the same URL with https. This test
+// pins the new contract: a single 302 produces a single POST attempt,
+// no retries, and the line is dropped (since the sink intentionally
+// does not follow redirects across schemes).
+
+TEST(HttpLogSink, ThreeOhTwoIsNotRetried) {
+    TestServer srv;
+    srv.forced_status.store(302);
+
+    gpufl::HttpLogSink::Options opts;
+    opts.base_url = srv.base_url();
+    opts.api_key  = "gpfl_test";
+    opts.max_retries = 3;
+    gpufl::HttpLogSink sink(std::move(opts));
+
+    sink.write(gpufl::Channel::All,
+               R"({"type":"job_start","app":"x"})");
+
+    ASSERT_TRUE(waitFor(
+        [&] { return sink.failedCount() >= 1; },
+        std::chrono::seconds(5)));
+    sink.close();
+
+    // Exactly one attempt — no retries — regardless of max_retries.
+    EXPECT_EQ(srv.requests.load(), 1);
     EXPECT_EQ(sink.uploadedCount(), 0u);
     EXPECT_EQ(sink.failedCount(),   1u);
 }

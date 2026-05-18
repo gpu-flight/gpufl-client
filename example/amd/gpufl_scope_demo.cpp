@@ -130,7 +130,6 @@ int main() {
     opts.system_sample_rate_ms = 50;
     opts.kernel_sample_rate_ms = 0;
     opts.sampling_auto_start = true;
-    opts.enable_kernel_details = true;
     opts.enable_debug_output = true;
     opts.enable_stack_trace = false;
     opts.profiling_engine = gpufl::ProfilingEngine::SassMetrics;

@@ -104,7 +104,6 @@ except ImportError as e:
             self.system_sample_rate_ms = 0
             self.kernel_sample_rate_ms = 0
             self.backend = BackendKind.Auto
-            self.enable_kernel_details = False
             self.enable_debug_output = False
             self.enable_stack_trace = False
             self.enable_source_collection = True

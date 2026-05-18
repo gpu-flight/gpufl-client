@@ -53,7 +53,6 @@ enum class ProfilingEngine {
 };
 
 struct MonitorOptions {
-    bool collect_kernel_details = false;
     bool enable_debug_output = false;
     bool enable_stack_trace = false;
     bool enable_source_collection = true;

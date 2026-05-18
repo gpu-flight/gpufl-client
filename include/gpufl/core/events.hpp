@@ -72,12 +72,24 @@ struct InitEvent {
     HostSample host;
     std::vector<DeviceSample> devices;
     std::vector<GpuStaticDeviceInfo> gpu_static_device_infos;
-    // session_kind     : "trace" | "monitor" — vendor-agnostic; the
-    //                    Traces page filters on it.
+    // session_kind     : "trace" | "monitor" — vendor-agnostic.
+    //                    Pre-Phase-A this drove a Traces / Monitor-
+    //                    streams tab split on the frontend; the split
+    //                    was removed in May 2026 (the kernel-data
+    //                    axis turned out more informative than the
+    //                    engine-ran axis), but session_kind is still
+    //                    emitted so older deployments survive +
+    //                    analytics can still ask "what fraction of
+    //                    sessions ran with an engine?".
     // profiling_engine : vendor-namespaced detail like
-    //                    "nvidia.pc_sampling". Empty string when
-    //                    session_kind = "monitor". Stored verbatim
-    //                    by the backend (no enum, just a label).
+    //                    "nvidia.pc_sampling" / "nvidia.sass_metrics"
+    //                    / "nvidia.none" (the latter is the explicit
+    //                    "user chose ProfilingEngine::None" sentinel).
+    //                    Stored verbatim by the backend.
+    //                    The "nvidia.none" string lets the backend
+    //                    distinguish "user explicitly disabled
+    //                    profiling" from "pre-V40 client that omitted
+    //                    the field" — both used to collapse to NULL.
     // Both populated in gpufl::init() from the resolved
     // MonitorOptions::profiling_engine. The C++ enum → string mapping
     // lives next to the InitEvent build site (gpufl.cpp).
