@@ -27,7 +27,6 @@ int main() {
     opts.log_path = "vector_add_benchmark";
     opts.system_sample_rate_ms = 50;
     opts.kernel_sample_rate_ms = 50;
-    opts.enable_kernel_details = true;
     opts.sampling_auto_start = true;
     opts.enable_debug_output = true;
     opts.enable_source_collection = true;
