@@ -85,7 +85,6 @@ TEST(WireContract, JobStartShape) {
     EXPECT_TRUE(JsonContains(json, "\"profiling_engine\":\"nvidia.pc_sampling\""));
 }
 
-// profiling_engine is omitted entirely for monitor sessions (empty string).
 TEST(WireContract, JobStartOmitsEmptyProfilingEngine) {
     gpufl::InitEvent e;
     e.pid = 1;
@@ -101,6 +100,22 @@ TEST(WireContract, JobStartOmitsEmptyProfilingEngine) {
     EXPECT_EQ(json.find("\"profiling_engine\""), std::string::npos)
         << "profiling_engine must be omitted (not emitted empty) for monitor "
            "sessions: " << json;
+}
+
+TEST(WireContract, JobStartEmitsNvidiaNoneSentinel) {
+    gpufl::InitEvent e;
+    e.pid = 1;
+    e.app = "explicit_none_app";
+    e.session_id = "sess-3";
+    e.ts_ns = 1;
+    e.session_kind = "monitor";
+    e.profiling_engine = "nvidia.none";
+
+    const std::string json = gpufl::model::InitEventModel(e).buildJson();
+
+    EXPECT_TRUE(JsonContains(json, "\"session_kind\":\"monitor\""));
+    EXPECT_TRUE(JsonContains(json, "\"profiling_engine\":\"nvidia.none\""))
+        << "explicit-None sessions must emit profiling_engine: nvidia.none: " << json;
 }
 
 // ── shutdown ──────────────────────────────────────────────────────────────

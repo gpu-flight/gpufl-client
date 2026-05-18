@@ -348,7 +348,6 @@ bool init(const InitOptions& opts) {
 
     GFL_LOG_DEBUG("Initializing Monitor (CUPTI)...");
     MonitorOptions mOpts;
-    mOpts.collect_kernel_details = g_opts.enable_kernel_details;
     mOpts.enable_debug_output = g_opts.enable_debug_output;
     mOpts.profiling_engine = g_opts.profiling_engine;
 
@@ -363,9 +362,6 @@ bool init(const InitOptions& opts) {
         GFL_LOG_DEBUG("GPUFL_PROFILING_ENGINE override: ", val);
     }
     mOpts.kernel_sample_rate_ms = g_opts.kernel_sample_rate_ms;
-    if (mOpts.profiling_engine != ProfilingEngine::None) {
-        mOpts.collect_kernel_details = true;
-    }
     mOpts.enable_stack_trace = g_opts.enable_stack_trace;
     mOpts.enable_source_collection = g_opts.enable_source_collection;
     // Propagate the framework-correlation flag to the backend so
@@ -441,17 +437,10 @@ bool init(const InitOptions& opts) {
     }
     ie.host = rt_ptr->host_collector->sample();
 
-    // V40 — derive vendor-agnostic session_kind + vendor-namespaced
-    // profiling_engine string from the resolved MonitorOptions. Used
-    // by the backend to tab-split the Sessions page (trace vs monitor)
-    // and to render an engine-specific badge on session detail.
-    // Keeping the mapping at the InitEvent build site (rather than
-    // inside the enum itself) means the C++ enum stays pure brand
-    // names ("PcSampling") while the wire format is namespaced.
     switch (mOpts.profiling_engine) {
         case ProfilingEngine::None:
             ie.session_kind = "monitor";
-            ie.profiling_engine = "";  // empty string → JSON omits or sends ""
+            ie.profiling_engine = "nvidia.none";
             break;
         case ProfilingEngine::PcSampling:
             ie.session_kind = "trace";

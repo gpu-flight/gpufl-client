@@ -112,9 +112,6 @@ void applyRemoteConfigToOpts(const json::JsonValue& cfg, InitOptions& opts) {
     updateIfPresent("enable_stack_trace", [&](const json::JsonValue& v) {
         if (v.is_bool()) opts.enable_stack_trace = v.get_bool();
     });
-    updateIfPresent("enable_kernel_details", [&](const json::JsonValue& v) {
-        if (v.is_bool()) opts.enable_kernel_details = v.get_bool();
-    });
     updateIfPresent("enable_source_collection", [&](const json::JsonValue& v) {
         if (v.is_bool()) opts.enable_source_collection = v.get_bool();
     });

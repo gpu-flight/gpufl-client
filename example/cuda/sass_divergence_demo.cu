@@ -146,7 +146,6 @@ int main() {
     opts.log_path = "sass_divergence";
     opts.remote_upload = false;
     opts.system_sample_rate_ms = 10;
-    opts.enable_kernel_details = true;
     opts.enable_debug_output = true;
     opts.sampling_auto_start = true;
     opts.enable_stack_trace = true;

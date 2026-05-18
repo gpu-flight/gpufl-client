@@ -59,7 +59,8 @@ PYBIND11_MODULE(_gpufl_client, m) {
         .def_readwrite("system_sample_rate_ms", &gpufl::InitOptions::system_sample_rate_ms)
         .def_readwrite("kernel_sample_rate_ms", &gpufl::InitOptions::kernel_sample_rate_ms)
         .def_readwrite("backend",               &gpufl::InitOptions::backend)
-        .def_readwrite("enable_kernel_details", &gpufl::InitOptions::enable_kernel_details)
+        // `enable_kernel_details` binding removed May 2026 — kernel
+        // grid/block details are now always captured. See gpufl.hpp.
         .def_readwrite("enable_debug_output",   &gpufl::InitOptions::enable_debug_output)
         .def_readwrite("enable_stack_trace",    &gpufl::InitOptions::enable_stack_trace)
         .def_readwrite("enable_source_collection", &gpufl::InitOptions::enable_source_collection)
@@ -92,7 +93,6 @@ PYBIND11_MODULE(_gpufl_client, m) {
                      int system_sample_rate_ms,
                      int kernel_sample_rate_ms,
                      gpufl::BackendKind backend,
-                     bool enable_kernel_details,
                      bool enable_debug_output,
                      bool enable_stack_trace,
                      bool enable_source_collection,
@@ -114,7 +114,6 @@ PYBIND11_MODULE(_gpufl_client, m) {
         opts.system_sample_rate_ms = system_sample_rate_ms;
         opts.kernel_sample_rate_ms = kernel_sample_rate_ms;
         opts.backend               = backend;
-        opts.enable_kernel_details = enable_kernel_details;
         opts.enable_debug_output   = enable_debug_output;
         opts.enable_stack_trace    = enable_stack_trace;
         opts.enable_source_collection = enable_source_collection;
@@ -136,7 +135,6 @@ PYBIND11_MODULE(_gpufl_client, m) {
        py::arg("system_sample_rate_ms")       = 0,
        py::arg("kernel_sample_rate_ms")       = 0,
        py::arg("backend")                     = gpufl::BackendKind::Auto,
-       py::arg("enable_kernel_details")       = false,
        py::arg("enable_debug_output")         = false,
        py::arg("enable_stack_trace")          = false,
        py::arg("enable_source_collection")    = true,

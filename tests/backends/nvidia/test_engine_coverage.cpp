@@ -78,7 +78,6 @@ class EngineCoverageTest
         opts.app_name = "engine_coverage";
         opts.log_path = (log_dir_ / log_prefix_).string();
         opts.profiling_engine = engine;
-        opts.enable_kernel_details = true;
         opts.enable_source_collection = true;
         opts.system_sample_rate_ms = 100;
 

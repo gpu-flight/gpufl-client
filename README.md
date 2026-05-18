@@ -83,7 +83,6 @@ import gpufl
 gpufl.init("my-app",
            log_path="./my_logs",
            sampling_auto_start=True,
-           enable_kernel_details=True,
            enable_stack_trace=True)
 
 a = torch.randn(1024, 1024, device="cuda")
@@ -105,8 +104,7 @@ from gpufl import ProfilingEngine
 
 gpufl.init("my-app",
            log_path="./logs",
-           profiling_engine=ProfilingEngine.PcSampling,
-           enable_kernel_details=True)
+           profiling_engine=ProfilingEngine.PcSampling)
 ```
 
 | Engine | What it collects | Analyzer method | Best for |
@@ -122,7 +120,6 @@ gpufl.init("my-app",
 gpufl::InitOptions opts;
 opts.app_name = "my_app";
 opts.log_path = "my_logs";
-opts.enable_kernel_details = true;
 opts.enable_stack_trace = true;
 opts.sampling_auto_start = true;
 opts.profiling_engine = gpufl::ProfilingEngine::SassMetrics;

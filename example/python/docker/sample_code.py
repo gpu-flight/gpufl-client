@@ -10,7 +10,6 @@ print(f"Device: {torch.cuda.get_device_name(0)}")
 gpufl.init("smoke-test",
            log_path="./smoke_test",
            sampling_auto_start=True,
-           enable_kernel_details=True,
            enable_stack_trace=True,
            profiling_engine = ProfilingEngine.RangeProfiler)
 
