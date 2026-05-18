@@ -13,7 +13,9 @@ if not defined GPUFL_HTTP_TOKEN (
     echo.
 )
 
-set GPUFL_HTTP_URL=http://host.docker.internal:8080/api/v1/events/
+REM Just the scheme+host — the agent appends /api/{version}/events/<type>.
+REM Override the API version with GPUFL_HTTP_API_VERSION when needed.
+set GPUFL_HTTP_HOST=http://host.docker.internal:8080
 
 pushd %~dp0..\..
 docker compose -f docker-compose.monitor.yml up --build
