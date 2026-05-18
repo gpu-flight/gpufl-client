@@ -5,9 +5,13 @@
 #
 # Run:
 #   docker run --gpus all \
-#     -e GPUFL_HTTP_URL=http://my-backend:8080/api/v1/events/ \
+#     -e GPUFL_HTTP_HOST=https://api.gpuflight.com \
 #     -e GPUFL_HTTP_TOKEN=gfl_... \
 #     gpufl/monitor:latest
+#
+# GPUFL_HTTP_HOST is just the scheme+host. The agent appends the
+# /api/{version}/events/<type> path automatically; override the
+# version with GPUFL_HTTP_API_VERSION when the backend cuts v2 etc.
 #
 # The Java agent JAR is pulled from the pre-built ghcr.io/gpu-flight/gpufl-agent image.
 # No local gpufl-agent checkout is required.
