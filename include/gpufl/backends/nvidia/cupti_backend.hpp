@@ -45,6 +45,23 @@ class CuptiBackend : public IMonitorBackend {
     bool IsMonitoringMode() override { return true; }
     bool IsProfilingMode()  override { return engine_ != nullptr; }
 
+    // Whether the active engine consumes cubin binaries. Cubin capture
+    // feeds two consumers, and both want the binary for the SAME three
+    // instruction-level engines:
+    //   1. disassembly (nvdisasm → cubin_disassembly events for the
+    //      Source/SASS dashboard view), and
+    //   2. the engine's own per-PC cubin lookups (PcSampling and
+    //      SassMetrics read cubin_by_crc_ to correlate samples).
+    // None (monitoring only) and RangeProfiler (scope-level HW counters)
+    // need neither, so we skip cubin capture/disassembly entirely for
+    // them — there's no per-instruction data to attach it to. This is
+    // what makes profiling_engine=None truly "monitoring only".
+    bool NeedsCubinCapture() const {
+        return opts_.profiling_engine == ProfilingEngine::PcSampling ||
+               opts_.profiling_engine == ProfilingEngine::SassMetrics ||
+               opts_.profiling_engine == ProfilingEngine::PcSamplingWithSass;
+    }
+
     void RegisterHandler(const std::shared_ptr<ICuptiHandler>& handler);
 
     bool IsActive() const { return active_.load(); }
