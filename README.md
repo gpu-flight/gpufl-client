@@ -257,6 +257,60 @@ viz.show()
 
 ---
 
+## Report Generation
+
+For a quick, shareable text summary of a session — session metadata, kernel
+hotspots, duration percentiles, and system metrics — generate a **text report**.
+It's the fastest way to see "what happened" without opening the dashboard, and
+it drops cleanly into CI logs, PR comments, or a plain terminal.
+
+![Text report example](images/Screenshot2.png)
+
+The report includes:
+- **Session Summary** — app name, session ID, duration, GPU device + SM count.
+- **Kernel Execution Summary** — total / unique kernels, GPU-busy %, and
+  duration statistics (avg / median / P90 / P99 / min / max). When a SASS
+  profiling engine was active, kernel durations include instrumentation
+  overhead and the report labels them accordingly.
+- **Top kernels by total GPU time** — with per-kernel call counts.
+- **Per-kernel details** — grid/block dimensions, occupancy, registers,
+  shared memory (static + dynamic), register spills, and Waves/SM.
+
+### From C++
+
+Call `generateReport()` after `shutdown()` — it reads the NDJSON logs written
+during the session:
+
+```cpp
+gpufl::init(opts);
+// ... your CUDA / HIP work ...
+gpufl::shutdown();
+
+gpufl::generateReport();               // print to stdout
+gpufl::generateReport("report.txt");   // or save to a file
+```
+
+### From Python
+
+```python
+from gpufl.report import generate_report
+
+# Print the report — wrap in print() so newlines render. In a Jupyter
+# notebook this also keeps the table columns aligned (stdout renders in
+# a monospace font). A bare `generate_report(...)` as a cell's last
+# expression shows an escaped one-line string, so always print() it.
+text = generate_report("./logs", log_prefix="my_app", top_n=10)
+print(text)
+
+# Or save it straight to a file
+generate_report("./logs", log_prefix="my_app", top_n=10, output_path="report.txt")
+```
+
+The Python version reads the same NDJSON logs the analyzer uses — no GPU
+required, so you can generate reports from logs copied off another machine.
+
+---
+
 ## Testing
 
 ### C++ Tests

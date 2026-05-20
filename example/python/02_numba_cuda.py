@@ -1,7 +1,9 @@
 import gpufl as gfl
+from gpufl.report import generate_report
 import numpy as np
 from numba import cuda
 import math
+import os
 import time
 
 # --- 1. Define a Real CUDA Kernel (Matrix Mul) ---
@@ -20,9 +22,13 @@ def matmul_kernel(A, B, C):
 
 def run_benchmark():
     # --- 2. Initialize GPUFL ---
-    # We enable the background sampler (16ms) to catch VRAM/Power usage during the heavy compute
+    # We enable the background sampler (16ms) to catch VRAM/Power usage during the heavy compute.
+    # LOG_PATH is the file prefix the FileLogSink writes to — it produces
+    # <LOG_PATH>.device.log / .scope.log / .system.log. We reuse it below
+    # to point generate_report() at the same files.
+    LOG_PATH = "./gfl_logs"
     print("[GPUFL] Initializing...")
-    gfl.init("Numba_App", "./gfl_logs", 100)
+    gfl.init("Numba_App", LOG_PATH, 100)
 
     try:
         # --- 3. Setup Data (Heavy Load) ---
@@ -69,6 +75,21 @@ def run_benchmark():
         # --- 5. Cleanup ---
         print("[GPUFL] Shutting down...")
         gfl.shutdown()
+
+        # --- 6. Generate a text report from the logs we just wrote ---
+        # shutdown() above flushes and closes the NDJSON channels, so the
+        # report reflects the full session. generate_report reads the same
+        # logs the analyzer uses — no GPU required for this step. We split
+        # LOG_PATH into (dir, prefix) the way GpuFlightSession expects:
+        #   "./gfl_logs" -> dir=".", prefix="gfl_logs"
+        #                -> reads ./gfl_logs.{device,scope,system}.log
+        # Wrap in print() so the report renders with real newlines (and,
+        # in a Jupyter notebook, in the monospace stdout area so the
+        # kernel tables stay aligned).
+        log_dir = os.path.dirname(LOG_PATH) or "."
+        log_prefix = os.path.basename(LOG_PATH)
+        print("\n[GPUFL] Session report:\n")
+        print(generate_report(log_dir, log_prefix=log_prefix, top_n=10))
 
 if __name__ == "__main__":
     if cuda.is_available():
