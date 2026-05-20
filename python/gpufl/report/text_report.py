@@ -508,6 +508,14 @@ def generate_report(
     top_n: int = 10,
     output_path: str = None,
 ) -> str:
+    """Generate the text session report.
+
+    Returns the report as a plain string. In a Jupyter notebook, wrap
+    the call in ``print(...)`` so it renders with real newlines in the
+    monospace stdout area (a bare ``generate_report(...)`` as a cell's
+    last expression shows the escaped repr). Pass ``output_path`` to
+    also write it to a file.
+    """
     session = GpuFlightSession(log_dir, session_id=session_id, log_prefix=log_prefix)
     report = TextReport(session, top_n=top_n)
     text = report.generate()
