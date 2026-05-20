@@ -44,6 +44,15 @@ void ResourceHandler::handle(CUpti_CallbackDomain domain, CUpti_CallbackId cbid,
 
     if (cbid == CUPTI_CBID_RESOURCE_MODULE_LOADED ||
         cbid == CUPTI_CBID_RESOURCE_MODULE_PROFILED) {
+        // Only capture cubins when the active engine actually consumes
+        // them. For profiling_engine=None (monitoring only) and
+        // RangeProfiler (scope-level HW counters) there is no per-PC data
+        // to overlay disassembly on, so capturing + disassembling +
+        // uploading cubins would be pure waste. Gating here keeps
+        // "monitoring only" truly monitoring-only and stops the
+        // cubin_disassembly bloat seen with PyTorch under None.
+        if (!backend_->NeedsCubinCapture()) return;
+
         auto *modData = static_cast<CUpti_ModuleResourceData *>(
             resourceData->resourceDescriptor);
         if (modData && modData->pCubin && modData->cubinSize > 0) {
