@@ -22,13 +22,32 @@ def matmul_kernel(A, B, C):
 
 def run_benchmark():
     # --- 2. Initialize GPUFL ---
-    # We enable the background sampler (16ms) to catch VRAM/Power usage during the heavy compute.
     # LOG_PATH is the file prefix the FileLogSink writes to — it produces
     # <LOG_PATH>.device.log / .scope.log / .system.log. We reuse it below
     # to point generate_report() at the same files.
     LOG_PATH = "./gfl_logs"
+
+    BACKEND_URL = os.environ.get("GPUFL_BACKEND_URL", "api.gpuflight.com")
+    API_KEY = os.environ.get("GPUFL_API_KEY", "")
+    REMOTE_UPLOAD = bool(API_KEY)
+
     print("[GPUFL] Initializing...")
-    gfl.init("Numba_App", LOG_PATH, 100)
+    if REMOTE_UPLOAD:
+        print(f"[GPUFL] Live upload ON -> {BACKEND_URL}")
+    else:
+        print("[GPUFL] Live upload OFF (set GPUFL_API_KEY to enable). Local files only.")
+
+    gfl.init(
+        app_name="Numba_App",
+        log_path=LOG_PATH,
+        sampling_auto_start=True,
+        system_sample_rate_ms=100,
+        enable_debug_output=True,
+        profiling_engine=gfl.ProfilingEngine.PcSamplingWithSass,
+        backend_url=BACKEND_URL,
+        api_key=API_KEY,
+        remote_upload=REMOTE_UPLOAD,
+    )
 
     try:
         # --- 3. Setup Data (Heavy Load) ---
