@@ -26,6 +26,11 @@ namespace gpufl::core {
  *   - template params      T_, T0_, T1_, …
  *   - substitutions        S_, S0_, S1_, … (used for repeated types)
  *   - bare function types  return type + parameter list
+ *   - abi-tags             B<source-name> (consumed + DISCARDED, not
+ *                          rendered) — Numba/NVVM CUDA kernels encode the
+ *                          lowered signature as a long hashed abi-tag, e.g.
+ *                          `_ZN8__main__13matmul_kernelB2v1B102<hash>` →
+ *                          `__main__::matmul_kernel`
  *
  * Constructs deliberately not handled (and the parser falls back to
  * returning the input unchanged when it hits them): operator names,
