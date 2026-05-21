@@ -179,7 +179,14 @@ jobs:
           # to C:\Program Files\OpenSSL-Win64\ (matches OPENSSL_ROOT_DIR
           # in CIBW_ENVIRONMENT_WINDOWS above).
           CIBW_BEFORE_ALL_WINDOWS: choco install -y openssl --no-progress
-          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          # Pin a recent manylinux_2_28 image (AlmaLinux 8.10). cibuildwheel
+          # 2.22.0's default pin (2024.11.16-1) is an AlmaLinux 8.6 snapshot
+          # whose repos only carry OpenSSL 1.1.1 — there is NO openssl3
+          # package — so the build died with "No match for argument:
+          # openssl3-devel". 8.10 ships openssl3 (3.5.5). Same glibc-2.28 /
+          # manylinux_2_28 ABI; verified to have cp312+cp313, openssl3-devel,
+          # and libssl.so.3 in /usr/lib64 (so auditwheel still bundles it).
+          CIBW_MANYLINUX_X86_64_IMAGE: quay.io/pypa/manylinux_2_28_x86_64:2026.05.17-1
           CIBW_BUILD: "cp312-manylinux_x86_64 cp313-manylinux_x86_64 cp312-win_amd64 cp313-win_amd64"
           # libnvidia-ml.so.1 is excluded for the same reason as libcuda.so.1:
           # it ships with the NVIDIA driver, not the CUDA toolkit, and is
