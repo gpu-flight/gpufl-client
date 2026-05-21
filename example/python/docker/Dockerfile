@@ -1,54 +1,57 @@
-FROM nvidia/cuda:13.1.0-devel-ubuntu24.04
+# syntax=docker/dockerfile:1
+# GPUFlight Jupyter playground.
+#
+# Installs the PUBLISHED gpufl wheel from PyPI — the same artifact end users
+# get from `pip install gpufl`. As of 1.0.0 the Linux wheel bundles its own
+# CUDA runtime (libcudart), CUPTI (libcupti) and OpenSSL, so there is NO
+# source build and NO system CUDA toolkit needed. The only thing required
+# from the host is the NVIDIA driver, injected at runtime by the NVIDIA
+# Container Toolkit.
+#
+#   Build:  docker build -t gpufl-jupyter:1.0.0 .
+#   Run:    docker run --gpus all -p 8888:8888 gpufl-jupyter:1.0.0
+#
+# A '-base' image is enough: we don't compile (so no '-devel'), and we don't
+# need the runtime's CUDA libs either — numba-cuda[cu13] ships its own
+# NVVM/NVRTC wheels and the gpufl wheel bundles cudart/cupti. '-base' still
+# sets NVIDIA_VISIBLE_DEVICES / NVIDIA_DRIVER_CAPABILITIES so the GPU is
+# visible. (If numba/gpufl ever need a system CUDA lib, bump back to
+# '-runtime' — one-line change.)
+FROM nvidia/cuda:13.1.0-base-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# System dependencies (Ubuntu 24.04 ships Python 3.12)
-# NOTE: cmake/ninja come from pip (build-system.requires needs >=3.31, apt has 3.28)
+# Ubuntu 24.04 ships Python 3.12, matching the gpufl cp312 wheel.
 RUN apt-get update && apt-get install -y \
     python3 \
     python3-venv \
-    python3-dev \
     python3-pip \
-    git \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Create venv to avoid PEP 668 issues
+# venv to avoid PEP 668 issues
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
-
-# Upgrade pip
 RUN pip install --upgrade pip
 
-# Install PyTorch with CUDA 13.1 support
-RUN pip install torch --index-url https://download.pytorch.org/whl/cu130
+# NOTE: PyTorch is intentionally NOT installed here. It pulls ~5–7 GB of its
+# own CUDA wheels (cublas/cudnn/nccl/…) that duplicate the base image and
+# aren't needed for the Numba / pure-CUDA examples this image is built for.
+# For a torch-integration playground, add back:
+#   RUN --mount=type=cache,target=/root/.cache/pip \
+#       pip install --retries 5 --timeout 120 torch --index-url https://download.pytorch.org/whl/cu130
+# (and import torch BEFORE gpufl to avoid the CUPTI clash).
 
-# Build gpufl from source so it picks up NVML from the CUDA devel image.
-#
-# Pinning to a released tag (rather than `main`) gives reproducible images
-# and protects users from mid-flight breakage on the active branch.
-ARG GPUFL_VERSION=v0.1.0
+# gpufl from PyPI, pinned for a reproducible image (bump for new releases).
+# numba-cuda[cu13] supplies the CUDA-13 NVVM/NVRTC compiler — plain `numba`
+# ships an older CUDA-12 target that reports "no CUDA device" on CUDA 13.
+ARG GPUFL_VERSION=1.0.0
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --retries 5 --timeout 120 "gpufl[analyzer,viz]==${GPUFL_VERSION}" "numba-cuda[cu13]"
 
-# Explicit CUDAToolkit + NVML stub paths.
-#
-# Under scikit-build-core's isolated pip build env, find_package(CUDAToolkit)
-# and the find_library() hint paths in CMakeLists.txt occasionally fail to
-# resolve — at which point CMake silently sets GPUFL_HAS_NVML=0 and the
-# resulting wheel has NO GPU telemetry (job_start emits "devices": []).
-# Pre-setting the cache variables here skips the auto-detection entirely
-# and pins the build to the known-correct paths for the nvidia/cuda devel
-# image. (CMakeLists.txt is hardened in v0.1.1+ to fail loudly on this,
-# but for v0.1.0 the wheel can ship broken without this workaround.)
-RUN git clone --depth 1 --branch ${GPUFL_VERSION} https://github.com/gpu-flight/gpufl-client.git /tmp/gpufl-client \
-    && CMAKE_ARGS="-DBUILD_TESTING=OFF \
-                   -DGPUFL_ENABLE_NVIDIA=ON \
-                   -DCUDAToolkit_ROOT=/usr/local/cuda \
-                   -DNVML_LIBRARY=/usr/local/cuda/targets/x86_64-linux/lib/stubs/libnvidia-ml.so" \
-       pip install -v "/tmp/gpufl-client[analyzer,viz]" \
-    && rm -rf /tmp/gpufl-client
-
-# Install Jupyter
-RUN pip install jupyterlab
+# Jupyter for interactive sessions
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --retries 5 --timeout 120 jupyterlab
 
 # Working directory for notebooks
 WORKDIR /workspace

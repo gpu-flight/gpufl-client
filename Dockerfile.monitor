@@ -6,7 +6,7 @@
 # Run:
 #   docker run --gpus all \
 #     -e GPUFL_HTTP_HOST=https://api.gpuflight.com \
-#     -e GPUFL_HTTP_TOKEN=gfl_... \
+#     -e GPUFL_HTTP_TOKEN=gpfl_... \
 #     gpufl/monitor:latest
 #
 # GPUFL_HTTP_HOST is just the scheme+host. The agent appends the
@@ -28,6 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         python3-pip \
         libnvidia-ml-dev \
+        libssl-dev \
     && pip3 install cmake --break-system-packages \
     && rm -rf /var/lib/apt/lists/*
 
@@ -50,15 +51,29 @@ FROM ghcr.io/gpu-flight/gpufl-agent:latest AS agent-jar
 FROM eclipse-temurin:25-jre AS jre
 
 # ── Stage 4: runtime image ─────────────────────────────────────────────────────
-FROM nvidia/cuda:13.1.0-runtime-ubuntu24.04
+# Use the SLIM '-base' image, NOT '-runtime'. The monitor daemon links only
+# CUDA cudart + CUPTI (NVML and libcuda are provided by the host driver via
+# --gpus). '-runtime' additionally ships the full CUDA math-library set
+# (cublas/cufft/curand/cusolver/cusparse/nvjitlink ≈ 2 GB) the monitor never
+# uses; '-base' omits them and we copy in only the two libs we actually need.
+# This is the bulk of the ~4.3 GB → ~1.x GB reduction.
+FROM nvidia/cuda:13.1.0-base-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# supervisor runs the daemon + agent. ca-certificates + libssl3 are required by
+# the HTTPS publisher (TLS handshake + CA validation against the backend) —
+# the '-base' image omits both, whereas '-runtime' happened to include them.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         supervisor \
+        ca-certificates \
+        libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy CUPTI shared library from the devel image (not available in runtime apt repos)
+# Copy the only CUDA libs the daemon needs from the devel build stage — the
+# '-base' runtime image ships neither. cudart = the CUDA runtime the daemon
+# links; cupti = the profiling library (not in any runtime apt repo).
+COPY --from=builder-cpp /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
 COPY --from=builder-cpp /usr/local/cuda/lib64/libcupti.so* /usr/local/cuda/lib64/
 RUN echo "/usr/local/cuda/lib64" > /etc/ld.so.conf.d/cuda.conf && ldconfig
 
