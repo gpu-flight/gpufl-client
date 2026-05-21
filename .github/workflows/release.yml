@@ -179,6 +179,14 @@ jobs:
           # to C:\Program Files\OpenSSL-Win64\ (matches OPENSSL_ROOT_DIR
           # in CIBW_ENVIRONMENT_WINDOWS above).
           CIBW_BEFORE_ALL_WINDOWS: choco install -y openssl --no-progress
+          # cibuildwheel ships NO default Windows repair command and only
+          # auto-installs delvewheel for that (nonexistent) default. Because
+          # we override CIBW_REPAIR_WHEEL_COMMAND_WINDOWS below (to pass
+          # --add-path for the OpenSSL DLLs), we must install delvewheel
+          # ourselves. The repair step runs in this same build env, so the
+          # tool lands on PATH. Without this the repair dies with
+          # "'delvewheel' is not recognized as an internal or external command".
+          CIBW_BEFORE_BUILD_WINDOWS: pip install delvewheel
           # Pin a recent manylinux_2_28 image (AlmaLinux 8.10). cibuildwheel
           # 2.22.0's default pin (2024.11.16-1) is an AlmaLinux 8.6 snapshot
           # whose repos only carry OpenSSL 1.1.1 — there is NO openssl3
@@ -209,9 +217,18 @@ jobs:
           # — give that to delvewheel via --add-path. Without this, the
           # rebuilt wheel imports cleanly on a system that already has
           # OpenSSL on PATH but fails on a clean machine.
+          # --exclude mirrors the Linux auditwheel excludes: nvcuda.dll
+          # (CUDA driver, == libcuda.so.1) and nvml.dll (NVIDIA management,
+          # == libnvidia-ml.so.1) ship with the user's driver, not the
+          # toolkit, so they're absent on the GPU-less CI runner. Without
+          # excluding them delvewheel fails trying to vendor a DLL it can't
+          # find. cudart/cupti are intentionally NOT excluded — like the
+          # Linux wheel, we bundle the CUDA runtime so the wheel is
+          # self-contained against everything except the driver. ';'-delimited.
           CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: >-
             delvewheel repair
             --add-path "C:\\Program Files\\OpenSSL-Win64\\bin"
+            --exclude "nvcuda.dll;nvml.dll"
             -w {dest_dir} {wheel}
 
       - uses: actions/upload-artifact@v4
