@@ -78,6 +78,13 @@ cmake.verbose = true
 logging.level = "INFO"
 ninja.make-fallback = true
 wheel.packages = ["python/gpufl"]
+# Ship the project license + third-party notices inside the wheel's
+# .dist-info/licenses/. The wheel bundles OpenSSL (Apache-2.0), CUDA
+# cudart/CUPTI (NVIDIA EULA), and statically compiles in cpp-httplib (MIT)
+# and pybind11 (BSD-3) — those licenses require their notices travel with
+# the redistributed binary. (Overriding the default glob, so LICENSE must
+# be listed explicitly too.)
+wheel.license-files = ["LICENSE", "THIRD-PARTY-NOTICES.txt"]
 
 [tool.cibuildwheel]
 build-frontend = "build"
