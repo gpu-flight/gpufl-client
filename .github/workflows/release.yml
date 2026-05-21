@@ -217,17 +217,25 @@ jobs:
           # — give that to delvewheel via --add-path. Without this, the
           # rebuilt wheel imports cleanly on a system that already has
           # OpenSSL on PATH but fails on a clean machine.
-          # --exclude mirrors the Linux auditwheel excludes: nvcuda.dll
-          # (CUDA driver, == libcuda.so.1) and nvml.dll (NVIDIA management,
-          # == libnvidia-ml.so.1) ship with the user's driver, not the
-          # toolkit, so they're absent on the GPU-less CI runner. Without
-          # excluding them delvewheel fails trying to vendor a DLL it can't
-          # find. cudart/cupti are intentionally NOT excluded — like the
-          # Linux wheel, we bundle the CUDA runtime so the wheel is
-          # self-contained against everything except the driver. ';'-delimited.
+          # delvewheel vendors the wheel's DLL deps. We must:
+          #  * --add-path the dirs holding the DLLs to bundle. OpenSSL is in
+          #    its choco bin; cudart64_*.dll is in CUDA\vX.Y\bin (on PATH, but
+          #    listed for safety); cupti64_*.dll lives in CUDA's
+          #    extras\CUPTI\lib64, which is NOT on PATH — without it delvewheel
+          #    fails with "Unable to find library: cupti64_2025.4.0.dll". We
+          #    bundle cudart+cupti so the wheel is self-contained, matching the
+          #    Linux wheel (auditwheel bundles libcudart/libcupti). The CUPTI
+          #    version-suffixed DLL name also makes excluding it fragile across
+          #    CUDA point releases, so bundling is the robust choice.
+          #  * --exclude the driver DLLs that ship with the user's driver, not
+          #    the toolkit, and are absent on the GPU-less runner: nvcuda.dll
+          #    (== libcuda.so.1) and nvml.dll (== libnvidia-ml.so.1). Mirrors
+          #    the Linux auditwheel --exclude flags.
+          # Paths use the pinned CUDA 13.1 location (see the Jimver cuda-toolkit
+          # step). Both --add-path and --exclude are ';'-delimited.
           CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: >-
             delvewheel repair
-            --add-path "C:\\Program Files\\OpenSSL-Win64\\bin"
+            --add-path "C:\\Program Files\\OpenSSL-Win64\\bin;C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.1\\bin;C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.1\\extras\\CUPTI\\lib64"
             --exclude "nvcuda.dll;nvml.dll"
             -w {dest_dir} {wheel}
 
