@@ -1,10 +1,11 @@
 import gpufl as gfl
-from gpufl.report import generate_report
-import numpy as np
-from numba import cuda
 import math
+import numpy as np
 import os
 import time
+from gpufl.report import generate_report
+from numba import cuda
+
 
 # --- 1. Define a Real CUDA Kernel (Matrix Mul) ---
 @cuda.jit
@@ -20,6 +21,7 @@ def matmul_kernel(A, B, C):
             tmp += A[row, k] * B[k, col]
         C[row, col] = tmp
 
+
 def run_benchmark():
     # --- 2. Initialize GPUFL ---
     # LOG_PATH is the file prefix the FileLogSink writes to — it produces
@@ -27,7 +29,7 @@ def run_benchmark():
     # to point generate_report() at the same files.
     LOG_PATH = "./gfl_logs"
 
-    BACKEND_URL = os.environ.get("GPUFL_BACKEND_URL", "api.gpuflight.com")
+    BACKEND_URL = os.environ.get("GPUFL_BACKEND_URL", "https://api.gpuflight.com")
     API_KEY = os.environ.get("GPUFL_API_KEY", "")
     REMOTE_UPLOAD = bool(API_KEY)
 
@@ -51,7 +53,7 @@ def run_benchmark():
 
     try:
         # --- 3. Setup Data (Heavy Load) ---
-        N = 2048 # 2048x2048 matrix = decent workload for testing
+        N = 2048  # 2048x2048 matrix = decent workload for testing
         print(f"[Setup] Generating {N}x{N} matrices...")
 
         # Host memory
@@ -109,6 +111,7 @@ def run_benchmark():
         log_prefix = os.path.basename(LOG_PATH)
         print("\n[GPUFL] Session report:\n")
         print(generate_report(log_dir, log_prefix=log_prefix, top_n=10))
+
 
 if __name__ == "__main__":
     if cuda.is_available():
