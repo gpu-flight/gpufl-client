@@ -136,7 +136,17 @@ jobs:
         uses: pypa/cibuildwheel@v2.22.0
         env:
           CIBW_VIRTUALENV_VERSION: "20.27.1"
-          CIBW_ENVIRONMENT_LINUX: "CUDA_HOME=/usr/local/cuda PATH=/usr/local/cuda/bin:$PATH CMAKE_ARGS='-DGPUFL_ENABLE_NVIDIA=ON -DGPUFL_ENABLE_AMD=OFF -DBUILD_TESTING=OFF'"
+          # OpenSSL hints: manylinux_2_28 (AlmaLinux 8) ships OpenSSL 1.1.1
+          # as the system default, but cpp-httplib v0.18.5 requires >= 3.0.0
+          # (SSL_get1_peer_certificate). We install EL8's `openssl3-devel`
+          # compat package (see CIBW_BEFORE_ALL_LINUX) which lays OpenSSL 3.x
+          # down under NON-standard prefixes — headers in /usr/include/openssl3,
+          # dev symlinks in /usr/lib64/openssl3 — so find_package(OpenSSL)
+          # won't see it without these explicit cache vars. The runtime
+          # SONAME is still libssl.so.3 in /usr/lib64, so auditwheel bundles
+          # it into gpufl.libs/ as before. Verified against the actual
+          # quay.io/pypa/manylinux_2_28_x86_64 image (OpenSSL 3.5.5).
+          CIBW_ENVIRONMENT_LINUX: "CUDA_HOME=/usr/local/cuda PATH=/usr/local/cuda/bin:$PATH CMAKE_ARGS='-DGPUFL_ENABLE_NVIDIA=ON -DGPUFL_ENABLE_AMD=OFF -DBUILD_TESTING=OFF -DOPENSSL_INCLUDE_DIR=/usr/include/openssl3 -DOPENSSL_SSL_LIBRARY=/usr/lib64/openssl3/libssl.so -DOPENSSL_CRYPTO_LIBRARY=/usr/lib64/openssl3/libcrypto.so'"
           # Windows build needs the OpenSSL install path so find_package(OpenSSL)
           # in CMakeLists.txt succeeds, otherwise HTTPS upload (HttpLogSink)
           # silently falls back to HTTP-only — see openssl-windows.html in the
@@ -151,14 +161,17 @@ jobs:
           # release before v0.1.1 silently shipped wheels without NVML
           # because this package was missing here.
           #
-          # openssl-devel provides the libssl/libcrypto headers + .so stubs
-          # so cpp-httplib's CPPHTTPLIB_OPENSSL_SUPPORT path compiles in.
-          # auditwheel bundles the libssl.so.3 / libcrypto.so.3 SOs into
-          # the wheel under gpufl.libs/ automatically (they're not on the
-          # manylinux_2_28 whitelist and not in our --exclude list).
+          # openssl3-devel (NOT openssl-devel — that's 1.1.1 on EL8) provides
+          # OpenSSL 3.x headers + .so symlinks so cpp-httplib's
+          # CPPHTTPLIB_OPENSSL_SUPPORT path compiles (it #errors on < 3.0.0).
+          # It installs under /usr/include/openssl3 + /usr/lib64/openssl3 —
+          # see the OPENSSL_* hints in CIBW_ENVIRONMENT_LINUX. auditwheel
+          # bundles the resulting libssl.so.3 / libcrypto.so.3 (from
+          # /usr/lib64) into the wheel under gpufl.libs/ automatically
+          # (they're not on the manylinux_2_28 whitelist or our --exclude list).
           CIBW_BEFORE_ALL_LINUX: >-
             curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo > /etc/yum.repos.d/cuda.repo &&
-            dnf install -y --nogpgcheck cuda-nvcc-13-1 cuda-cudart-devel-13-1 cuda-cupti-13-1 cuda-driver-devel-13-1 cuda-nvml-devel-13-1 openssl-devel
+            dnf install -y --nogpgcheck cuda-nvcc-13-1 cuda-cudart-devel-13-1 cuda-cupti-13-1 cuda-driver-devel-13-1 cuda-nvml-devel-13-1 openssl3-devel
           # Install OpenSSL on the Windows runner so find_package(OpenSSL)
           # in CMakeLists.txt succeeds and cpp-httplib gets compiled with
           # CPPHTTPLIB_OPENSSL_SUPPORT=1. Chocolatey is pre-installed on
