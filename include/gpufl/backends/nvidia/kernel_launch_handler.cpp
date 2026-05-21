@@ -1,6 +1,8 @@
 #include "gpufl/backends/nvidia/kernel_launch_handler.hpp"
 
+#include <algorithm>  // std::min(initializer_list) — see occupancy calc below
 #include <cstdio>
+#include <iterator>   // std::begin / std::end on the user_scope C-array
 #include <set>
 
 #include "gpufl/backends/nvidia/cuda_feature_guards.hpp"
