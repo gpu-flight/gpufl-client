@@ -1,7 +1,9 @@
 #include "gpufl/backends/nvidia/kernel_launch_handler.hpp"
 
 #include <cstdio>
+#include <set>
 
+#include "gpufl/backends/nvidia/cuda_feature_guards.hpp"
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
 #include "gpufl/core/activity_record.hpp"
 #include "gpufl/core/common.hpp"
@@ -38,11 +40,12 @@ KernelLaunchHandler::requiredCallbacks() const {
     // backend stores 0 for the API timestamps, the frontend can't
     // compute cpu_overhead / queue_latency, and the kernel detail
     // page falls back to "—" for those metrics. Add new launch CBIDs
-    // here as CUPTI exposes them.
+    // here as CUPTI exposes them — shouldHandle() derives its filter from
+    // this list, so there's only one place to update.
     //
-    // CUDART_VERSION guards keep the agent buildable against older
-    // CUDA toolkits — the enum value isn't defined if CUPTI predates
-    // the API.
+    // The GPUFL_HAS_* feature gates (see cuda_feature_guards.hpp) keep the
+    // agent buildable against older CUDA toolkits — the CBID enumerator
+    // isn't declared if CUPTI predates the API.
     std::vector<std::pair<CUpti_CallbackDomain, CUpti_CallbackId>> cbs = {
         // ── Runtime API ───────────────────────────────────────────
         {CUPTI_CB_DOMAIN_RUNTIME_API,
@@ -69,7 +72,7 @@ KernelLaunchHandler::requiredCallbacks() const {
     // Cooperative kernel launches (CUDA 9.0+) — used by NCCL
     // collectives and any kernel that needs grid-wide
     // synchronization via cooperative_groups.
-#if defined(CUDART_VERSION) && CUDART_VERSION >= 9000
+#if GPUFL_HAS_COOPERATIVE_LAUNCH
     cbs.push_back({CUPTI_CB_DOMAIN_RUNTIME_API,
                    CUPTI_RUNTIME_TRACE_CBID_cudaLaunchCooperativeKernel_v9000});
     cbs.push_back({CUPTI_CB_DOMAIN_RUNTIME_API,
@@ -88,7 +91,7 @@ KernelLaunchHandler::requiredCallbacks() const {
     // CUTLASS ≥ 2.10, and most new CUDA samples emit. Was the
     // primary cause of api_start_ns / api_exit_ns showing up as 0
     // for users on recent toolkits before this CBID was wired up.
-#if defined(CUDART_VERSION) && CUDART_VERSION >= 11060
+#if GPUFL_HAS_EXTENSIBLE_LAUNCH
     cbs.push_back({CUPTI_CB_DOMAIN_RUNTIME_API,
                    CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernelExC_v11060});
     cbs.push_back({CUPTI_CB_DOMAIN_RUNTIME_API,
@@ -109,55 +112,20 @@ std::vector<CUpti_ActivityKind> KernelLaunchHandler::requiredActivityKinds()
 
 bool KernelLaunchHandler::shouldHandle(const CUpti_CallbackDomain domain,
                                        const CUpti_CallbackId cbid) const {
-    // Mirror the CBIDs registered in requiredCallbacks() — anything
-    // missing here gets filtered out before handle() runs and the
-    // corresponding kernel records arrive without API timestamps.
-    if (domain == CUPTI_CB_DOMAIN_RUNTIME_API) {
-        switch (cbid) {
-            case CUPTI_RUNTIME_TRACE_CBID_cudaLaunch_v3020:
-            case CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_v7000:
-            case CUPTI_RUNTIME_TRACE_CBID_cudaLaunch_ptsz_v7000:
-            case CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_ptsz_v7000:
-                return true;
-#if defined(CUDART_VERSION) && CUDART_VERSION >= 9000
-            case CUPTI_RUNTIME_TRACE_CBID_cudaLaunchCooperativeKernel_v9000:
-            case CUPTI_RUNTIME_TRACE_CBID_cudaLaunchCooperativeKernel_ptsz_v9000:
-            case CUPTI_RUNTIME_TRACE_CBID_cudaLaunchCooperativeKernelMultiDevice_v9000:
-                return true;
-#endif
-#if defined(CUDART_VERSION) && CUDART_VERSION >= 11060
-            case CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernelExC_v11060:
-            case CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernelExC_ptsz_v11060:
-                return true;
-#endif
-            default:
-                return false;
-        }
-    }
-    if (domain == CUPTI_CB_DOMAIN_DRIVER_API) {
-        switch (cbid) {
-            case CUPTI_DRIVER_TRACE_CBID_cuLaunch:
-            case CUPTI_DRIVER_TRACE_CBID_cuLaunchGrid:
-            case CUPTI_DRIVER_TRACE_CBID_cuLaunchGridAsync:
-            case CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel:
-            case CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel_ptsz:
-                return true;
-#if defined(CUDART_VERSION) && CUDART_VERSION >= 9000
-            case CUPTI_DRIVER_TRACE_CBID_cuLaunchCooperativeKernel:
-            case CUPTI_DRIVER_TRACE_CBID_cuLaunchCooperativeKernel_ptsz:
-            case CUPTI_DRIVER_TRACE_CBID_cuLaunchCooperativeKernelMultiDevice:
-                return true;
-#endif
-#if defined(CUDART_VERSION) && CUDART_VERSION >= 11060
-            case CUPTI_DRIVER_TRACE_CBID_cuLaunchKernelEx:
-            case CUPTI_DRIVER_TRACE_CBID_cuLaunchKernelEx_ptsz:
-                return true;
-#endif
-            default:
-                return false;
-        }
-    }
-    return false;
+    // Single source of truth: a callback is handled iff we registered it in
+    // requiredCallbacks(). Deriving the filter from that list (rather than
+    // re-typing every CBID and its version guard here) means the two can
+    // never drift — a CBID added to one but forgotten in the other used to
+    // silently drop that launch API's telemetry. The set is identical for
+    // every instance, so build it once on first call (thread-safe since
+    // C++11) and reuse it; this stays on the per-callback hot path.
+    static const std::set<std::pair<CUpti_CallbackDomain, CUpti_CallbackId>>
+        kHandled = [this] {
+            const auto cbs = requiredCallbacks();
+            return std::set<std::pair<CUpti_CallbackDomain, CUpti_CallbackId>>(
+                cbs.begin(), cbs.end());
+        }();
+    return kHandled.count({domain, cbid}) != 0;
 }
 
 void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
@@ -208,32 +176,73 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
             meta.scope_depth = 0;
         }
 
+        auto setLaunchDims = [&meta](const unsigned int gx,
+                                     const unsigned int gy,
+                    const unsigned int gz, const unsigned int bx,
+                    const unsigned int by, const unsigned int bz,
+                                     size_t dyn_smem) {
+            meta.has_details = true;
+            meta.grid_x = static_cast<int>(gx);
+            meta.grid_y = static_cast<int>(gy);
+            meta.grid_z = static_cast<int>(gz);
+            meta.block_x = static_cast<int>(bx);
+            meta.block_y = static_cast<int>(by);
+            meta.block_z = static_cast<int>(bz);
+            meta.dyn_shared = static_cast<int>(dyn_smem);
+        };
+
         if (cbInfo->functionParams != nullptr) {
             if (domain == CUPTI_CB_DOMAIN_RUNTIME_API &&
                 cbid == CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_v7000) {
-                meta.has_details = true;
-                const auto* params =
+                const auto* p =
                     (cudaLaunchKernel_v7000_params*)(cbInfo->functionParams);
-                meta.grid_x = params->gridDim.x;
-                meta.grid_y = params->gridDim.y;
-                meta.grid_z = params->gridDim.z;
-                meta.block_x = params->blockDim.x;
-                meta.block_y = params->blockDim.y;
-                meta.block_z = params->blockDim.z;
-                meta.dyn_shared = static_cast<int>(params->sharedMem);
+                setLaunchDims(p->gridDim.x, p->gridDim.y, p->gridDim.z,
+                              p->blockDim.x, p->blockDim.y, p->blockDim.z,
+                              p->sharedMem);
             } else if (domain == CUPTI_CB_DOMAIN_DRIVER_API &&
                        cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel) {
-                meta.has_details = true;
-                const auto* params =
-                    (cuLaunchKernel_params*)cbInfo->functionParams;
-                meta.grid_x = params->gridDimX;
-                meta.grid_y = params->gridDimY;
-                meta.grid_z = params->gridDimZ;
-                meta.block_x = params->blockDimX;
-                meta.block_y = params->blockDimY;
-                meta.block_z = params->blockDimZ;
-                meta.dyn_shared = static_cast<int>(params->sharedMemBytes);
+                const auto* p = (cuLaunchKernel_params*)cbInfo->functionParams;
+                setLaunchDims(p->gridDimX, p->gridDimY, p->gridDimZ,
+                              p->blockDimX, p->blockDimY, p->blockDimZ,
+                              p->sharedMemBytes);
             }
+#if GPUFL_HAS_EXTENSIBLE_LAUNCH
+            // Extensible launch (CUDA 11.6+). cuda.core's launch() routes
+            // through cuLaunchKernelEx — NOT the plain cuLaunchKernel handled
+            // above — because LaunchConfig carries launch attributes (thread-
+            // block clusters, cooperative, etc.). numba-cuda's modern
+            // dispatcher (when cuda.core >= 1.0 is present) launches every
+            // kernel this way, as do CUTLASS and recent CUDA samples. Without
+            // these branches such kernels arrive with timing but has_details
+            // stays false, so grid/block/occupancy are dropped from the report
+            // ("kernel details missing" for Numba). The launch config is a
+            // pointer captured at API_ENTER and is valid for the callback's
+            // lifetime, so read it here while we're still inside the callback.
+            else if (domain == CUPTI_CB_DOMAIN_DRIVER_API &&
+                     (cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchKernelEx ||
+                      cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchKernelEx_ptsz)) {
+                const auto* p = (cuLaunchKernelEx_params*)cbInfo->functionParams;
+                if (p->config != nullptr) {
+                    const CUlaunchConfig* c = p->config;
+                    setLaunchDims(c->gridDimX, c->gridDimY, c->gridDimZ,
+                                  c->blockDimX, c->blockDimY, c->blockDimZ,
+                                  c->sharedMemBytes);
+                }
+            } else if (domain == CUPTI_CB_DOMAIN_RUNTIME_API &&
+                       (cbid ==
+                            CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernelExC_v11060 ||
+                        cbid ==
+                            CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernelExC_ptsz_v11060)) {
+                const auto* p =
+                    (cudaLaunchKernelExC_v11060_params*)cbInfo->functionParams;
+                if (p->config != nullptr) {
+                    const cudaLaunchConfig_t* c = p->config;
+                    setLaunchDims(c->gridDim.x, c->gridDim.y, c->gridDim.z,
+                                  c->blockDim.x, c->blockDim.y, c->blockDim.z,
+                                  c->dynamicSmemBytes);
+                }
+            }
+#endif
         }
 
         // Store metadata — emit later from scope stop (PC Sampling path)
