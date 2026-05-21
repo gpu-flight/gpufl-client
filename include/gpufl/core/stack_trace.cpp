@@ -85,6 +85,22 @@ std::string GetCallStack(int skipFrames) {
 
 namespace gpufl {
 namespace core {
+// Strip Itanium "[abi:...]" decorations that __cxa_demangle renders.
+// Numba/NVVM CUDA kernels encode their lowered signature as a long hashed
+// abi-tag (e.g. `__main__::matmul_kernel[abi:v1][abi:cw51cX…]`); for
+// readable names + the frontend's regex op-categorization we drop them.
+// This keeps the Linux output consistent with the Windows portable
+// demangler (DemangleItaniumName), which discards abi-tags while parsing.
+static std::string StripAbiTags(std::string s) {
+    std::string::size_type pos;
+    while ((pos = s.find("[abi:")) != std::string::npos) {
+        const std::string::size_type close = s.find(']', pos);
+        if (close == std::string::npos) break;
+        s.erase(pos, close - pos + 1);
+    }
+    return s;
+}
+
 std::string DemangleName(const char* mangled) {
     if (!mangled || mangled[0] == '\0') return mangled ? mangled : "";
     int status = 0;
@@ -92,7 +108,7 @@ std::string DemangleName(const char* mangled) {
     if (status == 0 && demangled) {
         std::string result(demangled);
         free(demangled);
-        return result;
+        return StripAbiTags(std::move(result));
     }
     return mangled;
 }

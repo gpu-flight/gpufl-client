@@ -57,6 +57,11 @@ private:
     // depends on it).
     bool lastNameWasTemplate_ = false;
 
+    // Set when skipAbiTags() runs off the end of the input on a truncated
+    // abi-tag. Tells parseNestedName() to accept the implicit end instead
+    // of demanding the closing 'E' that the clip removed.
+    bool truncated_ = false;
+
     // ── Byte-level helpers ────────────────────────────────────────
     bool eof() const { return p_ >= end_; }
     char peek() const { return eof() ? '\0' : *p_; }
@@ -151,8 +156,9 @@ private:
             lastNameWasTemplate_ = false;
             return sub;
         }
-        // Unscoped name: source_name [template_args]
+        // Unscoped name: source_name [abi-tags] [template_args]
         std::string n = parseUnqualifiedName();
+        skipAbiTags();
         if (peek() == 'I') {
             std::string targs = parseTemplateArgs();
             lastNameWasTemplate_ = true;
@@ -205,13 +211,18 @@ private:
                 std::string tp = parseTemplateParam();
                 parts.push_back(tp);
             } else {
-                // Source name (length-prefixed identifier).
+                // Source name (length-prefixed identifier), optionally
+                // followed by abi-tags (consumed + discarded).
                 std::string n = parseUnqualifiedName();
+                skipAbiTags();
                 parts.push_back(n);
                 subs_.push_back(joinScope(parts));
             }
         }
-        if (!consume('E')) throw ParseError();
+        // Normally the nested name must close with 'E'. If a truncated
+        // abi-tag ate the rest of the buffer (incl. the 'E'), accept the
+        // implicit end — we already have all the real name components.
+        if (!consume('E') && !truncated_) throw ParseError();
 
         std::string joined = joinScope(parts);
         // Was the LAST component templated? Detect by its trailing '>'.
@@ -246,6 +257,47 @@ private:
         std::string s(p_, p_ + len);
         p_ += len;
         return s;
+    }
+
+    // <abi-tags> ::= <abi-tag>*
+    // <abi-tag>  ::= "B" <source-name>
+    //
+    // Abi-tags decorate an unqualified-name. The case that brought us
+    // here: Numba/NVVM CUDA kernels encode the lowered type signature as
+    // a long hashed abi-tag —
+    //   _ZN8__main__13matmul_kernel B2v1 B102<102-char hash> E
+    // The standard demangler renders these as `name[abi:tag]`, but for
+    // our purpose (readable kernel names + the frontend's regex
+    // op-categorization) the tag is pure noise, and Numba's 100+ char
+    // hash would overflow the name buffer anyway. So we CONSUME and
+    // DISCARD them — a tagged name demangles to the bare name. Without
+    // this the loop hit the 'B', tried to read it as a source-name
+    // (which must start with a digit), threw ParseError, and the whole
+    // demangle fell back to the raw mangled string.
+    //
+    // Guarded on a following digit so we only treat 'B' as an abi-tag
+    // when it's actually `B<length>…`; a stray uppercase 'B' elsewhere
+    // won't be misconsumed (lowercase 'b' is the bool builtin, distinct).
+    void skipAbiTags() {
+        while (peek() == 'B' && p_ + 1 < end_ && p_[1] >= '0' && p_[1] <= '9') {
+            ++p_;                       // consume 'B'
+            const int len = parseNumber();
+            if (len <= 0) return;
+            if (p_ + len > end_) {
+                // Truncated abi-tag: the symbol was clipped by a fixed-size
+                // buffer before it reached us (CUDA tooling stores kernel
+                // names in bounded char arrays, and Numba's hashed tag is
+                // 100+ chars). The tag is discardable and we've already
+                // captured the real name, so consume what's left and flag
+                // truncation — the nested-name parser then finishes
+                // gracefully instead of failing the whole demangle and
+                // falling back to the raw mangled string.
+                p_ = end_;
+                truncated_ = true;
+                return;
+            }
+            p_ += len;                  // discard the tag identifier
+        }
     }
 
     // <template_args> ::= "I" <template_arg>+ "E"
@@ -382,8 +434,10 @@ private:
         }
 
         if (c >= '0' && c <= '9') {
-            // Source name as a class type, e.g. "5MyClass".
+            // Source name as a class type, e.g. "5MyClass", optionally
+            // abi-tagged.
             std::string n = parseSourceName();
+            skipAbiTags();
             subs_.push_back(n);
             return n;
         }
