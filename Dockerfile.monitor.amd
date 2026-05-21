@@ -8,7 +8,7 @@
 #     --device /dev/kfd --device /dev/dri \
 #     --group-add video --group-add render \
 #     -e GPUFL_HTTP_HOST=https://api.gpuflight.com \
-#     -e GPUFL_HTTP_TOKEN=gfl_... \
+#     -e GPUFL_HTTP_TOKEN=gpfl_... \
 #     gpufl/monitor-amd:latest
 #
 # GPUFL_HTTP_HOST is just the scheme+host. The agent appends the
