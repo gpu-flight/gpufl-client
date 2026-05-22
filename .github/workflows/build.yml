@@ -3,8 +3,28 @@ name: Build GPUFl Client
 on:
   push:
     branches: [ "main" ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'Dockerfile*'
+      - '**/Dockerfile'
+      - '**/Dockerfile.*'
+      - 'LICENSE'
+      - 'THIRD-PARTY-NOTICES.txt'
+      - '.gitignore'
+      - 'images/**'
   pull_request:
     branches: [ "main" ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'Dockerfile*'
+      - '**/Dockerfile'
+      - '**/Dockerfile.*'
+      - 'LICENSE'
+      - 'THIRD-PARTY-NOTICES.txt'
+      - '.gitignore'
+      - 'images/**'
 
 jobs:
   build:
