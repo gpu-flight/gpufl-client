@@ -8,8 +8,8 @@
 # from the host is the NVIDIA driver, injected at runtime by the NVIDIA
 # Container Toolkit.
 #
-#   Build:  docker build -t gpufl-jupyter:1.0.0 .
-#   Run:    docker run --gpus all -p 8888:8888 gpufl-jupyter:1.0.0
+#   Build:  docker build -t gpufl-jupyter:1.0.2 .
+#   Run:    docker run --gpus all -p 8888:8888 gpufl-jupyter:1.0.2
 #
 # A '-base' image is enough: we don't compile (so no '-devel'), and we don't
 # need the runtime's CUDA libs either — numba-cuda[cu13] ships its own
@@ -45,7 +45,7 @@ RUN pip install --upgrade pip
 # gpufl from PyPI, pinned for a reproducible image (bump for new releases).
 # numba-cuda[cu13] supplies the CUDA-13 NVVM/NVRTC compiler — plain `numba`
 # ships an older CUDA-12 target that reports "no CUDA device" on CUDA 13.
-ARG GPUFL_VERSION=1.0.0
+ARG GPUFL_VERSION=1.0.2
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --retries 5 --timeout 120 "gpufl[analyzer,viz]==${GPUFL_VERSION}" "numba-cuda[cu13]"
 
