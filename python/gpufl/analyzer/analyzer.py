@@ -74,6 +74,18 @@ class GpuFlightSession:
         scope_df  = self._load_log(self._resolve_log_path(log_prefix, "scope"))
         system_df = self._load_log(self._resolve_log_path(log_prefix, "system"))
 
+        # 1.5 Resolve the target session and scope every raw frame to it. The
+        # log files are append-only, so re-running into the same prefix leaves
+        # MULTIPLE sessions in one file; aggregating them silently produces
+        # nonsense (e.g. a kernel "duration" longer than the whole session).
+        # Default to the most-recent session unless the caller named one.
+        session_id = self._resolve_session_id(device_df, scope_df, system_df,
+                                               requested=session_id)
+        if session_id:
+            device_df = self._filter_session(device_df, session_id)
+            scope_df  = self._filter_session(scope_df, session_id)
+            system_df = self._filter_session(system_df, session_id)
+
         # 2. Extract session boundaries — supports both job_start (new) and init (old)
         self.session_start_ns = None
         self.session_end_ns   = None
@@ -165,6 +177,50 @@ class GpuFlightSession:
 
         # 5. Pre-calculate derived metrics
         self._enrich_data()
+
+    # ── Session selection ───────────────────────────────────────────────────────
+
+    def _resolve_session_id(self, device_df, scope_df, system_df, requested=None):
+        """Pick which session to report on.
+
+        If the caller named one, honor it. Otherwise default to the MOST
+        RECENT session in the logs (by job_start ts_ns) and warn when more
+        than one is present — aggregating multiple runs from an un-cleared
+        log file is almost never intended and corrupts the timing totals.
+        Returns None only when there are no job_start markers (legacy logs),
+        in which case the data is left unfiltered.
+        """
+        if requested:
+            return requested
+        seen = []  # (ts_ns, session_id) in file order
+        for df in (device_df, scope_df, system_df):
+            if df is None or df.empty or 'type' not in df.columns \
+                    or 'session_id' not in df.columns:
+                continue
+            starts = df[df['type'].isin(['job_start', 'init'])]
+            has_ts = 'ts_ns' in starts.columns
+            for _, r in starts.iterrows():
+                sid = r.get('session_id')
+                if sid is None or (isinstance(sid, float) and pd.isna(sid)):
+                    continue
+                ts = pd.to_numeric(r.get('ts_ns'), errors='coerce') if has_ts else None
+                seen.append((ts, sid))
+        if not seen:
+            return None
+        uniq = list(dict.fromkeys(sid for _, sid in seen))
+        latest = max(seen, key=lambda x: (-1 if x[0] is None or pd.isna(x[0]) else x[0]))[1]
+        if len(uniq) > 1:
+            self.console.print(
+                f"[yellow]Note:[/yellow] {len(uniq)} sessions found in these logs; "
+                f"reporting only the most recent ({latest}). Pass session_id=… to "
+                f"choose another, or clear the *.log files between runs.")
+        return latest
+
+    @staticmethod
+    def _filter_session(df, session_id):
+        if df is None or df.empty or 'session_id' not in df.columns:
+            return df
+        return df[df['session_id'] == session_id].copy()
 
     # ── Log loading ───────────────────────────────────────────────────────────
 
