@@ -44,6 +44,7 @@ RUN cmake -S . -B /build \
         -DBUILD_GPUFL_MONITOR=ON \
         -DGPUFL_ENABLE_NVIDIA=OFF \
         -DGPUFL_ENABLE_AMD=ON \
+        -DGPUFL_ENABLE_AMD_ROCPROFILER=OFF \
     && cmake --build /build --target gpufl-monitor --parallel
 
 # ── Stage 2: pull the pre-built Java agent ────────────────────────────────────
@@ -53,22 +54,13 @@ FROM ghcr.io/gpu-flight/gpufl-agent:latest AS agent-jar
 FROM eclipse-temurin:25-jre AS jre
 
 # ── Stage 4: runtime image ─────────────────────────────────────────────────────
-FROM ubuntu:24.04
+# Use ROCm base runtime to avoid fragile manual ROCm apt repo/package wiring.
+FROM rocm/dev-ubuntu-24.04:6.4-complete
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Add ROCm apt repository
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates \
-        wget \
-        gnupg \
-    && wget -q -O - https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor -o /etc/apt/keyrings/rocm.gpg \
-    && echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/6.4 noble main' \
-        > /etc/apt/sources.list.d/rocm.list \
-    && apt-get update && apt-get install -y --no-install-recommends \
         supervisor \
-        rocm-smi-lib \
-        rocm-hip-runtime \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy Java 25 JRE from Temurin (Ubuntu 24.04 repos only ship up to openjdk-21)

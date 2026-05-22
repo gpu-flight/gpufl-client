@@ -22,6 +22,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # -----------------------
 option(GPUFL_ENABLE_NVIDIA "Enable NVIDIA backends (CUDA + NVML when available)" ON)
 option(GPUFL_ENABLE_AMD    "Enable AMD backends (ROCm when available)" OFF)
+option(GPUFL_ENABLE_AMD_ROCPROFILER "Enable AMD rocprofiler-sdk tracing backend when available" ON)
 
 option(BUILD_GPUFL_EXAMPLE "Build gpufl example application" ON)
 option(BUILD_GPUFL_MONITOR "Build gpufl-monitor standalone daemon" ON)
@@ -481,18 +482,22 @@ if(GPUFL_ENABLE_AMD)
         endif()
     endif()
 
-    find_package(rocprofiler-sdk QUIET CONFIG HINTS /opt/rocm)
-    if(TARGET rocprofiler-sdk::rocprofiler-sdk)
-        set(GPUFL_HAS_ROCPROFILER_SDK 1)
-        target_link_libraries(gpufl PRIVATE rocprofiler-sdk::rocprofiler-sdk)
-        target_sources(gpufl PRIVATE
-            include/gpufl/backends/amd/monitor_adapter_amd.cpp
-            include/gpufl/backends/amd/rocprofiler_backend.cpp
-            include/gpufl/backends/amd/engine/dispatch_counter_engine.cpp
-        )
-        message(STATUS "Found ROCprofiler-SDK support")
+    if(GPUFL_ENABLE_AMD_ROCPROFILER)
+        find_package(rocprofiler-sdk QUIET CONFIG HINTS /opt/rocm)
+        if(TARGET rocprofiler-sdk::rocprofiler-sdk)
+            set(GPUFL_HAS_ROCPROFILER_SDK 1)
+            target_link_libraries(gpufl PRIVATE rocprofiler-sdk::rocprofiler-sdk)
+            target_sources(gpufl PRIVATE
+                include/gpufl/backends/amd/monitor_adapter_amd.cpp
+                include/gpufl/backends/amd/rocprofiler_backend.cpp
+                include/gpufl/backends/amd/engine/dispatch_counter_engine.cpp
+            )
+            message(STATUS "Found ROCprofiler-SDK support")
+        else()
+            message(STATUS "ROCprofiler-SDK not found; AMD kernel tracing disabled")
+        endif()
     else()
-        message(STATUS "ROCprofiler-SDK not found; AMD kernel tracing disabled")
+        message(STATUS "ROCprofiler-SDK support disabled by GPUFL_ENABLE_AMD_ROCPROFILER=OFF")
     endif()
 
     if(GPUFL_HAS_ROCM_SMI OR GPUFL_HAS_HIP)
