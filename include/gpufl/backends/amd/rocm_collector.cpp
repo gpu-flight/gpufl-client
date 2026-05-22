@@ -55,7 +55,8 @@ bool IsCpuLikeHipEntry(const hipDeviceProp_t& prop) {
     const std::string lowerName = ToLower(prop.name);
     return lowerName.find("ryzen") != std::string::npos ||
            lowerName.find("epyc") != std::string::npos ||
-           lowerName.find("threadripper") != std::string::npos;
+           lowerName.find("threadripper") != std::string::npos ||
+           lowerName.find("radeon graphics") != std::string::npos;
 }
 
 bool IsGpuHipDevice(const hipDeviceProp_t& prop) {
