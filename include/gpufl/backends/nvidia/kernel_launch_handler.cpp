@@ -298,27 +298,18 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
                   " start=", k->start, " end=", k->end,
                   " dur=", k->end - k->start);
 
-    const bool shouldThrottleKernels =
-        backend_->opts_.kernel_sample_rate_ms > 0 &&
-        backend_->opts_.profiling_engine != ProfilingEngine::PcSampling;
-
-    if (shouldThrottleKernels) {
-        uint64_t intervalNs =
-            static_cast<uint64_t>(backend_->opts_.kernel_sample_rate_ms) *
-            1000000ULL;
-        uint64_t lastTs =
-            backend_->last_kernel_end_ts_.load(std::memory_order_relaxed);
-        if (k->start < lastTs + intervalNs) {
-            GFL_LOG_DEBUG("[KernelLaunchHandler] activity throttled corr=",
-                          k->correlationId, " start=", k->start,
-                          " last=", lastTs, " intervalNs=", intervalNs);
-            backend_->kernel_activity_throttled_.fetch_add(
-                1, std::memory_order_relaxed);
-            return true;  // within throttle window — consume but do not emit
-        }
-        backend_->last_kernel_end_ts_.store(k->start,
-                                            std::memory_order_relaxed);
-    }
+    // NOTE (1.0.1): kernel_sample_rate_ms used to throttle activity-record
+    // processing here — skipping records that arrived within a sampling
+    // window. That was a serious bug: a throttled (skipped) record left its
+    // launch metadata in meta_by_corr_, and FlushPendingKernels() then
+    // resurrected the kernel as a SYNTHETIC record whose "duration" was the
+    // host dispatch-gap (next launch − this launch), not GPU time. On a
+    // host-bound workload that gap is data-loading wait (10–230 ms), so
+    // Total GPU Time / GPU Busy were inflated ~60–70× (GPU Busy > 100% while
+    // NVML showed the GPU idle). Kernel activity records carry the real GPU
+    // end−start and are cheap, so we now ALWAYS process every one. The
+    // kernel_sample_rate_ms option is retained for backward compatibility
+    // (callers/config files won't break) but is intentionally ignored.
 
     ActivityRecord out{};
     out.device_id = k->deviceId;

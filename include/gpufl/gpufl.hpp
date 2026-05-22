@@ -15,6 +15,11 @@ struct InitOptions {
     std::string log_path = "";  // if empty, will default to "<app>.log"
     int system_sample_rate_ms =
         0;  // currently less than 50-100 would not be effective.
+    // DEPRECATED (1.0.1): no longer has any effect. It used to throttle
+    // kernel activity-record processing, but that corrupted kernel timing
+    // (see the note in kernel_launch_handler.cpp). All kernel activity
+    // records are now always processed. Kept only so existing callers and
+    // config files don't break; will be removed in a future major release.
     int kernel_sample_rate_ms = 0;
     BackendKind backend = BackendKind::Auto;
     bool sampling_auto_start = false;
