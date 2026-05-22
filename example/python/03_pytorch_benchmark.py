@@ -30,7 +30,6 @@ def run_stress_test():
                log_path="./stress",
                sampling_auto_start=True,
                system_sample_rate_ms=50,
-               kernel_sample_rate_ms=50,
                enable_debug_output=False,
                enable_stack_trace=True,
                # opt-in to memory tracking. Default-off in v1
