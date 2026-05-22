@@ -5,9 +5,9 @@
 `gpufl` is a **low-overhead, always-on** C++ observability library for GPU applications. Built on CUPTI (NVIDIA) and rocprofiler-sdk (AMD), it captures kernel telemetry, SASS-level profiling, and system metrics with under 2% overhead in monitoring mode.
 Unlike traditional profilers (Nsight) that stop the world with 20-200x slowdown, GPUFlight is designed to run continuously in production — capturing kernel telemetry and logical scopes into structured logs.
 
-## Project Status: Beta (Pre-1.0)
+## Project Status: Stable (v1.0.2)
 
-GPUFlight is usable today and published to PyPI, but it's pre-1.0 — current releases are `0.1.0.devN` dev builds. The public API and the on-the-wire log format may still change between releases; the first stable contract is `v1.0.0`. Pin an exact version if you depend on it.
+GPUFlight is published to PyPI and has reached its first stable contract — the current release is `v1.0.2`. The public API and on-the-wire log format follow semantic versioning from `v1.0.0` onward; pin an exact version if you depend on it.
 
 To keep the initial design coherent, **we are not currently accepting major feature Pull Requests.** However, we welcome:
 - Bug reports and local build issues.
@@ -56,7 +56,7 @@ include(FetchContent)
 FetchContent_Declare(
     gpufl
     GIT_REPOSITORY https://github.com/gpu-flight/gpufl-client.git
-    GIT_TAG        v0.1.0.dev7   # pin a release tag — see the Releases page for the latest
+    GIT_TAG        v1.0.2   # pin a release tag — see the Releases page for the latest
 )
 FetchContent_MakeAvailable(gpufl)
 
@@ -68,27 +68,36 @@ target_link_libraries(my_app PRIVATE gpufl::gpufl CUDA::cudart CUDA::cupti)
 
 ## Quick Start (Python + Docker)
 
-The recommended way to get started is with a Docker container. See [example/python/docker/Dockerfile](example/python/docker/Dockerfile) for a ready-to-use setup with PyTorch and Jupyter Lab.
+The recommended way to get started is with a Docker container. See [example/python/docker/Dockerfile](example/python/docker/Dockerfile) for a ready-to-use Numba + Jupyter Lab playground (the published `ghcr.io/gpu-flight/gpufl-jupyter:latest` image).
 
 ```bash
 cd example/python/docker
-docker build -t gpufl-python .
-docker run --gpus all -p 8888:8888 -v $(pwd)/notebooks:/workspace gpufl-python
+docker build -t gpufl-jupyter .
+docker run --gpus all -p 8888:8888 -v $(pwd)/notebooks:/workspace gpufl-jupyter
 ```
 
 ```python
-import torch
 import gpufl
+from numba import cuda
+import numpy as np
 
 gpufl.init("my-app",
            log_path="./my_logs",
            sampling_auto_start=True,
            enable_stack_trace=True)
 
-a = torch.randn(1024, 1024, device="cuda")
-b = torch.randn(1024, 1024, device="cuda")
-c = a @ b
-torch.cuda.synchronize()
+@cuda.jit
+def add(a, b, out):
+    i = cuda.grid(1)
+    if i < out.size:
+        out[i] = a[i] + b[i]
+
+n = 1 << 20
+a = cuda.to_device(np.random.rand(n).astype(np.float32))
+b = cuda.to_device(np.random.rand(n).astype(np.float32))
+out = cuda.device_array(n, dtype=np.float32)
+add[(n + 255) // 256, 256](a, b, out)
+cuda.synchronize()
 
 gpufl.shutdown()
 ```
