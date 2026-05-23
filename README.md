@@ -1,9 +1,12 @@
 # GPUFlight Client Library (gpufl)
 
-**The Flight Recorder for GPU Production Workloads.**
+GPUFlight Client is an open-source CUDA and ROCm/HIP profiling client for collecting GPU profiling and monitoring data from inside your application.
 
-`gpufl` is a **low-overhead, always-on** C++ observability library for GPU applications. Built on CUPTI (NVIDIA) and rocprofiler-sdk (AMD), it captures kernel telemetry, SASS-level profiling, and system metrics with under 2% overhead in monitoring mode.
-Unlike traditional profilers (Nsight) that stop the world with 20-200x slowdown, GPUFlight is designed to run continuously in production — capturing kernel telemetry and logical scopes into structured logs.
+It records GPU workload activity such as kernel launches, GPU metrics, logical scopes, and optional low-level profiling data into local NDJSON logs. You can analyze those logs locally, generate reports, or stream them to the GPUFlight dashboard.
+
+The goal is to make GPU profiling lighter and more continuous, closer to observability rather than only one-time profiling.
+
+Built on CUPTI for NVIDIA GPUs and rocprofiler-sdk for AMD GPUs, GPUFlight is designed for always-on monitoring with low overhead in monitoring mode.
 
 ## Project Status: Stable (v1.0.2)
 
