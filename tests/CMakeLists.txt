@@ -14,6 +14,7 @@ set(GPUFL_TEST_SOURCES
     core/test_analyzer.cpp
     core/test_api_path_routing.cpp
     core/test_batch_models.cpp
+    core/test_bench_invoker.cpp
     core/test_wire_contract.cpp
     core/test_monitor.cpp
     core/test_http_log_sink.cpp

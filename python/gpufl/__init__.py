@@ -58,7 +58,7 @@ if os.name == 'nt':
 
 # 2. Import C++ Core Bindings
 try:
-    from ._gpufl_client import Scope, init, shutdown, system_start, system_stop, BackendKind, InitOptions, ProfilingEngine
+    from ._gpufl_client import Scope as _CScope, init, shutdown, system_start, system_stop, BackendKind, InitOptions, ProfilingEngine
 except ImportError as e:
     # We catch ImportError specifically to handle missing libcuda.so.1 or DLLs
     import sys
@@ -115,8 +115,10 @@ except ImportError as e:
             self.config_name = ""
             self.remote_upload = False
 
-    class Scope:
-        def __init__(self, *args): pass
+    class _CScope:
+        # Accept kwargs (repeat/warmup added in 1.0.3) so the no-GPU
+        # fallback matches the real pybind11 binding's signature.
+        def __init__(self, *args, **kwargs): pass
         def __enter__(self): return self
         def __exit__(self, *args): pass
     # --- FIX END ---
@@ -143,6 +145,15 @@ __version__ = "0.1.0.dev"
 # sass_divergence_demo) get the same capability without spawning a
 # Python interpreter, and the behavior is consistent across the two
 # call paths.
+
+# ── Session / log-path bookkeeping ──────────────────────────────────────────
+#
+# Tracked purely so `clean_logs()` can (a) refuse to delete the logs of a
+# session that's still being written in THIS process, and (b) default to the
+# last init()'s log location when called with no arguments.
+_session_active = False
+_last_log_path = None
+_last_app_name = None
 
 # Wrap the C++ init to pass through backend_url / remote_upload kwargs
 # and env vars into the underlying InitOptions.
@@ -206,6 +217,214 @@ def init(*args, backend_url=None, api_key=None, config_name=None,
     if remote_upload and 'remote_upload' not in kwargs:
         kwargs['remote_upload'] = True
 
-    return _original_init(*args, **kwargs)
+    # Remember where this session writes its logs so clean_logs() can
+    # default to it later, and guard against wiping an active session.
+    global _session_active, _last_log_path, _last_app_name
+    _last_app_name = kwargs.get('app_name', args[0] if args else None)
+    _last_log_path = kwargs.get('log_path', args[1] if len(args) > 1 else None)
 
-__all__ = ["Scope", "init", "shutdown", "system_start", "system_stop", "BackendKind", "InitOptions", "ProfilingEngine"]
+    result = _original_init(*args, **kwargs)
+    if result:
+        _session_active = True
+    return result
+
+
+# Wrap shutdown so the active-session guard in clean_logs() clears once the
+# logs are flushed and closed.
+_original_shutdown = shutdown
+
+def shutdown():
+    """Stop the runtime, flush and close all log files."""
+    global _session_active
+    try:
+        return _original_shutdown()
+    finally:
+        _session_active = False
+
+# ── Scope: context manager + benchmark-iteration helper ─────────────────────
+#
+# Thin Python wrapper over the C++ `_CScope`. Backward compatible: used as a
+# `with` block it behaves exactly as before. New in 1.0.3 it is also
+# *iterable* when constructed with `repeat=N`, which removes the
+# `with Scope(...): for _ in range(N):` boilerplate and — via `warmup=K` —
+# lets you exclude cold-start iterations (JIT compile, cold caches) from the
+# measured/profiled window without hand-writing two loops.
+class Scope:
+    """A logical profiling scope.
+
+    Two usage forms:
+
+    1. Context manager (unchanged) — bracket an arbitrary block::
+
+           with gpufl.Scope("inference", "ml"):
+               model(x)
+
+    2. Iterable benchmark loop (requires ``repeat``)::
+
+           for _ in gpufl.Scope("matmul", "math", repeat=10, warmup=3):
+               matmul_kernel[bpg, tpb](A, B, C)
+
+       The scope opens once, brackets all ``repeat`` measured iterations,
+       and closes when the loop ends — even if the body raises.
+
+    Args:
+        name:   Scope name shown in the report / dashboard.
+        tag:    Optional category tag (e.g. "math", "ml").
+        repeat: If set, the scope becomes iterable and yields this many
+                *measured* iterations (indices ``0 .. repeat-1``). Required
+                to iterate; a ``with`` block ignores it.
+        warmup: Iterations run BEFORE the scope opens — their work executes
+                but is excluded from the scope's timing/profiling. They yield
+                negative indices (``-warmup .. -1``) so ``i >= 0`` marks a
+                measured iteration. Only meaningful together with ``repeat``.
+    """
+
+    def __init__(self, name, tag="", *, repeat=None, warmup=0):
+        if repeat is not None and repeat < 0:
+            raise ValueError("Scope(repeat=...) must be >= 0")
+        if warmup < 0:
+            raise ValueError("Scope(warmup=...) must be >= 0")
+        self._name = name
+        self._tag = tag
+        self._repeat = repeat
+        self._warmup = warmup
+        self._inner = None
+
+    # --- context-manager protocol (backward compatible) ---
+    def __enter__(self):
+        self._inner = _CScope(self._name, self._tag)
+        self._inner.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self._inner is not None:
+            inner, self._inner = self._inner, None
+            return inner.__exit__(exc_type, exc_value, traceback)
+        return False
+
+    # --- iterator protocol (new in 1.0.3) ---
+    def __iter__(self):
+        # Validate eagerly so `for _ in Scope("x")` (no repeat) raises on
+        # loop entry rather than deferring until the first next().
+        if self._repeat is None:
+            raise TypeError(
+                "Scope is only iterable when constructed with repeat=N. "
+                "Use it as a context manager — `with gpufl.Scope(...):` — "
+                "otherwise."
+            )
+        return self._iterate()
+
+    def _iterate(self):
+        # Warmup: open a "<name>_warmup" sub-scope so the kernel events
+        # emitted during warmup are attributed to a separately
+        # identifiable bucket — same convention as the C++ BenchInvoker,
+        # keeps Python and C++ logs interchangeable. The sub-scope's
+        # BEGIN row carries repeat=warmup so per-iteration cold-start
+        # cost can be computed by the analyzer.
+        if self._warmup > 0:
+            warmup_inner = _CScope(self._name + "_warmup", self._tag,
+                                   repeat=self._warmup, warmup=0)
+            warmup_inner.__enter__()
+            try:
+                for w in range(self._warmup):
+                    yield w - self._warmup  # -warmup .. -1
+            finally:
+                warmup_inner.__exit__(None, None, None)
+        # Measured: open the main scope, yield repeat times, always close.
+        # Pass repeat/warmup through to the C++ scope so they land on the
+        # BEGIN row of scope_event_batch — the analyzer / backend then
+        # derive per-iteration metrics without the caller doing math.
+        self._inner = _CScope(self._name, self._tag,
+                              repeat=self._repeat, warmup=self._warmup)
+        self._inner.__enter__()
+        try:
+            for i in range(self._repeat):
+                yield i  # 0 .. repeat-1
+        finally:
+            inner, self._inner = self._inner, None
+            inner.__exit__(None, None, None)
+
+
+# ── clean_logs: wipe a session's NDJSON logs to start fresh ──────────────────
+def clean_logs(log_path=None, log_prefix=None, *, dry_run=False):
+    """Delete this app's NDJSON log files so the next run starts clean.
+
+    Removes the active and rotated log files for a given prefix —
+    ``<prefix>.<channel>.log`` and ``<prefix>.<channel>.<N>.log[.gz]`` — and
+    nothing else. It never removes a directory and never touches files that
+    don't match that pattern, so an unrelated file in the same folder is safe.
+
+    Target resolution:
+        * No args  → the ``log_path`` (or ``app_name``) of the most recent
+          ``gpufl.init()`` call in this process.
+        * ``log_path`` → a path/prefix like ``"./gfl_logs"``; the directory is
+          its dirname and the prefix its basename.
+        * ``log_prefix`` → override just the filename prefix.
+
+    Safety:
+        * **Refuses while a session is active in THIS process** — if you've
+          called ``init()`` without a matching ``shutdown()`` it raises
+          ``RuntimeError`` rather than delete logs you're still writing.
+        * **Does NOT detect the ``gpufl-monitor`` sidecar / agent running in
+          another process.** On Windows a file the agent has open cannot be
+          deleted, so the OS protects you (the file is skipped with a
+          warning). On Linux an unlink succeeds even while the agent holds the
+          file open, which can confuse a live tail — **stop the agent before
+          calling this, or use ``dry_run=True`` first to preview.**
+
+    Args:
+        log_path:   Path/prefix whose logs to remove. Defaults to the last
+                    ``init()``'s location.
+        log_prefix: Override the filename prefix (basename) only.
+        dry_run:    If True, return the list of matching files WITHOUT
+                    deleting anything.
+
+    Returns:
+        list[str]: The files removed (or, with ``dry_run``, the files that
+        would be removed).
+    """
+    if _session_active:
+        raise RuntimeError(
+            "clean_logs() refused: a gpufl session is active in this process "
+            "(init() was called without a matching shutdown()). Call "
+            "gpufl.shutdown() first, then clean_logs()."
+        )
+
+    if log_path is None:
+        log_path = _last_log_path or _last_app_name
+    if not log_path:
+        raise ValueError(
+            "clean_logs(): no log_path given and no prior init() to infer one "
+            "from. Pass log_path=... explicitly."
+        )
+
+    directory = os.path.dirname(log_path) or "."
+    base = log_prefix if log_prefix is not None else os.path.basename(log_path)
+    if base.endswith(".log"):
+        base = base[:-4]
+
+    import glob
+    import warnings
+    matched = sorted({
+        p
+        for pattern in (f"{base}.*.log", f"{base}.*.log.gz")
+        for p in glob.glob(os.path.join(directory, pattern))
+    })
+
+    if dry_run:
+        return matched
+
+    removed = []
+    for p in matched:
+        try:
+            os.remove(p)
+            removed.append(p)
+        except OSError as e:
+            # On Windows an open file (e.g. the sidecar agent tailing it)
+            # raises PermissionError — skipping it IS the safety net against
+            # deleting a file that's in use. Warn rather than crash.
+            warnings.warn(f"[gpufl] clean_logs: could not remove {p}: {e}")
+    return removed
+
+
+__all__ = ["Scope", "init", "shutdown", "clean_logs", "system_start", "system_stop", "BackendKind", "InitOptions", "ProfilingEngine"]

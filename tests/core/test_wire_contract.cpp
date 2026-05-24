@@ -304,6 +304,12 @@ TEST(WireContract, DeviceMetricBatchExtendedColumns) {
 }
 
 // ── scope_event_batch ─────────────────────────────────────────────────────
+//
+// v2 format (1.0.3+): two extra columns `repeat` and `warmup` carry
+// benchmark metadata on BEGIN rows produced by GFL_BENCH / Python's
+// iterable Scope. Rows that don't set them (legacy GFL_SCOPE, END
+// rows) emit 0/0 — semantically a no-op for older readers that
+// project only the first 5 columns.
 TEST(WireContract, ScopeEventBatchColumns) {
     gpufl::BatchBuffer<gpufl::ScopeBatchRow> batch;
     gpufl::ScopeBatchRow begin{};
@@ -325,11 +331,48 @@ TEST(WireContract, ScopeEventBatchColumns) {
         gpufl::model::ScopeEventBatchModel(batch, "sess-1", 1).buildJson();
 
     EXPECT_TRUE(JsonContains(json, "\"type\":\"scope_event_batch\""));
+    EXPECT_TRUE(JsonContains(json, "\"version\":2"));
     EXPECT_TRUE(JsonContains(
         json,
         "\"columns\":[\"dt_ns\",\"scope_instance_id\",\"name_id\","
-        "\"event_type\",\"depth\"]"));
-    EXPECT_TRUE(JsonContains(json, "\"rows\":[[0,1,1,0,0],[5500,1,1,1,0]]"));
+        "\"event_type\",\"depth\",\"repeat\",\"warmup\"]"));
+    // BEGIN/END rows from a non-bench scope carry 0/0 in the trailing
+    // two columns — wire output is otherwise byte-identical to v1.
+    EXPECT_TRUE(JsonContains(json,
+        "\"rows\":[[0,1,1,0,0,0,0],[5500,1,1,1,0,0,0]]"));
+}
+
+// Verifies that when a scope's BEGIN row carries benchmark metadata
+// (set by GFL_BENCH / ScopedMonitor(name, ScopeMeta{...})), the
+// values surface on the wire. END rows always emit 0/0 — the backend
+// joins by scope_instance_id and reads metadata from the BEGIN row.
+TEST(WireContract, ScopeEventBatchCarriesRepeatAndWarmupOnBegin) {
+    gpufl::BatchBuffer<gpufl::ScopeBatchRow> batch;
+    gpufl::ScopeBatchRow begin{};
+    begin.ts_ns = 1000;
+    begin.scope_instance_id = 7;
+    begin.name_id = 3;
+    begin.event_type = 0;
+    begin.depth = 1;
+    begin.repeat = 10;
+    begin.warmup = 3;
+    batch.push(begin);
+    gpufl::ScopeBatchRow end{};
+    end.ts_ns = 2000;
+    end.scope_instance_id = 7;
+    end.name_id = 3;
+    end.event_type = 1;
+    end.depth = 1;
+    // repeat/warmup intentionally left at default 0 on the END row.
+    batch.push(end);
+
+    const std::string json =
+        gpufl::model::ScopeEventBatchModel(batch, "sess-1", 1).buildJson();
+
+    // BEGIN row: dt=0, instance=7, name=3, event=0, depth=1, repeat=10, warmup=3
+    // END   row: dt=1000, instance=7, name=3, event=1, depth=1, repeat=0, warmup=0
+    EXPECT_TRUE(JsonContains(json,
+        "\"rows\":[[0,7,3,0,1,10,3],[1000,7,3,1,1,0,0]]"));
 }
 
 // ── host_metric_batch ─────────────────────────────────────────────────────
