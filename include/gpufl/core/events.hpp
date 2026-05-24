@@ -428,6 +428,15 @@ struct ScopeBatchRow {
     uint32_t name_id           = 0;  // scope name dictionary ID
     uint8_t  event_type        = 0;  // 0 = begin, 1 = end
     int      depth             = 0;
+
+    // Optional benchmark metadata set on the BEGIN row only (0 on END).
+    // Populated when the scope was opened with iteration metadata —
+    // e.g. Python's `for _ in gpufl.Scope(name, repeat=N, warmup=K)`.
+    // 0 on either field means "not provided" and the row serializes
+    // the same as before (analyzer / backend simply skip the metric).
+    // Backend joins by scope_instance_id to read the begin-row values.
+    uint32_t repeat            = 0;  // measured iterations bracketed by scope
+    uint32_t warmup            = 0;  // iterations run BEFORE scope opened
 };
 
 struct ProfileSampleBatchRow {

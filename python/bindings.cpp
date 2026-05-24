@@ -9,10 +9,28 @@ namespace py = pybind11;
 
 class PyScope {
 public:
-    PyScope(std::string name, std::string tag) : name_(name), tag_(tag) {}
+    // `repeat` / `warmup` are benchmark metadata stamped onto the BEGIN
+    // row of the underlying scope_event_batch when the scope opens.
+    // Both default to 0 — the legacy `with gpufl.Scope("x"):` call path
+    // produces byte-identical output to pre-1.0.3.
+    PyScope(std::string name, std::string tag, uint32_t repeat, uint32_t warmup)
+        : name_(std::move(name)),
+          tag_(std::move(tag)),
+          repeat_(repeat),
+          warmup_(warmup) {}
 
     void enter() {
-        monitor_ = std::make_unique<gpufl::ScopedMonitor>(name_, tag_);
+        if (repeat_ == 0 && warmup_ == 0) {
+            // Legacy fast path — no ScopeMeta allocation needed.
+            monitor_ = std::make_unique<gpufl::ScopedMonitor>(name_, tag_);
+        } else {
+            // 1.0.3+ canonical ctor: tag now lives inside ScopeMeta.
+            gpufl::ScopeMeta meta;
+            meta.tag    = tag_;
+            meta.repeat = repeat_;
+            meta.warmup = warmup_;
+            monitor_ = std::make_unique<gpufl::ScopedMonitor>(name_, meta);
+        }
     }
 
     void exit(py::object exc_type, py::object exc_value, py::object traceback) {
@@ -22,6 +40,8 @@ public:
 private:
     std::string name_;
     std::string tag_;
+    uint32_t repeat_{0};
+    uint32_t warmup_{0};
     std::unique_ptr<gpufl::ScopedMonitor> monitor_;
 };
 
@@ -180,7 +200,17 @@ PYBIND11_MODULE(_gpufl_client, m) {
     // --------------------------
 
     py::class_<PyScope>(m, "Scope")
-        .def(py::init<std::string, std::string>(), py::arg("name"), py::arg("tag") = "")
+        // `repeat` / `warmup` are keyword-only on purpose — they're
+        // optional benchmark metadata, not positional name/tag args. The
+        // pure-Python `gpufl.Scope` wrapper in __init__.py forwards
+        // these when its iterable (repeat=N, warmup=K) form opens the
+        // C++ scope.
+        .def(py::init<std::string, std::string, uint32_t, uint32_t>(),
+             py::arg("name"),
+             py::arg("tag")    = "",
+             py::kw_only(),
+             py::arg("repeat") = 0u,
+             py::arg("warmup") = 0u)
         .def("__enter__", [](PyScope &self) {
             self.enter();
             return &self;

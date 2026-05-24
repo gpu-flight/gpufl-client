@@ -13,6 +13,7 @@
 
 #include <cuda_runtime.h>
 
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 
@@ -208,13 +209,40 @@ int main() {
         CHECK_CUDA(cudaDeviceSynchronize());
     }
 
-    // --- Kernel 1: Baseline (no divergence) ---
-    std::cout << "  [1/5] uniformWork — no divergence" << std::endl;
-    GFL_SCOPE("1_uniform_work") {
+    // --- Kernel 1: Baseline (no divergence) — auto-loop benchmark demo ---
+    //
+    // Demonstrates GFL_BENCH (1.0.3+): the macro runs the body
+    // `warmup` times BEFORE opening the scope and `repeat` times
+    // INSIDE it, all in one place. The scope's BEGIN row carries
+    // both counts so the analyzer / backend can compute per-iter
+    // time. The Python equivalent is:
+    //
+    //   for _ in gpufl.Scope("1_uniform_work", repeat=10, warmup=3):
+    //       uniformWork[...](...)
+    //
+    // The warmup iterations prime L1/L2 and let the PC-sampling
+    // buffer drain its first burst, so the 10 measured iterations
+    // reflect steady-state cost rather than cold-cache overhead.
+    //
+    // The trailing semicolon after `};` is required — the macro
+    // expands to a single expression statement (BenchInvoker
+    // construction + operator+= with the lambda body).
+    //
+    // CUDA error checking sits OUTSIDE the lambda: `return` inside
+    // the body would only exit the lambda, not main, so CHECK_CUDA
+    // wouldn't propagate. cudaGetLastError() afterwards still picks
+    // up any kernel launch / sync failure across the whole loop.
+    std::cout << "  [1/5] uniformWork — 3 warmup + 10 measured" << std::endl;
+    constexpr int kWarmup = 3;
+    constexpr int kRepeat = 10;
+    GFL_BENCH("1_uniform_work",
+              gpufl::ScopeMeta{}
+                  .setRepeat(kRepeat)
+                  .setWarmup(kWarmup)) {
         uniformWork<<<grid, block>>>(d_out, d_in, n);
-        CHECK_CUDA(cudaGetLastError());
-        CHECK_CUDA(cudaDeviceSynchronize());
-    }
+        cudaDeviceSynchronize();
+    };
+    CHECK_CUDA(cudaGetLastError());
 
     // --- Kernel 2: Even/odd split ---
     std::cout << "  [2/5] branchByWarpLane — 50/50 divergence" << std::endl;

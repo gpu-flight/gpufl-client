@@ -205,18 +205,73 @@ void shutdown();
 // - With output_path: saves the report to a file.
 void generateReport(const std::string& output_path = "");
 
+// Single options object carrying everything you might attach to a
+// scope beyond its name. Used as the canonical 2nd argument of the
+// 1.0.3+ `ScopedMonitor(name, meta)` ctor and the unified
+// `GFL_SCOPE(name, ...)` macro. Designed as an aggregate so callers
+// can use designated initializers:
+//
+//     GFL_SCOPE("hot", .repeat=10, .warmup=3, .tag="ml")
+//
+// Fields are declared in init-list order — designated initializers
+// must list them in the same order (`.tag` before `.repeat` before
+// `.warmup`).  Any field can be omitted; defaults all zero / empty.
+//
+// New fields can be appended without breaking existing callers
+// (designated init only sets named members; aggregate default
+// initializers cover the rest).
+struct ScopeMeta {
+    // Optional category tag (e.g. "math", "ml", "io"). When non-empty,
+    // replaces the legacy `tag` parameter of ScopedMonitor / Python's
+    // `Scope(name, tag)` so the API has a single source of truth.
+    std::string tag = {};
+    // Number of MEASURED iterations bracketed by this scope. Lets the
+    // analyzer divide total scope time by `repeat` to get per-iter avg
+    // without the caller pre-computing it. 0 = not provided.
+    uint32_t repeat = 0;
+    // Iterations the caller ran BEFORE opening this scope, deliberately
+    // excluded from measurement (JIT compile / cold cache warmup). 0 = none.
+    // Stored for audit / reporting; not used in per-iter math.
+    uint32_t warmup = 0;
+
+    // Fluent builders — the portable way to populate ScopeMeta in
+    // pure C++17. Designated initializers (`{.repeat=10}`) require
+    // C++20 (or GCC/Clang in C++17 mode with extensions); MSVC's
+    // /std:c++17 rejects them outright. The builders work on every
+    // compiler.
+    //
+    //     gpufl::ScopeMeta{}.setRepeat(10).setWarmup(3).setTag("ml")
+    //
+    // Each setter returns `*this` so calls chain. Use them with
+    // GFL_BENCH or pass the result directly to ScopedMonitor.
+    ScopeMeta& setTag(std::string t)    { tag    = std::move(t); return *this; }
+    ScopeMeta& setRepeat(uint32_t r)    { repeat = r;            return *this; }
+    ScopeMeta& setWarmup(uint32_t w)    { warmup = w;            return *this; }
+};
+
 class ScopedMonitor {
    public:
     explicit ScopedMonitor(std::string name, std::string tag, bool deep_profiling);
     explicit ScopedMonitor(std::string name, std::string tag);
     explicit ScopedMonitor(std::string name, bool deep_profiling);
     explicit ScopedMonitor(std::string name);
+    // Canonical 1.0.3+ ctor — single options object. `meta.tag`
+    // replaces the legacy separate `tag` parameter; the older
+    // (name, tag, ScopeMeta) overload has been retired in favor of
+    // this one so there's a single source of truth for the tag.
+    explicit ScopedMonitor(std::string name, ScopeMeta meta);
     ~ScopedMonitor();
 
     ScopedMonitor(const ScopedMonitor&) = delete;
     ScopedMonitor& operator=(const ScopedMonitor&) = delete;
 
    private:
+    // Shared ctor body — all constructors funnel through this so the
+    // begin-row push, NVTX push, and profiler-scope hooks live in one
+    // place. `meta` defaults to ScopeMeta{} (zeros) for the legacy
+    // overloads, so their wire output is byte-for-byte unchanged.
+    void init_(const ScopeMeta& meta) const;
+
     std::string name_;
     std::string tag_;
     int pid_{0};
@@ -233,12 +288,105 @@ inline void monitor(const std::string& name, const std::string& tag,
     ScopedMonitor r(name, tag);
     fn();
 }
+
+namespace detail {
+
+// Helper that powers GFL_BENCH. The trailing lambda body is delivered
+// via operator+=, which lets the macro expansion look like a natural
+// `{ block }` after `GFL_BENCH(...)`. The body runs `warmup` times
+// BEFORE the scope opens (excluded from measurement) and `repeat`
+// times INSIDE the scope (bracketed by the BEGIN / END rows).
+//
+// Body is captured by reference via the `[&]` lambda the macro
+// produces, so it sees all enclosing locals — but be aware that
+// `return` inside the body returns from the LAMBDA, not the
+// enclosing function. Use exceptions for fatal errors instead.
+class BenchInvoker {
+   public:
+    BenchInvoker(std::string name, ScopeMeta meta)
+        : name_(std::move(name)), meta_(std::move(meta)) {}
+
+    // Precedence note: `operator+=` was picked over `*` / `<<` because
+    // it has lower precedence than the lambda's `[]` capture syntax,
+    // so the macro doesn't need extra parens around the lambda.
+    template <class Body>
+    void operator+=(Body&& body) {
+        // Warmup phase: open a "<name>_warmup" sub-scope so the kernel
+        // events emitted during warmup are attributed to a separately
+        // identifiable bucket in the log instead of leaking into the
+        // global / outer scope. The warmup scope itself carries
+        // repeat=meta_.warmup so the analyzer's per-iteration math
+        // works for cold-start cost too. Tag inherits from the user's
+        // meta so warmup and measured group together (e.g. both
+        // tagged "ml" if the user passed that).
+        if (meta_.warmup > 0) {
+            ScopeMeta warmup_meta;
+            warmup_meta.tag    = meta_.tag;
+            warmup_meta.repeat = meta_.warmup;
+            ScopedMonitor warmup_scope(name_ + "_warmup",
+                                       std::move(warmup_meta));
+            for (uint32_t i = 0; i < meta_.warmup; ++i) body();
+        }
+        // Measured phase: open the main "<name>" scope.
+        ScopedMonitor scope(name_, meta_);
+        for (uint32_t i = 0; i < meta_.repeat; ++i) body();
+    }
+
+   private:
+    std::string name_;
+    ScopeMeta meta_;
+};
+
+}  // namespace detail
 }  // namespace gpufl
 
+// GFL_SCOPE — single-arg scoped instrumentation, unchanged since
+// pre-1.0.3. Pass ONLY a name. The body runs exactly once and the
+// scope brackets all the work inside it.
+//
+//     GFL_SCOPE("inference") { model_forward(x); }
+//
+// For benchmark loops with automatic warmup + repeat, see GFL_BENCH
+// below. For attaching metadata (tag / repeat / warmup) to a scope
+// without using the auto-loop helper — e.g. you have an irregular
+// loop body with `continue` / `break` / early-return semantics that
+// don't fit in a lambda — construct ScopedMonitor directly:
+//
+//     gpufl::ScopeMeta meta;
+//     meta.repeat = 10;
+//     gpufl::ScopedMonitor scope("hot", meta);
+//     for (int i = 0; i < 10; ++i) { ... }
 #define GFL_SCOPE(name) if (gpufl::ScopedMonitor _gpufl_scope{name}; true)
 
 #define GFL_SCOPE_TAGGED(name, tag, deep_profiling) \
     if (gpufl::ScopedMonitor _gpufl_scope{name, tag}; true)
+
+// GFL_BENCH — automatic benchmark loop. The body block runs
+// `meta.warmup` times BEFORE the scope opens and `meta.repeat` times
+// INSIDE the scope (BEGIN row carries both counts). Saves you from
+// writing two for-loops + a manual ScopedMonitor:
+//
+//     GFL_BENCH("hot", gpufl::ScopeMeta{}.setRepeat(10).setWarmup(3)) {
+//         my_kernel<<<grid, block>>>(...);
+//         cudaDeviceSynchronize();
+//     };   // ← trailing ';' is required
+//
+// The builder form (`ScopeMeta{}.setX(...)`) is recommended because
+// it compiles on every major compiler in /std:c++17. Designated
+// initializers (`{.repeat=10, .warmup=3}`) work on GCC and Clang in
+// C++17 (compiler extension) and on every compiler in C++20, but
+// MSVC's /std:c++17 explicitly rejects them — so projects targeting
+// MSVC pre-C++20 should stick with builders.
+//
+// The body is captured by `[&]` so it sees enclosing locals.
+//
+// IMPORTANT: `return` inside the body returns from the LAMBDA, not
+// the enclosing function. Macros that expand to early-return
+// (e.g. CHECK_CUDA) won't propagate errors out — throw an exception
+// instead, or check status after the macro completes.
+#define GFL_BENCH(name, ...) \
+    ::gpufl::detail::BenchInvoker{name, ::gpufl::ScopeMeta{__VA_ARGS__}} \
+        += [&]()
 
 #define GFL_SYSTEM_START(name) ::gpufl::systemStart(name)
 #define GFL_SYSTEM_STOP(name) ::gpufl::systemStop(name)

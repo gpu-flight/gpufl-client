@@ -586,12 +586,30 @@ ScopedMonitor::ScopedMonitor(std::string name, const bool deep_profiling)
     : ScopedMonitor(std::move(name), "", deep_profiling) {}
 
 ScopedMonitor::ScopedMonitor(std::string name, std::string tag,
-                             bool deep_profiling)
+                             bool /*deep_profiling*/)
     : name_(std::move(name)),
       tag_(std::move(tag)),
       pid_(detail::GetPid()),
       start_ns_(detail::GetTimestampNs()),
       scope_id_(nextScopeId_()) {
+    init_(ScopeMeta{});  // no benchmark metadata
+}
+
+// Canonical 1.0.3+ ctor — single options object. Tag now lives
+// inside ScopeMeta (was a separate parameter in the earlier draft)
+// so the call site has a single source of truth and the variadic
+// GFL_SCOPE macro can wrap any combination of fields in one
+// ScopeMeta{...} literal.
+ScopedMonitor::ScopedMonitor(std::string name, ScopeMeta meta)
+    : name_(std::move(name)),
+      tag_(std::move(meta.tag)),
+      pid_(detail::GetPid()),
+      start_ns_(detail::GetTimestampNs()),
+      scope_id_(nextScopeId_()) {
+    init_(meta);  // meta.tag is moved-from; init_ only reads repeat/warmup
+}
+
+void ScopedMonitor::init_(const ScopeMeta& meta) const {
     if (const Runtime* rt = runtime(); !rt || !rt->logger) return;
 
     auto& stack = getThreadScopeStack();
@@ -605,6 +623,11 @@ ScopedMonitor::ScopedMonitor(std::string name, std::string tag,
     row.name_id = name_id;
     row.event_type = 0;  // begin
     row.depth = depth;
+    // Benchmark metadata — 0/0 for the legacy ctors, populated for the
+    // ScopeMeta overload. End row (in dtor) keeps these at 0; backend
+    // joins by scope_instance_id to read the begin-row values.
+    row.repeat = meta.repeat;
+    row.warmup = meta.warmup;
     Monitor::PushScopeRow(row);
 
     // Scope callbacks are useful for both tracing and profiling backends.

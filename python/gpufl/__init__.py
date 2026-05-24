@@ -116,7 +116,9 @@ except ImportError as e:
             self.remote_upload = False
 
     class _CScope:
-        def __init__(self, *args): pass
+        # Accept kwargs (repeat/warmup added in 1.0.3) so the no-GPU
+        # fallback matches the real pybind11 binding's signature.
+        def __init__(self, *args, **kwargs): pass
         def __enter__(self): return self
         def __exit__(self, *args): pass
     # --- FIX END ---
@@ -313,11 +315,27 @@ class Scope:
         return self._iterate()
 
     def _iterate(self):
-        # Warmup: body runs with the scope CLOSED (excluded from timing).
-        for w in range(self._warmup):
-            yield w - self._warmup  # -warmup .. -1
-        # Measured: open the scope once, yield repeat times, always close.
-        self._inner = _CScope(self._name, self._tag)
+        # Warmup: open a "<name>_warmup" sub-scope so the kernel events
+        # emitted during warmup are attributed to a separately
+        # identifiable bucket — same convention as the C++ BenchInvoker,
+        # keeps Python and C++ logs interchangeable. The sub-scope's
+        # BEGIN row carries repeat=warmup so per-iteration cold-start
+        # cost can be computed by the analyzer.
+        if self._warmup > 0:
+            warmup_inner = _CScope(self._name + "_warmup", self._tag,
+                                   repeat=self._warmup, warmup=0)
+            warmup_inner.__enter__()
+            try:
+                for w in range(self._warmup):
+                    yield w - self._warmup  # -warmup .. -1
+            finally:
+                warmup_inner.__exit__(None, None, None)
+        # Measured: open the main scope, yield repeat times, always close.
+        # Pass repeat/warmup through to the C++ scope so they land on the
+        # BEGIN row of scope_event_batch — the analyzer / backend then
+        # derive per-iteration metrics without the caller doing math.
+        self._inner = _CScope(self._name, self._tag,
+                              repeat=self._repeat, warmup=self._warmup)
         self._inner.__enter__()
         try:
             for i in range(self._repeat):

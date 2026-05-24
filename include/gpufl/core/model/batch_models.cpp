@@ -161,20 +161,25 @@ std::string ScopeEventBatchModel::buildJson() const {
     const int64_t base = rows.front().ts_ns;
 
     std::ostringstream oss;
-    oss << "{\"version\":1,\"type\":\"scope_event_batch\""
+    oss << "{\"version\":2,\"type\":\"scope_event_batch\""
         << ",\"session_id\":\"" << jsonEscape(session_id_) << '"'
         << ",\"batch_id\":" << batch_id_ << ",\"base_time_ns\":" << base
         << ",\"columns\":[\"dt_ns\",\"scope_instance_id\",\"name_id\","
-           "\"event_type\",\"depth\"]"
+           "\"event_type\",\"depth\",\"repeat\",\"warmup\"]"
         << ",\"rows\":[";
 
     bool first = true;
     for (const auto& r : rows) {
         if (!first) oss << ',';
         first = false;
+        // v2 (1.0.3): adds repeat + warmup as the last two columns.
+        // Both are 0 on END rows and on BEGIN rows that didn't carry
+        // benchmark metadata, so older v1 callers keep producing
+        // semantically-identical numeric payloads — only the column
+        // list / version bump changes the wire format.
         oss << '[' << (r.ts_ns - base) << ',' << r.scope_instance_id << ','
             << r.name_id << ',' << static_cast<int>(r.event_type) << ','
-            << r.depth << ']';
+            << r.depth << ',' << r.repeat << ',' << r.warmup << ']';
     }
     oss << "]}";
     return oss.str();
