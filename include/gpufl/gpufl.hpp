@@ -22,7 +22,31 @@ struct InitOptions {
     // config files don't break; will be removed in a future major release.
     int kernel_sample_rate_ms = 0;
     BackendKind backend = BackendKind::Auto;
-    bool sampling_auto_start = false;
+    /**
+     * System-metric sampling policy.
+     *
+     *   true  — Sampler runs continuously from init() to shutdown().
+     *           GPU/host telemetry events are emitted on a fixed interval
+     *           regardless of scopes. Use for fleet monitoring, dashboards,
+     *           any "always-on" use case.
+     *
+     *   false — Sampler is idle by default. It activates while inside any
+     *           GFL_SCOPE region (auto-bracketing), or between explicit
+     *           gpufl::systemStart() / systemStop() calls. Outside those
+     *           windows zero system-metric events are emitted. Use when
+     *           you only care about telemetry during specific phases of
+     *           your application (e.g. inside a training-step scope).
+     *
+     * Renamed from `sampling_auto_start` in this release. The old name
+     * referred only to init-time auto-start and didn't capture the
+     * scope-bracketing behavior, which was silently broken when the
+     * flag was off. C++ callers must rename to `continuous_system_sampling`;
+     * the compiler will surface this as a "no member named
+     * 'sampling_auto_start'" error pointing at their call site. Python
+     * callers using the old kwarg name keep working for one release
+     * with a DeprecationWarning (see python/gpufl/__init__.py).
+     */
+    bool continuous_system_sampling = false;
     bool enable_debug_output = false;
     bool enable_stack_trace = false;
     bool enable_source_collection = true;  // collect source file content for source/SASS correlation
@@ -251,13 +275,20 @@ class ScopedMonitor {
     // begin-row push, NVTX push, and profiler-scope hooks live in one
     // place. `meta` defaults to ScopeMeta{} (zeros) for the legacy
     // overloads, so their wire output is byte-for-byte unchanged.
-    void init_(const ScopeMeta& meta) const;
+    void init_(const ScopeMeta& meta);
 
     std::string name_;
     std::string tag_;
     int pid_{0};
     int64_t start_ns_{0};
     uint64_t scope_id_{};
+    // True if this scope took an activation on the sampler (i.e.,
+    // continuous_system_sampling was off at scope entry and we kicked
+    // off system metrics for the scope duration). The destructor uses
+    // this to decide whether to deactivate symmetrically. Avoids
+    // re-reading g_opts in the destructor, which could see a different
+    // value if shutdown() raced ahead.
+    bool sampler_activated_{false};
 };
 
 inline void monitor(const std::string& name, const std::function<void()>& fn) {

@@ -451,8 +451,20 @@ bool init(const InitOptions& opts) {
 
     rt_ptr->logger->write(model::InitEventModel(ie));
 
-    // Start sampler if enabled and collector exists
-    if (g_opts.sampling_auto_start && rt_ptr->logger) {
+    // Configure the sampler with collectors / interval. This does NOT
+    // start the worker — that happens via activate(), driven either by
+    // the continuous-mode baseline activation below or by GFL_SCOPE
+    // entry / systemStart() at runtime.
+    if (g_opts.system_sample_rate_ms > 0 && rt_ptr->collector) {
+        rt_ptr->sampler.configure(rt_ptr->app_name, rt_ptr->session_id,
+                                  rt_ptr->logger, rt_ptr->collector,
+                                  g_opts.system_sample_rate_ms,
+                                  rt_ptr->host_collector.get());
+    }
+
+    // Continuous mode: emit the SystemStart event and take the baseline
+    // activation that keeps the sampler running until shutdown().
+    if (g_opts.continuous_system_sampling && rt_ptr->logger) {
         SystemStartEvent e;
         e.pid = gpufl::detail::GetPid();
         e.app = rt_ptr->app_name;
@@ -463,12 +475,9 @@ bool init(const InitOptions& opts) {
         if (rt_ptr->host_collector) e.host = rt_ptr->host_collector->sample();
         rt_ptr->logger->write(model::SystemStartModel(e));
     }
-    if (g_opts.sampling_auto_start && g_opts.system_sample_rate_ms > 0 &&
+    if (g_opts.continuous_system_sampling && g_opts.system_sample_rate_ms > 0 &&
         rt_ptr->collector) {
-        rt_ptr->sampler.start(rt_ptr->app_name, rt_ptr->session_id,
-                              rt_ptr->logger, rt_ptr->collector,
-                              g_opts.system_sample_rate_ms, rt_ptr->app_name,
-                              rt_ptr->host_collector.get());
+        rt_ptr->sampler.activate();
     }
 
     // Intentionally disabled — shutdown order must be explicit to avoid CUPTI
@@ -499,10 +508,12 @@ void systemStart(std::string name) {
         if (rt->host_collector) e.host = rt->host_collector->sample();
         rt->logger->write(model::SystemStartModel(e));
     }
+    // Activate the sampler under the ref-counted model. If continuous
+    // mode already took a baseline activation at init(), this stacks on
+    // top of it (sampler keeps running). If continuous mode is off,
+    // this is what actually starts the worker.
     if (g_opts.system_sample_rate_ms > 0 && rt->collector) {
-        rt->sampler.start(rt->app_name, rt->session_id, rt->logger,
-                          rt->collector, g_opts.system_sample_rate_ms, name,
-                          rt->host_collector.get());
+        rt->sampler.activate();
     }
 }
 
@@ -510,7 +521,12 @@ void systemStop(std::string name) {
     Runtime* rt = runtime();
     if (!rt || !rt->logger) return;
 
-    rt->sampler.stop();
+    // Symmetric with systemStart: drop one activation. The sampler
+    // worker only stops when the activation count hits zero, so
+    // overlapping scopes / nested start/stop cycles compose correctly.
+    if (g_opts.system_sample_rate_ms > 0 && rt->collector) {
+        rt->sampler.deactivate();
+    }
 
     SystemStopEvent e;
     e.pid = detail::GetPid();
@@ -537,9 +553,12 @@ void shutdown() {
     Runtime* rt = runtime();
     if (!rt) return;
 
-    rt->sampler.stop();
+    // Hard teardown — zero any remaining activation count and join the
+    // worker thread. shutdown() short-circuits even if scopes leaked or
+    // systemStart/stop were unbalanced, so this is the safety net.
+    rt->sampler.shutdown();
 
-    if (g_opts.sampling_auto_start && rt->collector) {
+    if (g_opts.continuous_system_sampling && rt->collector) {
         SystemStopEvent e;
         e.pid = detail::GetPid();
         e.app = rt->app_name;
@@ -598,12 +617,27 @@ ScopedMonitor::ScopedMonitor(std::string name, ScopeMeta meta)
     init_(meta);  // meta.tag is moved-from; init_ only reads repeat/warmup
 }
 
-void ScopedMonitor::init_(const ScopeMeta& meta) const {
-    if (const Runtime* rt = runtime(); !rt || !rt->logger) return;
+void ScopedMonitor::init_(const ScopeMeta& meta) {
+    Runtime* rt = runtime();
+    if (!rt || !rt->logger) return;
 
     auto& stack = getThreadScopeStack();
     const int depth = static_cast<int>(stack.size());
     stack.push_back(name_);
+
+    // Scope-driven system-metric sampling. If continuous mode is off,
+    // every scope takes one activation on the way in and balances it on
+    // the way out. The Sampler's ref count handles nesting and overlap
+    // correctly (overlapping scopes / explicit systemStart all stack).
+    // We snapshot the decision at scope entry so the destructor can't
+    // double-activate or miss a deactivation if continuous mode is
+    // toggled mid-scope (which shouldn't happen, but defends against it).
+    if (!g_opts.continuous_system_sampling &&
+        g_opts.system_sample_rate_ms > 0 &&
+        rt->collector) {
+        rt->sampler.activate();
+        sampler_activated_ = true;
+    }
 
     const uint32_t name_id = Monitor::InternScopeName(name_);
     ScopeBatchRow row;
@@ -638,8 +672,25 @@ ScopedMonitor::~ScopedMonitor() {
     // its own internal range stack.
     GPUFL_NVTX_POP();
 
-    const Runtime* rt = runtime();
-    if (!rt || !rt->logger) return;
+    Runtime* rt = runtime();
+    if (!rt || !rt->logger) {
+        // Best-effort: if the runtime is already gone but we'd taken a
+        // sampler activation, we can't deactivate (no Sampler instance
+        // to talk to). Sampler::shutdown() in gpufl::shutdown() will
+        // have zeroed activations anyway, so we just drop the flag.
+        sampler_activated_ = false;
+        return;
+    }
+
+    // Balance the activation taken in init_() before any other dtor
+    // work, so that the sampler can wind down promptly when the
+    // outermost scope exits. The Sampler's ref count guarantees that
+    // overlapping scopes / explicit systemStart keep it running until
+    // all activators have released.
+    if (sampler_activated_) {
+        rt->sampler.deactivate();
+        sampler_activated_ = false;
+    }
 
     auto& stack = getThreadScopeStack();
     if (!stack.empty()) stack.pop_back();

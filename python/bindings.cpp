@@ -89,7 +89,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
         .def(py::init<>())
         .def_readwrite("app_name",              &gpufl::InitOptions::app_name)
         .def_readwrite("log_path",              &gpufl::InitOptions::log_path)
-        .def_readwrite("sampling_auto_start",   &gpufl::InitOptions::sampling_auto_start)
+        .def_readwrite("continuous_system_sampling", &gpufl::InitOptions::continuous_system_sampling)
         .def_readwrite("system_sample_rate_ms", &gpufl::InitOptions::system_sample_rate_ms)
         .def_readwrite("kernel_sample_rate_ms", &gpufl::InitOptions::kernel_sample_rate_ms)
         .def_readwrite("backend",               &gpufl::InitOptions::backend)
@@ -121,7 +121,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
     // enum, which is strictly more expressive.
     m.def("init", [](std::string app_name,
                      std::string log_path,
-                     bool sampling_auto_start,
+                     bool continuous_system_sampling,
                      int system_sample_rate_ms,
                      int kernel_sample_rate_ms,
                      gpufl::BackendKind backend,
@@ -141,7 +141,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
         gpufl::InitOptions opts;
         opts.app_name              = app_name;
         opts.log_path              = log_path;
-        opts.sampling_auto_start   = sampling_auto_start;
+        opts.continuous_system_sampling = continuous_system_sampling;
         opts.system_sample_rate_ms = system_sample_rate_ms;
         opts.kernel_sample_rate_ms = kernel_sample_rate_ms;
         opts.backend               = backend;
@@ -161,7 +161,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
         return gpufl::init(opts);
     }, py::arg("app_name"),
        py::arg("log_path")                    = "",
-       py::arg("sampling_auto_start")         = false,
+       py::arg("continuous_system_sampling")  = false,
        py::arg("system_sample_rate_ms")       = 0,
        py::arg("kernel_sample_rate_ms")       = 0,
        py::arg("backend")                     = gpufl::BackendKind::Auto,

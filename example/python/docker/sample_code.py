@@ -9,7 +9,7 @@ print(f"Device: {torch.cuda.get_device_name(0)}")
 # Initialize GPU Flight
 gpufl.init("smoke-test",
            log_path="./smoke_test",
-           sampling_auto_start=True,
+           continuous_system_sampling=True,
            enable_stack_trace=True,
            profiling_engine = ProfilingEngine.RangeProfiler)
 

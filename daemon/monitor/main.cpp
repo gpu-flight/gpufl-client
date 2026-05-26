@@ -85,7 +85,7 @@ int main() {
     opts.app_name = appName;
     opts.log_path = logPath;
     opts.profiling_engine = gpufl::ProfilingEngine::None;
-    opts.sampling_auto_start = true;
+    opts.continuous_system_sampling = true;
     opts.system_sample_rate_ms = intervalMs;
     opts.enable_debug_output = true;
     opts.flush_logs_always = true;

@@ -79,7 +79,7 @@ int main()
     gpufl::InitOptions opts;
     opts.app_name              = "occupancy_demo";
     opts.log_path              = "occupancy_demo.log";
-    opts.sampling_auto_start   = true;
+    opts.continuous_system_sampling = true;
     opts.enable_debug_output   = false;
 
     if (!gpufl::init(opts)) {

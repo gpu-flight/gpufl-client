@@ -5,7 +5,7 @@
 TEST(CoreLogic, InitOptionsDefault) {
     gpufl::InitOptions opts;
     EXPECT_EQ(opts.app_name, "gpufl");
-    EXPECT_FALSE(opts.sampling_auto_start);
+    EXPECT_FALSE(opts.continuous_system_sampling);
     EXPECT_EQ(opts.profiling_engine, gpufl::ProfilingEngine::PcSampling);
 }
 

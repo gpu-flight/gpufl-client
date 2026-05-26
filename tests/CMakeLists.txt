@@ -19,6 +19,7 @@ set(GPUFL_TEST_SOURCES
     core/test_monitor.cpp
     core/test_http_log_sink.cpp
     core/test_itanium_demangle.cpp
+    core/test_sampler.cpp
 )
 
 if(GPUFL_ENABLE_NVIDIA AND GPUFL_HAS_CUPTI)
