@@ -1,5 +1,6 @@
 import os
 import sys
+from contextlib import contextmanager
 
 # Import-order guard: gpufl and PyTorch each bundle a CUPTI version.
 # If gpufl is imported before torch, two incompatible CUPTI DLLs end up
@@ -95,6 +96,12 @@ except ImportError as e:
         SassMetrics        = "SassMetrics"
         RangeProfiler      = "RangeProfiler"
         PcSamplingWithSass = "PcSamplingWithSass"
+        # Friendly aliases — mirror the pybind11 ProfilingEngine attrs
+        # added in bindings.cpp. Identical string values so equality
+        # checks against the technical names still work in stub mode.
+        Continuous         = "PcSampling"
+        Deep               = "PcSamplingWithSass"
+        Range              = "RangeProfiler"
 
     class InitOptions:
         def __init__(self):
@@ -112,7 +119,6 @@ except ImportError as e:
             self.config_file = ""
             self.backend_url = ""
             self.api_key = ""
-            self.config_name = ""
             self.remote_upload = False
 
     class _CScope:
@@ -131,20 +137,18 @@ except Exception as e:
 
 __version__ = "0.1.0.dev"
 
-# ── Remote Configuration ──────────────────────────────────────────────────────
+# ── Remote upload ─────────────────────────────────────────────────────────────
 #
-# Remote config fetch and direct log upload are BOTH implemented in the
-# C++ core now (see include/gpufl/core/gpufl.cpp :: fetchRemoteConfig
-# and include/gpufl/core/logger/http_log_sink.cpp). This Python wrapper
-# is a thin pass-through: it translates the user-facing kwargs into
+# Direct log upload is implemented in the C++ core (see
+# include/gpufl/core/logger/http_log_sink.cpp). This Python wrapper
+# is a thin pass-through: it translates user-facing kwargs into
 # InitOptions fields and lets the C++ init() do the work.
 #
-# Previously the Python side ran its own urllib-based config fetch,
-# which was fine but duplicated the logic. We consolidated into C++
-# so that pure-C++ consumers (e.g. compiled demos like
-# sass_divergence_demo) get the same capability without spawning a
-# Python interpreter, and the behavior is consistent across the two
-# call paths.
+# (Historical note: a `config_name` kwarg used to trigger a remote
+# named-config fetch from the backend before init completed. That
+# feature was removed alongside the backend's ConfigController and
+# the SPA's ProfilingConfigPage. All configuration now flows through
+# InitOptions, env vars, and the local config file.)
 
 # ── Session / log-path bookkeeping ──────────────────────────────────────────
 #
@@ -159,7 +163,7 @@ _last_app_name = None
 # and env vars into the underlying InitOptions.
 _original_init = init
 
-def init(*args, backend_url=None, api_key=None, config_name=None,
+def init(*args, backend_url=None, api_key=None,
          remote_upload=None, **kwargs):
     """Initialize GPUFlight.
 
@@ -167,23 +171,17 @@ def init(*args, backend_url=None, api_key=None, config_name=None,
     previous; your explicit field sets on this call always win:
 
       1. InitOptions defaults (built-in).
-      2. Remote named config (opt-in: requires backend_url + api_key +
-         config_name; setting only backend_url does NOT trigger a fetch).
-      3. Local config file (config_file=...).
-      4. Env vars (GPUFL_BACKEND_URL / GPUFL_API_KEY / GPUFL_CONFIG_NAME /
+      2. Local config file (config_file=...).
+      3. Env vars (GPUFL_BACKEND_URL / GPUFL_API_KEY /
          GPUFL_REMOTE_UPLOAD / GPUFL_PROFILING_ENGINE / GPUFL_CONFIG_FILE).
-      5. The kwargs you pass to this function.
+      4. The kwargs you pass to this function.
 
     Args:
         backend_url: Base URL of the GPUFlight backend
             (e.g. "https://api.gpuflight.com"). On its own it does
-            nothing — opt into a capability via `config_name`
-            (remote config fetch) and/or `remote_upload=True` (live
-            NDJSON upload to `<backend_url>/api/v1/events/<type>`).
-        api_key: API key used for BOTH config fetch and log upload
-            (single key for v1).
-        config_name: Name of the remote config profile to fetch
-            (e.g. "production"). Leave empty for no remote fetch.
+            nothing — opt into live NDJSON upload to
+            `<backend_url>/api/v1/events/<type>` via `remote_upload=True`.
+        api_key: API key for log upload to the GPUFlight backend.
         remote_upload: When truthy, attaches the C++ HttpLogSink so
             every NDJSON line is POSTed live to the backend in parallel
             with the disk write. Env: `GPUFL_REMOTE_UPLOAD=1`.
@@ -192,28 +190,21 @@ def init(*args, backend_url=None, api_key=None, config_name=None,
     """
     # Resolve env-var fallbacks. Doing this in Python lets explicit
     # kwargs win over env; the C++ layer also does env fallback for
-    # the pure-C++ code path (e.g. sass_divergence_demo), so either
-    # side resolving the values is sufficient.
+    # the pure-C++ code path, so either side resolving is sufficient.
     if not backend_url:
         backend_url = os.environ.get('GPUFL_BACKEND_URL')
     if not api_key:
         api_key = os.environ.get('GPUFL_API_KEY')
-    if not config_name:
-        config_name = os.environ.get('GPUFL_CONFIG_NAME')
     if remote_upload is None:
         env_upload = os.environ.get('GPUFL_REMOTE_UPLOAD', '').strip().lower()
         remote_upload = env_upload in ('1', 'true', 'yes', 'on')
 
     # Forward to the underlying C++ init via the pybind11 binding. C++
-    # handles the remote config GET (synchronous, 5s timeout,
-    # best-effort) when config_name is non-empty, and attaches
-    # HttpLogSink when remote_upload is true.
+    # attaches HttpLogSink when remote_upload is true.
     if backend_url and 'backend_url' not in kwargs:
         kwargs['backend_url'] = backend_url
     if api_key and 'api_key' not in kwargs:
         kwargs['api_key'] = api_key
-    if config_name and 'config_name' not in kwargs:
-        kwargs['config_name'] = config_name
     if remote_upload and 'remote_upload' not in kwargs:
         kwargs['remote_upload'] = True
 
@@ -240,6 +231,56 @@ def shutdown():
         return _original_shutdown()
     finally:
         _session_active = False
+
+
+# ── Session: top-level context manager around init() / shutdown() ────────────
+#
+# Wraps init() + shutdown() so callers don't have to remember the explicit
+# shutdown — particularly important for live HTTP upload, where the dashboard
+# only flips a session from "running" → "stopped" once the C++ HttpLogSink
+# POSTs `/api/v1/events/shutdown`, which only fires from shutdown(). A bare
+# `gpufl.init(...)` in a Jupyter notebook cell never sends that event because
+# the kernel stays alive after the cell completes, so the session UI shows
+# "running" indefinitely.
+#
+#   with gpufl.session(app_name="my_app", remote_upload=True):
+#       # ... train ...
+#   # shutdown() runs here, even on exception
+#
+# All kwargs forward verbatim to init(). The yielded value is whatever init()
+# returned (truthy on success, False in stub/no-GPU mode) so callers can
+# branch on it without re-calling init.
+@contextmanager
+def session(*args, **kwargs):
+    """Run a GPUFlight session as a context manager.
+
+    Equivalent to::
+
+        gpufl.init(*args, **kwargs)
+        try:
+            yield
+        finally:
+            gpufl.shutdown()
+
+    On exit the C++ HttpLogSink drains the queue and POSTs
+    `/api/v1/events/shutdown`, which is what flips the dashboard session
+    from "running" to "stopped". Without this (or a manual shutdown call)
+    the UI shows the session as running indefinitely.
+
+    Yields:
+        The value returned by `init()` — truthy on success, False in
+        stub / no-GPU mode. Lets callers do ``with gpufl.session(...) as
+        ok: if not ok: ...``.
+    """
+    result = init(*args, **kwargs)
+    try:
+        yield result
+    finally:
+        # shutdown() is idempotent on the C++ side (HttpLogSink::close
+        # short-circuits if running_ is already false), so this is safe
+        # even when init() failed and no real session was started.
+        shutdown()
+
 
 # ── Scope: context manager + benchmark-iteration helper ─────────────────────
 #
@@ -427,4 +468,4 @@ def clean_logs(log_path=None, log_prefix=None, *, dry_run=False):
     return removed
 
 
-__all__ = ["Scope", "init", "shutdown", "clean_logs", "system_start", "system_stop", "BackendKind", "InitOptions", "ProfilingEngine"]
+__all__ = ["Scope", "init", "shutdown", "session", "clean_logs", "system_start", "system_stop", "BackendKind", "InitOptions", "ProfilingEngine"]

@@ -149,27 +149,26 @@ gpufl::shutdown();
 
 ## Talking to the Backend
 
-`gpufl` can optionally interact with the GPUFlight backend in two
-independent ways, both opt-in:
+`gpufl` can optionally upload logs directly to the GPUFlight backend
+as a background HTTP stream, in parallel with the local on-disk
+NDJSON write. Opt in via `remote_upload=True`. Requires `backend_url`
++ `api_key` to be set.
 
 | Capability | Opt in via | What happens |
 |---|---|---|
-| **Fetch remote named config** | `config_name="..."` | `gpufl.init()` does a one-off `GET /api/v1/config?config=<name>` before monitoring starts and applies the returned fields to your `InitOptions`. |
 | **Direct log upload** | `remote_upload=True` | A background thread POSTs every NDJSON line to `/api/v1/events/<type>` in parallel with the on-disk write. Intended for local / SSH / Jupyter workflows. |
 
-Both require `backend_url` + `api_key` to be set. **Setting those two
-fields alone does nothing** — you must opt into at least one of the
-two capabilities above.
+For production deployments where the agent daemon ships logs to the
+backend, leave `remote_upload=False` and let the daemon do the upload.
 
 ### Configuration precedence
 
 When multiple sources set the same field, higher beats lower:
 
 ```
-5. The kwargs you pass to gpufl.init()            ← highest
-4. Env vars (GPUFL_BACKEND_URL, GPUFL_API_KEY, ...)
-3. Local config file (config_file=...)
-2. Remote named config (when config_name is set)
+4. The kwargs you pass to gpufl.init()            ← highest
+3. Env vars (GPUFL_BACKEND_URL, GPUFL_API_KEY, ...)
+2. Local config file (config_file=...)
 1. Built-in defaults                              ← lowest
 ```
 
@@ -178,24 +177,11 @@ When multiple sources set the same field, higher beats lower:
 ```python
 import gpufl
 
-# Just live upload — no remote config fetch
+# Live upload to the backend
 gpufl.init("my_app",
            log_path="./logs",
            backend_url="https://api.gpuflight.com",
            api_key="gpfl_xxxxxxxxxxxx",
-           remote_upload=True)
-
-# Just remote config fetch — no upload (production uses the sidecar)
-gpufl.init("my_app",
-           backend_url="https://api.gpuflight.com",
-           api_key="gpfl_xxxxxxxxxxxx",
-           config_name="production")
-
-# Both
-gpufl.init("my_app",
-           backend_url="https://api.gpuflight.com",
-           api_key="gpfl_xxxxxxxxxxxx",
-           config_name="production",
            remote_upload=True)
 ```
 
@@ -204,7 +190,6 @@ Or via environment:
 ```bash
 export GPUFL_BACKEND_URL=https://api.gpuflight.com
 export GPUFL_API_KEY=gpfl_xxxxxxxxxxxx
-export GPUFL_CONFIG_NAME=production     # opt into remote config
 export GPUFL_REMOTE_UPLOAD=1            # opt into live upload
 python my_training_script.py
 ```
