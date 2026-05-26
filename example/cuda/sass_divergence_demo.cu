@@ -148,7 +148,7 @@ int main() {
     opts.remote_upload = false;
     opts.system_sample_rate_ms = 10;
     opts.enable_debug_output = true;
-    opts.sampling_auto_start = true;
+    opts.continuous_system_sampling = true;
     opts.enable_stack_trace = true;
     opts.profiling_engine = gpufl::ProfilingEngine::PcSamplingWithSass;
 

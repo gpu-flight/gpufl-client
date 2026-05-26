@@ -86,7 +86,7 @@ import numpy as np
 
 gpufl.init("my-app",
            log_path="./my_logs",
-           sampling_auto_start=True,
+           continuous_system_sampling=True,
            enable_stack_trace=True)
 
 @cuda.jit
@@ -133,7 +133,7 @@ gpufl::InitOptions opts;
 opts.app_name = "my_app";
 opts.log_path = "my_logs";
 opts.enable_stack_trace = true;
-opts.sampling_auto_start = true;
+opts.continuous_system_sampling = true;
 opts.profiling_engine = gpufl::ProfilingEngine::SassMetrics;
 
 gpufl::init(opts);

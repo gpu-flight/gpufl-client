@@ -20,7 +20,7 @@ int main(int argc, char** argv) {
     // Optional: Set a specific log path or let it default
     opts.log_path = "gpufl_system.log";
     opts.system_sample_rate_ms = 10;
-    opts.sampling_auto_start = true;
+    opts.continuous_system_sampling = true;
     gpufl::init(opts);
     // GFL_SYSTEM_START("system");
 

@@ -73,7 +73,7 @@ def setup_gpufl(config: dict, log_dir: str) -> bool:
         result = gpufl.init(
             app_name='benchmark',
             log_path=log_path,
-            sampling_auto_start=True,
+            continuous_system_sampling=True,
             system_sample_rate_ms=100,
             profiling_engine=engine,
         )

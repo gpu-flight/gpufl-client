@@ -1,51 +1,91 @@
 #include "gpufl/core/sampler.hpp"
 
 #include "gpufl/core/common.hpp"
+#include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/logger/logger.hpp"
 #include "gpufl/core/model/batch_models.hpp"
 
 namespace gpufl {
 Sampler::Sampler() = default;
-Sampler::~Sampler() { stop(); }
+Sampler::~Sampler() { shutdown(); }
 
-void Sampler::start(std::string appName, std::string sessionId,
-                    std::shared_ptr<Logger> logger,
-                    std::shared_ptr<ISystemCollector<DeviceSample>> collector,
-                    const int sampleIntervalMs, std::string name,
-                    HostCollector* hostCollector) {
-    stop();
-
+void Sampler::configure(std::string appName, std::string sessionId,
+                        std::shared_ptr<Logger> logger,
+                        std::shared_ptr<ISystemCollector<DeviceSample>> collector,
+                        const int sampleIntervalMs,
+                        HostCollector* hostCollector) {
+    std::lock_guard lk(mu_);
     appName_        = std::move(appName);
-    logger_         = std::move(logger);
     sessionId_      = std::move(sessionId);
+    logger_         = std::move(logger);
     collector_      = std::move(collector);
     host_collector_ = hostCollector;
     intervalMs_     = sampleIntervalMs;
-    name_           = std::move(name);
-    batch_.clear();
-    batch_id_      = 0;
-    host_batch_.clear();
-    host_batch_id_ = 0;
+}
 
-    if (!logger_ || !collector_ || intervalMs_ <= 0) return;
-
-    running_.store(true);
-
-    {
-        std::lock_guard lk(mu_);
-        th_ = std::thread([this] { runLoop_(); });
+void Sampler::activate() {
+    std::lock_guard lk(mu_);
+    const int prev = activations_.fetch_add(1, std::memory_order_acq_rel);
+    if (prev == 0) {
+        // 0 → 1 transition: start the worker thread if we're configured
+        // enough to do useful work. If we're not configured, the counter
+        // still increments — the next deactivate balances it. This keeps
+        // the API safe to call before configure().
+        if (logger_ && collector_ && intervalMs_ > 0 && !running_.load()) {
+            startWorkerLocked_();
+        }
     }
 }
 
-void Sampler::stop() {
-    running_.store(false, std::memory_order_release);
-
-    std::thread toJoin;
-    {
-        std::lock_guard lk(mu_);
-        toJoin = std::move(th_);
+void Sampler::deactivate() {
+    std::lock_guard lk(mu_);
+    const int prev = activations_.fetch_sub(1, std::memory_order_acq_rel);
+    if (prev <= 0) {
+        // Clamp at zero and warn once. Negative activations means an
+        // unbalanced call (deactivate without a matching activate); we
+        // don't propagate it because the caller may be in a destructor
+        // and surfacing exceptions there would be worse than the bug.
+        activations_.store(0, std::memory_order_release);
+        static std::atomic<bool> warned{false};
+        if (!warned.exchange(true)) {
+            GFL_LOG_ERROR("[Sampler] deactivate() called more times than "
+                          "activate() — clamping at zero. Check for "
+                          "unbalanced systemStart/systemStop or leaked "
+                          "ScopedMonitor destructors.");
+        }
+        return;
     }
+    if (prev == 1) {
+        // 1 → 0 transition: stop the worker.
+        if (running_.load()) {
+            stopWorkerLocked_();
+        }
+    }
+}
 
+void Sampler::shutdown() {
+    std::lock_guard lk(mu_);
+    activations_.store(0, std::memory_order_release);
+    if (running_.load()) {
+        stopWorkerLocked_();
+    }
+}
+
+void Sampler::startWorkerLocked_() {
+    batch_.clear();
+    batch_id_ = 0;
+    host_batch_.clear();
+    host_batch_id_ = 0;
+    running_.store(true, std::memory_order_release);
+    th_ = std::thread([this] { runLoop_(); });
+}
+
+void Sampler::stopWorkerLocked_() {
+    running_.store(false, std::memory_order_release);
+    std::thread toJoin = std::move(th_);
+    // Releasing the lock during join would let another activate() race
+    // ahead and start a second worker. Instead we join while holding
+    // the lock; the worker doesn't touch mu_, so no deadlock.
     if (toJoin.joinable()) {
         if (toJoin.get_id() == std::this_thread::get_id()) {
             toJoin.detach();
@@ -115,7 +155,7 @@ void Sampler::runLoop_() {
         std::this_thread::sleep_until(next_wake_time);
     }
 
-    // Flush any remaining samples accumulated before stop()
+    // Flush any remaining samples accumulated before deactivation.
     if (!batch_.empty()) {
         logger_->write(
             model::DeviceMetricBatchModel(batch_, sessionId_, ++batch_id_));

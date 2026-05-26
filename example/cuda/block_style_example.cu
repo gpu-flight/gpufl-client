@@ -38,7 +38,7 @@ int main() {
     opts.log_path = "gfl_block";
     opts.system_sample_rate_ms = 50;
     opts.kernel_sample_rate_ms = 50;
-    opts.sampling_auto_start = true;
+    opts.continuous_system_sampling = true;
     opts.enable_debug_output = true;
     opts.enable_source_collection = true;
     opts.profiling_engine = gpufl::ProfilingEngine::PcSamplingWithSass;

@@ -107,7 +107,7 @@ except ImportError as e:
         def __init__(self):
             self.app_name = "gpufl"
             self.log_path = ""
-            self.sampling_auto_start = False
+            self.continuous_system_sampling = False
             self.system_sample_rate_ms = 0
             self.kernel_sample_rate_ms = 0
             self.backend = BackendKind.Auto
@@ -188,6 +188,29 @@ def init(*args, backend_url=None, api_key=None,
             Defaults to False.
         **kwargs: All other InitOptions fields passed to C++ init.
     """
+    # Backward-compat shim: `sampling_auto_start` was renamed to
+    # `continuous_system_sampling` because the old name only described
+    # init-time auto-start and missed the new scope-bracketing behavior
+    # (off → sample only inside GFL_SCOPE / between systemStart/stop).
+    # We accept the old kwarg for one release with a DeprecationWarning,
+    # forwarding it to the new name. Caller passing both is an error.
+    if 'sampling_auto_start' in kwargs:
+        if 'continuous_system_sampling' in kwargs:
+            raise TypeError(
+                "init() got both 'sampling_auto_start' (deprecated) and "
+                "'continuous_system_sampling' — pass only the new name.")
+        import warnings
+        warnings.warn(
+            "'sampling_auto_start' is deprecated; use "
+            "'continuous_system_sampling' instead. With the new name, "
+            "False enables scope-bracketed sampling (sample only inside "
+            "GFL_SCOPE or between systemStart/stop); True samples "
+            "continuously from init to shutdown. The kwarg will be "
+            "removed in a future release.",
+            DeprecationWarning,
+            stacklevel=2)
+        kwargs['continuous_system_sampling'] = kwargs.pop('sampling_auto_start')
+
     # Resolve env-var fallbacks. Doing this in Python lets explicit
     # kwargs win over env; the C++ layer also does env fallback for
     # the pure-C++ code path, so either side resolving is sufficient.

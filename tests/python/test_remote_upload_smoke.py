@@ -110,7 +110,7 @@ def test_remote_upload_routes_events_to_stub_backend(stub_backend, tmp_path):
         backend_url=stub_backend["url"],
         api_key="gpfl_test_abc123",
         remote_upload=True,
-        sampling_auto_start=False,
+        continuous_system_sampling=False,
         enable_debug_output=False,
     )
     if not ok:
@@ -168,7 +168,7 @@ def test_env_var_enables_remote_upload(stub_backend, tmp_path, monkeypatch):
 
     log_prefix = str(tmp_path / "remote_upload_env")
     ok = gpufl.init(app_name="remote_upload_env", log_path=log_prefix,
-                    sampling_auto_start=False)
+                    continuous_system_sampling=False)
     if not ok:
         pytest.skip("gpufl.init returned False — no GPU")
     try:

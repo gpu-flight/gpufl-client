@@ -24,7 +24,7 @@ import gpufl
 EXPECTED_INIT_OPTIONS_FIELDS = {
     "app_name":               ("gpufl", str),
     "log_path":               ("",      str),
-    "sampling_auto_start":    (False,   bool),
+    "continuous_system_sampling": (False, bool),
     "system_sample_rate_ms":  (0,       int),
     "kernel_sample_rate_ms":  (0,       int),
     "enable_debug_output":    (False,   bool),
@@ -154,7 +154,7 @@ class TestInitFunction:
         result = gpufl.init(
             "test_app",
             log_path="./test_logs",
-            sampling_auto_start=False,
+            continuous_system_sampling=False,
             system_sample_rate_ms=50,
             kernel_sample_rate_ms=50,
             enable_debug_output=False,

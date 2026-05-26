@@ -28,7 +28,7 @@ def run_stress_test():
 
     gpufl.init("Heavy_Stress_App",
                log_path="./stress",
-               sampling_auto_start=True,
+               continuous_system_sampling=True,
                system_sample_rate_ms=50,
                enable_debug_output=False,
                enable_stack_trace=True,

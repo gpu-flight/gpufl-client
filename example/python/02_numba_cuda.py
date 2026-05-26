@@ -42,7 +42,7 @@ def run_benchmark():
     gfl.init(
         app_name="Numba_App",
         log_path=LOG_PATH,
-        sampling_auto_start=True,
+        continuous_system_sampling=True,
         system_sample_rate_ms=100,
         enable_debug_output=True,
         profiling_engine=gfl.ProfilingEngine.PcSamplingWithSass,
