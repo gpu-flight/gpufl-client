@@ -21,8 +21,28 @@ FROM nvidia/cuda:13.1.0-base-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Point any process in this image at the system CA bundle. The gpufl wheel
+# statically links its own OpenSSL, whose compile-time OPENSSLDIR was set
+# in the manylinux build container and does NOT match Ubuntu's
+# /etc/ssl/certs/ layout. Without these env vars, the embedded OpenSSL
+# fails to find any trusted roots and HttpLogSink reports
+# `httplib::Error=10` (SSLServerVerification). Both names are read by
+# OpenSSL's X509_get_default_cert_{file,dir}_env() at runtime and override
+# the baked-in OPENSSLDIR; harmless for any process that doesn't use them.
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    SSL_CERT_DIR=/etc/ssl/certs
+
 # Ubuntu 24.04 ships Python 3.12, matching the gpufl cp312 wheel.
+#
+# `ca-certificates` is required for the gpufl wheel's bundled OpenSSL to
+# verify TLS server certs when uploading to https://api.gpuflight.com.
+# Without it, HttpLogSink fails with `httplib::Error=10`
+# (SSLServerVerification): the handshake succeeds but there are no trusted
+# root CAs on disk to validate the server cert chain against. The
+# `nvidia/cuda:*-base-*` images intentionally ship without ca-certificates,
+# so we have to add it explicitly.
 RUN apt-get update && apt-get install -y \
+    ca-certificates \
     python3 \
     python3-venv \
     python3-pip \
