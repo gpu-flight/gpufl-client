@@ -81,15 +81,10 @@ struct InitOptions {
     // ── Configuration sources, in precedence order (low → high) ────────────
     //
     //   1. InitOptions defaults (these field initializers)
-    //   2. Remote named config (opt-in: requires backend_url + api_key + config_name)
-    //   3. Local config file (if config_file path is set)
-    //   4. Programmatic overrides (env vars, auto-tuning in gpufl::init)
-    //   5. The caller's explicit field sets in InitOptions
+    //   2. Local config file (if config_file path is set)
+    //   3. Programmatic overrides (env vars, auto-tuning in gpufl::init)
+    //   4. The caller's explicit field sets in InitOptions
     //
-    // Source (2) only runs when `config_name` is non-empty — merely
-    // setting `backend_url` + `api_key` does NOT trigger a fetch. This
-    // keeps the config-merge path predictable: you opt into remote
-    // config by name.
 
     /** Path to a local JSON config file. See ConfigFileLoader. */
     std::string config_file = "";
@@ -97,14 +92,14 @@ struct InitOptions {
     /**
      * GPUFlight backend base URL — e.g. "https://api.gpuflight.com" or
      * "http://localhost:8080". Host-only; do NOT include the API
-     * prefix (use {@link api_path} for that). Used by:
-     *   - log upload (when {@link remote_upload} is true) → POSTs to
-     *     `<backend_url><api_path>/events/<type>`.
-     *   - remote named-config fetch (when {@link config_name} is set) →
-     *     GETs `<backend_url><api_path>/config?config=<name>`.
+     * prefix (use {@link api_path} for that).
      *
-     * Setting this alone does nothing; you must also opt into at least
-     * one of the two capabilities via `remote_upload` or `config_name`.
+     * Used by log upload (when {@link remote_upload} is true) to POST
+     * NDJSON event batches to `<backend_url><api_path>/events/<type>`.
+     * Also used by the version-discovery probe at init time.
+     *
+     * Setting this alone does nothing; opt into upload via
+     * {@link remote_upload}.
      */
     std::string backend_url = "";
 
@@ -128,24 +123,10 @@ struct InitOptions {
     std::string api_path = "";
 
     /**
-     * API key used for BOTH remote config fetch and log upload (for v1).
-     * Sent as `X-API-Key` on the config GET and
-     * `Authorization: Bearer <key>` on event POSTs — matching the
-     * existing backend auth paths. May split later if config and
-     * ingestion need independent keys.
+     * API key for log upload to the GPUFlight backend.
+     * Sent as `Authorization: Bearer <key>` on event POSTs.
      */
     std::string api_key = "";
-
-    /**
-     * Name of the remote config to fetch (e.g. "production", "debug").
-     * When non-empty AND both {@link backend_url} and {@link api_key}
-     * are set, `gpufl::init()` performs a synchronous HTTP GET against
-     * `<backend_url><api_path>/config?config=<name>` and applies the
-     * returned field overrides to this InitOptions BEFORE the monitor
-     * is initialized. Empty means "no remote fetch" — your local
-     * config wins without any network round-trip.
-     */
-    std::string config_name = "";
 
     /**
      * When true, gpufl::init() attaches an HttpLogSink to the logger so

@@ -70,6 +70,20 @@ PYBIND11_MODULE(_gpufl_client, m) {
         .value("PcSamplingWithSass", gpufl::ProfilingEngine::PcSamplingWithSass)
         .export_values();
     profilingEngineEnum.attr("None_") = profilingEngineEnum.attr("__members__")[py::str("None")];
+    // Friendly aliases — Phase 1 of mode renaming. Bound as class
+    // attributes pointing at the existing enum entries (not as
+    // additional `.value()` calls, which would either fight pybind11's
+    // deduplication or end up shadowing the canonical name in repr).
+    // gpufl.ProfilingEngine.Deep is the same value as
+    // gpufl.ProfilingEngine.PcSamplingWithSass, and repr() will still
+    // show the technical name. See
+    // gpufl-manual/client/mode-data-layers.html for naming rationale.
+    profilingEngineEnum.attr("Continuous") =
+        profilingEngineEnum.attr("__members__")[py::str("PcSampling")];
+    profilingEngineEnum.attr("Deep") =
+        profilingEngineEnum.attr("__members__")[py::str("PcSamplingWithSass")];
+    profilingEngineEnum.attr("Range") =
+        profilingEngineEnum.attr("__members__")[py::str("RangeProfiler")];
 
     py::class_<gpufl::InitOptions>(m, "InitOptions")
         .def(py::init<>())
@@ -91,14 +105,12 @@ PYBIND11_MODULE(_gpufl_client, m) {
         .def_readwrite("enable_memory_tracking",      &gpufl::InitOptions::enable_memory_tracking)
         .def_readwrite("enable_cuda_graphs_tracking", &gpufl::InitOptions::enable_cuda_graphs_tracking)
         .def_readwrite("profiling_engine",      &gpufl::InitOptions::profiling_engine)
-        // Backend interactions — see InitOptions.backend_url / config_name
-        // / api_key / remote_upload docs for precedence and semantics.
-        // backend_url is the BASE URL of the GPUFlight backend; config
-        // fetch and log upload are each opt-in separately (via
-        // config_name and remote_upload respectively).
+        // Backend interactions — backend_url is the BASE URL of the
+        // GPUFlight backend; log upload is opt-in via remote_upload.
+        // (The historical `config_name` / remote-config-fetch binding
+        // was removed along with the backend's ConfigController.)
         .def_readwrite("backend_url",           &gpufl::InitOptions::backend_url)
         .def_readwrite("api_key",               &gpufl::InitOptions::api_key)
-        .def_readwrite("config_name",           &gpufl::InitOptions::config_name)
         .def_readwrite("remote_upload",         &gpufl::InitOptions::remote_upload);
 
     // Function-style init(). Every C++ InitOptions field that's user-facing
@@ -120,7 +132,6 @@ PYBIND11_MODULE(_gpufl_client, m) {
                      std::string config_file,
                      std::string backend_url,
                      std::string api_key,
-                     std::string config_name,
                      bool remote_upload,
                      bool enable_external_correlation,
                      bool enable_synchronization,
@@ -141,7 +152,6 @@ PYBIND11_MODULE(_gpufl_client, m) {
         opts.config_file           = config_file;
         opts.backend_url           = std::move(backend_url);
         opts.api_key               = std::move(api_key);
-        opts.config_name           = std::move(config_name);
         opts.remote_upload         = remote_upload;
         opts.enable_external_correlation = enable_external_correlation;
         opts.enable_synchronization      = enable_synchronization;
@@ -162,7 +172,6 @@ PYBIND11_MODULE(_gpufl_client, m) {
        py::arg("config_file")                 = "",
        py::arg("backend_url")                 = "",
        py::arg("api_key")                     = "",
-       py::arg("config_name")                 = "",
        py::arg("remote_upload")               = false,
        py::arg("enable_external_correlation") = true,
        py::arg("enable_synchronization")      = true,

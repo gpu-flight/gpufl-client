@@ -23,9 +23,9 @@
 // NOTE: we intentionally do NOT include <httplib.h> in this TU.
 // httplib pulls in <winsock2.h>, which collides with the legacy
 // <winsock.h> included transitively by <windows.h> (used below for
-// VEH + admin detection). The fetchRemoteConfig() implementation lives
-// in remote_config.cpp, which includes httplib first and avoids
-// windows.h entirely. See plan file for details.
+// VEH + admin detection). The version-discovery probe implementation
+// lives in remote_config.cpp, which includes httplib first and avoids
+// windows.h entirely.
 #include "gpufl/core/model/lifecycle_model.hpp"
 #include "gpufl/core/model/perf_metric_model.hpp"
 #include "gpufl/core/model/system_event_model.hpp"
@@ -187,13 +187,6 @@ MonitorBackendKind ToMonitorBackendKind(const BackendKind backend) {
     }
 }
 
-// fetchRemoteConfig + its helpers (urlEncode, parseBackendBaseUrl,
-// applyRemoteConfigToOpts) live in remote_config.cpp now — kept out of
-// this TU so the httplib include chain (which pulls in winsock2.h on
-// Windows) never collides with this file's <windows.h> usage for VEH
-// and admin elevation checks. gpufl.cpp just declares its intent by
-// including the header above and calling through.
-
 }  // namespace
 
 static std::string defaultLogPath_(const std::string& app) {
@@ -224,24 +217,10 @@ bool init(const InitOptions& opts) {
         }
     }
 
-    // Fetch remote named config — a dict of InitOptions overrides hosted
-    // at `<backend_url><api_path>/config?config=<config_name>`. Mirrors what
-    // the Python _fetch_remote_config() used to do; moved into C++ so
-    // pure C++ consumers (e.g. compiled sass_divergence_demo) get the
-    // same capability without a Python wrapper.
-    //
-    // Opt-in: we ONLY fetch when config_name is non-empty. Setting
-    // backend_url + api_key alone is not enough — it could mean the
-    // user only wants log upload, or nothing remote at all. Requiring
-    // a name makes the fetch predictable and keeps "set the URL for
-    // upload" from silently triggering a config pull.
     {
         std::string url  = g_opts.backend_url;
         std::string key  = g_opts.api_key;
-        std::string name = g_opts.config_name;
         std::string apiPath = g_opts.api_path;
-        // Env-var fallbacks so scripts / containers can set these
-        // without touching code.
         if (url.empty()) {
             if (const char* e = std::getenv("GPUFL_BACKEND_URL")) url = e;
             // Legacy name — accept for one release to ease migration.
@@ -250,25 +229,17 @@ bool init(const InitOptions& opts) {
         if (key.empty()) {
             if (const char* e = std::getenv("GPUFL_API_KEY")) key = e;
         }
-        if (name.empty()) {
-            if (const char* e = std::getenv("GPUFL_CONFIG_NAME")) name = e;
-        }
         if (apiPath.empty()) {
             if (const char* e = std::getenv("GPUFL_API_PATH")) apiPath = e;
         }
-        // Normalize once — every downstream consumer (fetchRemoteConfig,
-        // HttpLogSink, the discovery probe below) just appends after this.
+        // Normalize once — every downstream consumer (HttpLogSink wiring
+        // below, the version-discovery probe) just appends after this.
         apiPath = normalizeApiPath(apiPath);
         // Reflect env-var-resolved values back onto g_opts so downstream
-        // consumers (HttpLogSink wiring below) see consistent values.
+        // consumers see consistent values.
         g_opts.backend_url  = url;
         g_opts.api_key      = key;
-        g_opts.config_name  = name;
         g_opts.api_path     = apiPath;
-
-        if (!name.empty() && !url.empty() && !key.empty()) {
-            fetchRemoteConfig(url, apiPath, key, name, g_opts);
-        }
     }
 
     DebugLogger::setEnabled(g_opts.enable_debug_output);
@@ -338,7 +309,7 @@ bool init(const InitOptions& opts) {
     // Skipped when backend_url is empty (offline / file-only mode).
     if (!g_opts.backend_url.empty()) {
         std::thread([url = g_opts.backend_url,
-                     ap  = g_opts.api_path]() {
+                     ap  = g_opts.api_path] {
             probeBackendVersion(url, ap);
         }).detach();
     }
@@ -351,15 +322,33 @@ bool init(const InitOptions& opts) {
     mOpts.enable_debug_output = g_opts.enable_debug_output;
     mOpts.profiling_engine = g_opts.profiling_engine;
 
-    // Allow environment variable override: GPUFL_PROFILING_ENGINE
+    // Allow environment variable override: GPUFL_PROFILING_ENGINE.
+    // Accepts both technical names (PcSampling / PcSamplingWithSass /
+    // RangeProfiler) and friendly aliases (Continuous / Deep / Range)
+    // — same underlying enum values. Unrecognized values are logged but
+    // do not change the engine (it stays at whatever g_opts set above);
+    // previously such values fell through silently, which made
+    // `GPUFL_PROFILING_ENGINE=Deep` (documented in the manual) appear to
+    // work while actually doing nothing.
     if (const char* envEngine = std::getenv("GPUFL_PROFILING_ENGINE")) {
         const std::string val(envEngine);
-        if (val == "None")               mOpts.profiling_engine = ProfilingEngine::None;
-        else if (val == "PcSampling")    mOpts.profiling_engine = ProfilingEngine::PcSampling;
-        else if (val == "SassMetrics")   mOpts.profiling_engine = ProfilingEngine::SassMetrics;
-        else if (val == "RangeProfiler") mOpts.profiling_engine = ProfilingEngine::RangeProfiler;
-        else if (val == "PcSamplingWithSass") mOpts.profiling_engine = ProfilingEngine::PcSamplingWithSass;
-        GFL_LOG_DEBUG("GPUFL_PROFILING_ENGINE override: ", val);
+        bool matched = true;
+        if (val == "None")                                       mOpts.profiling_engine = ProfilingEngine::None;
+        else if (val == "PcSampling" || val == "Continuous")     mOpts.profiling_engine = ProfilingEngine::PcSampling;
+        else if (val == "SassMetrics")                           mOpts.profiling_engine = ProfilingEngine::SassMetrics;
+        else if (val == "RangeProfiler" || val == "Range")       mOpts.profiling_engine = ProfilingEngine::RangeProfiler;
+        else if (val == "PcSamplingWithSass" || val == "Deep")   mOpts.profiling_engine = ProfilingEngine::PcSamplingWithSass;
+        else matched = false;
+        if (matched) {
+            GFL_LOG_DEBUG("GPUFL_PROFILING_ENGINE override: ", val);
+        } else {
+            GFL_LOG_ERROR(
+                "GPUFL_PROFILING_ENGINE='", val, "' is not a recognized "
+                "engine name. Valid values: None, Continuous (alias "
+                "PcSampling), Deep (alias PcSamplingWithSass), Range "
+                "(alias RangeProfiler), SassMetrics. Keeping current "
+                "engine selection.");
+        }
     }
     mOpts.kernel_sample_rate_ms = g_opts.kernel_sample_rate_ms;
     mOpts.enable_stack_trace = g_opts.enable_stack_trace;

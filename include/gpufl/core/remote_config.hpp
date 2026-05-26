@@ -6,38 +6,17 @@
 
 namespace gpufl {
 
-/**
- * Synchronously fetch a named config from the GPUFlight backend and
- * apply whitelisted field overrides to {@code opts}.
- *
- * Performs {@code GET <base_url><api_path>/config?config=<config_name>}
- * with the {@code X-API-Key} header set to {@code api_key}. On success,
- * parses the JSON response and merges a fixed set of InitOptions fields
- * in place (profiling_engine, sample rates, boolean flags — see the
- * allowlist in remote_config.cpp).
- *
- * {@code api_path} must be pre-normalized by the caller: must start
- * with `/`, must not have a trailing slash. Empty string is treated
- * as `/api/v1` (the compiled-in default) so legacy callers that
- * passed only base_url + api_key still work.
- *
- * Best-effort semantics: on any error (network, non-2xx, malformed
- * JSON, unparseable URL) the call logs a warning via GFL_LOG_ERROR and
- * leaves {@code opts} untouched. This is called synchronously from
- * {@code gpufl::init} before the monitor is started, so the 5-second
- * HTTP timeout caps the blocking period.
- *
- * This is declared in its own header (rather than inline in gpufl.cpp)
- * so the implementation TU (remote_config.cpp) can include
- * {@code <httplib.h>} without the windows.h / winsock2.h header
- * collision that plagued the previous in-place implementation. See
- * the plan file for details.
- */
-void fetchRemoteConfig(const std::string& base_url,
-                       const std::string& api_path,
-                       const std::string& api_key,
-                       const std::string& config_name,
-                       InitOptions& opts);
+// Historical note: this file previously also contained
+// `fetchRemoteConfig`, which pulled a named profiling config from the
+// backend's `/api/v1/config?config=<name>` endpoint and applied
+// whitelisted overrides to InitOptions before the monitor started.
+// That feature was removed alongside the backend's ConfigController
+// and the SPA's ProfilingConfigPage. The version-discovery probe
+// below survives because it's an orthogonal concern (client/server
+// wire-version compatibility check, not config delivery).
+//
+// The filename is kept rather than renamed to `version_probe.{cpp,hpp}`
+// purely to minimize churn for CMake and existing #include sites.
 
 /**
  * Fire-and-forget version discovery. GETs

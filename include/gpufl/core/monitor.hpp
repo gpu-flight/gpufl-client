@@ -40,9 +40,31 @@ enum class MonitorBackendKind {
 /**
  * @brief Selects which profiling engine is active for this session.
  *
- * Note: RangeProfiler is mutually exclusive with PcSampling (both need
- * hardware perf counters).  PcSampling and SassMetrics can coexist because
- * SassMetrics uses software lazy SASS patching, not hardware counters.
+ * Compatibility matrix (NVIDIA backend):
+ *
+ *   PcSampling   + SassMetrics   → PcSamplingWithSass (shipping; alias "Deep").
+ *                                  PC sampling uses hardware counters; SASS
+ *                                  metrics uses software lazy cubin patching —
+ *                                  disjoint mechanisms, can coexist.
+ *
+ *   SassMetrics  + RangeProfiler → Possible in principle (no resource
+ *                                  conflict — SASS is software-patching,
+ *                                  Range uses hardware counters). Not yet
+ *                                  implemented; see prior plan notes for
+ *                                  the composite-engine sketch.
+ *
+ *   PcSampling   + RangeProfiler → IMPOSSIBLE on current NVIDIA drivers.
+ *                                  Both require exclusive access to SM
+ *                                  hardware perf counters; whichever calls
+ *                                  cuptiProfilerInitialize() first pre-empts
+ *                                  the other, and the loser fails with
+ *                                  CUPTI_ERROR_INVALID_OPERATION or
+ *                                  CUPTI_ERROR_NOT_INITIALIZED. No
+ *                                  client-side fix — would require NVIDIA
+ *                                  to expose a counter-multiplexing API.
+ *
+ *   By extension: PcSamplingWithSass + RangeProfiler is also impossible
+ *   (the PC-sampling half conflicts; the SASS half would be fine).
  */
 enum class ProfilingEngine {
     None,                // Monitoring only — no profiling overhead
@@ -50,6 +72,10 @@ enum class ProfilingEngine {
     SassMetrics,         // SASS instruction-level metrics
     RangeProfiler,       // Perfworks hardware counters (requires GPUFL_HAS_PERFWORKS)
     PcSamplingWithSass,  // PC sampling + SASS metrics in a single run
+
+    Continuous = PcSampling,
+    Deep       = PcSamplingWithSass,
+    Range      = RangeProfiler,
 };
 
 struct MonitorOptions {

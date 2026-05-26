@@ -70,6 +70,12 @@ EXPECTED_PROFILING_ENGINES = [
     "SassMetrics",
     "RangeProfiler",
     "PcSamplingWithSass",
+    # Friendly aliases (Phase 1 of mode renaming). Same underlying enum
+    # values as their technical counterparts above; locked in here so
+    # the binding regression test catches a missing alias.
+    "Continuous",
+    "Deep",
+    "Range",
 ]
 
 EXPECTED_BACKEND_KINDS = [
