@@ -30,14 +30,17 @@ def run_benchmark():
     LOG_PATH = "./gfl_logs"
 
     BACKEND_URL = os.environ.get("GPUFL_BACKEND_URL", "https://api.gpuflight.com")
-    API_KEY = os.environ.get("GPUFL_API_KEY", "")
-    REMOTE_UPLOAD = bool(API_KEY)
+    API_KEY     = os.environ.get("GPUFL_API_KEY", "")
+    UPLOAD_ENABLED = bool(API_KEY)
 
     print("[GPUFL] Initializing...")
-    if REMOTE_UPLOAD:
-        print(f"[GPUFL] Live upload ON -> {BACKEND_URL}")
+    if UPLOAD_ENABLED:
+        print(f"[GPUFL] Deferred upload ON — will ship to {BACKEND_URL} "
+              f"after shutdown.")
     else:
-        print("[GPUFL] Live upload OFF (set GPUFL_API_KEY to enable). Local files only.")
+        print("[GPUFL] Upload OFF (set GPUFL_API_KEY to enable). Local "
+              "files only — run `gpufl upload <log_path>` later if you "
+              "want to ship them.")
 
     gfl.init(
         app_name="Numba_App",
@@ -48,7 +51,6 @@ def run_benchmark():
         profiling_engine=gfl.ProfilingEngine.PcSamplingWithSass,
         backend_url=BACKEND_URL,
         api_key=API_KEY,
-        remote_upload=REMOTE_UPLOAD,
     )
 
     try:
@@ -96,6 +98,27 @@ def run_benchmark():
         # --- 5. Cleanup ---
         print("[GPUFL] Shutting down...")
         gfl.shutdown()
+
+        # --- 5b. Deferred upload (replaces the old remote_upload=True
+        # live-streaming flag). Upload runs AFTER shutdown, never during
+        # the workload — so network failures here can't affect the GPU
+        # job's exit code or performance. Skipped if no API key is set;
+        # the local NDJSON files remain on disk and can be uploaded
+        # later via `gpufl upload <LOG_PATH>`.
+        if UPLOAD_ENABLED:
+            print("[GPUFL] Uploading session to backend...")
+            r = gfl.upload_logs(
+                log_path=LOG_PATH,
+                backend_url=BACKEND_URL,
+                api_key=API_KEY,
+            )
+            if r.success:
+                print(f"[GPUFL] Upload OK — {r.events_uploaded} events, "
+                      f"{r.elapsed_ms / 1000:.1f}s")
+            else:
+                print(f"[GPUFL] Upload FAILED — {len(r.warnings)} warning(s):")
+                for w in r.warnings:
+                    print(f"  - {w}")
 
         # --- 6. Generate a text report from the logs we just wrote ---
         # shutdown() above flushes and closes the NDJSON channels, so the

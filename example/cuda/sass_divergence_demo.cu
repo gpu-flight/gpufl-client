@@ -145,7 +145,6 @@ int main() {
     gpufl::InitOptions opts;
     opts.app_name = "sass_divergence_demo";
     opts.log_path = "sass_divergence";
-    opts.remote_upload = false;
     opts.system_sample_rate_ms = 10;
     opts.enable_debug_output = true;
     opts.continuous_system_sampling = true;

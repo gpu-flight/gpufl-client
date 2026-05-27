@@ -8,9 +8,14 @@ The goal is to make GPU profiling lighter and more continuous, closer to observa
 
 Built on CUPTI for NVIDIA GPUs and rocprofiler-sdk for AMD GPUs, GPUFlight is designed for always-on monitoring with low overhead in monitoring mode.
 
-## Project Status: Stable (v1.0.2)
+## Project Status: 1.1.0 release candidate
 
-GPUFlight is published to PyPI and has reached its first stable contract — the current release is `v1.0.2`. The public API and on-the-wire log format follow semantic versioning from `v1.0.0` onward; pin an exact version if you depend on it.
+GPUFlight is published to PyPI; the current release candidate is
+`v1.1.0rc1`. **Breaking changes vs 1.0.x** — `remote_upload` /
+`HttpLogSink` removed (upload moves to a post-shutdown step), and
+`sampling_auto_start` renamed to `continuous_system_sampling`. See
+[CHANGELOG.md](./CHANGELOG.md) for the full migration notes. Pin an
+exact version if you depend on it.
 
 To keep the initial design coherent, **we are not currently accepting major feature Pull Requests.** However, we welcome:
 - Bug reports and local build issues.
@@ -32,7 +37,7 @@ Try the portal with real session data — no sign-up required:
 - **Profiling Engines**: Choose from PC Sampling (stall analysis), SASS Metrics (instruction-level divergence), or Range Profiler (hardware counters) — one engine per session.
 - **System Monitoring**: Collects GPU utilization, VRAM, temperature, power, and clock speeds via NVML.
 - **Sidecar Ready**: Outputs structured NDJSON logs with automatic rotation and gzip compression.
-- **Direct Upload**: Opt-in `remote_upload=True` mode POSTs telemetry straight to the GPUFlight backend — ideal for local dev, SSH, and Jupyter workflows where running the sidecar agent is overkill.
+- **Deferred Upload**: After a session ends, ship its NDJSON files to the GPUFlight backend with one call (`gpufl.upload_logs(...)`) or the orchestrated `with gpufl.session(backend_url=..., api_key=...):` context manager. All HTTP happens post-shutdown, so transient network failures cannot affect your GPU workload. Ideal for local dev, SSH, and Jupyter — no sidecar needed.
 - **Vendor Agnostic Design**: Architecture ready for AMD (ROCm) support.
 
 ---
@@ -59,7 +64,7 @@ include(FetchContent)
 FetchContent_Declare(
     gpufl
     GIT_REPOSITORY https://github.com/gpu-flight/gpufl-client.git
-    GIT_TAG        v1.0.2   # pin a release tag — see the Releases page for the latest
+    GIT_TAG        v1.1.0rc1   # pin a release tag — see the Releases page for the latest
 )
 FetchContent_MakeAvailable(gpufl)
 
@@ -149,66 +154,98 @@ gpufl::shutdown();
 
 ## Talking to the Backend
 
-`gpufl` can optionally upload logs directly to the GPUFlight backend
-as a background HTTP stream, in parallel with the local on-disk
-NDJSON write. Opt in via `remote_upload=True`. Requires `backend_url`
-+ `api_key` to be set.
-
-| Capability | Opt in via | What happens |
-|---|---|---|
-| **Direct log upload** | `remote_upload=True` | A background thread POSTs every NDJSON line to `/api/v1/events/<type>` in parallel with the on-disk write. Intended for local / SSH / Jupyter workflows. |
-
-For production deployments where the agent daemon ships logs to the
-backend, leave `remote_upload=False` and let the daemon do the upload.
+`gpufl` writes NDJSON to disk during a session. To get those events to
+the GPUFlight dashboard, call `gpufl.upload_logs(...)` (or the
+orchestrated `with gpufl.session(...)`) **after `gpufl.shutdown()` has
+returned**. Every byte of HTTP traffic happens post-shutdown, so
+network failures cannot affect your GPU workload.
 
 ### Configuration precedence
 
 When multiple sources set the same field, higher beats lower:
 
 ```
-4. The kwargs you pass to gpufl.init()            ← highest
+4. The kwargs you pass to gpufl.init() / upload_logs()  ← highest
 3. Env vars (GPUFL_BACKEND_URL, GPUFL_API_KEY, ...)
 2. Local config file (config_file=...)
-1. Built-in defaults                              ← lowest
+1. Built-in defaults                                    ← lowest
 ```
 
-### Quick start
+### Quick start — orchestrated
 
 ```python
 import gpufl
 
-# Live upload to the backend
-gpufl.init("my_app",
-           log_path="./logs",
-           backend_url="https://api.gpuflight.com",
-           api_key="gpfl_xxxxxxxxxxxx",
-           remote_upload=True)
+with gpufl.session(
+    app_name="my_app",
+    log_path="./logs",
+    backend_url="https://api.gpuflight.com",
+    api_key="gpfl_xxxxxxxxxxxx",
+):
+    train_one_epoch()
+# On __exit__: gpufl.shutdown() runs, then gpufl.upload_logs() — automatically.
 ```
 
-Or via environment:
+### Quick start — explicit
+
+```python
+import gpufl
+
+gpufl.init("my_app", log_path="./logs",
+           backend_url="https://api.gpuflight.com",
+           api_key="gpfl_xxxxxxxxxxxx")
+train_one_epoch()
+gpufl.shutdown()
+
+# Ship the session you just ran (default = latest).
+result = gpufl.upload_logs(
+    log_path="./logs",
+    backend_url="https://api.gpuflight.com",
+    api_key="gpfl_xxxxxxxxxxxx",
+)
+if not result.success:
+    for w in result.warnings:
+        print(f"WARN: {w}")
+```
+
+### CLI — `gpufl upload`
+
+For post-mortem recovery or one-off ad-hoc shipping:
 
 ```bash
-export GPUFL_BACKEND_URL=https://api.gpuflight.com
-export GPUFL_API_KEY=gpfl_xxxxxxxxxxxx
-export GPUFL_REMOTE_UPLOAD=1            # opt into live upload
-python my_training_script.py
+gpufl upload ./logs \
+    --backend-url https://api.gpuflight.com \
+    --api-key gpfl_xxxxxxxxxxxx
+
+# Specific session
+gpufl upload ./logs --session-id <uuid> --backend-url ... --api-key ...
+
+# Batch every session in the dir
+gpufl upload ./logs --all-sessions --backend-url ... --api-key ...
+
+# Re-upload after the cursor marked it done
+gpufl upload ./logs --force --backend-url ... --api-key ...
 ```
+
+Env vars `GPUFL_BACKEND_URL` / `GPUFL_API_KEY` are accepted in place of
+the flags.
 
 ### Upload mechanics
 
-- The client writes NDJSON to disk as usual AND POSTs each line in
-  parallel via a dedicated background thread — no added latency on the
-  measurement hot path.
-- Best-effort delivery: 3 retries with exponential backoff per line,
-  then drop. The on-disk NDJSON is still there, so a monitor daemon
-  (or manual re-upload) can always back-fill.
-- An invalid or unauthorized API key disables live upload for the
-  session; the file sink keeps working.
+- The client writes NDJSON to disk during the session — that's the
+  source of truth. **No HTTP runs during the workload.**
+- `gpufl.upload_logs(...)` streams the files, POSTs each event to
+  `/api/v1/events/<type>`, and writes a cursor file
+  (`.gpufl-upload-cursor.json`) recording which sessions completed.
+  Re-running it refuses to re-upload an already-completed session
+  unless `force=True` (CLI: `--force`).
+- Failure handling: one quick retry per POST, total 5-minute budget
+  by default. Returns a `UploadResult` with `.success` and any
+  `.warnings` — never throws on network errors.
 
-For production workloads with guaranteed delivery, pipe delivery, or
-cross-process fan-in, keep using the `gpufl-monitor` sidecar agent —
-it's the same NDJSON on the wire, just decoupled from the measurement
-process.
+For production fleets, the standalone `gpufl-agent` JVM service tails
+the same NDJSON files and uploads in compressed batches — it's the
+recommended path when many GPUs are emitting concurrently.
 
 ---
 

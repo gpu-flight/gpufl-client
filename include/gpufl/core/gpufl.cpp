@@ -16,10 +16,10 @@
 #include "gpufl/core/config_file_loader.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/events.hpp"
-#include "gpufl/core/logger/http_log_sink.hpp"
 #include "gpufl/core/logger/logger.hpp"
 #include "gpufl/core/remote_config.hpp"
 #include "gpufl/core/version.hpp"
+#include "gpufl/upload/upload_logs.hpp"
 // NOTE: we intentionally do NOT include <httplib.h> in this TU.
 // httplib pulls in <winsock2.h>, which collides with the legacy
 // <winsock.h> included transitively by <windows.h> (used below for
@@ -272,34 +272,23 @@ bool init(const InitOptions& opts) {
         return false;
     }
 
-    // Optional HttpLogSink — posts every NDJSON line directly to the
-    // backend alongside the file sink. Used for interactive contexts
-    // (local dev, SSH, Jupyter) where deploying the monitor daemon is
-    // heavy. File sink still writes normally so nothing is lost.
-    bool remote_upload_enabled = g_opts.remote_upload;
-    if (const char* env = std::getenv("GPUFL_REMOTE_UPLOAD")) {
-        // Any non-empty, non-"0"/"false" value turns it on.
-        const std::string v(env);
-        remote_upload_enabled =
-            !v.empty() && v != "0" && v != "false" && v != "False";
-    }
-    if (remote_upload_enabled) {
-        if (g_opts.backend_url.empty() || g_opts.api_key.empty()) {
-            GFL_LOG_ERROR(
-                "remote_upload=true but backend_url or api_key is empty "
-                "— skipping HttpLogSink. Set GPUFL_BACKEND_URL + "
-                "GPUFL_API_KEY (or pass backend_url / api_key kwargs).");
-        } else {
-            HttpLogSink::Options httpOpts;
-            httpOpts.base_url = g_opts.backend_url;
-            httpOpts.api_path = g_opts.api_path;
-            httpOpts.api_key  = g_opts.api_key;
-            rt->logger->addSink(
-                std::make_unique<HttpLogSink>(std::move(httpOpts)));
-            GFL_LOG_DEBUG(
-                "HttpLogSink attached — uploading to ",
-                g_opts.backend_url, g_opts.api_path);
-        }
+    // `remote_upload` is a backward-compat shim in v1.1: live
+    // HttpLogSink streaming is gone, but to preserve the old "set
+    // one flag and forget" UX, gpufl::shutdown() (below) automatically
+    // invokes gpufl::uploadLogs() with the configured backend_url +
+    // api_key after the file sink is closed. We log a deprecation
+    // notice here at init time so users see they're on the legacy
+    // path. Removed in v1.2 — at which point callers must invoke
+    // uploadLogs() (or gpufl.session() in Python) explicitly.
+    if (g_opts.remote_upload) {
+        GFL_LOG_ERROR(
+            "[DEPRECATED] opts.remote_upload=true is a v1.1 backward-"
+            "compat shim. Live HTTP streaming was removed; "
+            "gpufl::shutdown() will auto-call gpufl::uploadLogs() at "
+            "the end of the session instead. This flag, and "
+            "backend_url / api_key on InitOptions, will be removed "
+            "entirely in v1.2 — switch to passing creds directly to "
+            "UploadOptions / gpufl::uploadLogs() in new code.");
     }
 
     // Fire-and-forget version-discovery probe. Hits
@@ -578,6 +567,46 @@ void shutdown() {
     rt->logger->write(model::ShutdownEventModel(se));
 
     rt->logger->close();
+
+    // remote_upload deprecation shim — auto-call uploadLogs() at the
+    // end of shutdown() so pure-C++ callers who set the legacy flag
+    // still get their data shipped. Matches the Python side's atexit
+    // handler. The file sink has been closed above, so all NDJSON
+    // events are guaranteed flushed to disk before uploadLogs reads
+    // them back. Removed in v1.2 along with the field. (See gpufl.hpp.)
+    if (g_opts.remote_upload && !g_opts.backend_url.empty() &&
+        !g_opts.api_key.empty() && !g_opts.log_path.empty()) {
+        GFL_LOG_DEBUG(
+            "[remote_upload shim] running uploadLogs() at shutdown — "
+            "log_path=", g_opts.log_path,
+            " backend_url=", g_opts.backend_url);
+        UploadOptions uopts;
+        uopts.log_path    = g_opts.log_path;
+        uopts.backend_url = g_opts.backend_url;
+        uopts.api_key     = g_opts.api_key;
+        uopts.api_path    = g_opts.api_path;
+        // Use defaults for the rest — timeouts, retries, etc. The
+        // upload runs synchronously here; in the legacy live-streaming
+        // model this work was amortized across the workload, so
+        // total shutdown wall time may now be noticeably longer
+        // (proportional to log volume). Acceptable trade-off — the
+        // alternative was silent data loss.
+        const auto r = uploadLogs(uopts);
+        if (r.success) {
+            GFL_LOG_DEBUG(
+                "[remote_upload shim] uploadLogs OK — ",
+                r.events_uploaded, " event(s), ",
+                r.bytes_uploaded, " bytes, ",
+                r.elapsed_ms, "ms");
+        } else {
+            GFL_LOG_ERROR(
+                "[remote_upload shim] uploadLogs FAILED — ",
+                r.warnings.size(), " warning(s); first: ",
+                r.warnings.empty() ? std::string("(none)") :
+                                     r.warnings.front());
+        }
+    }
+
     set_runtime(nullptr);
 
     GFL_LOG_DEBUG("Shutdown complete!");

@@ -17,9 +17,9 @@ set(GPUFL_TEST_SOURCES
     core/test_bench_invoker.cpp
     core/test_wire_contract.cpp
     core/test_monitor.cpp
-    core/test_http_log_sink.cpp
     core/test_itanium_demangle.cpp
     core/test_sampler.cpp
+    upload/test_upload_logs.cpp
 )
 
 if(GPUFL_ENABLE_NVIDIA AND GPUFL_HAS_CUPTI)
@@ -93,11 +93,28 @@ target_link_libraries(gpufl_tests PRIVATE
     gpufl
 )
 
-# HttpLogSink tests spin up an embedded httplib::Server; link the test
-# binary against the same httplib::httplib interface target the main
-# library uses so headers and TLS config stay consistent.
+# Upload-path tests spin up an embedded httplib::Server to verify
+# end-to-end POST routing; link the test binary against the same
+# httplib::httplib interface target the main library uses so headers
+# and TLS config stay consistent.
 if(TARGET httplib::httplib)
     target_link_libraries(gpufl_tests PRIVATE httplib::httplib)
+endif()
+
+# zlib for the same test file — test_upload_logs.cpp writes mock
+# rotated `.log.gz` fixtures via gzopen/gzwrite/gzclose to exercise
+# the uploadLogs gzip-streaming path. zlib is PRIVATE on the main
+# `gpufl` target so its includes don't propagate to consumers; surface
+# them on the test binary by hand. Mirrors the find/fetch branches
+# above (root CMakeLists.txt around line 119).
+if(TARGET ZLIB::ZLIB)
+    target_link_libraries(gpufl_tests PRIVATE ZLIB::ZLIB)
+elseif(TARGET zlibstatic)
+    target_link_libraries(gpufl_tests PRIVATE zlibstatic)
+    target_include_directories(gpufl_tests PRIVATE
+        ${zlib_SOURCE_DIR}
+        ${zlib_BINARY_DIR}
+    )
 endif()
 
 if(TARGET CUDA::cudart)
@@ -105,13 +122,26 @@ if(TARGET CUDA::cudart)
 endif()
 
 # 6. Copy CUPTI and CUDA DLLs on Windows for test execution
+#
+# The CUPTI runtime ships with `cupti64_*.dll` *and* `nvperf_host.dll`
+# (Range Profiler / PerfWorks backend). Both live in
+# `extras/CUPTI/lib64/`, both are required at load time for the test
+# exe — if `nvperf_host.dll` is absent the loader fails with
+# STATUS_DLL_NOT_FOUND (0xC0000135) before main() runs, and gtest
+# produces zero output, making it look like the tests don't exist.
+# Glob both patterns from whichever strategy resolves first.
 if(WIN32)
     set(CUPTI_DLL_FOUND FALSE)
+    set(GPUFL_CUPTI_DLL_PATTERNS "cupti64*.dll" "nvperf_host*.dll")
 
     # Strategy 1: Try to find it via the CUDAToolkit_ROOT variable
     if(CUDAToolkit_ROOT)
         file(TO_CMAKE_PATH "${CUDAToolkit_ROOT}/extras/CUPTI/lib64" MANUAL_CUPTI_PATH)
-        file(GLOB FOUND_DLLS "${MANUAL_CUPTI_PATH}/cupti64*.dll")
+        set(FOUND_DLLS "")
+        foreach(PAT ${GPUFL_CUPTI_DLL_PATTERNS})
+            file(GLOB MATCHED "${MANUAL_CUPTI_PATH}/${PAT}")
+            list(APPEND FOUND_DLLS ${MATCHED})
+        endforeach()
         if(FOUND_DLLS)
             set(CUPTI_DLL_FOUND TRUE)
             set(CUPTI_DLL_LIST ${FOUND_DLLS})
@@ -126,7 +156,11 @@ if(WIN32)
         endif()
         if(CUPTI_LIB_PATH)
             get_filename_component(CUPTI_DIR "${CUPTI_LIB_PATH}" DIRECTORY)
-            file(GLOB FOUND_DLLS "${CUPTI_DIR}/cupti64*.dll")
+            set(FOUND_DLLS "")
+            foreach(PAT ${GPUFL_CUPTI_DLL_PATTERNS})
+                file(GLOB MATCHED "${CUPTI_DIR}/${PAT}")
+                list(APPEND FOUND_DLLS ${MATCHED})
+            endforeach()
             if(FOUND_DLLS)
                 set(CUPTI_DLL_FOUND TRUE)
                 set(CUPTI_DLL_LIST ${FOUND_DLLS})
@@ -137,7 +171,11 @@ if(WIN32)
     # Strategy 3: Fallback to Environment Variable
     if(NOT CUPTI_DLL_FOUND)
         file(TO_CMAKE_PATH "$ENV{CUDA_PATH}/extras/CUPTI/lib64" ENV_CUPTI_PATH)
-        file(GLOB FOUND_DLLS "${ENV_CUPTI_PATH}/cupti64*.dll")
+        set(FOUND_DLLS "")
+        foreach(PAT ${GPUFL_CUPTI_DLL_PATTERNS})
+            file(GLOB MATCHED "${ENV_CUPTI_PATH}/${PAT}")
+            list(APPEND FOUND_DLLS ${MATCHED})
+        endforeach()
         if(FOUND_DLLS)
             set(CUPTI_DLL_FOUND TRUE)
             set(CUPTI_DLL_LIST ${FOUND_DLLS})
@@ -145,13 +183,14 @@ if(WIN32)
     endif()
 
     if(CUPTI_DLL_FOUND)
-        list(GET CUPTI_DLL_LIST 0 CUPTI_DLL_TO_COPY)
-        add_custom_command(TARGET gpufl_tests POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CUPTI_DLL_TO_COPY}"
-            "$<TARGET_FILE_DIR:gpufl_tests>"
-            COMMENT "Copying CUPTI DLL to test directory"
-        )
+        foreach(CUPTI_DLL ${CUPTI_DLL_LIST})
+            add_custom_command(TARGET gpufl_tests POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CUPTI_DLL}"
+                "$<TARGET_FILE_DIR:gpufl_tests>"
+                COMMENT "Copying CUPTI runtime DLL: ${CUPTI_DLL}"
+            )
+        endforeach()
     endif()
 
     # Also copy CUDA runtime DLLs needed for test discovery

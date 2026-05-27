@@ -18,9 +18,11 @@ class ILogSink;
  * line to every registered {@link ILogSink}.
  *
  * The default session uses a single {@link FileLogSink} (preserves
- * the original per-channel file layout on disk). Additional sinks
- * (e.g. {@link HttpLogSink} for direct-to-backend upload) can be
- * attached via {@link addSink}.
+ * the original per-channel file layout on disk). Additional sinks can
+ * be attached via {@link addSink} — e.g. test recorders, alternative
+ * file formats. Live HTTP upload used to live here (`HttpLogSink`) but
+ * was removed in favor of the post-shutdown {@link gpufl::uploadLogs}
+ * deferred-upload path; sinks are now strictly local.
  *
  * Thread safety: {@link write} is safe to call from any thread.
  * The sink vector itself is only modified from the init() / shutdown()

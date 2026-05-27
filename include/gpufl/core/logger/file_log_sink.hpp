@@ -22,10 +22,11 @@ class LogFileRotator;
  * (Device / Scope / System), line-level flush after every write,
  * size-based rotation with optional gzip compression of rotated files.
  *
- * This sink is the default for every session. It's also the durable
- * fallback if other sinks (e.g. HttpLogSink) drop lines due to
- * network pressure — the data is still on disk for a monitor daemon
- * to ship later.
+ * This sink is the default for every session. The NDJSON files it
+ * writes are the source of truth for both `gpufl::uploadLogs()` (the
+ * in-process deferred upload path) and the standalone `gpufl-agent`
+ * JVM service (production fleet sync). Data is always recoverable
+ * from these files even if upload fails.
  */
 class FileLogSink final : public ILogSink {
    public:

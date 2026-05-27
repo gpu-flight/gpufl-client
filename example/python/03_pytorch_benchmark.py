@@ -21,13 +21,15 @@ def run_stress_test():
     device = torch.device("cuda")
     print(f"Target: {torch.cuda.get_device_name(0)}")
 
-    api_key = os.environ.get("GPUFL_API_KEY", "")
+    api_key     = os.environ.get("GPUFL_API_KEY", "")
     backend_url = os.environ.get("GPUFL_BACKEND_URL", "http://localhost:8080")
-    remote_upload = bool(api_key)
-    print(f"Remote upload: {remote_upload}")
+    upload_enabled = bool(api_key)
+    print(f"Deferred upload: {'ON' if upload_enabled else 'OFF (set GPUFL_API_KEY to enable)'}")
+
+    LOG_PATH = "./stress"
 
     gpufl.init("Heavy_Stress_App",
-               log_path="./stress",
+               log_path=LOG_PATH,
                continuous_system_sampling=True,
                system_sample_rate_ms=50,
                enable_debug_output=False,
@@ -43,7 +45,6 @@ def run_stress_test():
                # Blackwell driver builds; we've tested it here so
                # it's safe to enable for this benchmark.
                enable_cuda_graphs_tracking=True,
-               remote_upload=remote_upload,
                api_key=api_key,
                backend_url=backend_url,
                profiling_engine=gpufl.ProfilingEngine.PcSampling)
@@ -140,6 +141,20 @@ def run_stress_test():
         gpufl.shutdown()
         gpufl.torch.detach()
         print(f"\n[DONE] Logs generated at: {os.path.abspath('./stress.scope.log')}")
+
+        # Deferred upload — runs after shutdown, never during the
+        # workload. Replaces the old `remote_upload=True` live streaming.
+        if upload_enabled:
+            print("[GPUFL] Uploading session to backend...")
+            r = gpufl.upload_logs(
+                log_path=LOG_PATH,
+                backend_url=backend_url,
+                api_key=api_key,
+            )
+            print(f"[GPUFL] Upload: {'OK' if r.success else 'FAILED'} — "
+                  f"{r.events_uploaded} events in {r.elapsed_ms/1000:.1f}s")
+            for w in r.warnings:
+                print(f"  WARN: {w}")
 
 
 if __name__ == "__main__":

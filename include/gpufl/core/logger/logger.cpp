@@ -13,10 +13,11 @@ bool Logger::open(const Options& opt) {
     opt_ = opt;
     if (opt_.base_path.empty()) return false;
     // The default sink is always the FileLogSink — preserving the
-    // durable on-disk NDJSON contract every existing consumer depends
-    // on (agent daemon, Python analyzer, text_report). Additional
-    // sinks are attached by init() depending on user options (e.g.
-    // HttpLogSink when opts.remote_upload is true).
+    // durable on-disk NDJSON contract every consumer depends on
+    // (gpufl::uploadLogs deferred upload, gpufl-agent, Python analyzer,
+    // text_report). The historical HttpLogSink (live streaming) was
+    // removed; sinks are now strictly local. addSink stays here for
+    // test recorders and future format adapters.
     addSink(std::make_unique<FileLogSink>(opt_));
     return true;
 }

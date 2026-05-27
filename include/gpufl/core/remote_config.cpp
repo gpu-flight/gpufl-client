@@ -20,8 +20,8 @@ namespace {
 /**
  * Parse a backend base URL (e.g. "https://api.gpuflight.com" or
  * "http://localhost:8080") into (scheme, host, port). Mirrors the same
- * logic used by HttpLogSink — kept local because the duplication is
- * ~20 lines and sharing would require a public header that neither
+ * logic used by gpufl::uploadLogs — kept local because the duplication
+ * is ~20 lines and sharing would require a public header that neither
  * consumer needs to export.
  */
 bool parseBackendBaseUrl(const std::string& url,
