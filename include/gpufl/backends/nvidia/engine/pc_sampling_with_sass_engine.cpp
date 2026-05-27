@@ -50,11 +50,23 @@ void PcSamplingWithSassEngine::start() {
 
 void PcSamplingWithSassEngine::stop() {
     pc_->stop();
-    // sass has no stop work
+    // SASS needs a final drain at stop — onScopeStop is the normal
+    // per-scope drain trigger, but workloads that don't wrap kernels
+    // in scopes (e.g. PyTorch training loops without a surrounding
+    // gpufl.Scope) would otherwise lose every sample because nothing
+    // pulls CUPTI's pending data into g_profileBatch before shutdown
+    // tears the buffers down. SassMetricsEngine::stop() now performs
+    // that drain — calling it here so the per-scope and per-session
+    // paths both flush.
+    if (sass_ok_) sass_->stop();
 }
 
 void PcSamplingWithSassEngine::shutdown() {
     pc_->shutdown();
+    // Belt-and-suspenders: SassMetricsEngine::shutdown() also drains
+    // before disabling CUPTI, so a teardown path that skips stop()
+    // (or one where stop()'s drain was a no-op because the engine
+    // wasn't enabled yet) still gets a final flush.
     if (sass_ok_) sass_->shutdown();
 }
 
