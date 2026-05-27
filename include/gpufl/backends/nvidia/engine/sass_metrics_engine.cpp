@@ -106,10 +106,31 @@ void SassMetricsEngine::start() {
     EnableSassMetrics_();
 }
 
-void SassMetricsEngine::stop() {}
+void SassMetricsEngine::stop() {
+    // Drain any SASS samples still pending in CUPTI's internal buffer
+    // BEFORE the engine is torn down. Without this, sessions that end
+    // without a final scope-stop (e.g. PyTorch training pipelines that
+    // run iterations outside a `with gpufl.Scope(...)` block, or where
+    // the last scope's onScopeStop hasn't fired before shutdown) lose
+    // every SASS sample — silently — because shutdown() below calls
+    // cuptiSassMetricsDisable + frees buffers without flushing.
+    //
+    // The drain itself is the same path onScopeStop uses
+    // (StopAndCollectSassMetrics_), which is safe to call multiple
+    // times: each call only collects what's currently in CUPTI's
+    // queue. Belt-and-suspenders.
+    if (enabled_) {
+        StopAndCollectSassMetrics_();
+    }
+}
 
 void SassMetricsEngine::shutdown() {
     if (enabled_) {
+        // Final drain pass — Monitor::Shutdown() may call shutdown()
+        // directly without going through stop() in some teardown paths,
+        // so we belt-and-suspender here too. StopAndCollectSassMetrics_
+        // is idempotent w.r.t. CUPTI state (just reads pending samples).
+        StopAndCollectSassMetrics_();
         CUpti_SassMetricsDisable_Params disableParams = {
             CUpti_SassMetricsDisable_Params_STRUCT_SIZE};
         disableParams.ctx = ctx_.cuda_ctx;
