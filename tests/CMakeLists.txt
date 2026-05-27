@@ -57,21 +57,6 @@ endif()
 
 add_executable(gpufl_tests ${GPUFL_TEST_SOURCES})
 
-# MSVC's linker runs /OPT:REF by default in Release builds. gtest's TEST()
-# macro registers each test at startup via a static initializer
-# (`test_info_` + a TestFactoryImpl in a COMDAT section) — and if nothing
-# outside that translation unit references those symbols, /OPT:REF treats
-# the section as dead and strips it from the final image. The build
-# succeeds, the .obj contains every symbol (verifiable with `dumpbin
-# /SYMBOLS test_upload_logs.obj`), but the executable's
-# `--gtest_list_tests` and CTest report "No tests were found" for that
-# file. Disabling /OPT:REF and /OPT:ICF keeps every static initializer
-# intact at the cost of a few KB of binary size — a fair trade for a
-# test executable.
-if(MSVC)
-  target_link_options(gpufl_tests PRIVATE /OPT:NOREF /OPT:NOICF)
-endif()
-
 # 3. Enable CUDA-specific test target behavior only when CUDA is available
 if(GPUFL_HAS_CUDA)
   set_target_properties(gpufl_tests PROPERTIES CUDA_RESOLVE_DEVICE_SYMBOLS ON)
@@ -137,13 +122,26 @@ if(TARGET CUDA::cudart)
 endif()
 
 # 6. Copy CUPTI and CUDA DLLs on Windows for test execution
+#
+# The CUPTI runtime ships with `cupti64_*.dll` *and* `nvperf_host.dll`
+# (Range Profiler / PerfWorks backend). Both live in
+# `extras/CUPTI/lib64/`, both are required at load time for the test
+# exe — if `nvperf_host.dll` is absent the loader fails with
+# STATUS_DLL_NOT_FOUND (0xC0000135) before main() runs, and gtest
+# produces zero output, making it look like the tests don't exist.
+# Glob both patterns from whichever strategy resolves first.
 if(WIN32)
     set(CUPTI_DLL_FOUND FALSE)
+    set(GPUFL_CUPTI_DLL_PATTERNS "cupti64*.dll" "nvperf_host*.dll")
 
     # Strategy 1: Try to find it via the CUDAToolkit_ROOT variable
     if(CUDAToolkit_ROOT)
         file(TO_CMAKE_PATH "${CUDAToolkit_ROOT}/extras/CUPTI/lib64" MANUAL_CUPTI_PATH)
-        file(GLOB FOUND_DLLS "${MANUAL_CUPTI_PATH}/cupti64*.dll")
+        set(FOUND_DLLS "")
+        foreach(PAT ${GPUFL_CUPTI_DLL_PATTERNS})
+            file(GLOB MATCHED "${MANUAL_CUPTI_PATH}/${PAT}")
+            list(APPEND FOUND_DLLS ${MATCHED})
+        endforeach()
         if(FOUND_DLLS)
             set(CUPTI_DLL_FOUND TRUE)
             set(CUPTI_DLL_LIST ${FOUND_DLLS})
@@ -158,7 +156,11 @@ if(WIN32)
         endif()
         if(CUPTI_LIB_PATH)
             get_filename_component(CUPTI_DIR "${CUPTI_LIB_PATH}" DIRECTORY)
-            file(GLOB FOUND_DLLS "${CUPTI_DIR}/cupti64*.dll")
+            set(FOUND_DLLS "")
+            foreach(PAT ${GPUFL_CUPTI_DLL_PATTERNS})
+                file(GLOB MATCHED "${CUPTI_DIR}/${PAT}")
+                list(APPEND FOUND_DLLS ${MATCHED})
+            endforeach()
             if(FOUND_DLLS)
                 set(CUPTI_DLL_FOUND TRUE)
                 set(CUPTI_DLL_LIST ${FOUND_DLLS})
@@ -169,7 +171,11 @@ if(WIN32)
     # Strategy 3: Fallback to Environment Variable
     if(NOT CUPTI_DLL_FOUND)
         file(TO_CMAKE_PATH "$ENV{CUDA_PATH}/extras/CUPTI/lib64" ENV_CUPTI_PATH)
-        file(GLOB FOUND_DLLS "${ENV_CUPTI_PATH}/cupti64*.dll")
+        set(FOUND_DLLS "")
+        foreach(PAT ${GPUFL_CUPTI_DLL_PATTERNS})
+            file(GLOB MATCHED "${ENV_CUPTI_PATH}/${PAT}")
+            list(APPEND FOUND_DLLS ${MATCHED})
+        endforeach()
         if(FOUND_DLLS)
             set(CUPTI_DLL_FOUND TRUE)
             set(CUPTI_DLL_LIST ${FOUND_DLLS})
@@ -177,13 +183,14 @@ if(WIN32)
     endif()
 
     if(CUPTI_DLL_FOUND)
-        list(GET CUPTI_DLL_LIST 0 CUPTI_DLL_TO_COPY)
-        add_custom_command(TARGET gpufl_tests POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CUPTI_DLL_TO_COPY}"
-            "$<TARGET_FILE_DIR:gpufl_tests>"
-            COMMENT "Copying CUPTI DLL to test directory"
-        )
+        foreach(CUPTI_DLL ${CUPTI_DLL_LIST})
+            add_custom_command(TARGET gpufl_tests POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CUPTI_DLL}"
+                "$<TARGET_FILE_DIR:gpufl_tests>"
+                COMMENT "Copying CUPTI runtime DLL: ${CUPTI_DLL}"
+            )
+        endforeach()
     endif()
 
     # Also copy CUDA runtime DLLs needed for test discovery
