@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "gpufl"
-version = "1.0.3.rc1"
+version = "1.1.0rc1"
 description = "GPU Monitoring Client"
 readme = "README.md"
 authors = [
@@ -25,6 +25,13 @@ classifiers = [
 [project.urls]
 Homepage = "https://github.com/gpufl/gpufl-client"
 Issues = "https://github.com/gpufl/gpufl-client/issues"
+
+# `gpufl` console script — entry point for the CLI defined in
+# python/gpufl/cli.py. Today's only subcommand is `gpufl upload <log_path>`
+# for ad-hoc / post-mortem deferred uploads. Production fleet sync still
+# routes through gpufl-agent (the JVM service).
+[project.scripts]
+gpufl = "gpufl.cli:main"
 
 [project.optional-dependencies]
 # PyTorch integration — first-class. Uses TorchDispatchMode (stable

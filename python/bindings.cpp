@@ -2,6 +2,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include "gpufl/gpufl.hpp"
+#include "gpufl/upload/upload_logs.hpp"
 #if GPUFL_HAS_CUDA
 #endif
 
@@ -106,11 +107,18 @@ PYBIND11_MODULE(_gpufl_client, m) {
         .def_readwrite("enable_cuda_graphs_tracking", &gpufl::InitOptions::enable_cuda_graphs_tracking)
         .def_readwrite("profiling_engine",      &gpufl::InitOptions::profiling_engine)
         // Backend interactions — backend_url is the BASE URL of the
-        // GPUFlight backend; log upload is opt-in via remote_upload.
+        // GPUFlight backend. Upload is a separate post-shutdown step
+        // via gpufl.upload_logs() / gpufl.session(); nothing on
+        // InitOptions controls upload directly anymore.
         // (The historical `config_name` / remote-config-fetch binding
         // was removed along with the backend's ConfigController.)
         .def_readwrite("backend_url",           &gpufl::InitOptions::backend_url)
         .def_readwrite("api_key",               &gpufl::InitOptions::api_key)
+        // DEPRECATED in v1.1, planned removal v1.2 alongside
+        // backend_url + api_key. See InitOptions docstring in
+        // gpufl.hpp. Field is a no-op at the C++ level; the Python
+        // wrapper around init() turns remote_upload=True into an
+        // atexit-scheduled upload_logs() call for backward compat.
         .def_readwrite("remote_upload",         &gpufl::InitOptions::remote_upload);
 
     // Function-style init(). Every C++ InitOptions field that's user-facing
@@ -185,6 +193,94 @@ PYBIND11_MODULE(_gpufl_client, m) {
         py::arg("name") = "system");
 
     m.def("shutdown", &gpufl::shutdown);
+
+    // ── Deferred bulk upload ────────────────────────────────────────────
+    //
+    // Replaces the in-process HttpLogSink streaming model. Call this
+    // AFTER gpufl::shutdown() to ship the session's NDJSON files to the
+    // backend in one bounded post-mortem step. Network failures here
+    // cannot affect the host job's exit code or perceived performance.
+    py::class_<gpufl::UploadOptions>(m, "UploadOptions")
+        .def(py::init<>())
+        .def_readwrite("log_path",                 &gpufl::UploadOptions::log_path)
+        .def_readwrite("backend_url",              &gpufl::UploadOptions::backend_url)
+        .def_readwrite("api_key",                  &gpufl::UploadOptions::api_key)
+        .def_readwrite("api_path",                 &gpufl::UploadOptions::api_path)
+        .def_readwrite("total_timeout_ms",         &gpufl::UploadOptions::total_timeout_ms)
+        .def_readwrite("connect_timeout_ms",       &gpufl::UploadOptions::connect_timeout_ms)
+        .def_readwrite("read_timeout_ms",          &gpufl::UploadOptions::read_timeout_ms)
+        .def_readwrite("max_retries",              &gpufl::UploadOptions::max_retries)
+        .def_readwrite("retry_delay_ms",           &gpufl::UploadOptions::retry_delay_ms)
+        .def_readwrite("cursor_filename",          &gpufl::UploadOptions::cursor_filename)
+        .def_readwrite("report_progress",          &gpufl::UploadOptions::report_progress)
+        .def_readwrite("session_id_filter",        &gpufl::UploadOptions::session_id_filter)
+        .def_readwrite("all_sessions",             &gpufl::UploadOptions::all_sessions)
+        .def_readwrite("force",                    &gpufl::UploadOptions::force);
+
+    py::class_<gpufl::UploadResult>(m, "UploadResult")
+        .def_readonly("success",                 &gpufl::UploadResult::success)
+        .def_readonly("files_processed",         &gpufl::UploadResult::files_processed)
+        .def_readonly("files_skipped_by_cursor", &gpufl::UploadResult::files_skipped_by_cursor)
+        .def_readonly("events_uploaded",         &gpufl::UploadResult::events_uploaded)
+        .def_readonly("bytes_uploaded",          &gpufl::UploadResult::bytes_uploaded)
+        .def_readonly("elapsed_ms",              &gpufl::UploadResult::elapsed_ms)
+        .def_readonly("warnings",                &gpufl::UploadResult::warnings)
+        .def("__repr__", [](const gpufl::UploadResult& r) {
+            std::ostringstream o;
+            o << "<UploadResult success=" << (r.success ? "True" : "False")
+              << " events=" << r.events_uploaded
+              << " bytes=" << r.bytes_uploaded
+              << " files=" << r.files_processed
+              << " warnings=" << r.warnings.size()
+              << " elapsed_ms=" << r.elapsed_ms << ">";
+            return o.str();
+        });
+
+    // Function-style entry — accepts every UploadOptions field as a
+    // keyword argument, mirroring the init() binding's shape.
+    m.def("upload_logs", [](std::string log_path, std::string backend_url,
+                            std::string api_key, std::string api_path,
+                            int total_timeout_ms, int connect_timeout_ms,
+                            int read_timeout_ms, int max_retries,
+                            int retry_delay_ms, std::string cursor_filename,
+                            bool report_progress,
+                            std::string session_id_filter,
+                            bool all_sessions, bool force) -> gpufl::UploadResult {
+        gpufl::UploadOptions opts;
+        opts.log_path           = std::move(log_path);
+        opts.backend_url        = std::move(backend_url);
+        opts.api_key            = std::move(api_key);
+        opts.api_path           = std::move(api_path);
+        opts.total_timeout_ms   = total_timeout_ms;
+        opts.connect_timeout_ms = connect_timeout_ms;
+        opts.read_timeout_ms    = read_timeout_ms;
+        opts.max_retries        = max_retries;
+        opts.retry_delay_ms     = retry_delay_ms;
+        opts.cursor_filename    = std::move(cursor_filename);
+        opts.report_progress    = report_progress;
+        opts.session_id_filter  = std::move(session_id_filter);
+        opts.all_sessions       = all_sessions;
+        opts.force              = force;
+        // Release the GIL — upload is I/O bound, can run for minutes,
+        // and we don't want to block other Python threads (notebooks
+        // often run cleanup tasks concurrently).
+        py::gil_scoped_release release;
+        return gpufl::uploadLogs(opts);
+    },
+        py::arg("log_path"),
+        py::arg("backend_url"),
+        py::arg("api_key"),
+        py::arg("api_path")           = "",
+        py::arg("total_timeout_ms")   = 5 * 60 * 1000,
+        py::arg("connect_timeout_ms") = 10 * 1000,
+        py::arg("read_timeout_ms")    = 30 * 1000,
+        py::arg("max_retries")        = 1,
+        py::arg("retry_delay_ms")     = 1000,
+        py::arg("cursor_filename")    = ".gpufl-upload-cursor.json",
+        py::arg("report_progress")    = true,
+        py::arg("session_id_filter")  = "",
+        py::arg("all_sessions")       = false,
+        py::arg("force")              = false);
 
     // F1 (External Correlation) active push/pop. Used by
     // gpufl.torch.attach()'s TorchDispatchMode to tag every aten op's

@@ -1,10 +1,17 @@
 cmake_minimum_required(VERSION 3.31)
 
 project(gpufl_client
-    VERSION 0.1.0
+    VERSION 1.1.0
     LANGUAGES CXX
     DESCRIPTION "Header-only GPU monitoring client library"
 )
+
+# Pre-release suffix appended to GPUFL_CLIENT_VERSION below. PEP 440
+# pre-release tokens (`rc1`, `a1`, `b1`, …) aren't valid in CMake's
+# `project(... VERSION ...)`, so we layer them on top here. To promote
+# 1.1.0rc1 → 1.1.0 final, set this to the empty string. To bump rc1 →
+# rc2 mid-validation, change just this line.
+set(GPUFL_VERSION_SUFFIX "rc1")
 
 # -----------------------
 # CUDA Architectures (CI Friendly)
@@ -57,7 +64,7 @@ target_compile_features(gpufl INTERFACE cxx_std_17)
 # inline the literal at call sites and the mismatch becomes visible
 # as comparison failures (e.g. test asserting on User-Agent).
 target_compile_definitions(gpufl PUBLIC
-    GPUFL_CLIENT_VERSION="${PROJECT_VERSION}"
+    GPUFL_CLIENT_VERSION="${PROJECT_VERSION}${GPUFL_VERSION_SUFFIX}"
 )
 
 # Enable PIC for static library (required when linking into shared libraries like Python modules)
@@ -69,7 +76,7 @@ target_sources(gpufl PRIVATE
     include/gpufl/core/logger/logger.cpp
     include/gpufl/core/logger/log_rotator.cpp
     include/gpufl/core/logger/file_log_sink.cpp
-    include/gpufl/core/logger/http_log_sink.cpp
+    include/gpufl/upload/upload_logs.cpp
     include/gpufl/core/host_info.cpp
     include/gpufl/core/remote_config.cpp
     include/gpufl/core/model/batch_models.cpp
@@ -148,7 +155,9 @@ target_sources(gpufl PRIVATE include/gpufl/core/logger/file_compressor.cpp)
 
 
 # -----------------------
-# cpp-httplib — HTTP client for direct-to-backend log upload (HttpLogSink).
+# cpp-httplib — HTTP client used by gpufl::uploadLogs (deferred upload
+# of session NDJSON files to the backend, called after gpufl::shutdown).
+# Also used by remote_config.cpp for the post-init version probe.
 #
 # Single-header library. Fetched once via FetchContent so every build gets
 # the same version regardless of the host system. HTTPS support is gated
@@ -168,30 +177,28 @@ FetchContent_MakeAvailable(httplib)
 
 find_package(OpenSSL QUIET)
 if(OpenSSL_FOUND)
-    message(STATUS "Found OpenSSL: ${OPENSSL_VERSION} — HttpLogSink HTTPS enabled")
+    message(STATUS "Found OpenSSL: ${OPENSSL_VERSION} — HTTPS upload enabled")
     target_compile_definitions(gpufl PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT=1)
     target_link_libraries(gpufl PRIVATE OpenSSL::SSL OpenSSL::Crypto)
     set(GPUFL_HTTPLIB_TLS 1)
 else()
     message(WARNING
-        "OpenSSL not found — HttpLogSink will support HTTP only. "
-        "Users pointing remote_config at an https:// endpoint will see "
-        "upload failures. Install OpenSSL (apt: libssl-dev, vcpkg: openssl, "
-        "brew: openssl) to enable TLS.")
+        "OpenSSL not found — gpufl::uploadLogs will support HTTP only. "
+        "Pointing backend_url at an https:// endpoint will fail to verify. "
+        "Install OpenSSL (apt: libssl-dev, vcpkg: openssl, brew: openssl) "
+        "to enable TLS.")
     set(GPUFL_HTTPLIB_TLS 0)
 endif()
 target_compile_definitions(gpufl PRIVATE GPUFL_HTTPLIB_TLS=${GPUFL_HTTPLIB_TLS})
 # NOTE: cpp-httplib's gzip request-body path (CPPHTTPLIB_ZLIB_SUPPORT)
-# is intentionally NOT defined. HttpLogSink sends uncompressed JSON
-# per event; bandwidth-conscious deployments use gpufl-agent against
-# the rotated NDJSON files (where deflate amortizes its dictionary
-# across the whole file for 10-15× compression vs the ~5× we'd get
-# per-POST). See the architectural note above HttpLogSink::Options
-# in http_log_sink.hpp for the full rationale.
+# is intentionally NOT defined. uploadLogs sends uncompressed JSON per
+# event; bandwidth-conscious deployments use gpufl-agent against the
+# rotated NDJSON files (where deflate amortizes its dictionary across
+# the whole file for 10-15× compression vs the ~5× we'd get per-POST).
 #
-# ZLIB is still linked above (around line 96) — file_compressor.cpp
-# uses it to gzip rotated NDJSON files written by FileLogSink, which
-# is a separate, working feature.
+# ZLIB is still linked above — file_compressor.cpp uses it to gzip
+# rotated NDJSON files written by FileLogSink, and upload_logs.cpp uses
+# it to read those rotated files back transparently during upload.
 target_link_libraries(gpufl PRIVATE httplib::httplib)
 
 

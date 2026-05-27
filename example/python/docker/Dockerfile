@@ -8,8 +8,8 @@
 # from the host is the NVIDIA driver, injected at runtime by the NVIDIA
 # Container Toolkit.
 #
-#   Build:  docker build -t gpufl-jupyter:1.0.2 .
-#   Run:    docker run --gpus all -p 8888:8888 gpufl-jupyter:1.0.2
+#   Build:  docker build -t gpufl-jupyter:1.1.0rc1 .
+#   Run:    docker run --gpus all -p 8888:8888 gpufl-jupyter:1.1.0rc1
 #
 # A '-base' image is enough: we don't compile (so no '-devel'), and we don't
 # need the runtime's CUDA libs either — numba-cuda[cu13] ships its own
@@ -25,7 +25,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # statically links its own OpenSSL, whose compile-time OPENSSLDIR was set
 # in the manylinux build container and does NOT match Ubuntu's
 # /etc/ssl/certs/ layout. Without these env vars, the embedded OpenSSL
-# fails to find any trusted roots and HttpLogSink reports
+# fails to find any trusted roots and gpufl::uploadLogs reports
 # `httplib::Error=10` (SSLServerVerification). Both names are read by
 # OpenSSL's X509_get_default_cert_{file,dir}_env() at runtime and override
 # the baked-in OPENSSLDIR; harmless for any process that doesn't use them.
@@ -36,7 +36,7 @@ ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
 #
 # `ca-certificates` is required for the gpufl wheel's bundled OpenSSL to
 # verify TLS server certs when uploading to https://api.gpuflight.com.
-# Without it, HttpLogSink fails with `httplib::Error=10`
+# Without it, gpufl::uploadLogs fails with `httplib::Error=10`
 # (SSLServerVerification): the handshake succeeds but there are no trusted
 # root CAs on disk to validate the server cert chain against. The
 # `nvidia/cuda:*-base-*` images intentionally ship without ca-certificates,
@@ -65,7 +65,7 @@ RUN pip install --upgrade pip
 # gpufl from PyPI, pinned for a reproducible image (bump for new releases).
 # numba-cuda[cu13] supplies the CUDA-13 NVVM/NVRTC compiler — plain `numba`
 # ships an older CUDA-12 target that reports "no CUDA device" on CUDA 13.
-ARG GPUFL_VERSION=1.0.2
+ARG GPUFL_VERSION=1.1.0rc1
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --retries 5 --timeout 120 "gpufl[analyzer,viz]==${GPUFL_VERSION}" "numba-cuda[cu13]"
 

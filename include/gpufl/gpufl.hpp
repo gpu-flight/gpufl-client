@@ -118,12 +118,23 @@ struct InitOptions {
      * "http://localhost:8080". Host-only; do NOT include the API
      * prefix (use {@link api_path} for that).
      *
-     * Used by log upload (when {@link remote_upload} is true) to POST
-     * NDJSON event batches to `<backend_url><api_path>/events/<type>`.
-     * Also used by the version-discovery probe at init time.
+     * Read by:
+     *   - the version-discovery probe at init time
+     *   - {@link gpufl::uploadLogs} when you call it post-shutdown
+     *     (stored on InitOptions so the deferred upload path can pick
+     *     it up without the caller having to re-supply it)
      *
-     * Setting this alone does nothing; opt into upload via
-     * {@link remote_upload}.
+     * Setting this alone does nothing — no HTTP runs during a session.
+     * Upload is a separate step (`gpufl::uploadLogs`, or the
+     * `gpufl.session()` Python context manager).
+     *
+     * **DEPRECATION NOTE (v1.2 removal)**: this field — together with
+     * {@link api_key} and {@link remote_upload} — is planned for
+     * removal in v1.2. Long-term, all backend creds will be passed
+     * directly to {@link gpufl::uploadLogs} (and the version probe
+     * will read `GPUFL_BACKEND_URL` directly). The fields stay
+     * functional in v1.1 to keep the migration painless; if you're
+     * starting fresh, prefer passing creds straight to `UploadOptions`.
      */
     std::string backend_url = "";
 
@@ -149,23 +160,44 @@ struct InitOptions {
     /**
      * API key for log upload to the GPUFlight backend.
      * Sent as `Authorization: Bearer <key>` on event POSTs.
+     *
+     * **DEPRECATION NOTE (v1.2 removal)**: planned for removal in v1.2
+     * together with {@link backend_url} and {@link remote_upload}.
+     * Long-term, pass creds directly to {@link gpufl::uploadLogs}.
      */
     std::string api_key = "";
 
     /**
-     * When true, gpufl::init() attaches an HttpLogSink to the logger so
-     * every NDJSON line is POSTed directly to the backend at
-     * {@code <backend_url><api_path>/events/<type>} using
-     * {@code Authorization: Bearer <api_key>}.
+     * **DEPRECATED — v1.1 backward-compat shim, removed in v1.2.**
      *
-     * Intended for interactive contexts (local dev, SSH, Jupyter) where
-     * deploying the monitor daemon is heavy. The file-based NDJSON logs
-     * are still written in parallel, so no data is lost if the backend
-     * is unreachable — the agent daemon (or a manual upload tool) can
-     * back-fill later.
+     * Previously attached an HttpLogSink that POSTed NDJSON events live
+     * during the session. That mechanism is gone in v1.1. To preserve
+     * the old "set one flag and forget" UX, this field now triggers an
+     * **automatic** call to {@link gpufl::uploadLogs} at the end of
+     * {@link gpufl::shutdown}, using {@link backend_url} +
+     * {@link api_key} from this InitOptions.
      *
-     * Requires both {@link backend_url} and {@link api_key} to be set;
-     * ignored otherwise. Env-var override: {@code GPUFL_REMOTE_UPLOAD=1}.
+     * Behavior with `remote_upload = true`:
+     *   - **At init()**: logs a deprecation message pointing at the
+     *     new API. No HTTP is opened.
+     *   - **At shutdown()**: after the file sink has flushed and
+     *     closed, `gpufl::uploadLogs(uopts)` is invoked synchronously
+     *     with creds copied from InitOptions. Failures are logged but
+     *     never thrown — the process exits cleanly either way.
+     *   - **In Python**: the wrapper emits a `DeprecationWarning` and
+     *     also schedules upload via `atexit`, so notebook / script
+     *     callers who never explicitly call shutdown() still get the
+     *     same delivery.
+     *
+     * Wall-time impact: the legacy live-streaming model amortized HTTP
+     * work across the session; the new shim does it all at shutdown.
+     * Expect shutdown to take seconds-to-minutes proportional to log
+     * volume. To avoid the wait or to control timing, drop the flag
+     * and call `gpufl::uploadLogs(uopts)` directly when convenient.
+     *
+     * In v1.2 this field — together with {@link backend_url} and
+     * {@link api_key} — is removed; creds move entirely onto
+     * `UploadOptions`. See `include/gpufl/upload/upload_logs.hpp`.
      */
     bool remote_upload = false;
 };

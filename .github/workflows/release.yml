@@ -148,7 +148,7 @@ jobs:
           # quay.io/pypa/manylinux_2_28_x86_64 image (OpenSSL 3.5.5).
           CIBW_ENVIRONMENT_LINUX: "CUDA_HOME=/usr/local/cuda PATH=/usr/local/cuda/bin:$PATH CMAKE_ARGS='-DGPUFL_ENABLE_NVIDIA=ON -DGPUFL_ENABLE_AMD=OFF -DBUILD_TESTING=OFF -DOPENSSL_INCLUDE_DIR=/usr/include/openssl3 -DOPENSSL_SSL_LIBRARY=/usr/lib64/openssl3/libssl.so -DOPENSSL_CRYPTO_LIBRARY=/usr/lib64/openssl3/libcrypto.so'"
           # Windows build needs the OpenSSL install path so find_package(OpenSSL)
-          # in CMakeLists.txt succeeds, otherwise HTTPS upload (HttpLogSink)
+          # in CMakeLists.txt succeeds, otherwise HTTPS upload (gpufl::uploadLogs)
           # silently falls back to HTTP-only — see openssl-windows.html in the
           # manual repo for the user-facing story. CIBW_BEFORE_ALL_WINDOWS
           # installs choco's openssl package into this path.

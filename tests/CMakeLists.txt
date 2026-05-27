@@ -17,9 +17,9 @@ set(GPUFL_TEST_SOURCES
     core/test_bench_invoker.cpp
     core/test_wire_contract.cpp
     core/test_monitor.cpp
-    core/test_http_log_sink.cpp
     core/test_itanium_demangle.cpp
     core/test_sampler.cpp
+    upload/test_upload_logs.cpp
 )
 
 if(GPUFL_ENABLE_NVIDIA AND GPUFL_HAS_CUPTI)
@@ -93,9 +93,10 @@ target_link_libraries(gpufl_tests PRIVATE
     gpufl
 )
 
-# HttpLogSink tests spin up an embedded httplib::Server; link the test
-# binary against the same httplib::httplib interface target the main
-# library uses so headers and TLS config stay consistent.
+# Upload-path tests spin up an embedded httplib::Server to verify
+# end-to-end POST routing; link the test binary against the same
+# httplib::httplib interface target the main library uses so headers
+# and TLS config stay consistent.
 if(TARGET httplib::httplib)
     target_link_libraries(gpufl_tests PRIVATE httplib::httplib)
 endif()

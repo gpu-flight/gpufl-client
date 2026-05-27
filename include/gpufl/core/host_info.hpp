@@ -11,11 +11,11 @@ namespace gpufl {
  *
  * Used to label session telemetry on its way to the backend so the
  * dashboard can group sessions by host. Both the file-tailing agent
- * path (reads NDJSON) and the direct HTTP-upload path (HttpLogSink
- * envelope) need this label, so we plumb it into both:
+ * path (reads NDJSON) and the in-process deferred-upload path
+ * (gpufl::uploadLogs) need this label, so we plumb it into the events
+ * that carry it:
  *   * `job_start` event — top-level `hostname` field
  *   * `host_metric_batch` event — top-level `hostname` field
- *   * EventWrapper envelope (HttpLogSink only) — same field name
  */
 std::string getLocalHostname();
 
