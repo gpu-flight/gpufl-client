@@ -888,14 +888,30 @@ UploadResult uploadLogs(const UploadOptions& opts) {
             std::string line;
             while (reader.readLine(line)) {
                 if (line.empty()) continue;
-                // Cheap session filter before any other work.
+
+                // Cheap session filter. Three cases:
+                //   1. session_id field missing entirely → the line is
+                //      malformed (every gpufl event carries session_id).
+                //      Warn + skip; don't silently lose visibility into
+                //      bad data.
+                //   2. session_id present but doesn't match this target →
+                //      another session's event. Silently skip — that's
+                //      the whole point of the filter.
+                //   3. session_id matches → process below.
                 const std::string line_sid = fastExtractSessionId(line);
+                if (line_sid.empty()) {
+                    result.warnings.push_back(
+                        "Unparseable NDJSON line in " + basename +
+                        " (no session_id field) — skipping");
+                    continue;
+                }
                 if (line_sid != current_sid) continue;
 
                 const std::string type = extractType(line);
                 if (type.empty()) {
                     result.warnings.push_back(
-                        "Unparseable NDJSON line in " + basename + " — skipping");
+                        "Unparseable NDJSON line in " + basename +
+                        " (no type field) — skipping");
                     continue;
                 }
                 if (type == "shutdown") {

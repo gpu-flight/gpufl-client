@@ -57,6 +57,21 @@ endif()
 
 add_executable(gpufl_tests ${GPUFL_TEST_SOURCES})
 
+# MSVC's linker runs /OPT:REF by default in Release builds. gtest's TEST()
+# macro registers each test at startup via a static initializer
+# (`test_info_` + a TestFactoryImpl in a COMDAT section) — and if nothing
+# outside that translation unit references those symbols, /OPT:REF treats
+# the section as dead and strips it from the final image. The build
+# succeeds, the .obj contains every symbol (verifiable with `dumpbin
+# /SYMBOLS test_upload_logs.obj`), but the executable's
+# `--gtest_list_tests` and CTest report "No tests were found" for that
+# file. Disabling /OPT:REF and /OPT:ICF keeps every static initializer
+# intact at the cost of a few KB of binary size — a fair trade for a
+# test executable.
+if(MSVC)
+  target_link_options(gpufl_tests PRIVATE /OPT:NOREF /OPT:NOICF)
+endif()
+
 # 3. Enable CUDA-specific test target behavior only when CUDA is available
 if(GPUFL_HAS_CUDA)
   set_target_properties(gpufl_tests PROPERTIES CUDA_RESOLVE_DEVICE_SYMBOLS ON)
@@ -99,6 +114,22 @@ target_link_libraries(gpufl_tests PRIVATE
 # and TLS config stay consistent.
 if(TARGET httplib::httplib)
     target_link_libraries(gpufl_tests PRIVATE httplib::httplib)
+endif()
+
+# zlib for the same test file — test_upload_logs.cpp writes mock
+# rotated `.log.gz` fixtures via gzopen/gzwrite/gzclose to exercise
+# the uploadLogs gzip-streaming path. zlib is PRIVATE on the main
+# `gpufl` target so its includes don't propagate to consumers; surface
+# them on the test binary by hand. Mirrors the find/fetch branches
+# above (root CMakeLists.txt around line 119).
+if(TARGET ZLIB::ZLIB)
+    target_link_libraries(gpufl_tests PRIVATE ZLIB::ZLIB)
+elseif(TARGET zlibstatic)
+    target_link_libraries(gpufl_tests PRIVATE zlibstatic)
+    target_include_directories(gpufl_tests PRIVATE
+        ${zlib_SOURCE_DIR}
+        ${zlib_BINARY_DIR}
+    )
 endif()
 
 if(TARGET CUDA::cudart)
