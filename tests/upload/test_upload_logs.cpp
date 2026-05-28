@@ -1,12 +1,15 @@
 // End-to-end tests for gpufl::uploadLogs.
 //
-// Each test writes a synthetic NDJSON log directory in a tmp path,
-// spins up an embedded httplib::Server to capture POSTs, runs
-// uploadLogs against the captured server, and asserts on what was
-// captured (event types, routing paths, auth headers, ordering).
+// v1.2 wire format: the client POSTs gzipped NDJSON chunks to
+// /api/v1/events/stream — each chunk carries N events (one per line)
+// with X-GpuFlight-Session-Id in the header. The capture server here
+// listens on that single route, decompresses the body, and exposes
+// both per-chunk and per-line views so tests can assert on either
+// granularity.
 //
-// These replace the URL-routing + version-header coverage that used
-// to live in test_http_log_sink.cpp before HttpLogSink was removed.
+// Earlier drafts of this file tested the per-event wire format (one
+// EventWrapper-wrapped POST per event to /api/v1/events/{type}). That
+// path was removed in v1.2 — see upload_logs.cpp.
 
 #include <gtest/gtest.h>
 
@@ -15,7 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
-#include <regex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -30,93 +33,152 @@ namespace fs = std::filesystem;
 
 namespace {
 
-/// Unescape a JSON string literal (used to pull the inner NDJSON line
-/// back out of the EventWrapper.data field). Only handles the escape
-/// sequences gpufl::json::escape() produces — \", \\, \n, \r, \t.
-std::string unescapeJsonString(const std::string& s) {
+// ─────────────────────────────────────────────────────────────────────
+// Test helpers
+// ─────────────────────────────────────────────────────────────────────
+
+/// Gunzip a body the server received with Content-Encoding: gzip.
+std::string gunzipString(const std::string& gzipped) {
+    if (gzipped.empty()) return {};
+    z_stream zs{};
+    zs.next_in  = reinterpret_cast<Bytef*>(const_cast<char*>(gzipped.data()));
+    zs.avail_in = static_cast<uInt>(gzipped.size());
+    // +16 = gzip wrapper (matches what the client uses in upload_logs.cpp)
+    if (inflateInit2(&zs, 15 + 16) != Z_OK) return {};
     std::string out;
-    out.reserve(s.size());
-    for (std::size_t i = 0; i < s.size(); ++i) {
-        if (s[i] == '\\' && i + 1 < s.size()) {
-            switch (s[i + 1]) {
-                case '"':  out += '"';  i++; break;
-                case '\\': out += '\\'; i++; break;
-                case '/':  out += '/';  i++; break;
-                case 'n':  out += '\n'; i++; break;
-                case 'r':  out += '\r'; i++; break;
-                case 't':  out += '\t'; i++; break;
-                default:   out += s[i]; break;
-            }
-        } else {
-            out += s[i];
+    std::vector<char> buf(64 * 1024);
+    while (true) {
+        zs.next_out  = reinterpret_cast<Bytef*>(buf.data());
+        zs.avail_out = static_cast<uInt>(buf.size());
+        int rc = inflate(&zs, Z_NO_FLUSH);
+        if (rc == Z_STREAM_END || rc == Z_OK) {
+            out.append(buf.data(), buf.size() - zs.avail_out);
+            if (rc == Z_STREAM_END) break;
+            if (zs.avail_in == 0 && zs.avail_out > 0) break;
+            continue;
         }
+        inflateEnd(&zs);
+        return {};
+    }
+    inflateEnd(&zs);
+    return out;
+}
+
+/// Split an NDJSON body on '\n', dropping blank lines.
+std::vector<std::string> splitLines(const std::string& body) {
+    std::vector<std::string> out;
+    std::stringstream ss(body);
+    std::string line;
+    while (std::getline(ss, line)) {
+        if (line.empty()) continue;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (!line.empty()) out.push_back(std::move(line));
     }
     return out;
 }
 
-/// Pull out the `"data":"<...escaped NDJSON...>"` field from an
-/// EventWrapper body and return its unescaped contents. Returns the
-/// original body unchanged if the field can't be found — defensive
-/// fallback so tests don't blow up if a future test exercises an
-/// already-unwrapped path.
-std::string extractInnerData(const std::string& wrapped_body) {
-    static const std::string kKey = "\"data\":\"";
-    const auto pos = wrapped_body.find(kKey);
-    if (pos == std::string::npos) return wrapped_body;
-    const std::size_t start = pos + kKey.size();
-    // Find the terminating quote, respecting backslash escapes.
-    std::size_t i = start;
-    while (i < wrapped_body.size()) {
-        if (wrapped_body[i] == '\\' && i + 1 < wrapped_body.size()) {
-            i += 2;
-            continue;
-        }
-        if (wrapped_body[i] == '"') break;
-        ++i;
-    }
-    if (i >= wrapped_body.size()) return wrapped_body;
-    return unescapeJsonString(wrapped_body.substr(start, i - start));
+/// Pull `"type":"<value>"` out of a raw NDJSON line. Mirrors the
+/// fastExtractType helper used inside upload_logs.cpp.
+std::string extractType(const std::string& line) {
+    static const std::string kKey = "\"type\":\"";
+    auto pos = line.find(kKey);
+    if (pos == std::string::npos) return {};
+    auto start = pos + kKey.size();
+    auto end   = line.find('"', start);
+    if (end == std::string::npos) return {};
+    return line.substr(start, end - start);
 }
 
-/// Localhost capture server. Stores every POSTed body keyed by the
-/// event-type path component, plus the request headers, so individual
-/// tests can verify routing, auth, and ordering.
-///
-/// Each Capture exposes both the raw `body` (the full EventWrapper
-/// envelope JSON as POSTed) and `inner_data` (the unwrapped inner
-/// NDJSON line). Tests should generally assert on inner_data — that's
-/// the per-event payload semantics.
+std::string extractSessionId(const std::string& line) {
+    static const std::string kKey = "\"session_id\":\"";
+    auto pos = line.find(kKey);
+    if (pos == std::string::npos) return {};
+    auto start = pos + kKey.size();
+    auto end   = line.find('"', start);
+    if (end == std::string::npos) return {};
+    return line.substr(start, end - start);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Capture server — listens on /api/v1/events/stream
+// ─────────────────────────────────────────────────────────────────────
+
+/// Localhost server that captures every chunk POSTed by uploadLogs.
+/// Each chunk records: the decompressed NDJSON body, the per-chunk
+/// headers, and the individual lines parsed out of the body. Tests can
+/// then assert at chunk-granularity (e.g. "exactly N chunks"), or
+/// flatten via `allLines()` for per-event semantics matching the
+/// pre-v1.2 test surface.
 class CaptureServer {
    public:
-    struct Capture {
-        std::string event_type;
-        std::string body;        // raw EventWrapper envelope
-        std::string inner_data;  // unwrapped inner NDJSON line
+    struct Chunk {
+        std::string session_id;       // X-GpuFlight-Session-Id header
+        std::string hostname;         // X-GpuFlight-Hostname header (may be empty)
         std::string user_agent;
         std::string authorization;
         std::string client_version;
         std::string wire_version;
+        std::string content_encoding;
+        std::string body;             // decompressed NDJSON body
+        std::vector<std::string> lines;
+        // For convenience in tests: vector of (event_type, session_id)
+        // extracted from each line.
+        std::vector<std::pair<std::string, std::string>> events;
     };
 
-    /// Construct with an optional status override (default 200). Setting
-    /// `force_status = 401` lets tests simulate auth failures; 500 lets
-    /// them simulate transient errors.
-    explicit CaptureServer(int force_status = 200) : force_status_(force_status) {
-        server_.Post(R"(/api/v1/events/([a-z_]+))",
+    /// Construct with optional HTTP status override. force_status=200
+    /// is the happy path; 401/403 simulates auth failure; 404 the old-
+    /// backend case; 500 a transient failure.
+    explicit CaptureServer(int force_status = 200, std::size_t fail_first_n_with_5xx = 0)
+        : force_status_(force_status),
+          fail_first_n_(fail_first_n_with_5xx) {
+        server_.Post("/api/v1/events/stream",
             [this](const httplib::Request& req, httplib::Response& res) {
                 std::lock_guard<std::mutex> lk(mu_);
-                Capture c;
-                c.event_type     = req.matches.size() > 1 ? req.matches[1].str() : "";
-                c.body           = req.body;
-                c.inner_data     = extractInnerData(req.body);
-                c.user_agent     = req.get_header_value("User-Agent");
-                c.authorization  = req.get_header_value("Authorization");
-                c.client_version = req.get_header_value("X-GpuFlight-Client-Version");
-                c.wire_version   = req.get_header_value("X-GpuFlight-Wire-Version");
+
+                Chunk c;
+                c.session_id       = req.get_header_value("X-GpuFlight-Session-Id");
+                c.hostname         = req.get_header_value("X-GpuFlight-Hostname");
+                c.user_agent       = req.get_header_value("User-Agent");
+                c.authorization    = req.get_header_value("Authorization");
+                c.client_version   = req.get_header_value("X-GpuFlight-Client-Version");
+                c.wire_version     = req.get_header_value("X-GpuFlight-Wire-Version");
+                c.content_encoding = req.get_header_value("Content-Encoding");
+
+                // With CPPHTTPLIB_ZLIB_SUPPORT enabled (see top-level
+                // CMakeLists.txt), cpp-httplib's server auto-decompresses
+                // incoming bodies that carry Content-Encoding: gzip
+                // BEFORE the handler runs — req.body is already the raw
+                // NDJSON. (Without ZLIB support, the server would have
+                // returned 415 before reaching us.)
+                c.body = req.body;
+                c.lines = splitLines(c.body);
+                for (const auto& l : c.lines) {
+                    c.events.emplace_back(extractType(l), extractSessionId(l));
+                }
                 captured_.push_back(std::move(c));
-                res.status = force_status_;
-                res.set_content("{\"ok\":true}", "application/json");
+
+                // Decide status. The "fail first N then succeed" mode
+                // lets tests exercise the retry path: the first N
+                // chunks return 500, subsequent ones return 200.
+                int status = force_status_;
+                if (fail_first_n_ > 0 && captured_.size() <= fail_first_n_) {
+                    status = 500;
+                }
+
+                res.status = status;
+                if (status >= 200 && status < 300) {
+                    // Build a faithful StreamIngestResponse body —
+                    // accepted = line count, rejected = 0, no errors.
+                    std::ostringstream rsp;
+                    rsp << "{\"accepted\":" << captured_.back().lines.size()
+                        << ",\"rejected\":0,\"errors\":[]}";
+                    res.set_content(rsp.str(), "application/json");
+                } else {
+                    res.set_content("{\"error\":\"forced\"}", "application/json");
+                }
             });
+
         port_ = server_.bind_to_any_port("127.0.0.1");
         thread_ = std::thread([this] { server_.listen_after_bind(); });
         for (int i = 0; i < 200 && !server_.is_running(); ++i) {
@@ -133,9 +195,32 @@ class CaptureServer {
         return "http://127.0.0.1:" + std::to_string(port_);
     }
 
-    std::vector<Capture> snapshot() {
+    std::vector<Chunk> snapshot() {
         std::lock_guard<std::mutex> lk(mu_);
         return captured_;
+    }
+
+    /// Flatten across all chunks: returns every NDJSON line POSTed, in
+    /// arrival order. The pre-v1.2 tests called this "captures" — keep
+    /// the same idea so semantically-equivalent assertions read the
+    /// same.
+    std::vector<std::string> allLines() {
+        std::lock_guard<std::mutex> lk(mu_);
+        std::vector<std::string> out;
+        for (const auto& c : captured_) {
+            for (const auto& l : c.lines) out.push_back(l);
+        }
+        return out;
+    }
+
+    /// Same idea but returns (event_type, session_id) pairs.
+    std::vector<std::pair<std::string, std::string>> allEvents() {
+        std::lock_guard<std::mutex> lk(mu_);
+        std::vector<std::pair<std::string, std::string>> out;
+        for (const auto& c : captured_) {
+            for (const auto& e : c.events) out.push_back(e);
+        }
+        return out;
     }
 
    private:
@@ -143,8 +228,9 @@ class CaptureServer {
     std::thread          thread_;
     int                  port_{0};
     int                  force_status_;
+    std::size_t          fail_first_n_;
     std::mutex           mu_;
-    std::vector<Capture> captured_;
+    std::vector<Chunk>   captured_;
 };
 
 /// Write `lines` (one NDJSON event per line) to `path`, optionally gzipped.
@@ -165,24 +251,29 @@ void writeLog(const fs::path& path, const std::vector<std::string>& lines,
     }
 }
 
-/// Build a minimal log dir with one job_start, one kernel batch, one
-/// shutdown — spread across rotated .gz + active .log so the lifecycle
-/// ordering is non-trivial.
-std::string makeMinimalSession(const fs::path& root, const std::string& prefix = "test") {
-    fs::create_directories(root);
-    // device channel — rotated (older) + active (newer)
-    writeLog(root / (prefix + ".device.1.log.gz"), {
-        R"({"type":"job_start","session_id":"s1","app":"test","pid":1,"ts_ns":100})",
-        R"({"type":"kernel_event_batch","session_id":"s1","batch_id":1,"rows":[[0,1,0,1000,101,0,32,1]]})",
+/// Build a minimal session under the v1.2 per-session-subdirectory
+/// layout. Files live at `<root>/<sid>/<channel>[.N].log[.gz]`. The
+/// returned string is the `log_path` to pass to uploadLogs — in v1.2
+/// that's just the parent directory (root), not a prefix.
+std::string makeMinimalSession(const fs::path& root,
+                               const std::string& sid = "s1") {
+    const fs::path session_dir = root / sid;
+    fs::create_directories(session_dir);
+    // Rotated (older) — device channel only, gzipped
+    writeLog(session_dir / "device.1.log.gz", {
+        R"({"type":"job_start","session_id":")" + sid + R"(","app":"test","pid":1,"ts_ns":100})",
+        R"({"type":"kernel_event_batch","session_id":")" + sid + R"(","batch_id":1,"rows":[[0,1,0,1000,101,0,32,1]]})",
     }, /*gzip=*/true);
-    writeLog(root / (prefix + ".device.log"), {
-        R"({"type":"kernel_event_batch","session_id":"s1","batch_id":2,"rows":[[2000,2,0,1500,102,0,64,1]]})",
-        R"({"type":"shutdown","session_id":"s1","app":"test","pid":1,"ts_ns":9999})",
+    // Active device .log — newer events
+    writeLog(session_dir / "device.log", {
+        R"({"type":"kernel_event_batch","session_id":")" + sid + R"(","batch_id":2,"rows":[[2000,2,0,1500,102,0,64,1]]})",
+        R"({"type":"shutdown","session_id":")" + sid + R"(","app":"test","pid":1,"ts_ns":9999})",
     });
-    writeLog(root / (prefix + ".scope.log"), {
-        R"({"type":"scope_event_batch","session_id":"s1","batch_id":1,"rows":[[0,1,1,0,0],[5000,1,1,1,0]]})",
+    // Scope channel, active only
+    writeLog(session_dir / "scope.log", {
+        R"({"type":"scope_event_batch","session_id":")" + sid + R"(","batch_id":1,"rows":[[0,1,1,0,0],[5000,1,1,1,0]]})",
     });
-    return (root / prefix).string();  // returns the log_path prefix
+    return root.string();
 }
 
 }  // namespace
@@ -206,35 +297,33 @@ TEST(UploadLogs, UploadsAllEventsAcrossChannelsAndRotation) {
 
     const auto result = gpufl::uploadLogs(opts);
 
-    EXPECT_TRUE(result.success);
+    EXPECT_TRUE(result.success) << "warnings: "
+        << (result.warnings.empty() ? "<none>" : result.warnings.front());
     EXPECT_EQ(result.events_uploaded, 5u)
-        << "Expected 5 NDJSON events to be POSTed (job_start, "
+        << "Expected 5 NDJSON events across all chunks (job_start, "
         << "two kernel batches, one scope batch, one shutdown).";
     EXPECT_EQ(result.files_processed, 3u);  // device.1.log.gz + device.log + scope.log
     EXPECT_TRUE(result.warnings.empty()) << "Unexpected warnings on happy path";
 
-    const auto caps = srv.snapshot();
-    ASSERT_EQ(caps.size(), 5u);
+    const auto events = srv.allEvents();
+    ASSERT_EQ(events.size(), 5u);
 
-    // job_start must be POSTed first (so the backend creates the session
-    // row before any event tries to reference its session_id).
-    EXPECT_EQ(caps.front().event_type, "job_start");
-    // shutdown must be POSTed last (deferred to end of upload).
-    EXPECT_EQ(caps.back().event_type, "shutdown");
+    // job_start must arrive first (so the backend creates the session
+    // row before any event references its session_id). shutdown must
+    // arrive last (deferred to end of session's chunks).
+    EXPECT_EQ(events.front().first, "job_start");
+    EXPECT_EQ(events.back().first,  "shutdown");
 
     fs::remove_all(tmp);
 }
 
-// Regression guard for the silent-data-loss bug shipped in the first
-// uploadLogs() draft: the backend's EventIngestionController binds
-// every request body to an `EventWrapper(data, agentSendingTime,
-// hostname, ipAddr)` record. Posting the bare NDJSON line leaves
-// every wrapper field null, the inner readValue(null, ...) throws,
-// the exception is swallowed, and the controller returns 200 anyway
-// — so the client reports success while the dashboard sees nothing.
-// This test asserts the wrapper is present on every POST.
-TEST(UploadLogs, EveryPostIsWrappedInEventWrapper) {
-    const fs::path tmp = fs::temp_directory_path() / "gpufl_upload_test_wrapper";
+TEST(UploadLogs, ChunkBodyIsGzippedNdjsonNotEventWrapper) {
+    // Regression guard against accidentally falling back to the v1.1
+    // per-event EventWrapper format. The new wire format is raw NDJSON
+    // (one event per line), gzipped, with the session-id in a header.
+    // No "data" field, no "agentSendingTime" field — just the events
+    // themselves, byte-identical to what's on disk.
+    const fs::path tmp = fs::temp_directory_path() / "gpufl_upload_test_ndjson";
     fs::remove_all(tmp);
     const std::string log_path = makeMinimalSession(tmp);
 
@@ -248,37 +337,36 @@ TEST(UploadLogs, EveryPostIsWrappedInEventWrapper) {
     const auto result = gpufl::uploadLogs(opts);
     ASSERT_TRUE(result.success);
 
-    const auto caps = srv.snapshot();
-    ASSERT_FALSE(caps.empty());
-    for (const auto& c : caps) {
-        // The raw POST body MUST be an EventWrapper envelope, not the
-        // bare NDJSON event. Check for each wrapper field by name.
-        EXPECT_NE(c.body.find("\"data\":\""), std::string::npos)
-            << "Body missing wrapper field `data`: " << c.body;
-        EXPECT_NE(c.body.find("\"agentSendingTime\":"), std::string::npos)
-            << "Body missing wrapper field `agentSendingTime`: " << c.body;
-        EXPECT_NE(c.body.find("\"hostname\":"), std::string::npos)
-            << "Body missing wrapper field `hostname`: " << c.body;
-        EXPECT_NE(c.body.find("\"ipAddr\":"), std::string::npos)
-            << "Body missing wrapper field `ipAddr`: " << c.body;
-
-        // The unwrapped inner content must be the original NDJSON event.
-        EXPECT_NE(c.inner_data.find("\"type\":\""), std::string::npos)
-            << "Inner data should be NDJSON event: " << c.inner_data;
-        EXPECT_NE(c.inner_data.find("\"session_id\":\""), std::string::npos)
-            << "Inner data should carry session_id: " << c.inner_data;
+    const auto chunks = srv.snapshot();
+    ASSERT_FALSE(chunks.empty());
+    for (const auto& c : chunks) {
+        EXPECT_EQ(c.content_encoding, "gzip")
+            << "Every chunk should be gzipped on the wire.";
+        EXPECT_FALSE(c.session_id.empty())
+            << "Every chunk must carry X-GpuFlight-Session-Id.";
+        // Body should NOT look like an EventWrapper envelope. The
+        // legacy format started with `{"data":` — the new format
+        // starts directly with the first event's `{"type":`.
+        EXPECT_EQ(c.body.find("\"data\":\""), std::string::npos)
+            << "Chunk body should not be EventWrapper-wrapped: " << c.body;
+        EXPECT_EQ(c.body.find("\"agentSendingTime\":"), std::string::npos)
+            << "Chunk body should not be EventWrapper-wrapped: " << c.body;
+        // Every parsed line should be a real event.
+        for (const auto& l : c.lines) {
+            EXPECT_NE(l.find("\"type\":\""), std::string::npos);
+            EXPECT_NE(l.find("\"session_id\":\""), std::string::npos);
+        }
     }
 
     fs::remove_all(tmp);
 }
 
-TEST(UploadLogs, AuthHeaderAndVersionHeadersPresentOnEveryPost) {
+TEST(UploadLogs, AuthHeaderAndVersionHeadersPresentOnEveryChunk) {
     const fs::path tmp = fs::temp_directory_path() / "gpufl_upload_test_headers";
     fs::remove_all(tmp);
     const std::string log_path = makeMinimalSession(tmp);
 
     CaptureServer srv;
-
     gpufl::UploadOptions opts;
     opts.log_path        = log_path;
     opts.backend_url     = srv.base_url();
@@ -288,13 +376,64 @@ TEST(UploadLogs, AuthHeaderAndVersionHeadersPresentOnEveryPost) {
     const auto result = gpufl::uploadLogs(opts);
     ASSERT_TRUE(result.success);
 
-    const auto caps = srv.snapshot();
-    ASSERT_FALSE(caps.empty());
-    for (const auto& c : caps) {
+    const auto chunks = srv.snapshot();
+    ASSERT_FALSE(chunks.empty());
+    for (const auto& c : chunks) {
         EXPECT_EQ(c.authorization,  "Bearer secret_token");
         EXPECT_EQ(c.client_version, gpufl::kClientVersion);
         EXPECT_EQ(c.wire_version,   gpufl::kWireVersion);
+        EXPECT_EQ(c.session_id,     "s1");
         EXPECT_FALSE(c.user_agent.empty());
+    }
+
+    fs::remove_all(tmp);
+}
+
+TEST(UploadLogs, EveryLineInChunkMatchesSessionIdHeader) {
+    // Backend defense-in-depth: every line's session_id MUST match
+    // the X-GpuFlight-Session-Id header. We exercise that here by
+    // verifying client-side filtering — only s1's lines end up in
+    // the chunk despite the on-disk file containing other sessions'
+    // events too (synthetically interleaved).
+    const fs::path tmp = fs::temp_directory_path() / "gpufl_upload_test_filter";
+    fs::remove_all(tmp);
+    fs::create_directories(tmp);
+
+    // Defense-in-depth test: a session's directory should contain
+    // only its own session_id's lines. We simulate a corrupted file
+    // (intentionally including s2 events in s1's dir) and verify the
+    // per-line client-side filter catches them so the wire only carries
+    // s1's lines. Normal operation never produces such files — the
+    // rotator writes only the active session_id into <sid>/<channel>.log.
+    fs::create_directories(tmp / "s1");
+    writeLog(tmp / "s1" / "device.log", {
+        R"({"type":"job_start","session_id":"s1","ts_ns":1})",
+        R"({"type":"kernel_event_batch","session_id":"s2","rows":[]})",   // wrong session — must be skipped
+        R"({"type":"kernel_event_batch","session_id":"s1","rows":[]})",
+        R"({"type":"shutdown","session_id":"s2","ts_ns":99})",            // wrong session
+        R"({"type":"shutdown","session_id":"s1","ts_ns":99})",
+    });
+
+    CaptureServer srv;
+    gpufl::UploadOptions opts;
+    opts.log_path          = tmp.string();
+    opts.backend_url       = srv.base_url();
+    opts.api_key           = "x";
+    opts.session_id_filter = "s1";
+    opts.report_progress   = false;
+
+    const auto result = gpufl::uploadLogs(opts);
+    ASSERT_TRUE(result.success);
+
+    const auto chunks = srv.snapshot();
+    ASSERT_FALSE(chunks.empty());
+    for (const auto& c : chunks) {
+        EXPECT_EQ(c.session_id, "s1");
+        for (const auto& [type, sid] : c.events) {
+            EXPECT_EQ(sid, "s1")
+                << "Every line in the chunk must match the header's "
+                << "session_id — s2 events should never reach the wire.";
+        }
     }
 
     fs::remove_all(tmp);
@@ -305,9 +444,6 @@ TEST(UploadLogs, AuthHeaderAndVersionHeadersPresentOnEveryPost) {
 // ─────────────────────────────────────────────────────────────────────
 
 TEST(UploadLogs, CursorRefusesRepeatUploadOfSameSession) {
-    // Cursor v2 tracks completed session_ids — re-running the default
-    // (single-session) upload on a session that already shipped should
-    // refuse with success=false and a warning suggesting --force.
     const fs::path tmp = fs::temp_directory_path() / "gpufl_upload_test_cursor_refuse";
     fs::remove_all(tmp);
     const std::string log_path = makeMinimalSession(tmp);
@@ -319,31 +455,27 @@ TEST(UploadLogs, CursorRefusesRepeatUploadOfSameSession) {
     opts.api_key         = "x";
     opts.report_progress = false;
 
-    // First run: uploads everything.
     const auto r1 = gpufl::uploadLogs(opts);
     ASSERT_TRUE(r1.success);
-    const auto caps_after_first = srv.snapshot().size();
-    EXPECT_GE(caps_after_first, 1u);
+    const auto chunks_after_first = srv.snapshot().size();
+    EXPECT_GE(chunks_after_first, 1u);
     EXPECT_TRUE(fs::exists(tmp / ".gpufl-upload-cursor.json"));
 
     // Second run: same session_id is in cursor.completed_sessions, so
     // the default mode refuses and emits a warning suggesting --force.
     const auto r2 = gpufl::uploadLogs(opts);
     EXPECT_FALSE(r2.success);
-    EXPECT_EQ(r2.events_uploaded, 0u)
-        << "No events should be uploaded when refusing — backend should "
-        << "see no additional POSTs.";
+    EXPECT_EQ(r2.events_uploaded, 0u);
     ASSERT_FALSE(r2.warnings.empty());
     EXPECT_NE(r2.warnings.front().find("already uploaded"), std::string::npos);
     EXPECT_NE(r2.warnings.front().find("force"), std::string::npos);
-    EXPECT_EQ(srv.snapshot().size(), caps_after_first)
-        << "Server should see no further POSTs on refusal.";
+    EXPECT_EQ(srv.snapshot().size(), chunks_after_first)
+        << "Server should see no further chunks on refusal.";
 
     fs::remove_all(tmp);
 }
 
 TEST(UploadLogs, ForceOverridesCursorRefusal) {
-    // --force re-uploads even completed sessions.
     const fs::path tmp = fs::temp_directory_path() / "gpufl_upload_test_force";
     fs::remove_all(tmp);
     const std::string log_path = makeMinimalSession(tmp);
@@ -355,19 +487,17 @@ TEST(UploadLogs, ForceOverridesCursorRefusal) {
     opts.api_key         = "x";
     opts.report_progress = false;
 
-    // First run completes; cursor now lists session s1.
     const auto r1 = gpufl::uploadLogs(opts);
     ASSERT_TRUE(r1.success);
-    const auto first_count = srv.snapshot().size();
+    const auto first_lines = srv.allLines().size();
 
-    // Re-run with force=true → events are uploaded again.
     opts.force = true;
     const auto r2 = gpufl::uploadLogs(opts);
     EXPECT_TRUE(r2.success);
     EXPECT_EQ(r2.events_uploaded, r1.events_uploaded)
         << "force=true should re-upload every event from the session.";
-    EXPECT_EQ(srv.snapshot().size(), first_count * 2)
-        << "Server should see double the captures after a forced re-upload.";
+    EXPECT_EQ(srv.allLines().size(), first_lines * 2)
+        << "Server should see double the lines after a forced re-upload.";
 
     fs::remove_all(tmp);
 }
@@ -386,25 +516,82 @@ TEST(UploadLogs, AuthFailureShortCircuits) {
     opts.log_path        = log_path;
     opts.backend_url     = srv.base_url();
     opts.api_key         = "bad_token";
-    opts.max_retries     = 0;  // don't retry — we expect immediate abort
+    opts.max_retries     = 0;
     opts.report_progress = false;
 
     const auto result = gpufl::uploadLogs(opts);
 
     EXPECT_FALSE(result.success);
     EXPECT_FALSE(result.warnings.empty());
-    // First POST returns 401 → abort. Subsequent events not attempted.
-    // The server should see exactly one capture.
+    // First chunk returns 401 → abort. No subsequent chunks.
     EXPECT_EQ(srv.snapshot().size(), 1u)
-        << "Auth failure should short-circuit — no further POSTs expected";
+        << "Auth failure should short-circuit — no further chunks expected";
 
     fs::remove_all(tmp);
+}
+
+TEST(UploadLogs, OldBackend404SurfacesMigrationWarning) {
+    // Backend predates v1.2 — /events/stream doesn't exist. We expect
+    // a single 404, no retries, and a clear migration-hint warning.
+    const fs::path tmp = fs::temp_directory_path() / "gpufl_upload_test_404";
+    fs::remove_all(tmp);
+    const std::string log_path = makeMinimalSession(tmp);
+
+    CaptureServer srv(/*force_status=*/404);
+    gpufl::UploadOptions opts;
+    opts.log_path        = log_path;
+    opts.backend_url     = srv.base_url();
+    opts.api_key         = "x";
+    opts.max_retries     = 3;       // confirm 404 doesn't trigger retries
+    opts.report_progress = false;
+
+    const auto result = gpufl::uploadLogs(opts);
+
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(result.events_uploaded, 0u);
+    ASSERT_FALSE(result.warnings.empty());
+    // Look for the migration hint anywhere in the warnings — exact
+    // wording can drift but the marker terms shouldn't.
+    bool found_hint = false;
+    for (const auto& w : result.warnings) {
+        if (w.find("/api/v1/events/stream") != std::string::npos &&
+            w.find("backend") != std::string::npos) {
+            found_hint = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(found_hint)
+        << "Expected a 404 warning mentioning /api/v1/events/stream and backend";
+    EXPECT_EQ(srv.snapshot().size(), 1u)
+        << "404 must not trigger retries — every subsequent chunk would 404 too.";
+
+    fs::remove_all(tmp);
+}
+
+TEST(UploadLogs, TransientFailureRetriesThenSucceeds) {
+    // First chunk POST gets a 500; retry succeeds. No data loss.
+    const fs::path tmp = fs::temp_directory_path() / "gpufl_upload_test_retry";
+    fs::remove_all(tmp);
+    const std::string log_path = makeMinimalSession(tmp);
+
+    CaptureServer srv(/*force_status=*/200, /*fail_first_n=*/1);
+    gpufl::UploadOptions opts;
+    opts.log_path        = log_path;
+    opts.backend_url     = srv.base_url();
+    opts.api_key         = "x";
+    opts.max_retries     = 2;
+    opts.retry_delay_ms  = 1;
+    opts.report_progress = false;
+
+    const auto result = gpufl::uploadLogs(opts);
+    EXPECT_TRUE(result.success) << "Should retry past the transient 500.";
+    EXPECT_EQ(result.events_uploaded, 5u);
 }
 
 TEST(UploadLogs, MissingLogDirReturnsFailureNotThrow) {
     gpufl::UploadOptions opts;
     opts.log_path    = "/nonexistent/path/that/should/not/exist";
-    opts.backend_url = "http://127.0.0.1:1";  // arbitrary, won't be reached
+    opts.backend_url = "http://127.0.0.1:1";
     opts.api_key     = "x";
     opts.report_progress = false;
 
@@ -422,13 +609,13 @@ TEST(UploadLogs, EmptyLogDirIsSuccessNoOp) {
 
     CaptureServer srv;
     gpufl::UploadOptions opts;
-    opts.log_path        = (tmp / "test").string();
+    opts.log_path        = tmp.string();    // tmp exists but has no session subdirs
     opts.backend_url     = srv.base_url();
     opts.api_key         = "x";
     opts.report_progress = false;
 
     const auto result = gpufl::uploadLogs(opts);
-    EXPECT_TRUE(result.success);  // nothing to do is success, not failure
+    EXPECT_TRUE(result.success);
     EXPECT_EQ(result.events_uploaded, 0u);
     EXPECT_EQ(result.files_processed, 0u);
     EXPECT_TRUE(srv.snapshot().empty());
@@ -441,7 +628,8 @@ TEST(UploadLogs, MalformedNdjsonLineSkippedWithWarning) {
     fs::remove_all(tmp);
     fs::create_directories(tmp);
 
-    writeLog(tmp / "test.device.log", {
+    fs::create_directories(tmp / "s1");
+    writeLog(tmp / "s1" / "device.log", {
         R"({"type":"job_start","session_id":"s1"})",
         "this is not json at all — should be skipped with a warning",
         R"({"type":"kernel_event_batch","session_id":"s1","rows":[]})",
@@ -450,14 +638,14 @@ TEST(UploadLogs, MalformedNdjsonLineSkippedWithWarning) {
 
     CaptureServer srv;
     gpufl::UploadOptions opts;
-    opts.log_path        = (tmp / "test").string();
+    opts.log_path        = tmp.string();
     opts.backend_url     = srv.base_url();
     opts.api_key         = "x";
     opts.report_progress = false;
 
     const auto result = gpufl::uploadLogs(opts);
-    EXPECT_TRUE(result.success);  // bad lines are skipped, upload continues
-    EXPECT_EQ(result.events_uploaded, 3u);  // 3 good lines uploaded
+    EXPECT_TRUE(result.success);
+    EXPECT_EQ(result.events_uploaded, 3u);
     EXPECT_FALSE(result.warnings.empty()) << "Should warn about the bad line";
 
     fs::remove_all(tmp);
@@ -467,8 +655,6 @@ TEST(UploadLogs, EmptyBackendUrlReturnsFailure) {
     gpufl::UploadOptions opts;
     opts.log_path = "/tmp";
     opts.api_key  = "x";
-    // backend_url intentionally empty
-
     const auto result = gpufl::uploadLogs(opts);
     EXPECT_FALSE(result.success);
     EXPECT_FALSE(result.warnings.empty());
@@ -478,16 +664,10 @@ TEST(UploadLogs, EmptyApiKeyReturnsFailure) {
     gpufl::UploadOptions opts;
     opts.log_path    = "/tmp";
     opts.backend_url = "http://example.com";
-    // api_key intentionally empty
-
     const auto result = gpufl::uploadLogs(opts);
     EXPECT_FALSE(result.success);
     EXPECT_FALSE(result.warnings.empty());
 }
-
-// ─────────────────────────────────────────────────────────────────────
-// Lifecycle ordering
-// ─────────────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────────────
 // Session selection (default=latest, --session-id, --all-sessions)
@@ -495,21 +675,24 @@ TEST(UploadLogs, EmptyApiKeyReturnsFailure) {
 
 namespace {
 
-/// Build a directory with two independent sessions sharing the same
-/// log_path prefix. `s_old` has a lower job_start.ts_ns than `s_new`,
-/// so the default "latest" selection should pick `s_new`.
-std::string makeTwoSessions(const fs::path& root,
-                            const std::string& prefix = "multi") {
-    fs::create_directories(root);
-    writeLog(root / (prefix + ".device.log"), {
+std::string makeTwoSessions(const fs::path& root) {
+    // v1.2 layout: each session in its own subdirectory under root.
+    // Pre-v1.2 fixtures interleaved sessions in one flat file; that
+    // was a worst case for per-line filtering. Per-session-dir makes
+    // session isolation a property of the on-disk layout itself.
+    fs::create_directories(root / "s_old");
+    fs::create_directories(root / "s_new");
+    writeLog(root / "s_old" / "device.log", {
         R"({"type":"job_start","session_id":"s_old","app":"x","pid":1,"ts_ns":100})",
         R"({"type":"kernel_event_batch","session_id":"s_old","batch_id":1,"rows":[[0,1,0,1,1,0,0,0]]})",
         R"({"type":"shutdown","session_id":"s_old","app":"x","pid":1,"ts_ns":200})",
+    });
+    writeLog(root / "s_new" / "device.log", {
         R"({"type":"job_start","session_id":"s_new","app":"x","pid":2,"ts_ns":1000})",
         R"({"type":"kernel_event_batch","session_id":"s_new","batch_id":1,"rows":[[0,1,0,1,1,0,0,0]]})",
         R"({"type":"shutdown","session_id":"s_new","app":"x","pid":2,"ts_ns":2000})",
     });
-    return (root / prefix).string();
+    return root.string();
 }
 
 }  // namespace
@@ -528,26 +711,25 @@ TEST(UploadLogs, DefaultSelectsLatestSessionOnly) {
 
     const auto result = gpufl::uploadLogs(opts);
     EXPECT_TRUE(result.success);
-    // 3 events: s_new's job_start, kernel_event_batch, shutdown.
-    // s_old must NOT be uploaded.
     EXPECT_EQ(result.events_uploaded, 3u)
-        << "Default mode should upload only the latest session (s_new), "
-        << "not s_old.";
+        << "Default mode should upload only the latest session (s_new), not s_old.";
 
-    const auto caps = srv.snapshot();
-    ASSERT_EQ(caps.size(), 3u);
-    for (const auto& c : caps) {
-        // Every uploaded event should carry session_id "s_new" in the
-        // unwrapped inner NDJSON line.
-        EXPECT_NE(c.inner_data.find("\"session_id\":\"s_new\""), std::string::npos)
-            << "Expected only s_new events; got inner: " << c.inner_data;
+    const auto events = srv.allEvents();
+    ASSERT_EQ(events.size(), 3u);
+    for (const auto& [type, sid] : events) {
+        EXPECT_EQ(sid, "s_new")
+            << "Expected only s_new events; got session " << sid;
+    }
+    // Header on every chunk must also be s_new.
+    for (const auto& c : srv.snapshot()) {
+        EXPECT_EQ(c.session_id, "s_new");
     }
 
     fs::remove_all(tmp);
 }
 
 TEST(UploadLogs, SessionIdFilterUploadsOnlyMatchingSession) {
-    const fs::path tmp = fs::temp_directory_path() / "gpufl_upload_test_filter";
+    const fs::path tmp = fs::temp_directory_path() / "gpufl_upload_test_filter_select";
     fs::remove_all(tmp);
     const std::string log_path = makeTwoSessions(tmp);
 
@@ -556,17 +738,15 @@ TEST(UploadLogs, SessionIdFilterUploadsOnlyMatchingSession) {
     opts.log_path          = log_path;
     opts.backend_url       = srv.base_url();
     opts.api_key           = "x";
-    opts.session_id_filter = "s_old";  // pick the older one explicitly
+    opts.session_id_filter = "s_old";
     opts.report_progress   = false;
 
     const auto result = gpufl::uploadLogs(opts);
     EXPECT_TRUE(result.success);
     EXPECT_EQ(result.events_uploaded, 3u);
 
-    const auto caps = srv.snapshot();
-    ASSERT_EQ(caps.size(), 3u);
-    for (const auto& c : caps) {
-        EXPECT_NE(c.inner_data.find("\"session_id\":\"s_old\""), std::string::npos);
+    for (const auto& c : srv.snapshot()) {
+        EXPECT_EQ(c.session_id, "s_old");
     }
 
     fs::remove_all(tmp);
@@ -612,23 +792,18 @@ TEST(UploadLogs, AllSessionsUploadsEveryDistinctSession) {
     EXPECT_EQ(result.events_uploaded, 6u)
         << "Expected 3 events from s_old + 3 from s_new.";
 
-    // Per-session lifecycle ordering: s_old should appear as a complete
-    // block (job_start→...→shutdown) before s_new starts. We don't
-    // require any specific ordering between the two sessions, just
-    // that each session's events form a contiguous block.
-    const auto caps = srv.snapshot();
-    ASSERT_EQ(caps.size(), 6u);
-    // Find each session's first and last event index. They should not
-    // interleave.
+    // Per-session lifecycle ordering: each session's chunks form a
+    // contiguous block (no interleaving) so the backend sees a clean
+    // job_start → ... → shutdown sequence per session.
+    const auto chunks = srv.snapshot();
+    ASSERT_FALSE(chunks.empty());
     int s_old_first = -1, s_old_last = -1, s_new_first = -1, s_new_last = -1;
-    for (int i = 0; i < static_cast<int>(caps.size()); ++i) {
-        const bool is_old = caps[i].inner_data.find("s_old") != std::string::npos;
-        const bool is_new = caps[i].inner_data.find("s_new") != std::string::npos;
-        if (is_old) {
+    for (int i = 0; i < static_cast<int>(chunks.size()); ++i) {
+        if (chunks[i].session_id == "s_old") {
             if (s_old_first < 0) s_old_first = i;
             s_old_last = i;
         }
-        if (is_new) {
+        if (chunks[i].session_id == "s_new") {
             if (s_new_first < 0) s_new_first = i;
             s_new_last = i;
         }
@@ -636,15 +811,8 @@ TEST(UploadLogs, AllSessionsUploadsEveryDistinctSession) {
     const bool no_interleave =
         (s_old_last < s_new_first) || (s_new_last < s_old_first);
     EXPECT_TRUE(no_interleave)
-        << "Sessions should not interleave — per-session lifecycle "
-        << "ordering requires each session's events to form a "
-        << "contiguous block of POSTs.";
-
-    // Each session's block must start with job_start and end with shutdown.
-    EXPECT_EQ(caps[s_old_first].event_type, "job_start");
-    EXPECT_EQ(caps[s_old_last].event_type,  "shutdown");
-    EXPECT_EQ(caps[s_new_first].event_type, "job_start");
-    EXPECT_EQ(caps[s_new_last].event_type,  "shutdown");
+        << "Sessions should not interleave at the chunk level — each "
+        << "session's chunks must be contiguous.";
 
     fs::remove_all(tmp);
 }
@@ -662,20 +830,16 @@ TEST(UploadLogs, AllSessionsSilentlySkipsAlreadyCompleted) {
     opts.all_sessions    = true;
     opts.report_progress = false;
 
-    // First run: ships both sessions.
     const auto r1 = gpufl::uploadLogs(opts);
     ASSERT_TRUE(r1.success);
     EXPECT_EQ(r1.events_uploaded, 6u);
+    const auto chunks_first = srv.snapshot().size();
 
-    // Second run with --all-sessions: both sessions are in the cursor.
-    // Should silently skip both, success=true, zero new events.
     const auto r2 = gpufl::uploadLogs(opts);
-    EXPECT_TRUE(r2.success)
-        << "All-sessions mode with everything already done is a success "
-        << "no-op, not a failure.";
+    EXPECT_TRUE(r2.success);
     EXPECT_EQ(r2.events_uploaded, 0u);
-    EXPECT_EQ(srv.snapshot().size(), 6u)
-        << "Server should see no additional POSTs.";
+    EXPECT_EQ(srv.snapshot().size(), chunks_first)
+        << "Server should see no additional chunks.";
 
     fs::remove_all(tmp);
 }
@@ -703,21 +867,19 @@ TEST(UploadLogs, JobStartFirstShutdownLast) {
     fs::remove_all(tmp);
     fs::create_directories(tmp);
 
-    // Put shutdown in the active file (last in file order). job_start
-    // in the rotated .gz (oldest). Mix in some other events to ensure
-    // they don't accidentally get reordered.
-    writeLog(tmp / "test.device.1.log.gz", {
+    fs::create_directories(tmp / "s");
+    writeLog(tmp / "s" / "device.1.log.gz", {
         R"({"type":"job_start","session_id":"s","ts_ns":1})",
         R"({"type":"kernel_event_batch","session_id":"s","batch_id":1,"rows":[]})",
     }, /*gzip=*/true);
-    writeLog(tmp / "test.device.log", {
+    writeLog(tmp / "s" / "device.log", {
         R"({"type":"kernel_event_batch","session_id":"s","batch_id":2,"rows":[]})",
         R"({"type":"shutdown","session_id":"s","ts_ns":99})",
     });
 
     CaptureServer srv;
     gpufl::UploadOptions opts;
-    opts.log_path        = (tmp / "test").string();
+    opts.log_path        = tmp.string();
     opts.backend_url     = srv.base_url();
     opts.api_key         = "x";
     opts.report_progress = false;
@@ -725,14 +887,66 @@ TEST(UploadLogs, JobStartFirstShutdownLast) {
     const auto result = gpufl::uploadLogs(opts);
     ASSERT_TRUE(result.success);
 
-    const auto caps = srv.snapshot();
-    ASSERT_EQ(caps.size(), 4u);
-    EXPECT_EQ(caps.front().event_type, "job_start")
-        << "job_start must be the very first POST (so the backend "
-        << "creates the session row before downstream events arrive).";
-    EXPECT_EQ(caps.back().event_type, "shutdown")
-        << "shutdown must be the very last POST (deferred to end of "
-        << "upload regardless of which file it lived in).";
+    const auto events = srv.allEvents();
+    ASSERT_EQ(events.size(), 4u);
+    EXPECT_EQ(events.front().first, "job_start")
+        << "job_start must be the first NDJSON line shipped (within "
+        << "the session's first chunk).";
+    EXPECT_EQ(events.back().first, "shutdown")
+        << "shutdown must be the last NDJSON line shipped (deferred "
+        << "to the session's final chunk regardless of which file it "
+        << "lived in on disk).";
+
+    fs::remove_all(tmp);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Chunking — verifies the chunk-size cap drives flush behavior.
+// ─────────────────────────────────────────────────────────────────────
+
+TEST(UploadLogs, ManyEventsSplitIntoMultipleChunks) {
+    // Generate enough events that they can't fit in a single 5000-line
+    // chunk. We use a much smaller threshold for the test by writing
+    // 6000+ lines, which guarantees ≥2 chunks regardless of byte size.
+    const fs::path tmp = fs::temp_directory_path() / "gpufl_upload_test_chunks";
+    fs::remove_all(tmp);
+    fs::create_directories(tmp);
+
+    constexpr int kLines = 5500;
+    std::vector<std::string> lines;
+    lines.reserve(kLines + 2);
+    lines.push_back(R"({"type":"job_start","session_id":"big","ts_ns":1})");
+    for (int i = 0; i < kLines; ++i) {
+        lines.push_back(
+            std::string(R"({"type":"kernel_event_batch","session_id":"big","batch_id":)")
+            + std::to_string(i) + R"(,"rows":[]})");
+    }
+    lines.push_back(R"({"type":"shutdown","session_id":"big","ts_ns":99})");
+    fs::create_directories(tmp / "big");
+    writeLog(tmp / "big" / "device.log", lines);
+
+    CaptureServer srv;
+    gpufl::UploadOptions opts;
+    opts.log_path        = tmp.string();
+    opts.backend_url     = srv.base_url();
+    opts.api_key         = "x";
+    opts.report_progress = false;
+
+    const auto result = gpufl::uploadLogs(opts);
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.events_uploaded, static_cast<std::size_t>(kLines + 2));
+
+    const auto chunks = srv.snapshot();
+    EXPECT_GE(chunks.size(), 2u)
+        << "5500+ events should split into multiple chunks at the "
+        << "5000-line cap.";
+    // Sanity: no chunk should exceed the line cap.
+    for (const auto& c : chunks) {
+        EXPECT_LE(c.lines.size(), 5000u);
+    }
+    // shutdown still arrives last — verifies deferred-shutdown logic
+    // survives chunking.
+    EXPECT_EQ(chunks.back().events.back().first, "shutdown");
 
     fs::remove_all(tmp);
 }

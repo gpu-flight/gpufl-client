@@ -1,6 +1,3 @@
-// Implementation of gpufl::uploadLogs — see upload_logs.hpp for the
-// API contract and ~/.claude/plans/deferred-upload-only.md for design.
-//
 // High-level structure:
 //   1. parse log_path → (directory, file-prefix)
 //   2. discover .log / .log.gz files matching the prefix; sort by
@@ -24,6 +21,7 @@
 #include "gpufl/upload/upload_logs.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -58,45 +56,52 @@ namespace {
 
 struct DiscoveredFile {
     fs::path     path;
+    std::string  session_id;      // v1.2+: derived from parent subdir name
     std::string  channel;         // e.g. "device", "scope", "system"
     int          rotation_index;  // 0 = active .log file; ≥1 = rotated
     bool         compressed;      // true if .log.gz
 };
 
-/// Split `log_path` ("/tmp/foo/bar" or "/tmp/foo/bar.log") into the
-/// directory and the file-prefix used by LogFileRotator::basePrefix().
+/// v1.2 disk layout — `log_path` is the directory under which each
+/// session lives in its own subdirectory:
+///
+///   <log_path>/
+///     <session_id_A>/
+///       device.log
+///       device.1.log.gz
+///       scope.log
+///       system.log
+///     <session_id_B>/
+///       ...
+///
+/// `splitLogPath` strips a legacy trailing `.log` so a caller passing
+/// the pre-v1.2 "/dir/app" or "/dir/app.log" form still gets a
+/// reasonable directory to look in.
 struct PathParts {
-    fs::path    directory;
-    std::string prefix;  // filename component, with any .log suffix stripped
+    fs::path directory;
 };
 
 PathParts splitLogPath(const std::string& log_path) {
     fs::path p(log_path);
-    PathParts out;
-    // Mirror LogFileRotator::basePrefix(): strip a trailing .log so
-    // callers can pass either "/dir/app" or "/dir/app.log" and get the
-    // same files discovered.
     if (p.extension() == ".log") p.replace_extension();
-    out.directory = p.has_parent_path() ? p.parent_path() : fs::current_path();
-    out.prefix    = p.filename().string();
+    PathParts out;
+    out.directory = p;
     return out;
 }
 
-/// Parse a filename like "app.device.log" or "app.device.5.log.gz" into
-/// its components. Returns false if the name doesn't match either shape
-/// or doesn't start with `prefix + "."`.
+/// Parse a filename like "device.log" or "device.5.log.gz" — the
+/// per-channel files inside a session subdirectory. Returns false if
+/// the name doesn't match.
+///
+/// Note: this is the v1.2 form (no prefix in the filename — the
+/// session_id is the parent directory name). The pre-v1.2 form
+/// `<prefix>.<channel>.log` is handled separately by the legacy-
+/// detection path.
 bool parseLogFilename(const std::string& filename,
-                      const std::string& prefix,
                       std::string& channel_out,
                       int& rotation_index_out,
                       bool& compressed_out) {
-    // Expected: {prefix}.{channel}[.{index}].log[.gz]
-    const std::string head = prefix + ".";
-    if (filename.size() <= head.size() ||
-        filename.compare(0, head.size(), head) != 0) {
-        return false;
-    }
-    std::string rest = filename.substr(head.size());
+    std::string rest = filename;
 
     // Strip optional .gz
     compressed_out = false;
@@ -110,15 +115,13 @@ bool parseLogFilename(const std::string& filename,
     }
     rest.erase(rest.size() - 4);  // strip .log
 
-    // Now rest is either "{channel}" or "{channel}.{index}"
+    // Now rest is either "{channel}" (active) or "{channel}.{index}" (rotated)
     const auto last_dot = rest.find_last_of('.');
     if (last_dot == std::string::npos) {
-        // active file: no rotation index
         channel_out = rest;
         rotation_index_out = 0;
         return !channel_out.empty();
     }
-    // Try to parse trailing component as an integer
     const std::string tail = rest.substr(last_dot + 1);
     try {
         const int idx = std::stoi(tail);
@@ -127,13 +130,108 @@ bool parseLogFilename(const std::string& filename,
         channel_out = rest.substr(0, last_dot);
         return !channel_out.empty();
     } catch (...) {
-        // No trailing integer → treat whole thing as channel name
-        // (e.g. a channel name that happens to contain a dot — unusual
-        // but not technically forbidden). Active file.
         channel_out = rest;
         rotation_index_out = 0;
         return !channel_out.empty();
     }
+}
+
+/// Detect pre-v1.2 flat layout — files like `<anything>.<device|scope|
+/// system>.log[.gz]` directly inside `dir`, instead of inside a
+/// session subdirectory. The check is intentionally narrow (only the
+/// three known channel names) to avoid false positives on user files.
+///
+/// Returns true on detection; caller bails with a migration-hint
+/// warning rather than attempting to upload (the on-disk shape no
+/// longer matches what the uploader's discovery walks).
+bool detectLegacyLayoutAt(const fs::path& dir) {
+    std::error_code ec;
+    if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) return false;
+    static const std::regex kLegacyRe(
+        R"(.+\.(device|scope|system)\.(?:\d+\.)?log(?:\.gz)?)");
+    for (const auto& entry : fs::directory_iterator(dir, ec)) {
+        if (!entry.is_regular_file(ec)) continue;
+        if (std::regex_match(entry.path().filename().string(), kLegacyRe)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Outcome of `repairOrphanLogIfNeeded`. Three states:
+///   - Keep (path): use the returned path as the file to read. Either
+///       the original .log (repair was unnecessary or failed) or the
+///       newly-created .log.gz (repair succeeded).
+///   - Skip:        do NOT add this entry to discovery. Happens when a
+///       .log AND its .log.gz counterpart both exist — we've removed
+///       the stale .log here; the .gz will be discovered separately by
+///       the directory iterator and added then. Adding the .log would
+///       duplicate the .gz's events on upload.
+struct RepairResult {
+    enum Kind { Keep, Skip };
+    Kind     kind = Keep;
+    fs::path path;
+};
+
+/// Lazy crash repair — gzip an orphan `.log` file in place if the
+/// session's clean-shutdown compress-on-close never ran.
+///
+/// Cases:
+///   1. `.log` exists, `.log.gz` does NOT  → repair (gzip + remove .log)
+///       → returns Keep(<.gz path>).
+///   2. `.log` exists, `.log.gz` ALSO exists → the .log is a stale
+///       leftover from a failed compress-on-shutdown (Windows file-lock
+///       edge case, etc.). Remove the .log; signal Skip so the caller
+///       doesn't add a duplicate entry for the .gz (the directory
+///       iterator will hit the .gz separately).
+///   3. `.log` exists but is empty → remove (no data to preserve),
+///       signal Skip.
+///   4. `.log` doesn't exist → returns Keep(<.log path>) unchanged.
+RepairResult repairOrphanLogIfNeeded(const fs::path& log_path) {
+    std::error_code ec;
+    if (!fs::exists(log_path, ec)) return {RepairResult::Keep, log_path};
+    const fs::path gz_path = fs::path(log_path.string() + ".gz");
+    if (fs::exists(gz_path, ec)) {
+        // Both files exist — .log is the stale duplicate from a
+        // failed compress-on-shutdown. Remove it and skip; the .gz
+        // entry will be added by the iterator's other pass.
+        std::error_code rm_ec;
+        fs::remove(log_path, rm_ec);
+        return {RepairResult::Skip, log_path};
+    }
+
+    // Empty file → just remove. No data to preserve.
+    if (fs::file_size(log_path, ec) == 0) {
+        fs::remove(log_path, ec);
+        return {RepairResult::Skip, log_path};
+    }
+
+    // Inline gzip using zlib. Read source, compress, write dest, then
+    // remove source on success.
+    std::ifstream in(log_path, std::ios::binary);
+    if (!in) return {RepairResult::Keep, log_path};
+    gzFile out = gzopen(gz_path.string().c_str(), "wb");
+    if (!out) return {RepairResult::Keep, log_path};
+    char buf[64 * 1024];
+    bool ok = true;
+    while (in) {
+        in.read(buf, sizeof(buf));
+        const auto n = in.gcount();
+        if (n > 0) {
+            if (gzwrite(out, buf, static_cast<unsigned>(n)) != static_cast<int>(n)) {
+                ok = false;
+                break;
+            }
+        }
+    }
+    gzclose(out);
+    in.close();
+    if (!ok) {
+        fs::remove(gz_path, ec);
+        return {RepairResult::Keep, log_path};
+    }
+    fs::remove(log_path, ec);
+    return {RepairResult::Keep, gz_path};
 }
 
 std::vector<DiscoveredFile> discoverFiles(const PathParts& parts) {
@@ -142,28 +240,54 @@ std::vector<DiscoveredFile> discoverFiles(const PathParts& parts) {
     if (!fs::exists(parts.directory, ec) || !fs::is_directory(parts.directory, ec)) {
         return out;
     }
-    for (const auto& entry : fs::directory_iterator(parts.directory, ec)) {
-        if (!entry.is_regular_file(ec)) continue;
-        const std::string fname = entry.path().filename().string();
-        DiscoveredFile df;
-        if (!parseLogFilename(fname, parts.prefix,
-                              df.channel, df.rotation_index, df.compressed)) {
-            continue;
+    // v1.2: walk one level of subdirectories — each is a session_id.
+    // Inside each subdir, parse channel files. Lazy crash repair runs
+    // here so any orphan `.log` files get gzipped on first discovery.
+    for (const auto& session_entry : fs::directory_iterator(parts.directory, ec)) {
+        if (!session_entry.is_directory(ec)) continue;
+        const std::string sid = session_entry.path().filename().string();
+        if (sid.empty() || sid.front() == '.') continue;  // skip dotfiles like .gpufl-upload-cursor.json
+
+        for (const auto& entry : fs::directory_iterator(session_entry.path(), ec)) {
+            if (!entry.is_regular_file(ec)) continue;
+            const std::string fname = entry.path().filename().string();
+            DiscoveredFile df;
+            if (!parseLogFilename(fname, df.channel, df.rotation_index, df.compressed)) {
+                continue;
+            }
+            // Lazy repair / dedup for `.log` entries:
+            //   - Orphan .log (no .log.gz): gzip in place, treat as .gz.
+            //   - .log + .log.gz both present: the .log is a stale
+            //     leftover from a failed compress-on-shutdown. Drop the
+            //     .log; the iterator will hit the .gz separately and
+            //     add the (single) correct entry then. This is the fix
+            //     for the "duplicate records after uploadLogs" symptom
+            //     that surfaces when compress() succeeded but couldn't
+            //     remove the source file (e.g., Windows file-lock edge).
+            //   - Empty .log: just removed; skip.
+            fs::path final_path = entry.path();
+            if (!df.compressed) {
+                const auto r = repairOrphanLogIfNeeded(entry.path());
+                if (r.kind == RepairResult::Skip) continue;
+                final_path = r.path;
+                if (final_path.extension() == ".gz") {
+                    df.compressed = true;
+                }
+            }
+            df.path = final_path;
+            df.session_id = sid;
+            out.push_back(std::move(df));
         }
-        df.path = entry.path();
-        out.push_back(std::move(df));
     }
 
-    // Sort: by channel (stable lexicographic), then by upload order
-    // within a channel — oldest first. Rotation index N=max_files is
-    // the oldest (rotated longest ago); active (N=0) is newest. So
-    // within a channel: descending rotation_index, with active (0) last.
+    // Sort: by (session_id, channel) lexicographic, then by upload
+    // order within a channel — oldest first. Rotation index N=max_files
+    // is the oldest; active (N=0) is newest. So within (sid, channel):
+    // descending rotation_index, with active (0) last.
     std::sort(out.begin(), out.end(),
               [](const DiscoveredFile& a, const DiscoveredFile& b) {
+                  if (a.session_id != b.session_id) return a.session_id < b.session_id;
                   if (a.channel != b.channel) return a.channel < b.channel;
-                  // Within channel: rotated files first (in DESCENDING
-                  // index order, since high index = oldest), then the
-                  // active file (index 0) last.
                   const bool a_active = a.rotation_index == 0;
                   const bool b_active = b.rotation_index == 0;
                   if (a_active != b_active) return !a_active;  // active goes last
@@ -486,67 +610,217 @@ std::unique_ptr<httplib::Client> makeClient(const UrlParts& url,
     }
 }
 
-/// Wrap a raw NDJSON event line in the `EventWrapper` envelope the
-/// backend expects on every POST to /api/v1/events/{type}:
+// ─────────────────────────────────────────────────────────────────────
+// Chunked NDJSON upload (POST /api/v1/events/stream)
+// ─────────────────────────────────────────────────────────────────────
+//
+// Replaces the pre-v1.2 per-event POST loop. Each chunk is a bundle of
+// NDJSON lines (one event per line, all events the same session_id),
+// gzipped and POSTed in a single HTTP request. The wire format is
+// described in EventIngestionController#receiveEventStream on the
+// backend; in short:
+//
+//   POST /api/v1/events/stream
+//   Authorization: Bearer <api_key>
+//   X-GpuFlight-Session-Id: <uuid>          (required; backend validates
+//                                            every line's session_id matches)
+//   X-GpuFlight-Hostname: <host>            (optional, stamped on every event)
+//   Content-Type: application/x-ndjson
+//   Content-Encoding: gzip                  (we always gzip)
+//
+//   <gzipped NDJSON body, one event per line>
+//
+// Response shape on 2xx (parsed by parseStreamResponse below):
+//
+//   {"accepted": N, "rejected": M, "errors": [{"line": L, "type": "T",
+//                                              "reason": "..."}]}
+
+/// Gzip-compress `input` and return the compressed bytes. Uses zlib
+/// directly (deflate with windowBits +16 = gzip wrapper). Throws
+/// nothing — on failure, returns an empty string and the caller
+/// treats that as a transient failure for the chunk (retry).
 ///
-///   {
-///     "data": "<NDJSON line, JSON-string-encoded>",
-///     "agentSendingTime": <ms-since-epoch>,
-///     "hostname": "<host>",
-///     "ipAddr":   "<ip-or-empty>"
-///   }
-///
-/// CRITICAL: `EventIngestionController` deserializes the request body
-/// as `EventWrapper`, then `BatchIngestionServiceImpl` re-deserializes
-/// `wrapper.data()` into the per-event-type class. If we POST the bare
-/// event JSON instead, Spring leaves every field of EventWrapper null,
-/// the inner readValue(null, ...) throws, the exception is swallowed
-/// in a catch block, and the controller returns 200 anyway — silent
-/// data loss. The wrapper MUST be present.
-std::string wrapEventBody(const std::string& ndjson_line,
-                          const std::string& hostname,
-                          const std::string& ip_addr) {
-    const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-    std::ostringstream oss;
-    oss << "{\"data\":\""        << json::escape(ndjson_line)
-        << "\",\"agentSendingTime\":" << now_ms
-        << ",\"hostname\":\""    << json::escape(hostname)
-        << "\",\"ipAddr\":\""    << json::escape(ip_addr)
-        << "\"}";
-    return oss.str();
+/// Target compression level 6 is the same default cpp-httplib uses
+/// internally — a reasonable balance of CPU vs ratio for log NDJSON,
+/// which compresses to roughly 10× smaller on real workloads.
+std::string gzipString(const std::string& input) {
+    if (input.empty()) return {};
+    z_stream zs{};
+    // 15 = max window, +16 = gzip wrapper. memLevel 8 is the zlib
+    // default. Level 6 matches httplib::detail::compress's default.
+    if (deflateInit2(&zs, /*level=*/6, Z_DEFLATED,
+                     /*windowBits=*/15 + 16, /*memLevel=*/8,
+                     Z_DEFAULT_STRATEGY) != Z_OK) {
+        return {};
+    }
+    zs.next_in  = reinterpret_cast<Bytef*>(const_cast<char*>(input.data()));
+    zs.avail_in = static_cast<uInt>(input.size());
+
+    // Worst-case compressed size ≈ source + 64 KB; allocate generously.
+    std::string out;
+    out.resize(deflateBound(&zs, static_cast<uLong>(input.size())));
+    zs.next_out  = reinterpret_cast<Bytef*>(out.data());
+    zs.avail_out = static_cast<uInt>(out.size());
+
+    const int rc = deflate(&zs, Z_FINISH);
+    const uLong produced = zs.total_out;
+    deflateEnd(&zs);
+    if (rc != Z_STREAM_END) return {};
+    out.resize(produced);
+    return out;
 }
 
-/// Outcome of a single POST attempt. Drives the retry / abort logic.
-enum class PostOutcome {
+/// Outcome of a single stream-chunk POST. Drives the retry / abort
+/// logic in the main loop. Mirrors the per-event PostOutcome that came
+/// before but adds OldBackend404 — a sentinel for "the /stream endpoint
+/// is missing, the backend predates v1.2." We don't retry on that; we
+/// abort the whole upload with a migration-hint warning.
+enum class StreamPostOutcome {
     Ok,
-    TransientFailure,   // network error or 5xx — retry candidate
-    AuthFailure,        // 401 / 403 — abort the whole upload
-    ClientError,        // other 4xx — log and skip the event
+    OldBackend404,
+    TransientFailure,
+    AuthFailure,
+    ClientError,
 };
 
-PostOutcome doPost(httplib::Client& client, const std::string& path,
-                   const httplib::Headers& headers, const std::string& body,
-                   std::string& failure_reason) {
-    auto res = client.Post(path.c_str(), headers, body, "application/json");
+/// One per-line error parsed out of a 200-OK chunk response. Lets us
+/// surface partial failures as `UploadResult.warnings` entries without
+/// failing the whole upload.
+struct StreamLineError {
+    int         line = 0;
+    std::string type;
+    std::string reason;
+};
+
+/// Outcome of a chunk POST plus the parsed response counters. `accepted
+/// + rejected` should equal the number of non-blank lines we sent.
+struct StreamPostResult {
+    StreamPostOutcome           outcome = StreamPostOutcome::TransientFailure;
+    std::string                 failure_reason;  // populated when outcome != Ok
+    std::size_t                 accepted = 0;
+    std::size_t                 rejected = 0;
+    std::vector<StreamLineError> line_errors;
+};
+
+/// Parse the backend's StreamIngestResponse body. Tolerant — missing
+/// fields default to 0 / empty. Used after a 2xx so we know what the
+/// server actually accepted.
+void parseStreamResponse(const std::string& body, StreamPostResult& out) {
+    try {
+        const json::JsonValue v = json::parseJson(body);
+        if (!v.is_object()) return;
+        if (v.contains("accepted")) {
+            out.accepted = static_cast<std::size_t>(v.at("accepted").as_int(0));
+        }
+        if (v.contains("rejected")) {
+            out.rejected = static_cast<std::size_t>(v.at("rejected").as_int(0));
+        }
+        if (v.contains("errors")) {
+            const json::JsonValue& errs = v.at("errors");
+            if (errs.is_array()) {
+                for (std::size_t i = 0; i < errs.size(); ++i) {
+                    const json::JsonValue& e = errs[i];
+                    if (!e.is_object()) continue;
+                    StreamLineError le;
+                    if (e.contains("line"))   le.line   = static_cast<int>(e.at("line").as_int(0));
+                    if (e.contains("type")   && e.at("type").is_string())
+                        le.type   = e.at("type").get_string();
+                    if (e.contains("reason") && e.at("reason").is_string())
+                        le.reason = e.at("reason").get_string();
+                    out.line_errors.push_back(std::move(le));
+                }
+            }
+        }
+    } catch (...) {
+        // Body wasn't JSON or was unparseable — leave counters at 0,
+        // caller falls back to "all-sent-assumed-accepted" via the
+        // line_count it tracked locally. Better than failing the chunk
+        // for a malformed response from an otherwise-2xx backend.
+    }
+}
+
+/// POST one NDJSON chunk to `/api/v1/events/stream`. The body has
+/// already been gzipped by the caller — we set Content-Encoding here
+/// to match.
+///
+/// Returns the parsed outcome. Caller is responsible for retry /
+/// abort decisions based on `outcome`.
+StreamPostResult postStreamChunk(httplib::Client&         client,
+                                 const std::string&       api_path,
+                                 const std::string&       session_id,
+                                 const std::string&       hostname,
+                                 const std::string&       api_key,
+                                 const std::string&       ua_header,
+                                 const std::string&       gzipped_body) {
+    StreamPostResult out;
+    const std::string path = api_path + "/events/stream";
+
+    // Per-chunk headers. Authorization etc. are repeated here (rather
+    // than relying on client.set_default_headers) so a future move to
+    // multiple concurrent clients doesn't silently drop auth.
+    httplib::Headers headers = {
+        {"Authorization",              "Bearer " + api_key},
+        {"User-Agent",                 ua_header},
+        {"X-GpuFlight-Client-Version", kClientVersion},
+        {"X-GpuFlight-Wire-Version",   kWireVersion},
+        {"X-GpuFlight-Session-Id",     session_id},
+        {"Content-Encoding",           "gzip"},
+    };
+    // Hostname is optional from the backend's perspective; only send
+    // the header when we have something meaningful. Avoids advertising
+    // a blank "" hostname for hosts with no resolvable name.
+    if (!hostname.empty()) {
+        headers.emplace("X-GpuFlight-Hostname", hostname);
+    }
+
+    auto res = client.Post(path.c_str(), headers, gzipped_body, "application/x-ndjson");
     if (!res) {
         std::ostringstream os;
         os << "transport error httplib::Error=" << static_cast<int>(res.error());
-        failure_reason = os.str();
-        return PostOutcome::TransientFailure;
+        out.failure_reason = os.str();
+        out.outcome = StreamPostOutcome::TransientFailure;
+        return out;
     }
     const int status = res->status;
-    if (status >= 200 && status < 300) return PostOutcome::Ok;
+    if (status >= 200 && status < 300) {
+        parseStreamResponse(res->body, out);
+        out.outcome = StreamPostOutcome::Ok;
+        return out;
+    }
+    // 404 is reserved for "endpoint doesn't exist." We treat it as the
+    // sentinel for an old backend that pre-dates v1.2's /stream route.
+    // No retry — every subsequent chunk will hit the same 404.
+    if (status == 404) {
+        out.failure_reason =
+            "gpufl client v1.2 requires backend v1.2+. The "
+            "/api/v1/events/stream endpoint is missing (HTTP 404) — "
+            "upgrade your backend or downgrade gpufl-client to v1.1.x.";
+        out.outcome = StreamPostOutcome::OldBackend404;
+        return out;
+    }
     if (status == 401 || status == 403) {
-        failure_reason = "auth failure (HTTP " + std::to_string(status) + ")";
-        return PostOutcome::AuthFailure;
+        out.failure_reason = "auth failure (HTTP " + std::to_string(status) + ")";
+        out.outcome = StreamPostOutcome::AuthFailure;
+        return out;
+    }
+    if (status == 413) {
+        // Body exceeded backend's 50 MB cap — we should never hit this
+        // because our chunk targets are well under that. Treat as
+        // client error (don't retry) so the caller logs + skips.
+        out.failure_reason =
+            "chunk exceeded backend body limit (HTTP 413) — client bug, "
+            "chunk size should be < 50 MB";
+        out.outcome = StreamPostOutcome::ClientError;
+        return out;
     }
     if (status >= 500) {
-        failure_reason = "server error (HTTP " + std::to_string(status) + ")";
-        return PostOutcome::TransientFailure;
+        out.failure_reason = "server error (HTTP " + std::to_string(status) + ")";
+        out.outcome = StreamPostOutcome::TransientFailure;
+        return out;
     }
-    failure_reason = "client error (HTTP " + std::to_string(status) + ")";
-    return PostOutcome::ClientError;
+    out.failure_reason = "client error (HTTP " + std::to_string(status) + ")";
+    out.outcome = StreamPostOutcome::ClientError;
+    return out;
 }
 
 }  // namespace
@@ -562,14 +836,19 @@ struct SessionInfo {
     int64_t     job_start_ts_ns = 0;  // 0 if no ts_ns parsed (sorts oldest)
 };
 
-/// Single-pass scan over every discovered file looking for `job_start`
-/// events. Records {session_id, ts_ns} for each unique session. Stops
-/// reading each file at the first `job_start` it finds — there's only
-/// ever one per session, and they tend to live at the head of the
-/// oldest file in their channel, so this is cheap in practice.
+/// v1.2: session_id comes from the parent subdirectory name (already
+/// populated on every DiscoveredFile). We still parse the first
+/// `job_start` event to get ts_ns, which drives "default = latest
+/// session" ordering. Sessions with no job_start (interrupted before
+/// init?) get ts_ns=0 — they sort to the oldest position.
 std::vector<SessionInfo> discoverSessions(const std::vector<DiscoveredFile>& files) {
+    // Group by session_id (from subdir name), pick earliest ts_ns.
     std::map<std::string, int64_t> seen;  // sid → earliest ts_ns observed
     for (const auto& f : files) {
+        if (f.session_id.empty()) continue;
+        if (seen.find(f.session_id) == seen.end()) {
+            seen[f.session_id] = 0;  // default — overwritten if we find a job_start below
+        }
         NdjsonReader reader(f.path, f.compressed);
         if (!reader.ok()) continue;
         std::string line;
@@ -577,15 +856,12 @@ std::vector<SessionInfo> discoverSessions(const std::vector<DiscoveredFile>& fil
             if (line.empty()) continue;
             const std::string type = fastExtractType(line);
             if (type != "job_start") continue;
-            const std::string sid = fastExtractSessionId(line);
-            if (sid.empty()) continue;
             const int64_t ts = fastExtractTsNs(line);
-            auto it = seen.find(sid);
-            if (it == seen.end()) {
-                seen[sid] = ts;
-            } else if (ts < it->second) {
-                it->second = ts;  // pick earliest (defensive — there's usually only one)
+            const auto it = seen.find(f.session_id);
+            if (it->second == 0 || ts < it->second) {
+                it->second = ts;
             }
+            break;  // one job_start per file is enough
         }
     }
     std::vector<SessionInfo> out;
@@ -598,7 +874,7 @@ std::vector<SessionInfo> discoverSessions(const std::vector<DiscoveredFile>& fil
                   if (a.job_start_ts_ns != b.job_start_ts_ns) {
                       return a.job_start_ts_ns < b.job_start_ts_ns;
                   }
-                  return a.session_id < b.session_id;  // tie-break for determinism
+                  return a.session_id < b.session_id;
               });
     return out;
 }
@@ -633,6 +909,56 @@ UploadResult uploadLogs(const UploadOptions& opts) {
 
     const PathParts parts = splitLogPath(opts.log_path);
     std::error_code ec;
+
+    // v1.2 legacy-format detection. Fires when the user's logs are in
+    // the pre-v1.2 flat layout (`<base>.<channel>.log[.gz]`) instead
+    // of the v1.2 per-session subdirectory layout
+    // (`<base>/<session_id>/<channel>.log[.gz]`). Two places to check:
+    //
+    //   1. Inside parts.directory itself — the user passed the parent
+    //      dir of a pre-v1.2 install. Files like `myapp.device.log`
+    //      sit at the top level alongside session subdirs.
+    //   2. At parts.directory's parent, matching the basename — the
+    //      user passed the pre-v1.2 prefix path `/tmp/myapp` while
+    //      files are at `/tmp/myapp.device.log` etc.
+    //
+    // Either case → emit a single warning that points at the migration
+    // path. We DON'T attempt to upload — the on-disk shape doesn't
+    // match what discovery now walks, and silently uploading nothing
+    // is worse than a loud error.
+    auto emitLegacyWarning = [&](const fs::path& legacy_at) {
+        result.warnings.emplace_back(
+            "uploadLogs: detected pre-v1.2 flat log layout at " +
+            legacy_at.string() + ". v1.2 expects per-session "
+            "subdirectories (<log_path>/<session_id>/<channel>.log). "
+            "Delete the old files (gpufl.clean_logs() / `rm "
+            "<log_path>*.{device,scope,system}.log*`) and re-run the "
+            "session to generate logs in the new layout.");
+    };
+    if (detectLegacyLayoutAt(parts.directory)) {
+        emitLegacyWarning(parts.directory);
+        return result;
+    }
+    if (parts.directory.has_parent_path()) {
+        const fs::path parent = parts.directory.parent_path();
+        const std::string basename = parts.directory.filename().string();
+        if (!basename.empty()) {
+            // Look for files matching `<basename>.<channel>.log[.gz]`
+            // directly in the parent dir.
+            static const std::array<const char*, 3> kChannels = {
+                "device", "scope", "system"};
+            for (const char* ch : kChannels) {
+                for (const std::string& suffix : {".log", ".log.gz"}) {
+                    const fs::path p = parent / (basename + "." + ch + suffix);
+                    if (fs::exists(p, ec)) {
+                        emitLegacyWarning(p);
+                        return result;
+                    }
+                }
+            }
+        }
+    }
+
     if (!fs::exists(parts.directory, ec) || !fs::is_directory(parts.directory, ec)) {
         result.warnings.emplace_back(
             "uploadLogs: log directory does not exist: " + parts.directory.string());
@@ -642,8 +968,8 @@ UploadResult uploadLogs(const UploadOptions& opts) {
     // ── Discover files + sessions ────────────────────────────────────
     auto files = discoverFiles(parts);
     if (files.empty()) {
-        GFL_LOG_DEBUG("[uploadLogs] no log files matched prefix '",
-                      parts.prefix, "' in ", parts.directory.string());
+        GFL_LOG_DEBUG("[uploadLogs] no session subdirs found in ",
+                      parts.directory.string());
         result.success = true;
         result.elapsed_ms = elapsedMs();
         return result;
@@ -747,18 +1073,19 @@ UploadResult uploadLogs(const UploadOptions& opts) {
     const std::string api_path = normalizeApiPath(opts.api_path);
     const std::string ua_header =
         std::string("gpufl-client/") + kClientVersion + " (deferred-upload)";
-    const httplib::Headers headers = {
-        {"Authorization",              "Bearer " + opts.api_key},
-        {"User-Agent",                 ua_header},
-        {"X-GpuFlight-Client-Version", kClientVersion},
-        {"X-GpuFlight-Wire-Version",   kWireVersion},
-    };
 
-    // Stamped on every POST envelope so the backend can attribute
-    // events to the originating host. Resolved once per upload — both
-    // helpers cache after first call (and IP currently returns empty).
+    // Stamped on every chunk so the backend can attribute events to
+    // the originating host. Resolved once per upload — getLocalHostname
+    // caches after first call.
     const std::string envelope_hostname = getLocalHostname();
-    const std::string envelope_ip       = getLocalIpAddr();
+
+    // Chunk-size limits. Targets the bulk-NDJSON sweet spot: large
+    // enough to amortize HTTPS handshake + framework overhead, small
+    // enough to (a) keep memory bounded and (b) stay well under the
+    // backend's 50 MB decompressed cap. With ~250 B average per event,
+    // 5000 lines lands at ~1.2 MB pre-gzip / ~120 KB post-gzip.
+    static constexpr std::size_t kChunkLineLimit = 5000;
+    static constexpr std::size_t kChunkByteLimit = 5 * 1024 * 1024;  // 5 MB uncompressed
 
     // Progress reporting state.
     auto last_progress_time = upload_start;
@@ -773,9 +1100,14 @@ UploadResult uploadLogs(const UploadOptions& opts) {
         if (!force && !by_time && !by_bytes) return;
         const auto total_elapsed = std::chrono::duration_cast<std::chrono::seconds>(
             now - upload_start).count();
+        // Two distinct numbers: files visited so far, and target
+        // sessions for this upload. The pre-v1.2 form was
+        // "%zu/%zu session(s)" which read like "F of S sessions
+        // complete" but was actually mixing files (numerator) and
+        // sessions (denominator) — fixed by labeling both axes.
         std::fprintf(stderr,
                      "[gpufl::upload] %zu events uploaded (%zu MB), "
-                     "%zu/%zu session(s), %llds elapsed\n",
+                     "%zu file(s), %zu session(s), %llds elapsed\n",
                      result.events_uploaded,
                      result.bytes_uploaded / (1024 * 1024),
                      result.files_processed,
@@ -789,57 +1121,116 @@ UploadResult uploadLogs(const UploadOptions& opts) {
         return elapsedMs() >= opts.total_timeout_ms;
     };
 
-    bool auth_failed = false;
-    bool budget_aborted = false;
+    bool auth_failed     = false;
+    bool budget_aborted  = false;
+    bool old_backend_404 = false;   // /events/stream missing → abort all sessions
 
-    // Per-event POST with retry. Returns true if the event was either
-    // successfully POSTed OR skipped with a recorded warning (caller
-    // should continue). Returns false only when the whole upload must
-    // abort (auth failure or budget exhausted).
+    // Per-chunk POST with retry. Gzips the assembled NDJSON body,
+    // sends it to /api/v1/events/stream with the session-id header,
+    // parses the per-line accept/reject response, updates counters.
     //
-    // `ndjson_line` is the raw event JSON we read from disk. We wrap it
-    // in the EventWrapper envelope here (see wrapEventBody for why) and
-    // POST that. bytes_uploaded counts the wrapped envelope size — that
-    // matches what actually went over the wire.
-    auto postEvent = [&](const std::string& type,
-                         const std::string& ndjson_line) -> bool {
+    // Returns true if the chunk was either accepted (possibly with
+    // some per-line warnings) OR refused with a recorded warning AND
+    // the upload should continue. Returns false only when the WHOLE
+    // upload must abort (auth failure, budget exhausted, or 404 from
+    // an old backend that doesn't have /stream).
+    //
+    // `chunk_lines` is the count we sent — used to spot the case where
+    // the backend's parsed `accepted + rejected` doesn't match (e.g.,
+    // server bug or response truncation): we trust the server's
+    // accepted count and warn on the delta.
+    auto flushChunk = [&](const std::string& session_id,
+                          const std::string& ndjson_body,
+                          const std::size_t  chunk_lines) -> bool {
+        if (ndjson_body.empty() || chunk_lines == 0) return true;
         if (budgetExpired()) {
             budget_aborted = true;
             return false;
         }
-        const std::string body = wrapEventBody(ndjson_line, envelope_hostname,
-                                               envelope_ip);
-        const std::string path = api_path + "/events/" + type;
+
+        const std::string gz_body = gzipString(ndjson_body);
+        if (gz_body.empty()) {
+            // zlib failed — surface as a warning and SKIP this chunk
+            // (return true to keep going with the next chunk). Should
+            // never happen in practice; defense for a misbuilt zlib.
+            result.warnings.push_back(
+                "gzip compression failed for chunk of " +
+                std::to_string(chunk_lines) + " line(s) — skipping chunk");
+            return true;
+        }
+
         std::string fail_reason;
         for (int attempt = 0; attempt <= opts.max_retries; ++attempt) {
-            const PostOutcome outcome = doPost(*client, path, headers, body, fail_reason);
-            if (outcome == PostOutcome::Ok) {
-                result.events_uploaded++;
-                result.bytes_uploaded   += body.size();
-                bytes_since_last_progress += body.size();
+            const StreamPostResult r = postStreamChunk(
+                *client, api_path, session_id, envelope_hostname,
+                opts.api_key, ua_header, gz_body);
+
+            if (r.outcome == StreamPostOutcome::Ok) {
+                // The server's response is the source of truth. If
+                // it accepted everything, accepted == chunk_lines and
+                // rejected == 0. If it accepted only some, rejected
+                // > 0 and r.line_errors carries the explanations.
+                result.events_uploaded += r.accepted;
+                result.bytes_uploaded  += ndjson_body.size();
+                bytes_since_last_progress += ndjson_body.size();
+
+                // Sanity: if the backend reports a strange count
+                // (accepted + rejected != chunk_lines), surface it —
+                // protects against silent partial loss on a future
+                // backend bug.
+                if (r.accepted + r.rejected != chunk_lines) {
+                    result.warnings.push_back(
+                        "chunk for session " + session_id + ": sent " +
+                        std::to_string(chunk_lines) + " line(s), backend reported " +
+                        std::to_string(r.accepted) + " accepted + " +
+                        std::to_string(r.rejected) + " rejected (mismatch)");
+                }
+                // Per-line errors → individual warnings so the caller
+                // can see what was dropped. Bounded server-side at
+                // MAX_REPORTED_ERRORS, so this list stays small.
+                for (const auto& le : r.line_errors) {
+                    result.warnings.push_back(
+                        "chunk line " + std::to_string(le.line) +
+                        " (type=" + le.type + ") rejected: " + le.reason);
+                }
                 return true;
             }
-            if (outcome == PostOutcome::AuthFailure) {
+            if (r.outcome == StreamPostOutcome::OldBackend404) {
+                // Backend predates the /stream endpoint. No retry —
+                // every chunk would hit the same 404. Abort the whole
+                // upload with a migration-hint warning.
+                result.warnings.push_back(r.failure_reason);
+                old_backend_404 = true;
+                return false;
+            }
+            if (r.outcome == StreamPostOutcome::AuthFailure) {
                 result.warnings.push_back(
-                    "POST /events/" + type + " failed: " + fail_reason +
+                    "chunk POST /events/stream failed: " + r.failure_reason +
                     " — aborting remaining uploads");
                 auth_failed = true;
                 return false;
             }
-            if (outcome == PostOutcome::ClientError) {
+            if (r.outcome == StreamPostOutcome::ClientError) {
+                // 4xx that isn't auth or 404. Probably 413 (we built
+                // a too-big chunk — a bug) or 400 (header missing or
+                // body malformed). Log and skip — retrying won't help.
                 result.warnings.push_back(
-                    "POST /events/" + type + " failed: " + fail_reason +
-                    " — skipping event");
+                    "chunk POST /events/stream failed: " + r.failure_reason +
+                    " — skipping chunk of " + std::to_string(chunk_lines) + " line(s)");
                 return true;
             }
+            // TransientFailure: retry on the loop's next iteration if
+            // we have budget for both more retries AND wall time.
+            fail_reason = r.failure_reason;
             if (attempt < opts.max_retries && !budgetExpired()) {
                 std::this_thread::sleep_for(
                     std::chrono::milliseconds(opts.retry_delay_ms));
                 continue;
             }
             result.warnings.push_back(
-                "POST /events/" + type + " failed after " +
-                std::to_string(attempt + 1) + " attempt(s): " + fail_reason);
+                "chunk POST /events/stream failed after " +
+                std::to_string(attempt + 1) + " attempt(s): " + fail_reason +
+                " — skipping chunk of " + std::to_string(chunk_lines) + " line(s)");
             return true;
         }
         return true;
@@ -857,25 +1248,65 @@ UploadResult uploadLogs(const UploadOptions& opts) {
     // ── Per-session upload loop ──────────────────────────────────────
     //
     // For each target session: stream every discovered file, filter
-    // events by session_id, defer that session's shutdown events to
-    // the end of THAT session (not the end of the whole upload).
-    // Result: backend sees a clean job_start → batches → shutdown
-    // arrival order per session.
+    // events by session_id, build up an NDJSON chunk in memory,
+    // flush when the chunk hits the line- or byte-cap. shutdown events
+    // are deferred to a separate final chunk so the backend sees a
+    // clean job_start → batches → shutdown arrival order per session.
+    //
+    // Chunks DON'T align with file boundaries — a session whose data
+    // spans multiple rotated files just flushes when full, regardless
+    // of which file the next line came from. That keeps wire-efficiency
+    // tied to the chunk-size cap, not to the rotator's per-file size.
     for (const auto& target : targets) {
-        if (auth_failed || budget_aborted) break;
+        if (auth_failed || budget_aborted || old_backend_404) break;
         const std::string& current_sid = target.session_id;
 
-        std::vector<std::pair<std::string, std::string>> deferred_shutdowns;
+        // Chunk accumulator for this session. NDJSON: one event per
+        // line, '\n' separator, trailing newline on every line so the
+        // backend's BufferedReader splits cleanly.
+        std::string chunk_buf;
+        chunk_buf.reserve(kChunkByteLimit + 64 * 1024);  // headroom for the final line that pushed us over
+        std::size_t chunk_lines = 0;
+
+        // shutdown events deferred to the end of this session's
+        // chunks — preserves per-session lifecycle ordering on the
+        // backend regardless of which file they actually lived in.
+        std::vector<std::string> deferred_shutdowns;
+
         std::size_t events_from_session = 0;
         bool session_ok = true;
 
         GFL_LOG_DEBUG("[uploadLogs] session ", current_sid, " starting");
 
+        // Helper closure: flush the current chunk and reset. Returns
+        // false to break out when the upload must abort.
+        auto flushSessionChunk = [&]() -> bool {
+            if (chunk_lines == 0) return true;
+            const std::size_t batch_lines = chunk_lines;
+            if (!flushChunk(current_sid, chunk_buf, batch_lines)) {
+                session_ok = false;
+                return false;
+            }
+            events_from_session += batch_lines;
+            chunk_buf.clear();
+            chunk_lines = 0;
+            maybeLogProgress(/*force=*/false);
+            return true;
+        };
+
         for (auto& f : files) {
-            if (auth_failed || budget_aborted) {
+            if (auth_failed || budget_aborted || old_backend_404) {
                 session_ok = false;
                 break;
             }
+            // v1.2: files are discovered with `session_id` set from
+            // their parent subdir name. Skip files belonging to a
+            // different session before opening — saves the gunzip /
+            // line-by-line scan cost for sessions we're not uploading
+            // in this pass (especially valuable in all_sessions mode
+            // where we visit each file once per matching session).
+            if (f.session_id != current_sid) continue;
+
             const std::string basename = f.path.filename().string();
 
             NdjsonReader reader(f.path, f.compressed);
@@ -915,27 +1346,46 @@ UploadResult uploadLogs(const UploadOptions& opts) {
                     continue;
                 }
                 if (type == "shutdown") {
-                    deferred_shutdowns.emplace_back(type, line);
+                    // Hold for the per-session final chunk so the
+                    // backend's lifecycle bookkeeping sees shutdown
+                    // arrive after every batch event.
+                    deferred_shutdowns.push_back(line);
                     continue;
                 }
-                if (!postEvent(type, line)) {
-                    session_ok = false;
-                    break;
+
+                chunk_buf.append(line);
+                chunk_buf.push_back('\n');
+                chunk_lines++;
+
+                // Flush when either cap hits. Checking AFTER append so
+                // we never exceed the byte cap by more than one line.
+                if (chunk_lines >= kChunkLineLimit ||
+                    chunk_buf.size() >= kChunkByteLimit) {
+                    if (!flushSessionChunk()) break;
                 }
-                events_from_session++;
-                maybeLogProgress(/*force=*/false);
             }
             if (!session_ok) break;
         }
 
-        // POST this session's deferred shutdowns BEFORE moving on to
-        // the next session so lifecycle ordering stays per-session.
-        if (session_ok) {
-            for (auto& [type, body] : deferred_shutdowns) {
-                if (!postEvent(type, body)) {
-                    session_ok = false;
-                    break;
-                }
+        // Remaining lines (under the cap) become the second-to-last
+        // chunk of this session. Then the deferred shutdowns ride in
+        // the very last chunk on their own — keeps them strictly after
+        // every batch.
+        if (session_ok && chunk_lines > 0) {
+            flushSessionChunk();
+        }
+        if (session_ok && !deferred_shutdowns.empty()) {
+            std::string sd_chunk;
+            sd_chunk.reserve(64 * 1024);
+            for (const auto& l : deferred_shutdowns) {
+                sd_chunk.append(l);
+                sd_chunk.push_back('\n');
+            }
+            const std::size_t sd_lines = deferred_shutdowns.size();
+            if (!flushChunk(current_sid, sd_chunk, sd_lines)) {
+                session_ok = false;
+            } else {
+                events_from_session += sd_lines;
             }
         }
 
@@ -964,9 +1414,11 @@ UploadResult uploadLogs(const UploadOptions& opts) {
             "Total timeout (" + std::to_string(opts.total_timeout_ms) +
             " ms) exceeded — upload aborted");
     }
-    // Success = no auth or budget failure AND every target session
-    // either shipped events or was a deliberately-empty target.
-    result.success = !auth_failed && !budget_aborted;
+    // Success = no auth failure, no budget exhaustion, and the backend
+    // wasn't an ancient pre-v1.2 one missing the /stream endpoint. The
+    // 404 case has already pushed a clear migration-hint warning into
+    // result.warnings via flushChunk's OldBackend404 branch.
+    result.success = !auth_failed && !budget_aborted && !old_backend_404;
     result.elapsed_ms = elapsedMs();
     maybeLogProgress(/*force=*/true);
 

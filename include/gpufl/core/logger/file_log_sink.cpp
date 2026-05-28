@@ -18,14 +18,24 @@ FileLogSink::FileChannel::FileChannel(std::string name, Logger::Options opt)
     }
     LogRotationOptions r{};
     r.base_path = opt_.base_path;
+    r.session_id = opt_.session_id;
     r.channel_name = name_;
     r.max_files = opt_.max_files;
     r.compress_rotated = opt_.compress_rotated;
     rotator_ = std::make_unique<LogFileRotator>(r, compressor_.get());
 
-    if (!opt_.base_path.empty()) {
+    // v1.2+ requires a session_id. Without it the rotator would write
+    // to "<base>/<empty>/channel.log" — a path with an empty path
+    // component, which `fs::create_directories` would happily make as
+    // just "<base>/", landing files at parent level. The uploader
+    // would then flag the parent-level files as the legacy flat
+    // layout and refuse to upload. Fail loudly here instead.
+    if (!opt_.base_path.empty() && !opt_.session_id.empty()) {
         opened_ = true;
         ensureOpenLocked();
+    } else if (!opt_.base_path.empty()) {
+        GFL_LOG_ERROR("FileLogSink: session_id is required (got empty). "
+                      "Channel '", name_, "' will not be opened.");
     }
 }
 
@@ -40,6 +50,19 @@ void FileLogSink::FileChannel::closeLocked() {
     if (stream_.is_open()) {
         stream_.flush();
         stream_.close();
+    }
+    // v1.2+: compress the active .log → .log.gz on clean shutdown so
+    // the finished session directory contains only compressed files.
+    // The rotator's compressActive() is a no-op when the active file
+    // doesn't exist (channel never wrote a byte) or compression is
+    // disabled, so it's safe to call unconditionally here.
+    //
+    // On crash (process killed without a clean Logger::close()), this
+    // path doesn't run — the uploader's lazy crash-repair branch
+    // gzips the orphan .log on first read instead. That keeps the
+    // on-wire format uniform regardless of whether shutdown ran.
+    if (rotator_) {
+        rotator_->compressActive();
     }
     opened_ = false;
 }

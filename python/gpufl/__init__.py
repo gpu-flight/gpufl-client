@@ -643,17 +643,20 @@ class Scope:
 def clean_logs(log_path=None, log_prefix=None, *, dry_run=False):
     """Delete this app's NDJSON log files so the next run starts clean.
 
-    Removes the active and rotated log files for a given prefix —
-    ``<prefix>.<channel>.log`` and ``<prefix>.<channel>.<N>.log[.gz]`` — and
-    nothing else. It never removes a directory and never touches files that
-    don't match that pattern, so an unrelated file in the same folder is safe.
+    v1.2 disk layout: logs live at ``<log_path>/<session_id>/<channel>.log``
+    (and rotated ``<channel>.<N>.log[.gz]``). ``clean_logs()`` walks each
+    session subdirectory and removes its channel files and the now-empty
+    subdir. Unrelated files in ``<log_path>`` itself are never touched,
+    and unrelated subdirectories whose contents don't match the channel
+    pattern are skipped intact.
 
     Target resolution:
         * No args  → the ``log_path`` (or ``app_name``) of the most recent
           ``gpufl.init()`` call in this process.
-        * ``log_path`` → a path/prefix like ``"./gfl_logs"``; the directory is
-          its dirname and the prefix its basename.
-        * ``log_prefix`` → override just the filename prefix.
+        * ``log_path`` → the directory that contains session subdirs.
+        * ``log_prefix`` → DEPRECATED in v1.2 (the layout has no filename
+          prefix anymore). Kept as a no-op argument for one release so
+          callers don't break; remove in v1.3.
 
     Safety:
         * **Refuses while a session is active in THIS process** — if you've
@@ -662,20 +665,22 @@ def clean_logs(log_path=None, log_prefix=None, *, dry_run=False):
         * **Does NOT detect the ``gpufl-monitor`` sidecar / agent running in
           another process.** On Windows a file the agent has open cannot be
           deleted, so the OS protects you (the file is skipped with a
-          warning). On Linux an unlink succeeds even while the agent holds the
-          file open, which can confuse a live tail — **stop the agent before
-          calling this, or use ``dry_run=True`` first to preview.**
+          warning). On Linux an unlink succeeds even while the agent holds
+          the file open, which can confuse a live tail — **stop the agent
+          before calling this, or use ``dry_run=True`` first to preview.**
 
     Args:
-        log_path:   Path/prefix whose logs to remove. Defaults to the last
-                    ``init()``'s location.
-        log_prefix: Override the filename prefix (basename) only.
+        log_path:   Directory whose session subdirs to remove. Defaults to
+                    the last ``init()``'s location.
+        log_prefix: Ignored in v1.2 (kept for backward-compat with v1.1
+                    callers — emits a DeprecationWarning if passed).
         dry_run:    If True, return the list of matching files WITHOUT
                     deleting anything.
 
     Returns:
         list[str]: The files removed (or, with ``dry_run``, the files that
-        would be removed).
+        would be removed). Empty subdirectories that contained only
+        removed channel files are also deleted (and listed).
     """
     if _session_active:
         raise RuntimeError(
@@ -684,26 +689,60 @@ def clean_logs(log_path=None, log_prefix=None, *, dry_run=False):
             "gpufl.shutdown() first, then clean_logs()."
         )
 
+    if log_prefix is not None:
+        import warnings as _w
+        _w.warn(
+            "clean_logs(log_prefix=...) is deprecated in v1.2 — the new "
+            "disk layout has no filename prefix (logs live at "
+            "<log_path>/<session_id>/<channel>.log). The argument is "
+            "ignored. Pass only log_path=... going forward.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
     if log_path is None:
         log_path = _last_log_path or _last_app_name
     if not log_path:
         raise ValueError(
-            "clean_logs(): no log_path given and no prior init() to infer one "
-            "from. Pass log_path=... explicitly."
+            "clean_logs(): no log_path given and no prior init() to infer "
+            "one from. Pass log_path=... explicitly."
         )
 
-    directory = os.path.dirname(log_path) or "."
-    base = log_prefix if log_prefix is not None else os.path.basename(log_path)
-    if base.endswith(".log"):
-        base = base[:-4]
+    # v1.2: log_path is the directory of session subdirs. v1.1 callers
+    # might have passed `<dir>/<prefix>` or `<dir>/<prefix>.log` — strip
+    # a trailing `.log` so either still resolves to a sensible dir.
+    if log_path.endswith(".log"):
+        log_path = log_path[:-4]
 
-    import glob
+    import re
     import warnings
-    matched = sorted({
-        p
-        for pattern in (f"{base}.*.log", f"{base}.*.log.gz")
-        for p in glob.glob(os.path.join(directory, pattern))
-    })
+
+    # Each session subdir's channel files match this pattern.
+    # device.log / device.log.gz / device.5.log / device.5.log.gz / etc.
+    channel_re = re.compile(r"^(?:device|scope|system)(?:\.\d+)?\.log(?:\.gz)?$")
+
+    matched = []
+    if os.path.isdir(log_path):
+        for entry in sorted(os.listdir(log_path)):
+            sub = os.path.join(log_path, entry)
+            if not os.path.isdir(sub):
+                continue
+            # Collect this subdir's channel files. If ALL its contents
+            # match the channel pattern, the subdir itself goes too.
+            subdir_files = []
+            try:
+                names = os.listdir(sub)
+            except OSError:
+                continue
+            all_match = bool(names)
+            for fname in names:
+                if channel_re.match(fname):
+                    subdir_files.append(os.path.join(sub, fname))
+                else:
+                    all_match = False
+            matched.extend(sorted(subdir_files))
+            if all_match:
+                matched.append(sub)   # subdir itself is removable after files
 
     if dry_run:
         return matched
@@ -711,7 +750,10 @@ def clean_logs(log_path=None, log_prefix=None, *, dry_run=False):
     removed = []
     for p in matched:
         try:
-            os.remove(p)
+            if os.path.isdir(p):
+                os.rmdir(p)            # only empty dirs reach here
+            else:
+                os.remove(p)
             removed.append(p)
         except OSError as e:
             # On Windows an open file (e.g. the sidecar agent tailing it)
