@@ -16,7 +16,12 @@ FROM nvidia/cuda:13.1.0-devel-ubuntu24.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install build dependencies
+# Install build dependencies.
+# libssl-dev is REQUIRED for cpp-httplib HTTPS support — without it, CMake's
+# find_package(OpenSSL QUIET) silently fails and the wheel is built HTTP-only.
+# Symptom at runtime: gpufl.upload_logs() to https:// returns a single warning
+# "uploadLogs: failed to construct HTTP client for https://..." because
+# httplib::Client throws on construction when SSL isn't compiled in.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
@@ -26,6 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ninja-build \
     build-essential \
     ca-certificates \
+    libssl-dev \
     git \
     && rm -rf /var/lib/apt/lists/*
 
@@ -46,7 +52,14 @@ ENV CMAKE_ARGS="-DGPUFL_ENABLE_NVIDIA=ON -DGPUFL_ENABLE_AMD=OFF -DBUILD_PYTHON=O
 RUN rm -rf dist && python3 -m build --wheel --outdir dist --no-isolation
 
 # ── Stage 2: Final Runtime Image ──────────────────────────────────────────────
-FROM nvidia/cuda:13.1.0-base-ubuntu24.04
+# Use the -devel image (not -base) so /usr/local/cuda/extras/CUPTI/lib64/
+# libcupti.so.13 is present at runtime. The -base image strips CUPTI, which
+# would make `import gpufl` fall back to stub mode with the warning
+# "Failed to import _gpufl_client extension: libcupti.so.13: cannot open
+# shared object file". -devel is larger (~5 GB) but the simplest correct fix;
+# if image size becomes important, switch back to -base and COPY just CUPTI
+# from the builder stage.
+FROM nvidia/cuda:13.1.0-devel-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
