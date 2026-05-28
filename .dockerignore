@@ -1,6 +1,6 @@
-# Python / notebooks — not needed for the C++ daemon build
-python/
-example/python/
+# Python / notebooks — uncomment if building Python wheels inside Docker
+# python/
+# example/python/
 **/.Trash-*
 **/__pycache__/
 **/*.pyc
@@ -15,4 +15,4 @@ build/
 .git/
 .idea/
 .vscode/
-*.md
+# *.md
