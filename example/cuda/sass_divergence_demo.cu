@@ -283,12 +283,6 @@ int main() {
     gpufl::shutdown();
     gpufl::generateReport();
 
-    gpufl::UploadOptions uopts;
-    uopts.backend_url="http://localhost:8080";
-    uopts.api_key="gpfl_DGOmYte8PsTASYC61T6I1883fiAQMwt9";
-    uopts.log_path = opts.log_path;
-    gpufl::uploadLogs(uopts);
-
     std::cout << "\n=== Done ===" << std::endl;
     std::cout << "Logs: " << opts.log_path << ".scope.log" << std::endl;
     std::cout << "Analyze with:" << std::endl;
