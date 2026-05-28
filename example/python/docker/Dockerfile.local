@@ -1,0 +1,78 @@
+# syntax=docker/dockerfile:1
+# GPUFlight Jupyter playground - LOCAL DEVELOPMENT BUILD (Multi-stage).
+#
+# This Dockerfile builds the local source code into a wheel INSIDE a container
+# to ensure it matches the target environment (Python 3.12 on Ubuntu 24.04).
+# This avoids "not a supported wheel" errors caused by host/container version mismatches.
+#
+#   Build:
+#      docker build -t gpufl-jupyter:1.1.0rc1-dev -f example/python/docker/Dockerfile.local .
+#
+#   Run:
+#      docker run --gpus all -p 8888:8888 gpufl-jupyter:1.1.0rc1-dev
+
+# ── Stage 1: Build the Python wheel ───────────────────────────────────────────
+FROM nvidia/cuda:13.1.0-devel-ubuntu24.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    python3-venv \
+    python3-dev \
+    cmake \
+    ninja-build \
+    build-essential \
+    ca-certificates \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python build tools.
+# We use --break-system-packages because we are in a dedicated build container.
+# We must include cmake and ninja here because they are listed in pyproject.toml
+# and we are using --no-isolation.
+RUN pip3 install --break-system-packages scikit-build-core pybind11 build cmake ninja
+
+WORKDIR /src
+COPY . .
+
+# Build the wheel for the current platform (Ubuntu 24.04 / Python 3.12)
+# We use --no-isolation to use the dependencies we just installed.
+# BUILD_TESTING=OFF avoids gtest discovery/execution in the build container,
+# which otherwise fails without host GPU driver libraries (libcuda.so.1).
+ENV CMAKE_ARGS="-DGPUFL_ENABLE_NVIDIA=ON -DGPUFL_ENABLE_AMD=OFF -DBUILD_PYTHON=ON -DBUILD_TESTING=OFF"
+RUN rm -rf dist && python3 -m build --wheel --outdir dist --no-isolation
+
+# ── Stage 2: Final Runtime Image ──────────────────────────────────────────────
+FROM nvidia/cuda:13.1.0-base-ubuntu24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    SSL_CERT_DIR=/etc/ssl/certs
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    python3 \
+    python3-venv \
+    python3-pip \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+RUN pip install --upgrade pip
+
+# Install dependencies normally
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install "numba-cuda[cu13]" jupyterlab pandas matplotlib rich
+
+# Copy and install the wheel built in Stage 1.
+COPY --from=builder /src/dist/*.whl /tmp/
+RUN pip install /tmp/*.whl && \
+    pip install "gpufl[analyzer,viz]"
+
+WORKDIR /workspace
+EXPOSE 8888
+CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--allow-root", "--NotebookApp.token=''", "--NotebookApp.password=''"]
