@@ -119,14 +119,30 @@ void FileLogSink::FileChannel::write(std::string_view line) {
             return;
         }
     }
-    // Write line + newline, then flush so the agent's LogTailer never
-    // observes a partial (mid-record) line. Without this, the tailer can
-    // call readLine() on a buffered-but-unflushed write, get a truncated
-    // JSON, and Jackson throws FAIL_ON_TRAILING_TOKENS errors.
+    // Write line + newline. Per-write flush is gated behind
+    // Options::flush_always (wired from InitOptions::flush_logs_always)
+    // because it's a real syscall in the hot path and matters under
+    // high event volume — SASS-heavy PyTorch sessions can push tens of
+    // thousands of batched lines per second across channels, at which
+    // point the fsync cost dominates.
+    //
+    // When OFF (default): rely on libc's ofstream buffer (~4 KiB) +
+    // OS page cache. Rotation (rotateLocked, above) and shutdown
+    // (closeLocked) explicitly flush, so the .log → .log.gz pipeline
+    // and the uploader's lazy crash-repair path both still see complete
+    // data. Worst case on SIGKILL: a few buffered NDJSON lines lost —
+    // acceptable for profiling data.
+    //
+    // When ON: flush at every line boundary so a live tailer (the agent's
+    // LogTailer in the Phase 4 live-push design) never observes a
+    // partial mid-record line. Without this, the tailer's readLine() can
+    // hit a buffered-but-unflushed write, get truncated JSON, and Jackson
+    // throws FAIL_ON_TRAILING_TOKENS errors.
     stream_.write(line.data(), static_cast<std::streamsize>(line.size()));
     stream_.put('\n');
-    stream_.flush();  // Always flush at line boundary — writes are already
-                      // rare (one per batched event), cost is negligible.
+    if (opt_.flush_always) {
+        stream_.flush();
+    }
     current_bytes_ += bytesToWrite;
 }
 
