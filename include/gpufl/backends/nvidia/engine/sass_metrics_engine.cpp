@@ -88,7 +88,12 @@ void SassMetricsEngine::start() {
         return;
     }
 
-    // Initialize profiler device — required before SASS Metrics APIs
+    // Initialize profiler device — required before SASS Metrics APIs.
+    // Mark profiler_initialized_ on success so EnableSassMetrics_'s
+    // failure paths can undo this via cuptiProfilerDeInitialize.
+    // Leaving the profiler initialized after a partial SASS setup
+    // permanently disables CUPTI's PC Sampling API, which is what
+    // caused the PcSamplingWithSass-mode hang on Blackwell.
     CUpti_Profiler_Initialize_Params p = {
         CUpti_Profiler_Initialize_Params_STRUCT_SIZE};
     CUptiResult initRes = cuptiProfilerInitialize(&p);
@@ -102,8 +107,20 @@ void SassMetricsEngine::start() {
         }
         return;
     }
+    profiler_initialized_ = true;
 
     EnableSassMetrics_();
+}
+
+void SassMetricsEngine::DeInitProfilerIfNeeded_() {
+    if (!profiler_initialized_) return;
+    CUpti_Profiler_DeInitialize_Params dp = {
+        CUpti_Profiler_DeInitialize_Params_STRUCT_SIZE};
+    CUptiResult res = cuptiProfilerDeInitialize(&dp);
+    if (!IsExpectedTeardownError(res)) {
+        LogCuptiErrorIfFailed(this->name(), "cuptiProfilerDeInitialize", res);
+    }
+    profiler_initialized_ = false;
 }
 
 void SassMetricsEngine::stop() {
@@ -159,6 +176,10 @@ void SassMetricsEngine::shutdown() {
         delete sass_metrics_buffers_;
         sass_metrics_buffers_ = nullptr;
     }
+    // Symmetric teardown of cuptiProfilerInitialize from start(). Skipped
+    // if the partial-failure paths in EnableSassMetrics_ already called
+    // it — DeInitProfilerIfNeeded_ is idempotent via the profiler_initialized_ flag.
+    DeInitProfilerIfNeeded_();
     enabled_ = false;
     config_set_ = false;
 }
@@ -209,6 +230,7 @@ void SassMetricsEngine::EnableSassMetrics_() {
     }
 
     size_t validConfigs = 0;
+    size_t failedQueries = 0;
     for (size_t i = 0; i < kSassMetricNames.size(); ++i) {
         // Proactive skip for known-expensive metrics on older GPUs.
         if (skipExpensive && IsExpensiveOnPreSm120(kSassMetricNames[i])) {
@@ -226,6 +248,7 @@ void SassMetricsEngine::EnableSassMetrics_() {
                 "skipping: ",
                 kSassMetricNames[i]);
             skipped_metrics_.push_back(kSassMetricNames[i]);
+            ++failedQueries;
             continue;
         }
         sass_metrics_buffers_->config[validConfigs].metricId =
@@ -237,7 +260,36 @@ void SassMetricsEngine::EnableSassMetrics_() {
     }
 
     if (validConfigs == 0) {
-        GFL_LOG_ERROR("[SassMetricsEngine] No valid SASS metrics for this GPU");
+        GFL_LOG_ERROR(
+            "[SassMetricsEngine] No valid SASS metrics for this GPU "
+            "(all cuptiSassMetricsGetProperties calls failed). "
+            "Tearing down CUPTI profiler so PC Sampling can continue; "
+            "Deep mode will degrade to PC Sampling only this session.");
+        DeInitProfilerIfNeeded_();
+        return;
+    }
+
+    // Conservative bail on sm_120+ (Blackwell): any metric-query failure
+    // here historically indicated a deeper compatibility issue with the
+    // SASS API on this hardware path (Blackwell laptop + Windows WDDM),
+    // not just an isolated unsupported metric. Proceeding to
+    // cuptiSassMetricsSetConfig + cuptiSassMetricsEnable in that
+    // partially-failed state hung the next cuLaunchKernel in lazy-
+    // patching interception, because CUPTI's profiler state was
+    // already corrupted by the partial init. Bail cleanly instead so
+    // Deep mode degrades to PC Sampling only — same UX as the all-
+    // failed case above, just triggered by one-or-more failures
+    // instead of strictly all.
+    if (failedQueries > 0 && cc.valid() && cc.atLeast(12, 0)) {
+        GFL_LOG_ERROR(
+            "[SassMetricsEngine] ", failedQueries,
+            " of ", kSassMetricNames.size(),
+            " SASS metric queries failed on sm_", cc.major, cc.minor,
+            ". On this hardware family a partial-failure state has been "
+            "observed to hang subsequent kernel launches via CUPTI's "
+            "lazy-patching path. Skipping SASS entirely; Deep mode will "
+            "degrade to PC Sampling only this session.");
+        DeInitProfilerIfNeeded_();
         return;
     }
 
@@ -287,12 +339,14 @@ void SassMetricsEngine::EnableSassMetrics_() {
                     "[SassMetricsEngine] Insufficient privileges for CUPTI "
                     "SASS metrics. Skipping SASS instrumentation.");
             }
+            DeInitProfilerIfNeeded_();
             return;
         }
         enabled_ = true;
     } else {
         LogCuptiErrorIfFailed(this->name(), "cuptiSassMetricsSetConfig", res);
         GFL_LOG_ERROR("[SassMetricsEngine] Failed to enable SASS Metrics");
+        DeInitProfilerIfNeeded_();
         return;
     }
     GFL_LOG_DEBUG("[SassMetricsEngine] SASS Metrics Enabled");

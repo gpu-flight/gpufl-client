@@ -167,6 +167,15 @@ void PcSamplingEngine::start() {
         pc_sampling_method_ = Method::SamplingAPI;
         cuptiActivityEnable(CUPTI_ACTIVITY_KIND_SOURCE_LOCATOR);
         GFL_LOG_DEBUG("[PC Sampling] Enabled SOURCE_LOCATOR for Sampling API.");
+        // Build-cache sanity log: prints the exact pc_sampling_period in
+        // effect for this session. Without this, a stale wheel/.pyd from
+        // a previous build silently uses the old default and any tuning
+        // experiment is invalid. Period is a log2 exponent — expand it
+        // so users don't have to do the mental math at debug time.
+        GFL_LOG_DEBUG(
+            "[PC Sampling] samplingPeriod=", opts_.pc_sampling_period,
+            " (2^", opts_.pc_sampling_period, " = ",
+            (1u << opts_.pc_sampling_period), " GPU cycles between samples)");
     } else {
         LogCuptiErrorIfFailed(this->name(), "cuptiActivityEnable(PC_SAMPLING)",
                               pcRes);

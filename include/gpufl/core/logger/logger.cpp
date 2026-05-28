@@ -18,8 +18,20 @@ bool Logger::open(const Options& opt) {
     // text_report). The historical HttpLogSink (live streaming) was
     // removed; sinks are now strictly local. addSink stays here for
     // test recorders and future format adapters.
-    addSink(std::make_unique<FileLogSink>(opt_));
-    return true;
+    auto sink = std::make_unique<FileLogSink>(opt_);
+    // Check that at least one channel file actually opened before
+    // declaring success. If create_directories or stream open failed
+    // (typically EACCES on a Docker volume mount left over from a
+    // previous container build), the sink would otherwise silently
+    // drop every write and downstream init steps (Monitor::Initialize,
+    // CUPTI start, sampler thread) would proceed against a logger
+    // that can't persist anything — eventually deref'ing broken state
+    // and killing the Python kernel. Returning false here lets
+    // gpufl::init() surface the failure cleanly as a False return to
+    // the caller, with the underlying fs error already on stderr.
+    const bool opened = sink->anyChannelOpen();
+    addSink(std::move(sink));
+    return opened;
 }
 
 void Logger::close() {

@@ -98,7 +98,18 @@ struct MonitorOptions {
     // InitOptions::enable_cuda_graphs_tracking. Default-off in v1.
     bool enable_cuda_graphs_tracking = false;
     int kernel_sample_rate_ms = 0;
-    uint32_t pc_sampling_period = 12;  // log2 exponent: 2^N GPU cycles between samples (valid: 5-31; 12 = 4096 cycles)
+    // log2 exponent: 2^N GPU cycles between samples (valid: 5-31).
+    // Default 16 = 65536 cycles. Was 12 (4096 cycles), but on
+    // many-kernel workloads (PyTorch / transformer training) the 4096-
+    // cycle default floods drainData() with ~10⁶ samples per session,
+    // contributing ~700% overhead on benchmark/run_benchmark.py's
+    // MiniGPT case (vs ~1% on the GEMM case, which has narrow SM
+    // occupancy and one PC range). 65536 cycles cuts sample volume
+    // 16× with no meaningful loss for hotspot analysis — the
+    // statistical signal for "which PCs dominate" needs maybe 10⁴
+    // samples per hot range, not 10⁶. Users doing fine-grained stall
+    // attribution can lower this back via InitOptions.
+    uint32_t pc_sampling_period = 16;
     ProfilingEngine profiling_engine = ProfilingEngine::None;
     MonitorBackendKind backend_kind = MonitorBackendKind::Auto;
 };

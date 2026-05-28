@@ -45,6 +45,16 @@ class FileLogSink final : public ILogSink {
     void write(Channel ch, std::string_view json) override;
     void close() override;
 
+    /**
+     * True if at least one of the per-channel files actually opened
+     * successfully. Used by Logger::open() to surface filesystem
+     * failures (permission denied on a Docker volume mount with
+     * stale UID ownership is the canonical case) up through
+     * gpufl::init() rather than letting init silently "succeed" with
+     * a sink that drops every write.
+     */
+    bool anyChannelOpen() const;
+
    private:
     // One stream per channel, matching the existing file layout.
     class FileChannel {

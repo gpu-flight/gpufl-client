@@ -9,7 +9,6 @@ import torch       # load framework (and its CUPTI) before gpufl
 import gpufl       # now gpufl's CUPTI loads into an already-initialized CUDA ctx
 import gpufl.torch
 
-
 def run_stress_test():
     print("--- GpuFlight: Heavy Stress Test (RTX 5060 Optimized) ---")
 
@@ -47,7 +46,7 @@ def run_stress_test():
                enable_cuda_graphs_tracking=True,
                api_key=api_key,
                backend_url=backend_url,
-               profiling_engine=gpufl.ProfilingEngine.PcSampling)
+               profiling_engine=gpufl.ProfilingEngine.PcSamplingWithSass)
 
     try:
         # 2. Allocate (Uses approx 3GB VRAM)
