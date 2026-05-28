@@ -212,57 +212,94 @@ class TestCleanLogs:
             gpufl._session_active = False
 
     def test_dry_run_lists_matches_without_deleting(self, tmp_path):
-        # Mix of matching + unrelated files; only the prefix-scoped ones
-        # should be returned.
-        for name in [
-            "gfl_logs.device.log",
-            "gfl_logs.scope.1.log.gz",
-            "gfl_logs.kernel.log",
-            "notes.txt",          # unrelated — must NOT be touched
-            "other.device.log",   # different prefix — must NOT be touched
-        ]:
-            (tmp_path / name).touch()
+        # v1.2 layout: log_path is a directory containing session subdirs.
+        # Each session subdir's channel files (device/scope/system, with
+        # optional .N rotation index and .gz suffix) are matched. Files
+        # at the top level of log_path are NEVER touched, and subdirs
+        # whose contents don't match the channel pattern are skipped.
+        log_root = tmp_path / "gfl_logs"
+        sid_a = log_root / "session-aaaa"
+        sid_b = log_root / "session-bbbb"
+        sid_a.mkdir(parents=True)
+        sid_b.mkdir(parents=True)
 
-        base = tmp_path / "gfl_logs"
-        preview = gpufl.clean_logs(str(base), dry_run=True)
+        # Session A: one active + one rotated.gz + one unrelated file.
+        (sid_a / "device.log").touch()
+        (sid_a / "scope.1.log.gz").touch()
+        (sid_a / "notes.txt").touch()    # unrelated within subdir — preserves subdir
 
-        # Three matching files, prefix-scoped.
+        # Session B: only channel files (subdir will be fully removable).
+        (sid_b / "device.log").touch()
+        (sid_b / "system.log.gz").touch()
+
+        # Unrelated top-level entries — must NOT be touched.
+        (log_root / "README.md").touch()
+        (log_root / "other_app").mkdir()
+        (log_root / "other_app" / "data.bin").touch()
+
+        preview = gpufl.clean_logs(str(log_root), dry_run=True)
+
         names = sorted(Path(p).name for p in preview)
+        # Expected: device.log + scope.1.log.gz from session-aaaa (subdir
+        # NOT in list because notes.txt prevents removal), and
+        # device.log + system.log.gz + the session-bbbb subdir itself
+        # (all its contents match → subdir is removable).
         assert names == [
-            "gfl_logs.device.log",
-            "gfl_logs.kernel.log",
-            "gfl_logs.scope.1.log.gz",
+            "device.log",
+            "device.log",
+            "scope.1.log.gz",
+            "session-bbbb",
+            "system.log.gz",
         ]
         # Dry-run must NOT delete anything.
-        assert (tmp_path / "gfl_logs.device.log").exists()
-        assert (tmp_path / "notes.txt").exists()
+        assert (sid_a / "device.log").exists()
+        assert (sid_b / "device.log").exists()
+        assert (log_root / "README.md").exists()
 
     def test_actual_delete_keeps_unrelated_files(self, tmp_path):
-        for name in [
-            "gfl_logs.device.log",
-            "gfl_logs.scope.1.log.gz",
-            "notes.txt",
-            "other.device.log",
-        ]:
-            (tmp_path / name).touch()
+        # Same layout as the dry-run test; verify real deletion semantics.
+        log_root = tmp_path / "gfl_logs"
+        sid_a = log_root / "session-aaaa"
+        sid_b = log_root / "session-bbbb"
+        sid_a.mkdir(parents=True)
+        sid_b.mkdir(parents=True)
 
-        base = tmp_path / "gfl_logs"
-        removed = gpufl.clean_logs(str(base))
+        (sid_a / "device.log").touch()
+        (sid_a / "scope.1.log.gz").touch()
+        (sid_b / "device.log").touch()
+        (sid_b / "system.log.gz").touch()
 
-        assert len(removed) == 2
-        survivors = sorted(p.name for p in tmp_path.iterdir())
-        # Only the unrelated files survive.
-        assert survivors == ["notes.txt", "other.device.log"]
+        (log_root / "README.md").touch()
+        (log_root / "other_app").mkdir()
+        (log_root / "other_app" / "data.bin").touch()
+
+        removed = gpufl.clean_logs(str(log_root))
+
+        # 4 channel files + 2 subdirs (both fully removable) = 6 entries.
+        assert len(removed) == 6
+        # Subdirs themselves are gone.
+        assert not sid_a.exists()
+        assert not sid_b.exists()
+        # Unrelated top-level entries untouched.
+        assert (log_root / "README.md").exists()
+        assert (log_root / "other_app" / "data.bin").exists()
 
     def test_defaults_to_last_init_path(self, tmp_path, monkeypatch):
         """No args → uses the path stashed by the most recent init()."""
-        (tmp_path / "my_app.device.log").touch()
-        monkeypatch.setattr(gpufl, "_last_log_path", str(tmp_path / "my_app"))
+        # v1.2 layout: my_app is the directory; sessions are subdirs inside.
+        log_root = tmp_path / "my_app"
+        session = log_root / "session-1234"
+        session.mkdir(parents=True)
+        (session / "device.log").touch()
+
+        monkeypatch.setattr(gpufl, "_last_log_path", str(log_root))
         monkeypatch.setattr(gpufl, "_last_app_name", "my_app")
 
         removed = gpufl.clean_logs()
-        assert len(removed) == 1
-        assert Path(removed[0]).name == "my_app.device.log"
+        # One file + the now-empty session subdir = 2 entries.
+        assert len(removed) == 2
+        names = sorted(Path(p).name for p in removed)
+        assert names == ["device.log", "session-1234"]
 
     def test_no_path_and_no_prior_init_raises(self, monkeypatch):
         monkeypatch.setattr(gpufl, "_last_log_path", None)

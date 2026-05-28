@@ -190,7 +190,13 @@ MonitorBackendKind ToMonitorBackendKind(const BackendKind backend) {
 }  // namespace
 
 static std::string defaultLogPath_(const std::string& app) {
-    return app + ".log";
+    // v1.2: log_path is a directory (sessions nest inside it as
+    // `<log_path>/<session_id>/<channel>.log`). The legacy convention
+    // returned "<app>.log" which the rotator stripped down to "<app>"
+    // anyway; explicitly return just "<app>" so debug output and
+    // `clean_logs(log_path=...)` show the same value as what's on
+    // disk.
+    return app;
 }
 
 // Remembered after init() for use by generateReport() after shutdown()
@@ -260,6 +266,11 @@ bool init(const InitOptions& opts) {
 
     Logger::Options logOpts;
     logOpts.base_path = logPath;
+    // Threaded through so the rotator can write under
+    // `<base_path>/<session_id>/<channel>.log` — v1.2 disk layout. The
+    // uploader uses the directory name to discover sessions instead of
+    // parsing job_start events out of flat log files.
+    logOpts.session_id = rt->session_id;
     logOpts.system_sample_rate_ms = g_opts.system_sample_rate_ms;
     logOpts.flush_always = g_opts.flush_logs_always;
 

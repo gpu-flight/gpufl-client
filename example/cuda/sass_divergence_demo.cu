@@ -20,6 +20,7 @@
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/monitor.hpp"
 #include "gpufl/gpufl.hpp"
+#include "gpufl/upload/upload_logs.hpp"
 static bool CheckCuda(cudaError_t err, const char* call, const char* file,
                       int line) {
     if (err == cudaSuccess) return true;

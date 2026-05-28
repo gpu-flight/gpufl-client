@@ -140,7 +140,6 @@ def run_stress_test():
     finally:
         gpufl.shutdown()
         gpufl.torch.detach()
-        print(f"\n[DONE] Logs generated at: {os.path.abspath('./stress.scope.log')}")
 
         # Deferred upload — runs after shutdown, never during the
         # workload. Replaces the old `remote_upload=True` live streaming.

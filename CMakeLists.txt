@@ -190,15 +190,24 @@ else()
     set(GPUFL_HTTPLIB_TLS 0)
 endif()
 target_compile_definitions(gpufl PRIVATE GPUFL_HTTPLIB_TLS=${GPUFL_HTTPLIB_TLS})
-# NOTE: cpp-httplib's gzip request-body path (CPPHTTPLIB_ZLIB_SUPPORT)
-# is intentionally NOT defined. uploadLogs sends uncompressed JSON per
-# event; bandwidth-conscious deployments use gpufl-agent against the
-# rotated NDJSON files (where deflate amortizes its dictionary across
-# the whole file for 10-15× compression vs the ~5× we'd get per-POST).
+# Enable cpp-httplib's gzip path. PUBLIC so any consumer that includes
+# httplib.h via gpufl's headers (notably the test target's embedded
+# httplib::Server) gets the same wire-format support — without this,
+# server::Post handlers return 415 on incoming Content-Encoding: gzip
+# requests, which is exactly what uploadLogs sends in v1.2+.
 #
-# ZLIB is still linked above — file_compressor.cpp uses it to gzip
-# rotated NDJSON files written by FileLogSink, and upload_logs.cpp uses
-# it to read those rotated files back transparently during upload.
+# In production, the Spring Boot backend handles gzip natively, so
+# this define affects the test target more than the client. We still
+# define it on gpufl PUBLIC because:
+#   - It enables future use of httplib::Client::set_compress(true)
+#     to compress the body in-place instead of our manual gzipString
+#     (no current need, but a free optimization if we ever want it).
+#   - It propagates to tests, which is the immediate motivation.
+#
+# ZLIB is already linked above — file_compressor.cpp uses it to gzip
+# rotated NDJSON files, and upload_logs.cpp uses it both to read those
+# files back and to gzip outgoing stream-chunks.
+target_compile_definitions(gpufl PUBLIC CPPHTTPLIB_ZLIB_SUPPORT=1)
 target_link_libraries(gpufl PRIVATE httplib::httplib)
 
 

@@ -2,9 +2,15 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
+#include <fstream>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
+
+#include <zlib.h>
+
+#include "gpufl/core/json/json.hpp"
 
 namespace fs = std::filesystem;
 
@@ -31,26 +37,76 @@ fs::path MakeTempLogDir() {
 
 namespace {
 
-// Match `{prefix}.{channel}.log` or `{prefix}.{channel}.<index>.log`.
+// v1.2 layout — files live at `<dir>/<prefix>/<session_id>/<channel>.log`
+// or `<dir>/<prefix>/<session_id>/<channel>.<N>.log[.gz]`. The test
+// helpers were originally written for the v1.1 flat layout
+// (`<dir>/<prefix>.<channel>.log`); this walks the per-session
+// subdirectories instead, aggregating across every session inside the
+// log_path. Tests that ran one session see one session's worth of
+// data; tests that ran multiple see them all merged.
 std::vector<fs::path> FindChannelFiles(const fs::path& dir,
                                        const std::string& prefix,
                                        const std::string& channel) {
     std::vector<fs::path> out;
-    if (!fs::exists(dir)) return out;
+    // <dir>/<prefix> is the log_path the rotator was given. Each
+    // subdirectory inside it is a session.
+    const fs::path log_path = dir / prefix;
+    if (!fs::exists(log_path)) return out;
 
-    const std::regex pattern(
-        "^" + std::regex_replace(prefix, std::regex(R"([.\^$|()\[\]{}*+?\\])"),
-                                 R"(\$&)") +
-        R"(\.)" + channel + R"((?:\.\d+)?\.log$)");
+    const std::regex channel_pattern(
+        "^" + channel + R"((?:\.\d+)?\.log(?:\.gz)?$)");
 
-    for (const auto& entry : fs::directory_iterator(dir)) {
-        if (!entry.is_regular_file()) continue;
-        const std::string name = entry.path().filename().string();
-        if (std::regex_match(name, pattern)) {
-            out.push_back(entry.path());
+    for (const auto& session_entry : fs::directory_iterator(log_path)) {
+        if (!session_entry.is_directory()) continue;
+        const std::string sid = session_entry.path().filename().string();
+        if (sid.empty() || sid.front() == '.') continue;
+
+        for (const auto& entry : fs::directory_iterator(session_entry.path())) {
+            if (!entry.is_regular_file()) continue;
+            const std::string name = entry.path().filename().string();
+            if (std::regex_match(name, channel_pattern)) {
+                out.push_back(entry.path());
+            }
         }
     }
     std::sort(out.begin(), out.end());
+    return out;
+}
+
+/// Read a NDJSON file (plain or gzipped) into JsonValue records.
+/// Gzipped files are transparently decompressed — needed because
+/// v1.2's compress-on-shutdown turns the active .log into .log.gz on
+/// clean shutdown, so test code that runs gpufl::shutdown() and then
+/// reads back the logs encounters .log.gz files.
+std::vector<JsonValue> readNdjsonAny(const fs::path& path) {
+    std::vector<JsonValue> out;
+    const bool gz = path.extension() == ".gz";
+    if (!gz) {
+        return ::gpufl::json::loadJsonLines(path.string());
+    }
+    // Streaming gunzip via zlib's gzgets.
+    gzFile f = gzopen(path.string().c_str(), "rb");
+    if (!f) return out;
+    std::string line;
+    char buf[8192];
+    while (gzgets(f, buf, sizeof(buf)) != nullptr) {
+        line.append(buf);
+        if (line.empty()) continue;
+        if (line.back() == '\n') {
+            line.pop_back();
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (!line.empty()) {
+                try { out.push_back(::gpufl::json::parseJson(line)); }
+                catch (...) { /* skip malformed */ }
+            }
+            line.clear();
+        }
+    }
+    if (!line.empty()) {
+        try { out.push_back(::gpufl::json::parseJson(line)); }
+        catch (...) {}
+    }
+    gzclose(f);
     return out;
 }
 
@@ -59,7 +115,7 @@ std::vector<JsonValue> ReadChannel(const fs::path& dir,
                                    const std::string& channel) {
     std::vector<JsonValue> merged;
     for (const auto& file : FindChannelFiles(dir, prefix, channel)) {
-        auto records = ::gpufl::json::loadJsonLines(file.string());
+        auto records = readNdjsonAny(file);
         merged.insert(merged.end(),
                       std::make_move_iterator(records.begin()),
                       std::make_move_iterator(records.end()));
