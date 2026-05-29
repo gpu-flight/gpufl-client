@@ -297,7 +297,7 @@ static bool gpufl_init_for(Mode m) {
     // log spam, completely masking the real per-kernel CUPTI cost. If
     // you need samplingPeriod-verification, do that in a separate
     // single-shot run, not during timed measurement.
-    opts.enable_debug_output = false;
+    opts.enable_debug_output = true;
     opts.enable_source_collection = false;
     switch (m) {
         case Mode::PcSampling:
