@@ -126,12 +126,26 @@ class CaptureServer {
         std::vector<std::pair<std::string, std::string>> events;
     };
 
+    /// Response shape selector. Lets a single test fixture exercise
+    /// both backend lineages:
+    ///   - LegacySync — pre-Phase 3a backend: HTTP 200 with
+    ///     `{accepted, rejected, errors}`.
+    ///   - AsyncSpool — Phase 3a+ backend: HTTP 202 with
+    ///     `{accepted_for_processing, spool_id}`.
+    /// The body-recording logic is identical for both; only the
+    /// response status code + body differ.
+    enum class ResponseShape { LegacySync, AsyncSpool };
+
     /// Construct with optional HTTP status override. force_status=200
     /// is the happy path; 401/403 simulates auth failure; 404 the old-
-    /// backend case; 500 a transient failure.
-    explicit CaptureServer(int force_status = 200, std::size_t fail_first_n_with_5xx = 0)
+    /// backend case; 500 a transient failure. `shape` picks which wire
+    /// shape the 2xx body takes.
+    explicit CaptureServer(int force_status = 200,
+                           std::size_t fail_first_n_with_5xx = 0,
+                           ResponseShape shape = ResponseShape::LegacySync)
         : force_status_(force_status),
-          fail_first_n_(fail_first_n_with_5xx) {
+          fail_first_n_(fail_first_n_with_5xx),
+          shape_(shape) {
         server_.Post("/api/v1/events/stream",
             [this](const httplib::Request& req, httplib::Response& res) {
                 std::lock_guard<std::mutex> lk(mu_);
@@ -165,15 +179,33 @@ class CaptureServer {
                 if (fail_first_n_ > 0 && captured_.size() <= fail_first_n_) {
                     status = 500;
                 }
+                // In async mode the natural success code is 202; map
+                // any 2xx the test asked for to 202 so the wire shape
+                // matches what Phase 3a backends actually send.
+                if (shape_ == ResponseShape::AsyncSpool &&
+                    status >= 200 && status < 300) {
+                    status = 202;
+                }
 
                 res.status = status;
                 if (status >= 200 && status < 300) {
-                    // Build a faithful StreamIngestResponse body —
-                    // accepted = line count, rejected = 0, no errors.
-                    std::ostringstream rsp;
-                    rsp << "{\"accepted\":" << captured_.back().lines.size()
-                        << ",\"rejected\":0,\"errors\":[]}";
-                    res.set_content(rsp.str(), "application/json");
+                    if (shape_ == ResponseShape::AsyncSpool) {
+                        // Phase 3a+ wire shape. spool_id is a synthetic
+                        // sequence — real GcsSpoolBackend uses UUIDs
+                        // but tests don't need the entropy.
+                        std::ostringstream rsp;
+                        rsp << "{\"accepted_for_processing\":true,"
+                            << "\"spool_id\":\"spool-"
+                            << captured_.size() << "\"}";
+                        res.set_content(rsp.str(), "application/json");
+                    } else {
+                        // Legacy sync wire shape: accepted = line
+                        // count, rejected = 0, no errors.
+                        std::ostringstream rsp;
+                        rsp << "{\"accepted\":" << captured_.back().lines.size()
+                            << ",\"rejected\":0,\"errors\":[]}";
+                        res.set_content(rsp.str(), "application/json");
+                    }
                 } else {
                     res.set_content("{\"error\":\"forced\"}", "application/json");
                 }
@@ -229,6 +261,7 @@ class CaptureServer {
     int                  port_{0};
     int                  force_status_;
     std::size_t          fail_first_n_;
+    ResponseShape        shape_;
     std::mutex           mu_;
     std::vector<Chunk>   captured_;
 };
@@ -314,6 +347,50 @@ TEST(UploadLogs, UploadsAllEventsAcrossChannelsAndRotation) {
     EXPECT_EQ(events.front().first, "job_start");
     EXPECT_EQ(events.back().first,  "shutdown");
 
+    fs::remove_all(tmp);
+}
+
+TEST(UploadLogs, AsyncAccept202_UsesChunkLinesAsAcceptedCount) {
+    // Phase 3a+ backends return HTTP 202 with
+    // `{accepted_for_processing, spool_id}` and do NOT carry per-line
+    // accepted/rejected counts. The client must:
+    //   - treat the 202 as success (no warning),
+    //   - credit chunk_lines to events_uploaded (since the server
+    //     hasn't run per-line dispatch yet),
+    //   - stash spool_id into UploadResult.spool_ids so operators can
+    //     correlate with backend logs.
+    // The "accepted + rejected != chunk_lines" mismatch warning that
+    // applies to the legacy sync path MUST stay quiet on this path.
+    const fs::path tmp = fs::temp_directory_path() / "gpufl_upload_test_async";
+    fs::remove_all(tmp);
+    const std::string log_path = makeMinimalSession(tmp);
+
+    CaptureServer srv(/*force_status=*/200, /*fail_first_n=*/0,
+                      CaptureServer::ResponseShape::AsyncSpool);
+    gpufl::UploadOptions opts;
+    opts.log_path        = log_path;
+    opts.backend_url     = srv.base_url();
+    opts.api_key         = "gpfl_test";
+    opts.report_progress = false;
+
+    const auto result = gpufl::uploadLogs(opts);
+
+    EXPECT_TRUE(result.success) << "warnings: "
+        << (result.warnings.empty() ? "<none>" : result.warnings.front());
+    EXPECT_EQ(result.events_uploaded, 5u)
+        << "Async path must use locally-tracked chunk_lines as the "
+        << "accepted count when the response has no `accepted` field.";
+    EXPECT_TRUE(result.warnings.empty())
+        << "Async path must not emit the legacy 'mismatch' warning: "
+        << (result.warnings.empty() ? "<none>" : result.warnings.front());
+    EXPECT_FALSE(result.spool_ids.empty())
+        << "Each 202 response should add one spool_id to UploadResult.";
+    // Every recorded spool_id must be non-empty (the server stub
+    // generates "spool-<seq>").
+    for (const auto& sid : result.spool_ids) {
+        EXPECT_FALSE(sid.empty());
+        EXPECT_NE(sid.find("spool-"), std::string::npos);
+    }
     fs::remove_all(tmp);
 }
 

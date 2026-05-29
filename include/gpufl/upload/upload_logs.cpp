@@ -692,23 +692,67 @@ struct StreamLineError {
     std::string reason;
 };
 
-/// Outcome of a chunk POST plus the parsed response counters. `accepted
-/// + rejected` should equal the number of non-blank lines we sent.
+/// Outcome of a chunk POST plus the parsed response counters.
+///
+/// <p>Two wire shapes are recognised, distinguished by `async_accepted`:
+///
+/// <ul>
+///   <li><b>Legacy synchronous (pre-Phase 3a backends).</b> HTTP 200
+///       with `{"accepted": N, "rejected": M, "errors": [...]}`. The
+///       per-line dispatch ran on the request thread; `accepted +
+///       rejected == chunk_lines` invariant holds; `line_errors`
+///       carries the explanations.</li>
+///   <li><b>Async-accept (Phase 3a+ backends).</b> HTTP 202 with
+///       `{"accepted_for_processing": true, "spool_id": "..."}`. The
+///       body was streamed to a spool (local disk or GCS) and a
+///       background worker drains it asynchronously. There are no
+///       per-line counts to return — the caller trusts the local
+///       `chunk_lines` as the accepted count.</li>
+/// </ul>
 struct StreamPostResult {
     StreamPostOutcome           outcome = StreamPostOutcome::TransientFailure;
     std::string                 failure_reason;  // populated when outcome != Ok
+
+    // ── Legacy synchronous-accept fields ──
     std::size_t                 accepted = 0;
     std::size_t                 rejected = 0;
     std::vector<StreamLineError> line_errors;
+
+    // ── Async-accept fields (Phase 3a+) ──
+    bool                        async_accepted = false;
+    std::string                 spool_id;
 };
 
-/// Parse the backend's StreamIngestResponse body. Tolerant — missing
-/// fields default to 0 / empty. Used after a 2xx so we know what the
-/// server actually accepted.
+/// Parse the backend's stream-endpoint response. Two wire shapes are
+/// recognised — see {@link StreamPostResult} for the full description.
+/// Tolerant: missing or unrecognised fields leave the corresponding
+/// `out` field at its default; the caller falls back to "all-sent-
+/// assumed-accepted" via the chunk_lines it tracked locally.
 void parseStreamResponse(const std::string& body, StreamPostResult& out) {
     try {
         const json::JsonValue v = json::parseJson(body);
         if (!v.is_object()) return;
+
+        // ── Phase 3a+ async-accept shape ─────────────────────────────
+        // The backend streamed our body into a spool (local disk or
+        // GCS) and queued it for the SpoolWorker to drain. There's no
+        // per-line accept/reject count to return — completion happens
+        // out-of-band. We record the spool id so the caller can stash
+        // it for operator debugging, and flag async_accepted so the
+        // upload loop knows to use chunk_lines as the accepted count
+        // instead of looking for an `accepted` field.
+        if (v.contains("accepted_for_processing")) {
+            out.async_accepted = v.at("accepted_for_processing").get_bool(false);
+            if (v.contains("spool_id") && v.at("spool_id").is_string()) {
+                out.spool_id = v.at("spool_id").get_string();
+            }
+            return;
+        }
+
+        // ── Legacy synchronous-accept shape (pre-Phase 3a) ──────────
+        // Per-line dispatch ran on the request thread. accepted +
+        // rejected == chunk_lines; line_errors carries the per-line
+        // explanations bounded server-side at MAX_REPORTED_ERRORS.
         if (v.contains("accepted")) {
             out.accepted = static_cast<std::size_t>(v.at("accepted").as_int(0));
         }
@@ -1166,18 +1210,44 @@ UploadResult uploadLogs(const UploadOptions& opts) {
                 opts.api_key, ua_header, gz_body);
 
             if (r.outcome == StreamPostOutcome::Ok) {
-                // The server's response is the source of truth. If
-                // it accepted everything, accepted == chunk_lines and
-                // rejected == 0. If it accepted only some, rejected
-                // > 0 and r.line_errors carries the explanations.
+                // Two backend shapes, two accounting paths:
+                //
+                //   1. async_accepted (Phase 3a+): the backend spooled
+                //      our body and queued it for the SpoolWorker.
+                //      There's no per-line breakdown to consume — by
+                //      contract, the worker will ingest exactly what
+                //      we sent (per-line rejections show up in the
+                //      backend's structured log, not our response).
+                //      Trust chunk_lines as the accepted count, stash
+                //      the spool_id for operator debugging, return.
+                //
+                //   2. Legacy synchronous accept (pre-Phase 3a): the
+                //      response carries explicit accepted/rejected
+                //      counts and any per-line errors. Trust the
+                //      server's count and surface partials as
+                //      warnings.
+                //
+                // No mismatch warning in the async path — the invariant
+                // "accepted + rejected == chunk_lines" doesn't apply
+                // when the server hasn't done the dispatch yet.
+                if (r.async_accepted) {
+                    result.events_uploaded += chunk_lines;
+                    result.bytes_uploaded  += ndjson_body.size();
+                    bytes_since_last_progress += ndjson_body.size();
+                    if (!r.spool_id.empty()) {
+                        result.spool_ids.push_back(r.spool_id);
+                    }
+                    return true;
+                }
+
+                // Legacy synchronous path. The server's response is the
+                // source of truth: accepted == chunk_lines when nothing
+                // was rejected, otherwise rejected > 0 and
+                // r.line_errors carries the explanations.
                 result.events_uploaded += r.accepted;
                 result.bytes_uploaded  += ndjson_body.size();
                 bytes_since_last_progress += ndjson_body.size();
 
-                // Sanity: if the backend reports a strange count
-                // (accepted + rejected != chunk_lines), surface it —
-                // protects against silent partial loss on a future
-                // backend bug.
                 if (r.accepted + r.rejected != chunk_lines) {
                     result.warnings.push_back(
                         "chunk for session " + session_id + ": sent " +
@@ -1185,9 +1255,6 @@ UploadResult uploadLogs(const UploadOptions& opts) {
                         std::to_string(r.accepted) + " accepted + " +
                         std::to_string(r.rejected) + " rejected (mismatch)");
                 }
-                // Per-line errors → individual warnings so the caller
-                // can see what was dropped. Bounded server-side at
-                // MAX_REPORTED_ERRORS, so this list stays small.
                 for (const auto& le : r.line_errors) {
                     result.warnings.push_back(
                         "chunk line " + std::to_string(le.line) +

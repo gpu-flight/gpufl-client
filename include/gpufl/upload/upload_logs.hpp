@@ -188,6 +188,23 @@ struct UploadResult {
      * success.
      */
     std::vector<std::string> warnings;
+
+    /**
+     * Spool IDs returned by the Phase 3a+ async-accept backend, one
+     * per chunk POST that the backend acknowledged with HTTP 202.
+     * Empty when uploading to a pre-Phase 3a backend (which returned
+     * HTTP 200 with synchronous accept/reject counts instead).
+     *
+     * <p>The client doesn't poll these (`uploadLogs` is fire-and-
+     * forget: it considers a 202 with a spool_id to be "all-sent-
+     * assumed-accepted"). They're exposed here for operator
+     * debugging — when an upload returns success but the dashboard
+     * never shows the data, grepping the backend's structured log
+     * by spool id pinpoints whether (a) the chunk reached spool
+     * storage, (b) the worker claimed it, and (c) the per-line
+     * ingest threw or accepted.
+     */
+    std::vector<std::string> spool_ids;
 };
 
 /**
