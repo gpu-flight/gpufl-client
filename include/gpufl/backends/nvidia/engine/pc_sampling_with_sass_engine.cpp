@@ -18,31 +18,41 @@ bool PcSamplingWithSassEngine::initialize(const MonitorOptions& opts,
 }
 
 void PcSamplingWithSassEngine::start() {
+    // SASS metrics (Profiler API) and PC Sampling API are mutually
+    // exclusive on current NVIDIA drivers (confirmed on Ampere sm_86
+    // and Blackwell sm_120; almost certainly the same on Hopper). The
+    // old design armed both, then tried to tear PC sampling down if
+    // SASS succeeded — but `cuptiPCSamplingDisable` itself is unsafe
+    // while another CUPTI API is initialized (see pc_sampling_engine
+    // comment around stop()), and on Ampere this teardown hangs
+    // indefinitely at the next flush (observed in
+    // example/cuda/manykernel_benchmark Deep-mode run, where the
+    // process froze after `[flushDisassembly] parsed 40 functions`).
+    //
+    // The safer pattern: try SASS first, and only arm PC sampling at
+    // all if SASS didn't succeed. No risky disable path because PC
+    // sampling was never armed alongside the Profiler API.
+    //
+    // Trade-off: Deep mode now provides SASS-only data when SASS works,
+    // and PC-sampling-only data when SASS doesn't. Users wanting both
+    // streams need to run two separate sessions until NVIDIA exposes
+    // a way to multiplex the underlying hardware counters.
     sass_->start();
     sass_ok_ = sass_->isEnabled();
-    pc_->start();
 
-    if (sass_ok_ && pc_->isSamplingAPI()) {
-        // SASS metrics (Profiler API) and PC Sampling API are mutually
-        // exclusive on current drivers (Hopper/Blackwell). Keeping both
-        // armed produces duplicate subscriber callbacks per kernel and
-        // deadlocks at shutdown / first flush. Prefer SASS metrics
-        // (higher-value data) and tear PC sampling down cleanly.
+    if (sass_ok_) {
+        // PcSamplingEngine::initialize() is CUPTI-free (just sets
+        // fields), so pc_ has touched no CUPTI state yet. Dropping it
+        // here is clean — no disable / unsubscribe needed.
         GFL_LOG_DEBUG(
-            "[PcSamplingWithSass] SamplingAPI + SASS incompatible — "
-            "disabling PC sampling for this session.");
-        pc_->stop();
-        pc_->shutdown();
+            "[PcSamplingWithSass] SASS active — skipping PC sampling "
+            "(mutually exclusive with Profiler API). Deep mode provides "
+            "SASS metrics only for this session.");
         pc_.reset();
-    } else if (!sass_ok_ && pc_->isSamplingAPI()) {
-        GFL_LOG_DEBUG(
-            "[PcSamplingWithSass] SASS failed and PC sampling on SamplingAPI — "
-            "running with PC sampling only.");
-    } else if (!sass_ok_) {
-        GFL_LOG_DEBUG(
-            "[PcSamplingWithSass] SASS failed — running PC sampling only.");
     } else {
-        GFL_LOG_DEBUG("[PcSamplingWithSass] Both PC sampling and SASS metrics active.");
+        pc_->start();
+        GFL_LOG_DEBUG(
+            "[PcSamplingWithSass] SASS unavailable — running PC sampling only.");
     }
 }
 
