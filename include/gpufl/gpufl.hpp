@@ -200,6 +200,30 @@ struct InitOptions {
      * `UploadOptions`. See `include/gpufl/upload/upload_logs.hpp`.
      */
     bool remote_upload = false;
+
+    /**
+     * Global kill switch. When false, {@link gpufl::init} returns false
+     * immediately without spawning any backend, opening a logger, or
+     * touching CUPTI / NVML / ROCm. Every other public entry point —
+     * {@link gpufl::shutdown}, {@link gpufl::systemStart} /
+     * {@link gpufl::systemStop}, every {@link ScopedMonitor} ctor /
+     * dtor — short-circuits automatically because they all guard on
+     * `runtime() != nullptr` and a disabled init never allocates one.
+     *
+     * Two equivalent ways to flip the switch:
+     *   - Set this field to false in code.
+     *   - Set the env var `GPUFL_DISABLED` to a truthy value
+     *     (`1`, `true`, `yes`, `on`; case-insensitive). The env var
+     *     takes precedence over this field, so you can disable gpufl
+     *     for a one-off run without editing code:
+     *     `GPUFL_DISABLED=1 ./my_app`.
+     *
+     * Use case: toggle gpufl on/off across runs without #ifdef'ing out
+     * the call sites or building a separate "no-gpufl" binary. The
+     * disabled path has effectively zero overhead — early-return at
+     * init, then null-runtime no-ops at every other call site.
+     */
+    bool enabled = true;
 };
 
 struct BackendProbeResult {

@@ -124,6 +124,7 @@ except ImportError as e:
             self.backend_url = ""
             self.api_key = ""
             self.remote_upload = False  # DEPRECATED v1.1, removed v1.2
+            self.enabled = True  # mirror C++ InitOptions::enabled
 
     class _CScope:
         # Accept kwargs (repeat/warmup added in 1.0.3) so the no-GPU
@@ -201,11 +202,60 @@ _session_active = False
 _last_log_path = None
 _last_app_name = None
 
+# ── Disable flag ─────────────────────────────────────────────────────────────
+#
+# When set, every public entry point (init, shutdown, system_start/stop,
+# upload_logs, Scope) becomes a no-op. Set by either:
+#   * gpufl.init(..., enabled=False)
+#   * the GPUFL_DISABLED env var (1/true/yes/on)
+# Env wins — it lets users force-off without editing code (handy for CI,
+# debugging, or comparing runs with vs. without instrumentation).
+_disabled = False
+
+
+def _env_disabled():
+    """True if the GPUFL_DISABLED env var is set to a truthy value."""
+    return os.environ.get('GPUFL_DISABLED', '').strip().lower() in (
+        '1', 'true', 'yes', 'on')
+
+
+class _NoopUploadResult:
+    """Stand-in returned by :func:`upload_logs` when gpufl is disabled.
+
+    The real :class:`UploadResult` is the C++ binding from pybind11 and
+    cannot be default-constructed or mutated from Python — its fields
+    are all ``def_readonly`` and there's no exposed ``py::init<>()``.
+    Trying to do ``r = UploadResult(); r.success = True`` from the
+    disabled-mode no-op path therefore crashes in production (in stub
+    mode the pure-Python class above masks the bug — same name, very
+    different shape).
+
+    This class mirrors the binding's public field set so existing caller
+    code — ``r.success``, ``r.events_uploaded``, ``isinstance(...)``-free
+    duck typing — keeps working unchanged. If you add a field to the
+    C++ ``UploadResult``, add it here too (and to the stub-mode class
+    above).
+    """
+    def __init__(self):
+        self.success = True
+        self.files_processed = 0
+        self.files_skipped_by_cursor = 0
+        self.events_uploaded = 0
+        self.bytes_uploaded = 0
+        self.elapsed_ms = 0
+        self.warnings = ["gpufl is disabled — upload_logs is a no-op"]
+        self.spool_ids = []
+
+    def __repr__(self):
+        return ("<UploadResult success=True events=0 bytes=0 files=0 "
+                "warnings=1 spool_ids=0 elapsed_ms=0 (disabled)>")
+
 # Wrap the C++ init to apply env-var fallbacks for backend_url and
 # api_key, and to reject removed kwargs with a clear TypeError.
 _original_init = init
 
-def init(*args, backend_url=None, api_key=None, remote_upload=None, **kwargs):
+def init(*args, backend_url=None, api_key=None, remote_upload=None,
+         enabled=True, **kwargs):
     """Initialize GPUFlight.
 
     Configuration precedence (low → high). Each layer may override the
@@ -237,8 +287,33 @@ def init(*args, backend_url=None, api_key=None, remote_upload=None, **kwargs):
             `with gpufl.session(backend_url=..., api_key=...):` (auto-
             orchestrated) or call gpufl.upload_logs(...) explicitly
             after shutdown. **Removed in v1.2.** Env: `GPUFL_REMOTE_UPLOAD=1`.
+        enabled: When False, init becomes a no-op — no daemon spawn, no
+            NVML probe, no log files, no atexit handler. Subsequent
+            gpufl calls (Scope, shutdown, upload_logs, system_start/stop)
+            also no-op for the rest of the process. Useful for toggling
+            instrumentation on/off without removing the call. The
+            ``GPUFL_DISABLED`` env var (set to ``1``/``true``/``yes``/
+            ``on``) forces the same behavior regardless of this kwarg —
+            that way you can disable gpufl for a one-off run without
+            editing code: ``GPUFL_DISABLED=1 python train.py``.
         **kwargs: All other InitOptions fields passed to C++ init.
+
+    Returns:
+        bool: True on successful init, False when stub-mode, disabled,
+        or init otherwise failed. Callers may branch on this:
+        ``if not gpufl.init(...): ...``.
     """
+    # ── disable check ───────────────────────────────────────────────────
+    # Env var wins over the kwarg — it's the "force off without editing
+    # code" knob. Set early so every downstream gpufl call sees it.
+    global _disabled
+    if _env_disabled() or not enabled:
+        _disabled = True
+        return False
+    # Re-enable on a successful enabled-init in case a prior call in
+    # this process disabled it. Lets the same interpreter session run
+    # disabled-then-enabled tests / notebooks without restarting.
+    _disabled = False
     # Backward-compat shim: `sampling_auto_start` was renamed to
     # `continuous_system_sampling` because the old name only described
     # init-time auto-start and missed the new scope-bracketing behavior
@@ -364,14 +439,36 @@ def init(*args, backend_url=None, api_key=None, remote_upload=None, **kwargs):
 # Wrap shutdown so the active-session guard in clean_logs() clears once the
 # logs are flushed and closed.
 _original_shutdown = shutdown
+_original_system_start = system_start
+_original_system_stop = system_stop
 
 def shutdown():
-    """Stop the runtime, flush and close all log files."""
+    """Stop the runtime, flush and close all log files.
+
+    No-op when gpufl is disabled (init was called with ``enabled=False``
+    or the ``GPUFL_DISABLED`` env var was set).
+    """
     global _session_active
+    if _disabled:
+        return None
     try:
         return _original_shutdown()
     finally:
         _session_active = False
+
+
+def system_start(name="system"):
+    """Start a system-monitoring scope. No-op when gpufl is disabled."""
+    if _disabled:
+        return None
+    return _original_system_start(name)
+
+
+def system_stop(name="system"):
+    """Stop a system-monitoring scope. No-op when gpufl is disabled."""
+    if _disabled:
+        return None
+    return _original_system_stop(name)
 
 
 # ── upload_logs: deferred bulk upload to the backend ────────────────────────
@@ -425,7 +522,15 @@ def upload_logs(*, log_path=None, backend_url=None, api_key=None,
     Returns:
         UploadResult with .success / .events_uploaded / .warnings / etc.
         Never raises on network errors — inspect .success.
+
+    When gpufl is disabled, returns an empty upload-result stand-in
+    (``_NoopUploadResult``) with the same field shape as the real
+    :class:`UploadResult` — ``success=True``, ``events_uploaded=0``, a
+    single warning explaining why. No network calls, no disk I/O. Safe
+    to call even when ``gpufl.init()`` was never called this process.
     """
+    if _disabled:
+        return _NoopUploadResult()
     if not log_path:
         log_path = _last_log_path
     if not log_path:
@@ -586,6 +691,11 @@ class Scope:
 
     # --- context-manager protocol (backward compatible) ---
     def __enter__(self):
+        # Disabled mode: skip the C++ scope so we don't touch the
+        # uninitialised runtime. `with gpufl.Scope(...):` still works,
+        # just instrumentation-free.
+        if _disabled:
+            return self
         self._inner = _CScope(self._name, self._tag)
         self._inner.__enter__()
         return self
@@ -609,6 +719,15 @@ class Scope:
         return self._iterate()
 
     def _iterate(self):
+        # Disabled mode: iterate the same warmup-then-measured indices
+        # the caller's benchmark loop expects, but skip the C++ scopes
+        # entirely. Same yield contract → caller code is unchanged.
+        if _disabled:
+            for w in range(self._warmup):
+                yield w - self._warmup
+            for i in range(self._repeat):
+                yield i
+            return
         # Warmup: open a "<name>_warmup" sub-scope so the kernel events
         # emitted during warmup are attributed to a separately
         # identifiable bucket — same convention as the C++ BenchInvoker,
