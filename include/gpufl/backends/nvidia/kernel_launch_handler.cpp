@@ -170,36 +170,33 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
         LaunchMeta meta{};
         meta.api_enter_ns = detail::GetTimestampNs();
 
-        // Pick the safest available name pointer.
+        // Always use cbInfo->functionName for the callback-path name.
         //
-        // cbInfo->symbolName is supposed to be the kernel symbol name,
-        // but on CUDA 13.1 it has been observed to point to unmapped
-        // memory during PyTorch autograd backward callbacks (RTX 3090
-        // / Linux). The strnlen guard inside cachedDemangle isn't
-        // enough — strnlen itself segfaults on the bad pointer (frame 0
-        // = __strnlen_avx2 in the gdb backtrace). So we have to reject
-        // the pointer BEFORE handing it off.
+        // Background: cbInfo->symbolName was the obvious choice (it's
+        // documented as the kernel's symbol name), but on CUDA 13.1
+        // CUPTI populates that field with non-pointer values for some
+        // launch callbacks — e.g. 0x8000000001 (high bit + low bit
+        // set, clearly a tagged value or internal handle, not an
+        // address). Reading it as a pointer segfaults. An earlier
+        // address-range heuristic (reject pointers below 0x10000)
+        // worked on hardware where the garbage was zero-shaped but
+        // missed the high-bit-tagged variant — we can't reliably
+        // detect "is this a real pointer" from the value alone
+        // without a mincore() check or SIGSEGV-handler probe, both of
+        // which add complexity for marginal benefit.
         //
-        // Heuristic: pointers in the bottom 64 KiB of the address space
-        // are unmapped on Linux (the kernel reserves that range for
-        // catching null-deref bugs). A pointer that low is uninitialized
-        // garbage from CUPTI, not a real symbol. Pointers higher up
-        // can still be freed-heap and crash — those rare cases are
-        // caught by the try/catch + bounded strnlen in cachedDemangle.
-        //
-        // cbInfo->functionName is the CUDA API name (e.g.
-        // "cudaLaunchKernel") and is always reliable; the real kernel
-        // name still arrives later via the activity record path
-        // (k->name in onActivityRecord), which overwrites meta.name
-        // with the correct value before the kernel record ships. So
-        // the worst case here is "meta.name is the API name for a few
-        // milliseconds between callback and activity-record arrival" —
-        // not a data-loss bug.
+        // cbInfo->functionName is always the CUDA API name (literal
+        // string constant in libcupti.so's read-only data, e.g.
+        // "cudaLaunchKernel" / "cuLaunchKernel"), so it's safe on
+        // every CUDA version. The trade-off: meta.name shows the
+        // API name instead of the kernel symbol for a brief window
+        // between the launch callback and the corresponding
+        // CUpti_ActivityKernel record arriving. onActivityRecord (see
+        // below in this file) overwrites meta.name with the real
+        // kernel name from k->name before any record ships. So the
+        // user-visible output is unchanged; only the in-flight
+        // meta_by_corr_ entry briefly carries the API name.
         const char* nm = cbInfo->functionName;
-        if (cbInfo->symbolName &&
-            reinterpret_cast<uintptr_t>(cbInfo->symbolName) >= 0x10000) {
-            nm = cbInfo->symbolName;
-        }
         const std::string& demangledName = cachedDemangle(nm);
         std::snprintf(meta.name, sizeof(meta.name), "%s", demangledName.c_str());
 
