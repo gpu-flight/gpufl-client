@@ -5,6 +5,7 @@
 # Correct order: framework first, then profiler.
 import os
 import time
+import json
 import torch       # load framework (and its CUPTI) before gpufl
 import gpufl       # now gpufl's CUPTI loads into an already-initialized CUDA ctx
 import gpufl.torch
@@ -46,7 +47,7 @@ def run_stress_test():
                enable_cuda_graphs_tracking=True,
                api_key=api_key,
                backend_url=backend_url,
-               profiling_engine=gpufl.ProfilingEngine.PcSamplingWithSass)
+               profiling_engine=gpufl.ProfilingEngine.None_)
 
     try:
         # 2. Allocate (Uses approx 3GB VRAM)
@@ -67,7 +68,6 @@ def run_stress_test():
         # 3. Heavy Compute Loop
         iterations = 50
         print(f"Starting {iterations} iterations of Matrix Multiplication...")
-        print("This should take about 5-10 seconds. Check Task Manager!")
 
         # NOTE: gpufl.torch.attach() above already pushes CUPTI external
         # correlation IDs around every aten dispatch (see
@@ -151,6 +151,10 @@ def run_stress_test():
             )
             print(f"[GPUFL] Upload: {'OK' if r.success else 'FAILED'} — "
                   f"{r.events_uploaded} events in {r.elapsed_ms/1000:.1f}s")
+
+            for sid in r.spool_ids:
+                print(f"  spool_id: {sid}")
+
             for w in r.warnings:
                 print(f"  WARN: {w}")
 

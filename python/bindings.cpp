@@ -225,6 +225,11 @@ PYBIND11_MODULE(_gpufl_client, m) {
         .def_readonly("bytes_uploaded",          &gpufl::UploadResult::bytes_uploaded)
         .def_readonly("elapsed_ms",              &gpufl::UploadResult::elapsed_ms)
         .def_readonly("warnings",                &gpufl::UploadResult::warnings)
+        // Phase 3a: async-accept backends return one spool_id per
+        // chunk. The CLI doesn't print these by default — they're
+        // operator-debugging cookies — but exposing on the Python
+        // class lets a notebook user or test harness inspect them.
+        .def_readonly("spool_ids",               &gpufl::UploadResult::spool_ids)
         .def("__repr__", [](const gpufl::UploadResult& r) {
             std::ostringstream o;
             o << "<UploadResult success=" << (r.success ? "True" : "False")
@@ -232,6 +237,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
               << " bytes=" << r.bytes_uploaded
               << " files=" << r.files_processed
               << " warnings=" << r.warnings.size()
+              << " spool_ids=" << r.spool_ids.size()
               << " elapsed_ms=" << r.elapsed_ms << ">";
             return o.str();
         });
