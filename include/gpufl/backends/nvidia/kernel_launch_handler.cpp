@@ -2,6 +2,7 @@
 
 #include <algorithm>  // std::min(initializer_list) — see occupancy calc below
 #include <cstdio>
+#include <cstring>    // strnlen — bounded read in cachedDemangle
 #include <iterator>   // std::begin / std::end on the user_scope C-array
 #include <set>
 
@@ -24,15 +25,40 @@ KernelLaunchHandler::KernelLaunchHandler(CuptiBackend* backend)
     : backend_(backend) {}
 
 const std::string& KernelLaunchHandler::cachedDemangle(const char* mangled) {
-    if (!mangled) {
-        static const std::string fallback = "kernel_launch";
-        return fallback;
-    }
+    static const std::string kFallback = "kernel_launch";
+    if (!mangled) return kFallback;
+
+    // Defensive bounded read. On CUDA 13.1 + PyTorch autograd's backward
+    // worker threads, a SEGV was observed deep inside cachedDemangle on
+    // an RTX 3090 — no DemangleName frame on the stack, which means the
+    // implicit `std::string(mangled)` construction in find()/emplace()
+    // crashed. That can happen if `cbInfo->symbolName` (or the activity
+    // record's `name` field) points to a buffer that isn't reliably
+    // null-terminated under some CUPTI codepath. strnlen short-circuits
+    // at kMaxNameLen so a non-null-terminated pointer reads at most one
+    // page of bogus memory instead of running off the end of mapping —
+    // and if it never finds a terminator we fall back to a known-safe
+    // string rather than letting std::string crash. PyTorch's longest
+    // mangled cuBLAS / cutlass names top out around 350 chars in
+    // practice; 4 KiB gives generous headroom.
+    constexpr size_t kMaxNameLen = 4096;
+    if (const size_t len = strnlen(mangled, kMaxNameLen);
+        len == 0 || len == kMaxNameLen) return kFallback;
+
     std::lock_guard lk(demangle_mu_);
-    auto it = demangle_cache_.find(mangled);
-    if (it != demangle_cache_.end()) return it->second;
-    auto [inserted, _] = demangle_cache_.emplace(mangled, DemangleName(mangled));
-    return inserted->second;
+    if (const auto it = demangle_cache_.find(mangled); it != demangle_cache_.end()) return it->second;
+    // Try-catch around the insert as belt-and-suspenders. If DemangleName
+    // itself throws (it shouldn't — abi::__cxa_demangle returns a status
+    // code and we check it — but defensive on platforms with unusual
+    // allocator behavior), we return the fallback rather than letting
+    // the exception unwind across a CUPTI callback boundary, which is
+    // undefined behavior in CUPTI's callback contract.
+    try {
+        auto [inserted, _] = demangle_cache_.emplace(mangled, DemangleName(mangled));
+        return inserted->second;
+    } catch (...) {
+        return kFallback;
+    }
 }
 
 std::vector<std::pair<CUpti_CallbackDomain, CUpti_CallbackId>>
