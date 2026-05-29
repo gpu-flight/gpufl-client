@@ -119,7 +119,16 @@ PYBIND11_MODULE(_gpufl_client, m) {
         // gpufl.hpp. Field is a no-op at the C++ level; the Python
         // wrapper around init() turns remote_upload=True into an
         // atexit-scheduled upload_logs() call for backward compat.
-        .def_readwrite("remote_upload",         &gpufl::InitOptions::remote_upload);
+        .def_readwrite("remote_upload",         &gpufl::InitOptions::remote_upload)
+        // Global kill switch — when false, gpufl::init returns false
+        // immediately and every downstream call is a no-op via the
+        // null-runtime guards. The high-level Python wrapper
+        // (python/gpufl/__init__.py) also exposes this as the `enabled`
+        // kwarg on its init() and short-circuits in Python before this
+        // binding is even called. Exposing the field here keeps the raw
+        // InitOptions surface consistent for callers who construct
+        // InitOptions directly and call init(opts).
+        .def_readwrite("enabled",               &gpufl::InitOptions::enabled);
 
     // Function-style init(). Every C++ InitOptions field that's user-facing
     // is surfaced as a keyword argument here so callers don't have to

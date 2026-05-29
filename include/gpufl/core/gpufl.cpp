@@ -1,6 +1,8 @@
 #include "gpufl.hpp"
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -209,7 +211,45 @@ static uint64_t nextScopeId_() {
     return g_nextScopeId.fetch_add(1, std::memory_order_relaxed);
 }
 
+namespace {
+
+// True if GPUFL_DISABLED env var is set to a truthy value. Mirrors the
+// Python wrapper's vocabulary (`1`/`true`/`yes`/`on`, case-insensitive)
+// so the two layers stay interchangeable. Empty / unset / anything else
+// → false.
+bool envDisabled_() {
+    const char* v = std::getenv("GPUFL_DISABLED");
+    if (!v) return false;
+    std::string s(v);
+    // Trim ASCII whitespace.
+    auto notWs = [](unsigned char c){ return !std::isspace(c); };
+    s.erase(s.begin(), std::find_if(s.begin(), s.end(), notWs));
+    s.erase(std::find_if(s.rbegin(), s.rend(), notWs).base(), s.end());
+    // Lower-case.
+    for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s == "1" || s == "true" || s == "yes" || s == "on";
+}
+
+}  // namespace
+
 bool init(const InitOptions& opts) {
+    // ── Disable kill switch ─────────────────────────────────────────────
+    // Env var wins over the InitOptions field — it's the "force off
+    // without editing code" knob. When disabled, we return immediately
+    // BEFORE allocating anything: no Runtime, no Monitor, no logger, no
+    // version-probe thread. Every other public entry point already
+    // short-circuits when `runtime() == nullptr` (gpufl::shutdown,
+    // systemStart/Stop, ScopedMonitor::init_/~ScopedMonitor), so the
+    // disabled state cascades for free — no per-call-site checks needed.
+    if (envDisabled_() || !opts.enabled) {
+        // Keep g_opts at defaults so any caller reading it post-init
+        // (rare — most paths gate on `runtime()` first) sees a clean
+        // disabled-state shape.
+        g_opts = InitOptions{};
+        g_opts.enabled = false;
+        return false;
+    }
+
     g_opts = opts;
 
     // Read config file early — before anything uses the options
