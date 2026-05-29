@@ -34,6 +34,7 @@ add_executable(check_device check_device.cu)
 add_executable(cupti_pc_sampling cupti_pc_sampling.cu)
 add_executable(list_sass_metrics list_sass_metrics.cu)
 add_executable(vector_add_benchmark vector_add_benchmark.cu)
+add_executable(manykernel_benchmark manykernel_benchmark.cu)
 add_executable(cupti_basic cupti_basic.cu)
 add_executable(occupancy_demo occupancy_demo.cu)
 add_executable(sass_divergence_demo sass_divergence_demo.cu)
@@ -103,6 +104,12 @@ target_link_libraries(vector_add_benchmark PRIVATE
         CUDA::cupti
 )
 
+target_link_libraries(manykernel_benchmark PRIVATE
+        CUDA::cudart
+        gpufl::gpufl
+        CUDA::cupti
+)
+
 
 target_compile_options(cupti_basic PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:
@@ -164,6 +171,9 @@ set_target_properties(list_sass_metrics PROPERTIES
 )
 
 set_target_properties(vector_add_benchmark PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+)
+set_target_properties(manykernel_benchmark PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
 )
 set_target_properties(occupancy_demo PROPERTIES
@@ -235,7 +245,7 @@ if (WIN32)
                 "${CUPTI_DLL_DIR}/nvperf_host*.dll"
                 "${CUPTI_DLL_DIR}/nvperf_target*.dll")
 
-        foreach (TARGET_NAME test_occupancy system_monitor gfl_block_example cupti_pc_sampling list_sass_metrics vector_add_benchmark occupancy_demo sass_divergence_demo)
+        foreach (TARGET_NAME test_occupancy system_monitor gfl_block_example cupti_pc_sampling list_sass_metrics vector_add_benchmark manykernel_benchmark occupancy_demo sass_divergence_demo)
             add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
                     COMMAND ${CMAKE_COMMAND} -E copy_if_different
                     "${CUPTI_DLL_TO_COPY}"

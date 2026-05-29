@@ -2,6 +2,7 @@
 
 #include <algorithm>  // std::min(initializer_list) — see occupancy calc below
 #include <cstdio>
+#include <cstring>    // strnlen — bounded read in cachedDemangle
 #include <iterator>   // std::begin / std::end on the user_scope C-array
 #include <set>
 
@@ -24,15 +25,40 @@ KernelLaunchHandler::KernelLaunchHandler(CuptiBackend* backend)
     : backend_(backend) {}
 
 const std::string& KernelLaunchHandler::cachedDemangle(const char* mangled) {
-    if (!mangled) {
-        static const std::string fallback = "kernel_launch";
-        return fallback;
-    }
+    static const std::string kFallback = "kernel_launch";
+    if (!mangled) return kFallback;
+
+    // Defensive bounded read. On CUDA 13.1 + PyTorch autograd's backward
+    // worker threads, a SEGV was observed deep inside cachedDemangle on
+    // an RTX 3090 — no DemangleName frame on the stack, which means the
+    // implicit `std::string(mangled)` construction in find()/emplace()
+    // crashed. That can happen if `cbInfo->symbolName` (or the activity
+    // record's `name` field) points to a buffer that isn't reliably
+    // null-terminated under some CUPTI codepath. strnlen short-circuits
+    // at kMaxNameLen so a non-null-terminated pointer reads at most one
+    // page of bogus memory instead of running off the end of mapping —
+    // and if it never finds a terminator we fall back to a known-safe
+    // string rather than letting std::string crash. PyTorch's longest
+    // mangled cuBLAS / cutlass names top out around 350 chars in
+    // practice; 4 KiB gives generous headroom.
+    constexpr size_t kMaxNameLen = 4096;
+    if (const size_t len = strnlen(mangled, kMaxNameLen);
+        len == 0 || len == kMaxNameLen) return kFallback;
+
     std::lock_guard lk(demangle_mu_);
-    auto it = demangle_cache_.find(mangled);
-    if (it != demangle_cache_.end()) return it->second;
-    auto [inserted, _] = demangle_cache_.emplace(mangled, DemangleName(mangled));
-    return inserted->second;
+    if (const auto it = demangle_cache_.find(mangled); it != demangle_cache_.end()) return it->second;
+    // Try-catch around the insert as belt-and-suspenders. If DemangleName
+    // itself throws (it shouldn't — abi::__cxa_demangle returns a status
+    // code and we check it — but defensive on platforms with unusual
+    // allocator behavior), we return the fallback rather than letting
+    // the exception unwind across a CUPTI callback boundary, which is
+    // undefined behavior in CUPTI's callback contract.
+    try {
+        auto [inserted, _] = demangle_cache_.emplace(mangled, DemangleName(mangled));
+        return inserted->second;
+    } catch (...) {
+        return kFallback;
+    }
 }
 
 std::vector<std::pair<CUpti_CallbackDomain, CUpti_CallbackId>>
@@ -144,8 +170,33 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
         LaunchMeta meta{};
         meta.api_enter_ns = detail::GetTimestampNs();
 
-        const char* nm =
-            cbInfo->symbolName ? cbInfo->symbolName : cbInfo->functionName;
+        // Always use cbInfo->functionName for the callback-path name.
+        //
+        // Background: cbInfo->symbolName was the obvious choice (it's
+        // documented as the kernel's symbol name), but on CUDA 13.1
+        // CUPTI populates that field with non-pointer values for some
+        // launch callbacks — e.g. 0x8000000001 (high bit + low bit
+        // set, clearly a tagged value or internal handle, not an
+        // address). Reading it as a pointer segfaults. An earlier
+        // address-range heuristic (reject pointers below 0x10000)
+        // worked on hardware where the garbage was zero-shaped but
+        // missed the high-bit-tagged variant — we can't reliably
+        // detect "is this a real pointer" from the value alone
+        // without a mincore() check or SIGSEGV-handler probe, both of
+        // which add complexity for marginal benefit.
+        //
+        // cbInfo->functionName is always the CUDA API name (literal
+        // string constant in libcupti.so's read-only data, e.g.
+        // "cudaLaunchKernel" / "cuLaunchKernel"), so it's safe on
+        // every CUDA version. The trade-off: meta.name shows the
+        // API name instead of the kernel symbol for a brief window
+        // between the launch callback and the corresponding
+        // CUpti_ActivityKernel record arriving. onActivityRecord (see
+        // below in this file) overwrites meta.name with the real
+        // kernel name from k->name before any record ships. So the
+        // user-visible output is unchanged; only the in-flight
+        // meta_by_corr_ entry briefly carries the API name.
+        const char* nm = cbInfo->functionName;
         const std::string& demangledName = cachedDemangle(nm);
         std::snprintf(meta.name, sizeof(meta.name), "%s", demangledName.c_str());
 

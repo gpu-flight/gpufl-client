@@ -40,6 +40,17 @@ class SassMetricsEngine final : public IProfilingEngine {
    private:
     void EnableSassMetrics_();
     void StopAndCollectSassMetrics_();
+    /**
+     * Undo cuptiProfilerInitialize if start() got that far before
+     * SASS metric setup failed (e.g. cuptiSassMetricsGetProperties
+     * returning INVALID_PARAMETER on a Blackwell laptop). Leaving the
+     * profiler in the "initialized" state after a partial SASS setup
+     * permanently disables CUPTI's PC Sampling API for the rest of the
+     * session, causing PcSamplingWithSass to hang on the next sample
+     * drain. Idempotent — safe to call when never initialized or after
+     * already deinited.
+     */
+    void DeInitProfilerIfNeeded_();
 
     struct SassMetricsBuffers {
         CUpti_SassMetrics_Config* config    = nullptr;
@@ -56,6 +67,11 @@ class SassMetricsEngine final : public IProfilingEngine {
     bool enabled_ = false;
     bool config_set_ = false;
     bool insufficient_privileges_ = false;
+    // True after cuptiProfilerInitialize() returned CUPTI_SUCCESS in
+    // start(). Drives DeInitProfilerIfNeeded_() so partial-setup
+    // failures don't leave CUPTI in a state that hangs PC Sampling
+    // (see DeInitProfilerIfNeeded_ doc).
+    bool profiler_initialized_ = false;
 };
 
 }  // namespace gpufl

@@ -33,6 +33,16 @@ FileLogSink::FileChannel::FileChannel(std::string name, Logger::Options opt)
     if (!opt_.base_path.empty() && !opt_.session_id.empty()) {
         opened_ = true;
         ensureOpenLocked();
+        // ensureOpenLocked logs the real fs error and bails on failure
+        // (e.g. EACCES from a Docker volume mount whose existing
+        // contents belong to a different UID). Reflect that failure in
+        // opened_ so subsequent write() calls short-circuit and so
+        // FileLogSink::anyChannelOpen() can report the truth up to
+        // Logger::open() → gpufl::init(). Without this flip, init()
+        // returned true with a sink that silently dropped every event.
+        if (!stream_.is_open()) {
+            opened_ = false;
+        }
     } else if (!opt_.base_path.empty()) {
         GFL_LOG_ERROR("FileLogSink: session_id is required (got empty). "
                       "Channel '", name_, "' will not be opened.");
@@ -78,10 +88,35 @@ void FileLogSink::FileChannel::ensureOpenLocked() {
     if (p.has_parent_path()) {
         std::error_code ec;
         fs::create_directories(p.parent_path(), ec);
+        // Surface the actual fs error. The most common failure here
+        // is EACCES on a pre-existing log_path mounted from the host
+        // (or carried over from a prior container image build) whose
+        // contents are owned by a UID the current container can't
+        // write to. Without this message, init() either crashed
+        // downstream or silently dropped every event with no clue
+        // why. Return early so we don't immediately try to open() a
+        // file in a directory we know doesn't exist.
+        if (ec) {
+            GFL_LOG_ERROR(
+                "Failed to create log directory '",
+                p.parent_path().string(), "' for channel '", name_,
+                "': ", ec.message(), " (error code ", ec.value(), "). ",
+                "Common causes: directory exists with restrictive "
+                "permissions (e.g. a Docker volume mount from a "
+                "previous container image — chown the path to the "
+                "current container's UID, or delete the directory "
+                "and let gpufl recreate it), read-only filesystem, "
+                "out of inodes.");
+            return;
+        }
     }
     stream_.open(p, std::ios::out | std::ios::app);
     if (!stream_.good()) {
-        GFL_LOG_ERROR("Failed to open log file: ", p.string());
+        GFL_LOG_ERROR(
+            "Failed to open log file '", p.string(), "' for channel '",
+            name_, "': ofstream not in a good state after open(). ",
+            "Check that the parent directory exists and is writable "
+            "by the current process UID.");
     } else {
         std::error_code ec;
         current_bytes_ = fs::exists(p, ec) ? fs::file_size(p, ec) : 0;
@@ -119,14 +154,30 @@ void FileLogSink::FileChannel::write(std::string_view line) {
             return;
         }
     }
-    // Write line + newline, then flush so the agent's LogTailer never
-    // observes a partial (mid-record) line. Without this, the tailer can
-    // call readLine() on a buffered-but-unflushed write, get a truncated
-    // JSON, and Jackson throws FAIL_ON_TRAILING_TOKENS errors.
+    // Write line + newline. Per-write flush is gated behind
+    // Options::flush_always (wired from InitOptions::flush_logs_always)
+    // because it's a real syscall in the hot path and matters under
+    // high event volume — SASS-heavy PyTorch sessions can push tens of
+    // thousands of batched lines per second across channels, at which
+    // point the fsync cost dominates.
+    //
+    // When OFF (default): rely on libc's ofstream buffer (~4 KiB) +
+    // OS page cache. Rotation (rotateLocked, above) and shutdown
+    // (closeLocked) explicitly flush, so the .log → .log.gz pipeline
+    // and the uploader's lazy crash-repair path both still see complete
+    // data. Worst case on SIGKILL: a few buffered NDJSON lines lost —
+    // acceptable for profiling data.
+    //
+    // When ON: flush at every line boundary so a live tailer (the agent's
+    // LogTailer in the Phase 4 live-push design) never observes a
+    // partial mid-record line. Without this, the tailer's readLine() can
+    // hit a buffered-but-unflushed write, get truncated JSON, and Jackson
+    // throws FAIL_ON_TRAILING_TOKENS errors.
     stream_.write(line.data(), static_cast<std::streamsize>(line.size()));
     stream_.put('\n');
-    stream_.flush();  // Always flush at line boundary — writes are already
-                      // rare (one per batched event), cost is negligible.
+    if (opt_.flush_always) {
+        stream_.flush();
+    }
     current_bytes_ += bytesToWrite;
 }
 
@@ -140,6 +191,12 @@ FileLogSink::FileLogSink(const Logger::Options& opt) {
 }
 
 FileLogSink::~FileLogSink() { close(); }
+
+bool FileLogSink::anyChannelOpen() const {
+    return (chanDevice_ && chanDevice_->isOpen()) ||
+           (chanScope_  && chanScope_->isOpen())  ||
+           (chanSystem_ && chanSystem_->isOpen());
+}
 
 void FileLogSink::close() {
     if (chanDevice_) chanDevice_->close();

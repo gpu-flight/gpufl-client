@@ -274,6 +274,21 @@ void CuptiBackend::shutdown() {
         engine_.reset();
     }
 
+    // Belt-and-suspenders final drain. stop() already disabled all
+    // activity kinds and flushed, but engine teardown above can emit a
+    // last burst (e.g. PcSamplingEngine::shutdown's StopAndCollectPcSampling_
+    // collection). Disabling SOURCE_LOCATOR explicitly here matches
+    // what start() enables for the SamplingAPI path. The final flush
+    // guarantees every BufferCompleted callback has returned before
+    // we null g_activeBackend below — without this, late deliveries
+    // raced the pointer-clear and surfaced as "No active backend!"
+    // noise on benchmarks that init/shutdown gpufl repeatedly in a
+    // single process (run_benchmark.py).
+    cuptiActivityDisable(CUPTI_ACTIVITY_KIND_SOURCE_LOCATOR);
+    cudaDeviceSynchronize();
+    LogCuptiIfUnexpected("shutdown", "cuptiActivityFlushAll(final)",
+                         cuptiActivityFlushAll(1));
+
     cuptiUnsubscribe(subscriber_);
     g_activeBackend.store(nullptr, std::memory_order_release);
     initialized_ = false;
@@ -664,11 +679,22 @@ void CuptiBackend::stop() {
     // returns zero kernel records on driver 590+.
     if (engine_) engine_->stop();
 
-    cudaDeviceSynchronize();
-    LogCuptiIfUnexpected("Perfworks", "cuptiActivityFlushAll",
-                         cuptiActivityFlushAll(1));
-    FlushPendingKernels();
-
+    // Disable all activity kinds FIRST, before the flush. The previous
+    // order (sync → flush → disable) left activity tracking enabled
+    // during the flush, so new records could be queued by the GPU
+    // while we were draining. Those new records then arrived AFTER
+    // shutdown() had cleared g_activeBackend, firing the noisy
+    // "[CUPTI] BufferCompleted: No active backend!" log and (worse)
+    // leaking activity into the next session's measurement on
+    // benchmarks that init/shutdown gpufl repeatedly in one process —
+    // run_benchmark.py's GEMM→PyTorch transition is the canonical
+    // case where this surfaced (RTX 3090 + Linux). Disabling first
+    // closes the queue so the subsequent flush truly drains
+    // everything pending.
+    //
+    // Already-queued records are NOT dropped by cuptiActivityDisable;
+    // they still come back through BufferCompleted during the flush
+    // below. So we don't lose any data by disabling first.
     {
         std::set<CUpti_ActivityKind> kinds;
         {
@@ -679,30 +705,32 @@ void CuptiBackend::stop() {
         for (auto k : kinds) cuptiActivityDisable(k);
     }
 
-    // disable + clear external-correlation state so a subsequent
-    // session in the same process starts fresh. cuptiActivityDisable on
-    // an unsupported kind is a no-op, so this is safe even when the
-    // earlier enable in start() soft-failed. We disable RUNTIME +
-    // DRIVER too because they were enabled solely as anchors for
-    // external correlation (no other consumer in the codebase relies
-    // on those activity kinds).
+    // Matching tear-down of the same anchor / supplementary kinds
+    // start() enables. Same disable-before-flush rationale — keeps
+    // the activity queue fully closed before drain.
     if (opts_.enable_external_correlation) {
         cuptiActivityDisable(CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION);
         cuptiActivityDisable(CUPTI_ACTIVITY_KIND_RUNTIME);
         cuptiActivityDisable(CUPTI_ACTIVITY_KIND_DRIVER);
     }
-    // Matching tear-down for sync events.
     if (opts_.enable_synchronization) {
         cuptiActivityDisable(CUPTI_ACTIVITY_KIND_SYNCHRONIZATION);
     }
-    // Matching tear-down for memory events.
     if (opts_.enable_memory_tracking) {
         cuptiActivityDisable(CUPTI_ACTIVITY_KIND_MEMORY2);
     }
-    // Matching tear-down for graph launches.
     if (opts_.enable_cuda_graphs_tracking) {
         cuptiActivityDisable(CUPTI_ACTIVITY_KIND_GRAPH_TRACE);
     }
+
+    // Now drain. cuda sync first so any in-flight kernel finishes and
+    // emits its end record; flush then blocks until every BufferCompleted
+    // callback has returned. With kinds disabled above, no new records
+    // can sneak into the queue during this window.
+    cudaDeviceSynchronize();
+    LogCuptiIfUnexpected("Perfworks", "cuptiActivityFlushAll",
+                         cuptiActivityFlushAll(1));
+    FlushPendingKernels();
     {
         std::lock_guard<std::mutex> lk(g_extCorrMu);
         g_extCorrMap.clear();

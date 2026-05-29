@@ -23,16 +23,18 @@ class DebugLogger {
 
     template <typename... Args>
     static void error(const char* prefix, Args&&... args) {
-        // Errors might be shown even if debug is off?
-        // The issue says "so many if statements like
-        // backend->GetOptions().enable_debug_output then print out the logs" So
-        // I should probably stick to what it was doing.
-        if (isEnabled()) {
-            std::stringstream ss;
-            ss << prefix;
-            (ss << ... << std::forward<Args>(args));
-            std::cerr << ss.str() << std::endl;
-        }
+        // Errors ALWAYS print, regardless of the debug-output flag.
+        // The earlier behavior (gated on isEnabled()) silenced
+        // legitimate failure diagnostics from init() / FileLogSink /
+        // CUPTI, so users hit mysterious crashes (e.g. permission
+        // denied on a cross-container volume mount with stale UID
+        // ownership) with zero stderr output to diagnose from. Debug
+        // verbosity is a knob for normal-running noise; failures are
+        // not normal-running noise.
+        std::stringstream ss;
+        ss << prefix;
+        (ss << ... << std::forward<Args>(args));
+        std::cerr << ss.str() << std::endl;
     }
 };
 

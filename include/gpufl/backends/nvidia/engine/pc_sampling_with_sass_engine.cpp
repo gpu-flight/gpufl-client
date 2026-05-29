@@ -18,38 +18,46 @@ bool PcSamplingWithSassEngine::initialize(const MonitorOptions& opts,
 }
 
 void PcSamplingWithSassEngine::start() {
-    // Start SASS first — cuptiSassMetricsEnable() patches loaded modules.
-    // Then start PC sampling — it must see already-patched cubins,
-    // otherwise both subsystems racing to patch on first kernel launch
-    // can deadlock.  The original deadlock was caused by periodic
-    // cuptiActivityFlushAll(0) from the collector thread (now removed),
-    // not by SASS + PC Sampling coexistence.
+    // SASS metrics (Profiler API) and PC Sampling API are mutually
+    // exclusive on current NVIDIA drivers (confirmed on Ampere sm_86
+    // and Blackwell sm_120; almost certainly the same on Hopper). The
+    // old design armed both, then tried to tear PC sampling down if
+    // SASS succeeded — but `cuptiPCSamplingDisable` itself is unsafe
+    // while another CUPTI API is initialized (see pc_sampling_engine
+    // comment around stop()), and on Ampere this teardown hangs
+    // indefinitely at the next flush (observed in
+    // example/cuda/manykernel_benchmark Deep-mode run, where the
+    // process froze after `[flushDisassembly] parsed 40 functions`).
+    //
+    // The safer pattern: try SASS first, and only arm PC sampling at
+    // all if SASS didn't succeed. No risky disable path because PC
+    // sampling was never armed alongside the Profiler API.
+    //
+    // Trade-off: Deep mode now provides SASS-only data when SASS works,
+    // and PC-sampling-only data when SASS doesn't. Users wanting both
+    // streams need to run two separate sessions until NVIDIA exposes
+    // a way to multiplex the underlying hardware counters.
     sass_->start();
     sass_ok_ = sass_->isEnabled();
-    pc_->start();
-    if (!sass_ok_) {
+
+    if (sass_ok_) {
+        // PcSamplingEngine::initialize() is CUPTI-free (just sets
+        // fields), so pc_ has touched no CUPTI state yet. Dropping it
+        // here is clean — no disable / unsubscribe needed.
         GFL_LOG_DEBUG(
-            "[PcSamplingWithSass] SASS metrics failed to enable — "
-            "falling back to PC sampling only.");
-    } else if (pc_->isSamplingAPI()) {
-        // SamplingAPI PC sampling is mutually exclusive with the Profiler
-        // API (SASS metrics) on many driver versions.  Any CUPTI call
-        // after cuptiPCSamplingEnable (getData, Disable, FlushAll) can
-        // permanently kill the subscriber callback, silently dropping all
-        // kernel launch events for subsequent scopes.  Skip PC sampling
-        // scope handling when SASS metrics are active — SASS metrics are
-        // the higher-value data source in PcSamplingWithSass mode.
-        skip_pc_scope_ = true;
-        GFL_LOG_DEBUG(
-            "[PcSamplingWithSass] SASS active + SamplingAPI — "
-            "disabling per-scope PC sampling (Profiler API conflict).");
+            "[PcSamplingWithSass] SASS active — skipping PC sampling "
+            "(mutually exclusive with Profiler API). Deep mode provides "
+            "SASS metrics only for this session.");
+        pc_.reset();
     } else {
-        GFL_LOG_DEBUG("[PcSamplingWithSass] Both PC sampling and SASS metrics active.");
+        pc_->start();
+        GFL_LOG_DEBUG(
+            "[PcSamplingWithSass] SASS unavailable — running PC sampling only.");
     }
 }
 
 void PcSamplingWithSassEngine::stop() {
-    pc_->stop();
+    if (pc_) pc_->stop();
     // SASS needs a final drain at stop — onScopeStop is the normal
     // per-scope drain trigger, but workloads that don't wrap kernels
     // in scopes (e.g. PyTorch training loops without a surrounding
@@ -62,7 +70,7 @@ void PcSamplingWithSassEngine::stop() {
 }
 
 void PcSamplingWithSassEngine::shutdown() {
-    pc_->shutdown();
+    if (pc_) pc_->shutdown();
     // Belt-and-suspenders: SassMetricsEngine::shutdown() also drains
     // before disabling CUPTI, so a teardown path that skips stop()
     // (or one where stop()'s drain was a no-op because the engine
@@ -71,11 +79,11 @@ void PcSamplingWithSassEngine::shutdown() {
 }
 
 void PcSamplingWithSassEngine::onScopeStart(const char* name) {
-    if (!skip_pc_scope_) pc_->onScopeStart(name);
+    if (pc_ && !skip_pc_scope_) pc_->onScopeStart(name);
 }
 
 void PcSamplingWithSassEngine::onScopeStop(const char* name) {
-    if (!skip_pc_scope_) pc_->onScopeStop(name);
+    if (pc_ && !skip_pc_scope_) pc_->onScopeStop(name);
     if (sass_ok_) sass_->onScopeStop(name);
 }
 
