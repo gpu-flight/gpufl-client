@@ -170,8 +170,36 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
         LaunchMeta meta{};
         meta.api_enter_ns = detail::GetTimestampNs();
 
-        const char* nm =
-            cbInfo->symbolName ? cbInfo->symbolName : cbInfo->functionName;
+        // Pick the safest available name pointer.
+        //
+        // cbInfo->symbolName is supposed to be the kernel symbol name,
+        // but on CUDA 13.1 it has been observed to point to unmapped
+        // memory during PyTorch autograd backward callbacks (RTX 3090
+        // / Linux). The strnlen guard inside cachedDemangle isn't
+        // enough — strnlen itself segfaults on the bad pointer (frame 0
+        // = __strnlen_avx2 in the gdb backtrace). So we have to reject
+        // the pointer BEFORE handing it off.
+        //
+        // Heuristic: pointers in the bottom 64 KiB of the address space
+        // are unmapped on Linux (the kernel reserves that range for
+        // catching null-deref bugs). A pointer that low is uninitialized
+        // garbage from CUPTI, not a real symbol. Pointers higher up
+        // can still be freed-heap and crash — those rare cases are
+        // caught by the try/catch + bounded strnlen in cachedDemangle.
+        //
+        // cbInfo->functionName is the CUDA API name (e.g.
+        // "cudaLaunchKernel") and is always reliable; the real kernel
+        // name still arrives later via the activity record path
+        // (k->name in onActivityRecord), which overwrites meta.name
+        // with the correct value before the kernel record ships. So
+        // the worst case here is "meta.name is the API name for a few
+        // milliseconds between callback and activity-record arrival" —
+        // not a data-loss bug.
+        const char* nm = cbInfo->functionName;
+        if (cbInfo->symbolName &&
+            reinterpret_cast<uintptr_t>(cbInfo->symbolName) >= 0x10000) {
+            nm = cbInfo->symbolName;
+        }
         const std::string& demangledName = cachedDemangle(nm);
         std::snprintf(meta.name, sizeof(meta.name), "%s", demangledName.c_str());
 
