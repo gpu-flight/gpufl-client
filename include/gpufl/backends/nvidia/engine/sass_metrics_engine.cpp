@@ -201,37 +201,15 @@ void SassMetricsEngine::EnableSassMetrics_() {
         ctx_.chip_name = getChipName(ctx_.device_id);
     }
 
-    // Hardware blocklist for SASS. The combinations below have all
-    // been observed to either fail at init or hang during data
-    // collection in our codebase + current NVIDIA drivers:
-    //   - sm_86 (Ampere RTX 3090, Linux): cuptiSassMetricsSetConfig
-    //     returns CUPTI_ERROR_OUT_OF_MEMORY in some workloads, and
-    //     in others SASS data drain (StopAndCollectSassMetrics_)
-    //     hangs after [flushDisassembly] returns. Observed on the
-    //     manykernel_benchmark Deep run.
-    //   - sm_8x family in general (Ampere/Ada): the same Profiler-
-    //     API ↔ PC-Sampling-API mutual exclusivity that breaks Deep
-    //     mode on Blackwell. We prefer giving the user reliable PC
-    //     Sampling data over a fragile SASS path that hangs.
-    // Hopper (sm_90) is untested and intentionally not blocked yet.
-    // Blackwell (sm_120) has its own check below in the metric loop
-    // (partial-failure bailout); leave that path as-is.
-    // Caller (PcSamplingWithSassEngine) sees sass_->isEnabled() == false
-    // and falls back to PC-Sampling-only via the start() conditional.
-    {
-        ComputeCapability blockCc =
-            GetComputeCapability(static_cast<int>(ctx_.device_id));
-        if (blockCc.valid() && blockCc.major == 8) {
-            GFL_LOG_ERROR(
-                "[SassMetricsEngine] sm_", blockCc.major, blockCc.minor,
-                " (Ampere/Ada family) has been observed to hang or "
-                "OOM in CUPTI SASS data collection under our usage. "
-                "Skipping SASS entirely; Deep mode will degrade to "
-                "PC Sampling only this session.");
-            DeInitProfilerIfNeeded_();
-            return;
-        }
-    }
+    // (Note: an earlier blanket sm_8x blocklist was removed. SASS works
+    // on Ampere/Ada when it's not racing against PC Sampling — and the
+    // PcSamplingWithSassEngine start() change that arms SASS first and
+    // skips PC sampling when SASS succeeds eliminates that race. The
+    // remaining real-failure paths — cuptiProfilerInitialize failure,
+    // cuptiSassMetricsSetConfig OOM, the partial-failure bailout for
+    // Blackwell below — all call DeInitProfilerIfNeeded_ and return
+    // with isEnabled() == false, which the composite engine handles
+    // cleanly. No reason to blocklist Ampere preemptively.)
 
     metric_id_to_name_.clear();
     if (!sass_metrics_buffers_) {
