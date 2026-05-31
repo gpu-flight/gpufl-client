@@ -394,14 +394,16 @@ void CuptiBackend::shutdown() {
     // Belt-and-suspenders final drain. stop() already disabled all
     // activity kinds and flushed, but engine teardown above can emit a
     // last burst (e.g. PcSamplingEngine::shutdown's StopAndCollectPcSampling_
-    // collection). Disabling SOURCE_LOCATOR explicitly here matches
-    // what start() enables for the SamplingAPI path. The final flush
+    // collection). Disabling SOURCE_LOCATOR + FUNCTION here matches what
+    // PcSamplingEngine enables on the PC-sampling paths (no-op for engines
+    // that never enabled them). The final flush
     // guarantees every BufferCompleted callback has returned before
     // we null g_activeBackend below — without this, late deliveries
     // raced the pointer-clear and surfaced as "No active backend!"
     // noise on benchmarks that init/shutdown gpufl repeatedly in a
     // single process (run_benchmark.py).
     cuptiActivityDisable(CUPTI_ACTIVITY_KIND_SOURCE_LOCATOR);
+    cuptiActivityDisable(CUPTI_ACTIVITY_KIND_FUNCTION);
     cudaDeviceSynchronize();
     LogCuptiIfUnexpected("shutdown", "cuptiActivityFlushAll(final)",
                          cuptiActivityFlushAll(1));
@@ -421,10 +423,15 @@ void CuptiBackend::start() {
     kernel_activity_emitted_.store(0, std::memory_order_relaxed);
     kernel_activity_throttled_.store(0, std::memory_order_relaxed);
 
-    CUPTI_CHECK(cuptiActivityEnable(CUPTI_ACTIVITY_KIND_SOURCE_LOCATOR));
-    // FUNCTION records carry the function name indexed by functionId in
-    // CUpti_ActivityPCSampling3; needed for source correlation on ActivityAPI.
-    CUPTI_CHECK(cuptiActivityEnable(CUPTI_ACTIVITY_KIND_FUNCTION));
+    // SOURCE_LOCATOR + FUNCTION activity records feed only the Activity-API
+    // PC-sampling source-correlation maps (g_sourceLocatorMap /
+    // g_functionNameMap, read solely by the CUPTI_ACTIVITY_KIND_PC_SAMPLING
+    // handler). PcSamplingEngine now enables them on the path that consumes
+    // them (both on the ActivityAPI branch; SOURCE_LOCATOR also on the
+    // SamplingAPI branch), so engines that don't PC-sample — SassMetrics,
+    // RangeProfiler, Trace — no longer emit records nothing reads, and
+    // PcSampling stops enabling them when it falls back to the new SamplingAPI
+    // on CUDA 13.x.
     // MARKER records capture NVTX push/pop ranges. We enable this
     // unconditionally because:
     //   - GFL_SCOPE itself now emits NVTX ranges (see gpufl.cpp)
@@ -711,7 +718,7 @@ void CuptiBackend::start() {
     {
         std::set<CUpti_ActivityKind> kinds;
         {
-            std::lock_guard<std::mutex> lk(handler_mu_);
+            std::lock_guard lk(handler_mu_);
             for (const auto& h : handlers_)
                 for (auto k : h->requiredActivityKinds()) kinds.insert(k);
         }
@@ -815,7 +822,7 @@ void CuptiBackend::stop() {
     {
         std::set<CUpti_ActivityKind> kinds;
         {
-            std::lock_guard<std::mutex> lk(handler_mu_);
+            std::lock_guard lk(handler_mu_);
             for (const auto& h : handlers_)
                 for (auto k : h->requiredActivityKinds()) kinds.insert(k);
         }
@@ -849,7 +856,7 @@ void CuptiBackend::stop() {
                          cuptiActivityFlushAll(1));
     FlushPendingKernels();
     {
-        std::lock_guard<std::mutex> lk(g_extCorrMu);
+        std::lock_guard lk(g_extCorrMu);
         g_extCorrMap.clear();
     }
 

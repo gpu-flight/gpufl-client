@@ -157,6 +157,14 @@ void PcSamplingEngine::start() {
 
     if (pcRes == CUPTI_SUCCESS) {
         pc_sampling_method_ = Method::ActivityAPI;
+        // CUpti_ActivityPCSampling3 carries only sourceLocatorId + functionId,
+        // so the ActivityAPI sampler needs the SOURCE_LOCATOR and FUNCTION
+        // companion records to resolve file/line/function. These used to be
+        // enabled unconditionally in CuptiBackend::start(); they live here now
+        // so only the engine that consumes them turns them on
+        // (CuptiBackend::shutdown() disables both).
+        cuptiActivityEnable(CUPTI_ACTIVITY_KIND_SOURCE_LOCATOR);
+        cuptiActivityEnable(CUPTI_ACTIVITY_KIND_FUNCTION);
         GFL_LOG_DEBUG(
             "[PC Sampling] Using Activity API "
             "(CUPTI_ACTIVITY_KIND_PC_SAMPLING)");
