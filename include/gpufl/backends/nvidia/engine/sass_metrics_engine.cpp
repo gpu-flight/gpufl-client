@@ -5,7 +5,9 @@
 #include <cupti_profiler_target.h>
 #include <cupti_sass_metrics.h>
 
+#include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -70,6 +72,84 @@ void FreeCuptiCorrelationString(char* s) {
     std::free(s);
 #endif
 }
+
+// ── Device-architecture exclusion for SASS ───────────────────────────────
+// SASS metrics intermittently hang or fail on specific GPU architectures
+// (notably RTX 3090 / Ampere sm_86: cuptiSassMetricsSetConfig OUT_OF_MEMORY,
+// plus lazy-patch launch hangs that EAGER module loading does not always
+// cure). GPUFL_SASS_EXCLUDE_ARCHS turns SASS off for confirmed-bad
+// architectures WITHOUT a rebuild, so we can compare e.g. sm_86 vs sm_120
+// empirically and then exclude only what is actually broken.
+//
+// Syntax: comma-separated compute capabilities. Each entry is one of:
+//   "86"  / "8.6"  → exact match (major 8, minor 6)
+//   "120" / "12.0" → exact match (major 12, minor 0)
+//   "8"   / "8.x"  → whole generation (any sm_8x)
+// Default (env unset): use kDefaultSassExcludeArchs (empty = attempt on every
+// architecture). Setting the env var — even to "" — overrides the compiled
+// default, so an end user can clear a baked-in exclusion at runtime.
+constexpr const char* kDefaultSassExcludeArchs = "";
+
+// True if the trimmed token [begin, end) names the given compute capability.
+bool CcMatchesToken(const ComputeCapability& cc, const char* begin,
+                    const char* end) {
+    while (begin < end && std::isspace(static_cast<unsigned char>(*begin)))
+        ++begin;
+    while (end > begin && std::isspace(static_cast<unsigned char>(end[-1])))
+        --end;
+    if (begin >= end) return false;
+
+    const std::string tok(begin, end);
+    int wantMajor = -1;
+    int wantMinor = -1;
+    bool wholeGen = false;
+
+    const auto dot = tok.find('.');
+    if (dot != std::string::npos) {
+        wantMajor = std::atoi(tok.substr(0, dot).c_str());
+        const std::string m = tok.substr(dot + 1);
+        if (m.empty() || m == "x" || m == "X") {
+            wholeGen = true;
+        } else {
+            wantMinor = std::atoi(m.c_str());
+        }
+    } else {
+        // All-digit form. A single digit means the whole generation;
+        // otherwise the last digit is the minor and the rest is the major
+        // (so "86" → 8.6, "120" → 12.0).
+        for (const char c : tok)
+            if (c < '0' || c > '9') return false;
+        if (tok.size() == 1) {
+            wantMajor = tok[0] - '0';
+            wholeGen = true;
+        } else {
+            wantMinor = tok.back() - '0';
+            wantMajor = std::atoi(tok.substr(0, tok.size() - 1).c_str());
+        }
+    }
+
+    if (wantMajor < 0 || cc.major != wantMajor) return false;
+    return wholeGen || cc.minor == wantMinor;
+}
+
+// True if SASS is excluded on this GPU's architecture via the configured
+// exclusion list. Never excludes on an unknown architecture (don't
+// over-exclude when the capability query failed).
+bool ArchExcludedForSass(const ComputeCapability& cc) {
+    if (!cc.valid()) return false;
+    const char* env = std::getenv("GPUFL_SASS_EXCLUDE_ARCHS");
+    const char* list = env ? env : kDefaultSassExcludeArchs;
+    if (!list || !*list) return false;
+
+    for (const char* p = list; *p;) {
+        const char* comma = std::strchr(p, ',');
+        const char* end = comma ? comma : (p + std::strlen(p));
+        if (CcMatchesToken(cc, p, end)) return true;
+        if (!comma) break;
+        p = comma + 1;
+    }
+    return false;
+}
 }  // namespace
 
 bool SassMetricsEngine::initialize(const MonitorOptions& opts,
@@ -88,6 +168,41 @@ void SassMetricsEngine::start() {
         return;
     }
 
+    // Resolve the device id + chip name up front. cuptiGetDeviceId is a
+    // standalone query (it does NOT require the Profiler API), so it's safe
+    // to call before cuptiProfilerInitialize — and it lets the architecture
+    // gate below run BEFORE we touch any Profiler/SASS state on an excluded
+    // GPU. EnableSassMetrics_ repeats this guarded by chip_name.empty(), so
+    // it becomes a no-op there.
+    if (ctx_.chip_name.empty()) {
+        if (LogCuptiErrorIfFailed(
+                this->name(), "cuptiGetDeviceId",
+                cuptiGetDeviceId(ctx_.cuda_ctx, &ctx_.device_id))) {
+            return;
+        }
+        ctx_.chip_name = getChipName(ctx_.device_id);
+    }
+
+    // ── Device-architecture exclusion gate ───────────────────────────────
+    // Turn SASS off for architectures confirmed to hang/fail — e.g. run with
+    // GPUFL_SASS_EXCLUDE_ARCHS=86 for RTX 3090 / Ampere sm_86. This runs
+    // before cuptiProfilerInitialize, so an excluded GPU never enters the
+    // Profiler API / lazy-patching path at all. enabled_ stays false →
+    // standalone SassMetrics produces no data (use PcSampling instead) and
+    // Deep mode degrades to PC sampling (sass_->isEnabled() == false).
+    const ComputeCapability cc =
+        GetComputeCapability(static_cast<int>(ctx_.device_id));
+    if (ArchExcludedForSass(cc)) {
+        GFL_LOG_ERROR(
+            "[SassMetricsEngine] SASS metrics DISABLED on sm_", cc.major,
+            cc.minor,
+            " via GPUFL_SASS_EXCLUDE_ARCHS (this architecture is configured as "
+            "unsupported for SASS). Standalone SassMetrics produces no data — "
+            "use ProfilingEngine.PcSampling instead; Deep mode degrades to PC "
+            "sampling. Monitor / Trace / PcSampling are unaffected.");
+        return;
+    }
+
     // Initialize profiler device — required before SASS Metrics APIs.
     // Mark profiler_initialized_ on success so EnableSassMetrics_'s
     // failure paths can undo this via cuptiProfilerDeInitialize.
@@ -103,7 +218,25 @@ void SassMetricsEngine::start() {
             insufficient_privileges_ = true;
             GFL_LOG_ERROR(
                 "[SassMetricsEngine] Insufficient privileges for CUPTI "
-                "SASS metrics. Skipping SASS instrumentation.");
+                "SASS metrics. Enable GPU performance counter access or "
+                "run with elevated privileges. Skipping SASS; the session "
+                "continues with kernel-trace data only.");
+        } else {
+            // The Profiler API wants to initialize against a context that
+            // hasn't already loaded modules / run kernels. The #1 cause
+            // of this failure in framework apps (PyTorch, etc.) is calling
+            // gpufl.init() AFTER GPU work has started. Name that explicitly
+            // so users get an actionable fix instead of a raw CUPTI code.
+            GFL_LOG_ERROR(
+                "[SassMetricsEngine] cuptiProfilerInitialize failed (CUptiResult ",
+                static_cast<int>(initRes),
+                "). SASS / Deep mode cannot start. Two common causes: "
+                "(1) gpufl.init() was called AFTER CUDA work already "
+                "began — the CUPTI Profiler API must initialize against a "
+                "clean context, so call gpufl.init() BEFORE the first CUDA "
+                "kernel (right after `import torch`); (2) this GPU + driver "
+                "does not support CUPTI SASS metrics. Skipping SASS; "
+                "Monitor / Trace / PcSampling are unaffected.");
         }
         return;
     }
@@ -209,7 +342,10 @@ void SassMetricsEngine::EnableSassMetrics_() {
     // cuptiSassMetricsSetConfig OOM, the partial-failure bailout for
     // Blackwell below — all call DeInitProfilerIfNeeded_ and return
     // with isEnabled() == false, which the composite engine handles
-    // cleanly. No reason to blocklist Ampere preemptively.)
+    // cleanly. No reason to blocklist Ampere preemptively. An opt-in,
+    // per-architecture gate now lives at the top of start()
+    // (GPUFL_SASS_EXCLUDE_ARCHS) for architectures CONFIRMED broken; it
+    // defaults to empty, so nothing is excluded unless explicitly set.)
 
     metric_id_to_name_.clear();
     if (!sass_metrics_buffers_) {
@@ -355,7 +491,29 @@ void SassMetricsEngine::EnableSassMetrics_() {
         enabled_ = true;
     } else {
         LogCuptiErrorIfFailed(this->name(), "cuptiSassMetricsSetConfig", res);
-        GFL_LOG_ERROR("[SassMetricsEngine] Failed to enable SASS Metrics");
+        // OUT_OF_MEMORY here is the signature of a GPU/driver that can't
+        // allocate the SASS metric configuration — observed on Ampere
+        // (RTX 3090, sm_86). It is a hardware/driver limitation, NOT a
+        // late-init problem (cuptiProfilerInitialize already succeeded by
+        // this point). SASS metrics simply aren't available on this
+        // setup; Deep degrades to PC sampling and the other engines are
+        // unaffected. Spell that out so the raw CUPTI code isn't the only
+        // signal the user gets.
+        if (res == CUPTI_ERROR_OUT_OF_MEMORY) {
+            GFL_LOG_ERROR(
+                "[SassMetricsEngine] cuptiSassMetricsSetConfig returned "
+                "OUT_OF_MEMORY — this GPU/driver can't allocate SASS metric "
+                "counters (seen on Ampere / sm_86). SASS metrics are "
+                "unavailable on this setup; this is a hardware/driver limit, "
+                "not a configuration error. Deep mode runs as PC Sampling "
+                "here; use ProfilingEngine.PcSampling directly to skip this "
+                "message. Monitor / Trace / PcSampling are unaffected.");
+        } else {
+            GFL_LOG_ERROR(
+                "[SassMetricsEngine] Failed to enable SASS Metrics "
+                "(cuptiSassMetricsSetConfig). Deep degrades to PC sampling; "
+                "Monitor / Trace / PcSampling are unaffected.");
+        }
         DeInitProfilerIfNeeded_();
         return;
     }

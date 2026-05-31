@@ -57,6 +57,127 @@ if os.name == 'nt':
                 if d not in os.environ.get('PATH', ''):
                     os.environ['PATH'] = d + os.pathsep + os.environ.get('PATH', '')
 
+
+# 1b. Linux: preload the MATCHING PerfWorks libraries before the C extension.
+#
+# gpufl's _gpufl_client.so links libnvperf_host.so / libnvperf_target.so
+# DIRECTLY (DT_NEEDED — see the NVPERF block in CMakeLists.txt), so the
+# dynamic loader resolves them the instant the extension is imported,
+# long before any of our initialize() code runs. In a PyTorch venv the
+# recommended import order is `torch` THEN `gpufl`; by the time gpufl
+# imports, torch has already loaded the pip `nvidia-cuXX` libcupti.so —
+# but NOT nvperf (torch doesn't touch PerfWorks at import). So our NEEDED
+# libnvperf_host.so has nothing resident to dedupe against, and the
+# loader finds the SYSTEM copy via ldconfig (/usr/local/cuda/.../
+# libnvperf_host.so). The result is venv CUPTI + system PerfWorks — a
+# split install that SEGFAULTS in NVPW_CUDA_LoadDriver the first time PC
+# sampling (PcSampling) or the Profiler API (SassMetrics / RangeProfiler
+# / Deep) runs. It "sometimes works" only when something happened to make
+# the matching nvperf resident first.
+#
+# `LD_LIBRARY_PATH=<venv>/nvidia/cuXX/lib` fixes it by winning that first
+# resolution. We do the same automatically and deterministically: find
+# the directory of the libcupti that's already mapped into the process
+# (torch loaded it; nvperf ships in the SAME wheel dir, so versions are
+# guaranteed to match) and preload its sibling PerfWorks libs with
+# RTLD_GLOBAL, in dependency order (target before host) so soname-dedup
+# binds our NEEDED entries to the matching copies. Best-effort and
+# silent; set GPUFL_DEBUG_PRELOAD=1 to trace what was preloaded.
+def _preload_matching_perfworks():
+    if not sys.platform.startswith('linux'):
+        return
+    import ctypes
+    import glob as _glob
+
+    # RTLD_LAZY|RTLD_GLOBAL — same flags the C++ side uses. GLOBAL so the
+    # symbols/soname win subsequent NEEDED resolutions; LAZY so we don't
+    # force-bind symbols that depend on libs not resident yet at import.
+    _mode = os.RTLD_LAZY | os.RTLD_GLOBAL
+
+    _debug = os.environ.get('GPUFL_DEBUG_PRELOAD', '').strip().lower() in (
+        '1', 'true', 'yes', 'on')
+
+    def _dbg(msg):
+        if _debug:
+            print(f"[gpufl] perfworks-preload: {msg}", file=sys.stderr)
+
+    candidate_dirs = []
+    # (1) Strongest signal: the directory of a libcupti already mapped
+    #     into this process. nvperf MUST match that CUPTI's CUDA version,
+    #     and it ships in the same wheel directory.
+    try:
+        with open('/proc/self/maps', 'r') as _maps:
+            for line in _maps:
+                slash = line.find('/')
+                if slash == -1:
+                    continue
+                path = line[slash:].rstrip()
+                if os.path.basename(path).startswith('libcupti.so'):
+                    d = os.path.dirname(path)
+                    if d and d not in candidate_dirs:
+                        candidate_dirs.append(d)
+    except OSError:
+        pass
+
+    # (2) Lower-priority fallback: nvidia CUDA wheels under site-packages.
+    #     Appended AFTER the libcupti dirs (which are preferred because
+    #     they're version-matched), so it covers (a) gpufl imported before
+    #     torch / pure-gpufl processes, and (b) torch bundling its libcupti
+    #     in a dir that has no sibling nvperf (e.g. torch/lib) — the loop
+    #     below skips dirs without the PerfWorks set and falls through here.
+    roots = []
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec('nvidia')
+        if spec and spec.submodule_search_locations:
+            roots.extend(list(spec.submodule_search_locations))
+    except Exception:
+        pass
+    try:
+        _site = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        roots.append(os.path.join(_site, 'nvidia'))
+    except Exception:
+        pass
+    for root in roots:
+        for d in _glob.glob(os.path.join(root, '*', 'lib')):
+            if d not in candidate_dirs:
+                candidate_dirs.append(d)
+
+    # A heavy pipeline (torch + torchvision + other CUDA extensions) can
+    # have MORE THAN ONE libcupti resident — e.g. the pip venv copy AND a
+    # system /usr/local/cuda copy. /proc/self/maps order is by address, not
+    # load order, so "first seen" is arbitrary and could point at the
+    # system dir while gpufl actually binds the venv CUPTI (→ we'd preload
+    # the wrong, mismatched nvperf). gpufl is a pip wheel and binds the pip
+    # CUPTI, so prefer site-packages dirs. Stable sort keeps relative order
+    # within each group.
+    candidate_dirs.sort(key=lambda p: 0 if 'site-packages' in p else 1)
+
+    _dbg(f"candidate dirs: {candidate_dirs}")
+
+    # Preload from the FIRST directory that actually has the PerfWorks
+    # set. Loading a second CUDA version's nvperf would soname-collide
+    # with the first (identical SONAME, different ABI), so stop after one.
+    for d in candidate_dirs:
+        if not _glob.glob(os.path.join(d, 'libnvperf_host.so*')):
+            continue
+        loaded_any = False
+        for pattern in ('libnvperf_target.so*', 'libpcsamplingutil.so*',
+                        'libnvperf_host.so*'):
+            for so in sorted(_glob.glob(os.path.join(d, pattern))):
+                try:
+                    ctypes.CDLL(so, mode=_mode)
+                    loaded_any = True
+                    _dbg(f"loaded {so}")
+                except OSError as exc:
+                    _dbg(f"skip {so} ({exc})")
+        if loaded_any:
+            break
+
+
+_preload_matching_perfworks()
+
+
 # 2. Import C++ Core Bindings
 try:
     from ._gpufl_client import (
@@ -95,17 +216,13 @@ except ImportError as e:
         None_ = "None"
 
     class ProfilingEngine:
-        None_              = "None"
-        PcSampling         = "PcSampling"
-        SassMetrics        = "SassMetrics"
-        RangeProfiler      = "RangeProfiler"
-        PcSamplingWithSass = "PcSamplingWithSass"
-        # Friendly aliases — mirror the pybind11 ProfilingEngine attrs
-        # added in bindings.cpp. Identical string values so equality
-        # checks against the technical names still work in stub mode.
-        Continuous         = "PcSampling"
-        Deep               = "PcSamplingWithSass"
-        Range              = "RangeProfiler"
+        # Six canonical names, no aliases — mirrors the C++ enum.
+        Monitor       = "Monitor"
+        Trace         = "Trace"
+        PcSampling    = "PcSampling"
+        SassMetrics   = "SassMetrics"
+        RangeProfiler = "RangeProfiler"
+        Deep          = "Deep"
 
     class InitOptions:
         def __init__(self):
@@ -119,7 +236,7 @@ except ImportError as e:
             self.enable_stack_trace = False
             self.enable_source_collection = True
             self.flush_logs_always = False
-            self.profiling_engine = ProfilingEngine.PcSampling
+            self.profiling_engine = ProfilingEngine.Monitor
             self.config_file = ""
             self.backend_url = ""
             self.api_key = ""
@@ -174,7 +291,7 @@ except Exception as e:
     print(f"[FATAL] Unexpected error importing _gpufl_client: {e}", file=sys.stderr)
     raise e
 
-__version__ = "0.1.0.dev"
+__version__ = "1.1.0rc2"
 
 # ── Backend upload ────────────────────────────────────────────────────────────
 #
@@ -250,6 +367,64 @@ class _NoopUploadResult:
         return ("<UploadResult success=True events=0 bytes=0 files=0 "
                 "warnings=1 spool_ids=0 elapsed_ms=0 (disabled)>")
 
+def _apply_eager_module_loading(profiling_engine):
+    """Optionally set CUDA_MODULE_LOADING=EAGER — opt-in only.
+
+    EAGER is now OPT-IN. By default gpufl leaves CUDA on its normal LAZY
+    module loading. The per-architecture SASS exclusion gate
+    (GPUFL_SASS_EXCLUDE_ARCHS, read by the C++ SASS engine) is the default
+    mechanism for the lazy-patching deadlock: it disables SASS only on
+    architectures confirmed to hang (e.g. RTX 3090 / sm_86) instead of
+    paying EAGER's whole-process startup + memory cost on every machine.
+
+    EAGER stays available as an alternative per-run workaround. CUPTI's SASS
+    instrumentation + LAZY module loading can deadlock under concurrent
+    kernel launches (PyTorch): each kernel's module is finalized AND
+    SASS-patched on its first launch, and many such first-launches racing
+    across threads invert CUPTI/driver locks. EAGER finalizes every module
+    up front while the process is quiescent, closing that window.
+
+    Overrides:
+      * GPUFL_EAGER_MODULE_LOADING=1|true|yes|on → force EAGER for this run.
+      * Unset / anything else                    → leave CUDA on LAZY (default).
+      * An existing CUDA_MODULE_LOADING (set by the user) is always honored.
+
+    Must run before the CUDA context is created. In the recommended order
+    (`import torch` → `import gpufl` → `gpufl.init()` → train) the context
+    isn't created until the first CUDA op in the loop, so setting it at the
+    top of init() takes effect.
+    """
+    # Opt-in only: act solely when GPUFL_EAGER_MODULE_LOADING is truthy.
+    # (profiling_engine is kept for call-site compatibility / future use.)
+    knob = os.environ.get('GPUFL_EAGER_MODULE_LOADING', '').strip().lower()
+    if knob not in ('1', 'true', 'yes', 'on'):
+        return  # default: leave CUDA on LAZY module loading
+
+    if os.environ.get('CUDA_MODULE_LOADING'):
+        return  # respect a value the user set themselves
+
+    # If CUDA is already up, the env is read-at-context-creation, so setting
+    # it now is a no-op — warn instead of silently doing nothing. Only peek
+    # at torch if it's already imported (never import it here).
+    _torch = sys.modules.get('torch')
+    if _torch is not None:
+        try:
+            if _torch.cuda.is_initialized():
+                import warnings
+                warnings.warn(
+                    "[gpufl] CUDA is already initialized, so setting "
+                    "CUDA_MODULE_LOADING=EAGER now has no effect. SASS/Deep "
+                    "profiling can deadlock under CUDA's default lazy module "
+                    "loading; set CUDA_MODULE_LOADING=EAGER on the command "
+                    "line (before the process starts) to avoid it.",
+                    RuntimeWarning, stacklevel=3)
+                return
+        except Exception:
+            pass
+
+    os.environ['CUDA_MODULE_LOADING'] = 'EAGER'
+
+
 # Wrap the C++ init to apply env-var fallbacks for backend_url and
 # api_key, and to reject removed kwargs with a clear TypeError.
 _original_init = init
@@ -314,6 +489,14 @@ def init(*args, backend_url=None, api_key=None, remote_upload=None,
     # this process disabled it. Lets the same interpreter session run
     # disabled-then-enabled tests / notebooks without restarting.
     _disabled = False
+
+    # EAGER module loading is OPT-IN (default: CUDA's normal LAZY). The
+    # per-architecture SASS exclusion gate (GPUFL_SASS_EXCLUDE_ARCHS) is the
+    # default guard for the CUPTI lazy-patching deadlock. Set
+    # GPUFL_EAGER_MODULE_LOADING=1 to force EAGER for this run instead — must
+    # happen before the training loop creates the CUDA context, hence here.
+    _apply_eager_module_loading(kwargs.get('profiling_engine'))
+
     # Backward-compat shim: `sampling_auto_start` was renamed to
     # `continuous_system_sampling` because the old name only described
     # init-time auto-start and missed the new scope-bracketing behavior

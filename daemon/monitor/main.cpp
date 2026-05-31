@@ -84,7 +84,11 @@ int main() {
     gpufl::InitOptions opts;
     opts.app_name = appName;
     opts.log_path = logPath;
-    opts.profiling_engine = gpufl::ProfilingEngine::None;
+    // Telemetry-only daemon: Monitor means no CUPTI at all, just the
+    // NVML/host metrics sampler driven by continuous_system_sampling
+    // below. (This used to pass `None`, which despite the name still
+    // subscribed CUPTI and captured kernel events the daemon never wanted.)
+    opts.profiling_engine = gpufl::ProfilingEngine::Monitor;
     opts.continuous_system_sampling = true;
     opts.system_sample_rate_ms = intervalMs;
     opts.enable_debug_output = true;

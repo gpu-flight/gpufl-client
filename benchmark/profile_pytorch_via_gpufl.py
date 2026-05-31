@@ -51,18 +51,19 @@ def run_minigpt_under_gpufl(steps: int, warmup_steps: int, batch_size: int,
                   # error if gpufl isn't installed
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    # Monitoring-only mode — engine=None_ means CUPTI is enabled for
-    # kernel activity records (which is what gives us duration_ns) but
-    # PC sampling is OFF, so we're not measuring the +657% overhead
-    # case — just the kernel timing ground truth. PC sampling on or
-    # off, the kernel duration_ns values are the same because they
-    # come from CUPTI's KIND_KERNEL records either way.
+    # Trace mode — kernel activity records are on (that's what gives us
+    # duration_ns) but PC sampling is OFF, so we're not measuring the
+    # +657% overhead case, just the kernel-timing ground truth. (Note:
+    # NOT Monitor — that disables CUPTI entirely and would yield zero
+    # kernel records. We need the activity trace.) PC sampling on or off,
+    # the duration_ns values are identical — they come from CUPTI's
+    # KIND_KERNEL records either way.
     ok = gpufl.init(
         "minigpt_kernel_profile",
         str(log_dir),
         True,  # continuous_system_sampling — unused but historically positional
         0,     # system_sample_rate_ms — off
-        profiling_engine=gpufl.ProfilingEngine.None_,
+        profiling_engine=gpufl.ProfilingEngine.Trace,
         enable_debug_output=False,  # debug stderr spam dominated overhead
                                     # in earlier runs — keep off for clean
                                     # kernel timing

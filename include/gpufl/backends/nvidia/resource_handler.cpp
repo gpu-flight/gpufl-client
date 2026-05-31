@@ -68,7 +68,7 @@ void ResourceHandler::handle(CUpti_CallbackDomain domain, CUpti_CallbackId cbid,
             // MODULE_LOADED cubin, and CUPTI's PC sampling data
             // references that CRC for source correlation.
             {
-                std::lock_guard<std::mutex> lk(backend_->cubin_mu_);
+                std::lock_guard lk(backend_->cubin_mu_);
                 if (backend_->seen_cubin_ptrs_.count(cubinPtr)) return;
                 backend_->seen_cubin_ptrs_.insert(cubinPtr);
             }
@@ -81,11 +81,11 @@ void ResourceHandler::handle(CUpti_CallbackDomain domain, CUpti_CallbackId cbid,
             // cuptiGetCubinCrc() here deadlocks. Defer to the worker thread.
             GFL_LOG_DEBUG("Queuing Cubin for CRC at ", cubinPtr,
                           " Size: ", cubinSize);
-            std::vector<uint8_t> bytes(
+            std::vector bytes(
                 static_cast<const uint8_t *>(cubinPtr),
                 static_cast<const uint8_t *>(cubinPtr) + cubinSize);
             {
-                std::lock_guard<std::mutex> lk(pending_mu_);
+                std::lock_guard lk(pending_mu_);
                 pending_.push(std::move(bytes));
             }
             pending_cv_.notify_one();

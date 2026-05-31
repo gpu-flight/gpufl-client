@@ -1162,7 +1162,7 @@ class GpuFlightSession:
             "    1. [bold]profiling_engine[/bold]: pass "
             "[cyan]ProfilingEngine.PcSampling[/cyan], "
             "[cyan]ProfilingEngine.SassMetrics[/cyan], or "
-            "[cyan]ProfilingEngine.PcSamplingWithSass[/cyan] to "
+            "[cyan]ProfilingEngine.Deep[/cyan] to "
             "[cyan]gpufl.init()[/cyan].\n"
             "    2. [bold]Scopes required[/bold]: wrap GPU work in "
             "[cyan]with gpufl.Scope(\"name\"):[/cyan] blocks — sample "

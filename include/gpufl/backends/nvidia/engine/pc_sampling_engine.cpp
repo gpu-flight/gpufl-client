@@ -494,9 +494,11 @@ bool PcSamplingEngine::EnableSamplingFeatures_() {
     sampling_api_ready_.store(true);
 
     // cuptiPCSamplingEnable / SetConfigurationAttribute can internally
-    // disable CUPTI_ACTIVITY_KIND_KERNEL.  Re-enable so kernel activity
-    // records continue to flow alongside PC samples.
-    cuptiActivityEnable(CUPTI_ACTIVITY_KIND_KERNEL);
+    // disable kernel activity tracing. Re-enable CONCURRENT_KERNEL so kernel
+    // records keep flowing alongside PC samples. We deliberately do NOT
+    // re-enable CUPTI_ACTIVITY_KIND_KERNEL — it serializes every kernel
+    // (distorts timing, adds overhead), and PC sampling is compatible with
+    // concurrent kernel tracing since CUDA 12.8 Update 1.
     cuptiActivityEnable(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL);
 
     GFL_LOG_DEBUG("[PC Sampling] configured and enabled successfully.");

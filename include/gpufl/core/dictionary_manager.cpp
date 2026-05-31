@@ -7,6 +7,7 @@
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
+#include <vector>
 
 #include "gpufl/core/sass_compressor.hpp"
 
@@ -15,13 +16,21 @@
 #include <fcntl.h>    // _O_CREAT, _O_WRONLY, _O_BINARY
 #include <windows.h>  // GetTempPathA
 #else
-#include <unistd.h>
+#include <fcntl.h>     // O_WRONLY (redirect child stderr -> /dev/null)
+#include <spawn.h>     // posix_spawn — fork-safe subprocess (NOT popen)
+#include <sys/wait.h>  // waitpid
+#include <unistd.h>    // pipe, close, dup2, STDOUT_FILENO
 #endif
 
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/logger/logger.hpp"
 #include "gpufl/core/model/model_utils.hpp"
 #include "gpufl/core/model/serializable.hpp"
+
+#ifndef _WIN32
+// posix_spawn needs the current environment for the disassembler child.
+extern "C" char **environ;
+#endif
 
 namespace gpufl {
 namespace {
@@ -59,6 +68,52 @@ void appendDict(std::ostringstream& oss, const char* key,
     }
     oss << '}';
 }
+
+#ifndef _WIN32
+// Launch argv[0] with stdout connected to a pipe we read and stderr sent
+// to /dev/null, via posix_spawn — deliberately NOT popen/system.
+//
+// popen() forks and runs /bin/sh. A plain fork() in a multithreaded
+// process clones only the calling thread but inherits every lock in its
+// current state; if another thread holds the glibc malloc arena lock at
+// the instant of the fork, the child deadlocks the first time it needs
+// that lock during pre-exec setup, never exec's, and the parent then
+// blocks forever reading the pipe. flushDisassembly runs on the collector
+// thread while application threads are busy launching kernels, so a fork
+// there frequently coincides with a held malloc lock — that is the
+// Deep-mode hang. posix_spawn runs only async-signal-safe code in the
+// child before exec (vfork/CLONE_VFORK semantics), so it cannot deadlock
+// on an inherited lock.
+//
+// Returns a readable FILE* (caller fcloses) and sets outPid for reaping,
+// or nullptr on failure.
+FILE *spawnReadPipe(char *const argv[], pid_t &outPid) {
+    int pipefd[2];
+    if (::pipe(pipefd) != 0) return nullptr;
+
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    // child stdout -> pipe write end; child stderr -> /dev/null
+    posix_spawn_file_actions_adddup2(&fa, pipefd[1], STDOUT_FILENO);
+    posix_spawn_file_actions_addopen(&fa, STDERR_FILENO, "/dev/null",
+                                     O_WRONLY, 0);
+    // close the inherited pipe fds in the child (write end is dup'd to 1)
+    posix_spawn_file_actions_addclose(&fa, pipefd[0]);
+    posix_spawn_file_actions_addclose(&fa, pipefd[1]);
+
+    pid_t pid = -1;
+    const int rc =
+        posix_spawn(&pid, argv[0], &fa, nullptr, argv, environ);
+    posix_spawn_file_actions_destroy(&fa);
+    ::close(pipefd[1]);  // parent keeps only the read end
+    if (rc != 0) {
+        ::close(pipefd[0]);
+        return nullptr;
+    }
+    outPid = pid;
+    return ::fdopen(pipefd[0], "r");
+}
+#endif  // !_WIN32
 
 }  // namespace
 
@@ -184,25 +239,32 @@ void DictionaryManager::flushDisassembly(Logger& logger,
                       bytes[2] == 'L' && bytes[3] == 'F' &&
                       (bytes[18] == 0xE0 && bytes[19] == 0x00));
 
-        char cmd[640];
+        // Launch the disassembler. POSIX uses posix_spawn (see
+        // spawnReadPipe) instead of popen — popen's fork() can deadlock on
+        // an inherited malloc lock in this multithreaded process, which is
+        // the Deep-mode hang. We exec the tool directly with an argv vector
+        // (no shell), so paths/args need no quoting and there's no /bin/sh.
+        FILE* pipe = nullptr;
+#ifndef _WIN32
+        pid_t childPid = -1;
+#endif
         if (isAmd) {
 #ifdef _WIN32
             // ROCm on Windows: not typical, skip AMD disassembly
             std::remove(tmpPathStr.c_str());
             continue;
 #else
-            // Discover llvm-objdump path
-            // Use -l to include DWARF source line info for source correlation
+            // llvm-objdump -d -l (-l adds DWARF source lines for correlation)
             const char* rocmPath = std::getenv("ROCM_PATH");
-            if (rocmPath && rocmPath[0]) {
-                std::snprintf(cmd, sizeof(cmd),
-                              "%s/llvm/bin/llvm-objdump -d -l %s 2>/dev/null",
-                              rocmPath, tmpPathStr.c_str());
-            } else {
-                std::snprintf(cmd, sizeof(cmd),
-                              "/opt/rocm/llvm/bin/llvm-objdump -d -l %s 2>/dev/null",
-                              tmpPathStr.c_str());
-            }
+            std::string objdump = (rocmPath && rocmPath[0])
+                ? std::string(rocmPath) + "/llvm/bin/llvm-objdump"
+                : std::string("/opt/rocm/llvm/bin/llvm-objdump");
+            std::vector<std::string> args = {objdump, "-d", "-l", tmpPathStr};
+            std::vector<char*> argv;
+            argv.reserve(args.size() + 1);
+            for (auto& a : args) argv.push_back(a.data());
+            argv.push_back(nullptr);
+            pipe = spawnReadPipe(argv.data(), childPid);
 #endif
         } else {
 #ifdef _WIN32
@@ -210,6 +272,7 @@ void DictionaryManager::flushDisassembly(Logger& logger,
             // Wrap entire command in outer quotes for cmd.exe /c — needed
             // when both the executable path and arguments contain spaces
             // (e.g., "C:\Program Files\...").
+            char cmd[640];
             const char* cudaPath = std::getenv("CUDA_PATH");
             if (cudaPath && cudaPath[0]) {
                 std::snprintf(cmd, sizeof(cmd),
@@ -220,21 +283,22 @@ void DictionaryManager::flushDisassembly(Logger& logger,
                               "\"nvdisasm.exe --print-code \"%s\"\"",
                               tmpPathStr.c_str());
             }
+            pipe = _popen(cmd, "r");
 #else
-            std::snprintf(cmd, sizeof(cmd),
-                          "/usr/local/cuda/bin/nvdisasm --print-code %s 2>/dev/null",
-                          tmpPathStr.c_str());
+            std::vector<std::string> args = {
+                "/usr/local/cuda/bin/nvdisasm", "--print-code", tmpPathStr};
+            std::vector<char*> argv;
+            argv.reserve(args.size() + 1);
+            for (auto& a : args) argv.push_back(a.data());
+            argv.push_back(nullptr);
+            pipe = spawnReadPipe(argv.data(), childPid);
 #endif
         }
 
-#ifdef _WIN32
-        FILE* pipe = _popen(cmd, "r");
-#else
-        FILE* pipe = ::popen(cmd, "r");
-#endif
         if (!pipe) {
             std::remove(tmpPathStr.c_str());
-            GFL_LOG_ERROR("[flushDisassembly] popen failed — disassembler unavailable?");
+            GFL_LOG_ERROR("[flushDisassembly] failed to launch disassembler "
+                          "— nvdisasm / llvm-objdump unavailable?");
             continue;
         }
 
@@ -334,7 +398,7 @@ void DictionaryManager::flushDisassembly(Logger& logger,
                 // NVIDIA nvdisasm format:
                 // Function: "_Z11vectorScalePiii:"
                 // Instruction: "/*XXXX*/   INSTR ;"
-                if (!std::isspace((unsigned char)raw[0]) && raw[0] != '.' &&
+                if (!std::isspace(static_cast<unsigned char>(raw[0])) && raw[0] != '.' &&
                     raw.back() == ':') {
                     currentFunc = raw.substr(0, raw.size() - 1);
                     if (!funcEntries.count(currentFunc))
@@ -368,7 +432,13 @@ void DictionaryManager::flushDisassembly(Logger& logger,
 #ifdef _WIN32
         _pclose(pipe);
 #else
-        ::pclose(pipe);
+        // We spawned with posix_spawn (not popen), so close the FILE*
+        // ourselves and reap the child explicitly to avoid a zombie.
+        ::fclose(pipe);
+        if (childPid > 0) {
+            int status = 0;
+            ::waitpid(childPid, &status, 0);
+        }
 #endif
         std::remove(tmpPathStr.c_str());
 

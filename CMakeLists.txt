@@ -11,7 +11,7 @@ project(gpufl_client
 # `project(... VERSION ...)`, so we layer them on top here. To promote
 # 1.1.0rc1 → 1.1.0 final, set this to the empty string. To bump rc1 →
 # rc2 mid-validation, change just this line.
-set(GPUFL_VERSION_SUFFIX "rc1")
+set(GPUFL_VERSION_SUFFIX "rc2")
 
 # -----------------------
 # CUDA Architectures (CI Friendly)

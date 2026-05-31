@@ -205,11 +205,12 @@ std::vector<std::string> GetStringArrayField(
 
 const char* EngineName(gpufl::ProfilingEngine e) {
     switch (e) {
-        case gpufl::ProfilingEngine::None:               return "None";
-        case gpufl::ProfilingEngine::PcSampling:         return "PcSampling";
-        case gpufl::ProfilingEngine::SassMetrics:        return "SassMetrics";
-        case gpufl::ProfilingEngine::RangeProfiler:      return "RangeProfiler";
-        case gpufl::ProfilingEngine::PcSamplingWithSass: return "PcSamplingWithSass";
+        case gpufl::ProfilingEngine::Monitor:       return "Monitor";
+        case gpufl::ProfilingEngine::Trace:         return "Trace";
+        case gpufl::ProfilingEngine::PcSampling:    return "PcSampling";
+        case gpufl::ProfilingEngine::SassMetrics:   return "SassMetrics";
+        case gpufl::ProfilingEngine::RangeProfiler: return "RangeProfiler";
+        case gpufl::ProfilingEngine::Deep:          return "Deep";
     }
     return "Unknown";
 }

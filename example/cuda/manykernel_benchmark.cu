@@ -304,16 +304,20 @@ static bool gpufl_init_for(Mode m) {
             opts.profiling_engine = gpufl::ProfilingEngine::PcSampling;
             break;
         case Mode::PcSamplingWithSass:
-            // "Deep" — PC sampling + SASS metrics. SASS metrics use
+            // gpufl Deep = PC sampling + SASS metrics. SASS metrics use
             // cuptiProfilerInitialize which has reportedly returned
             // CUPTI_ERROR_UNKNOWN (999) on Blackwell in earlier runs;
             // if init fails the mode is skipped cleanly via the
             // !gpufl_init_for(m) branch in run_mode().
-            opts.profiling_engine = gpufl::ProfilingEngine::PcSamplingWithSass;
+            opts.profiling_engine = gpufl::ProfilingEngine::Deep;
             break;
         case Mode::Monitoring:
         default:
-            opts.profiling_engine = gpufl::ProfilingEngine::None;
+            // The benchmark's "Monitoring" mode measures kernel-event
+            // capture overhead, so it maps to gpufl Trace (activity
+            // records, no sampling) — NOT gpufl Monitor, which disables
+            // CUPTI entirely and would capture no kernels to measure.
+            opts.profiling_engine = gpufl::ProfilingEngine::Trace;
             break;
     }
     return gpufl::init(opts);

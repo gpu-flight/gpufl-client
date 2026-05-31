@@ -52,14 +52,15 @@ class CuptiBackend : public IMonitorBackend {
     //      Source/SASS dashboard view), and
     //   2. the engine's own per-PC cubin lookups (PcSampling and
     //      SassMetrics read cubin_by_crc_ to correlate samples).
-    // None (monitoring only) and RangeProfiler (scope-level HW counters)
-    // need neither, so we skip cubin capture/disassembly entirely for
-    // them — there's no per-instruction data to attach it to. This is
-    // what makes profiling_engine=None truly "monitoring only".
+    // Trace (activity records only) and RangeProfiler (scope-level HW
+    // counters) need neither, so we skip cubin capture/disassembly
+    // entirely for them — there's no per-instruction data to attach it
+    // to. (ProfilingEngine::Monitor never constructs a CuptiBackend at
+    // all, so it doesn't reach this method.)
     bool NeedsCubinCapture() const {
         return opts_.profiling_engine == ProfilingEngine::PcSampling ||
                opts_.profiling_engine == ProfilingEngine::SassMetrics ||
-               opts_.profiling_engine == ProfilingEngine::PcSamplingWithSass;
+               opts_.profiling_engine == ProfilingEngine::Deep;
     }
 
     void RegisterHandler(const std::shared_ptr<ICuptiHandler>& handler);
@@ -89,7 +90,7 @@ class CuptiBackend : public IMonitorBackend {
         // and are flushed at session stop() instead.  cudaDeviceSynchronize
         // ensures GPU work completes before the scope exits.
         if (opts_.profiling_engine == ProfilingEngine::PcSampling ||
-            opts_.profiling_engine == ProfilingEngine::PcSamplingWithSass) {
+            opts_.profiling_engine == ProfilingEngine::Deep) {
             cudaDeviceSynchronize();
         }
     }

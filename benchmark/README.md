@@ -26,10 +26,10 @@ python run_benchmark.py
 | Mode | Engine | What it measures |
 |------|--------|-----------------|
 | Baseline | — | Pure CUDA/PyTorch, no GPUFlight |
-| Monitoring only | `None_` | System metrics (GPU util, temp, mem) only |
+| Monitoring only | `Monitor` | System metrics (GPU util, temp, mem) only, no CUPTI |
 | PC Sampling | `PcSampling` | Stall reason sampling |
 | SASS Metrics | `SassMetrics` | Instruction-level counters |
-| PcSampling + SASS | `PcSamplingWithSass` | Full profiling (default) |
+| PcSampling + SASS | `Deep` | Full profiling (PC sampling + SASS) |
 
 ## Workloads
 
@@ -66,6 +66,6 @@ Tested on NVIDIA GeForce RTX 5060 Laptop GPU (8.0 GiB), GPUFlight v0.1.0.dev.
 - **PC Sampling: high overhead on many-small-kernel workloads** (PyTorch launches thousands of micro-kernels). Use for targeted profiling sessions, not always-on. Set via environment variable:
   ```bash
   GPUFL_PROFILING_ENGINE=SassMetrics python train.py  # low-overhead
-  GPUFL_PROFILING_ENGINE=PcSamplingWithSass python train.py  # full (default)
+  GPUFL_PROFILING_ENGINE=Deep python train.py          # full (PC sampling + SASS)
   ```
 - **GEMM (large kernels):** overhead is moderate even with full profiling, because per-kernel CUPTI cost is amortized over longer kernel execution

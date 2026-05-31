@@ -42,10 +42,10 @@ enum class MonitorBackendKind {
  *
  * Compatibility matrix (NVIDIA backend):
  *
- *   PcSampling   + SassMetrics   → PcSamplingWithSass (shipping; alias "Deep").
- *                                  PC sampling uses hardware counters; SASS
- *                                  metrics uses software lazy cubin patching —
- *                                  disjoint mechanisms, can coexist.
+ *   PcSampling   + SassMetrics   → Deep (shipping). PC sampling uses
+ *                                  hardware counters; SASS metrics uses
+ *                                  software lazy cubin patching — disjoint
+ *                                  mechanisms, can coexist.
  *
  *   SassMetrics  + RangeProfiler → Possible in principle (no resource
  *                                  conflict — SASS is software-patching,
@@ -63,19 +63,33 @@ enum class MonitorBackendKind {
  *                                  client-side fix — would require NVIDIA
  *                                  to expose a counter-multiplexing API.
  *
- *   By extension: PcSamplingWithSass + RangeProfiler is also impossible
- *   (the PC-sampling half conflicts; the SASS half would be fine).
+ *   By extension: Deep + RangeProfiler is also impossible (the
+ *   PC-sampling half conflicts; the SASS half would be fine).
  */
 enum class ProfilingEngine {
-    None,                // Monitoring only — no profiling overhead
-    PcSampling,          // PC-level stall-reason sampling
-    SassMetrics,         // SASS instruction-level metrics
-    RangeProfiler,       // Perfworks hardware counters (requires GPUFL_HAS_PERFWORKS)
-    PcSamplingWithSass,  // PC sampling + SASS metrics in a single run
-
-    Continuous = PcSampling,
-    Deep       = PcSamplingWithSass,
-    Range      = RangeProfiler,
+    // A monotonic ladder of increasing capture depth + cost. One name
+    // per level, no aliases — the names are chosen so the option list
+    // reads clearly to someone who isn't a CUPTI expert. The plain
+    // intent is in each comment; the precise CUPTI mechanism is named
+    // where it's the real, doc-searchable term (PC sampling, SASS).
+    Monitor,        // No CUPTI at all — GPU/host health metrics only
+                    // (util, mem, temp, power). Lowest overhead and immune
+                    // to every CUPTI kernel-path failure mode (per-launch
+                    // cost, the CUDA 13.1 symbolName segfault, activity
+                    // buffer leakage). "Just watch my GPU." The default.
+    Trace,          // + Activity trace: every kernel, memcpy/memset, and
+                    // sync — name, duration, stream, grid/block. NOT
+                    // kernel-exclusive (hence "Trace", not "KernelTrace").
+                    // "What ran and how long."
+    PcSampling,     // + PC stall-reason sampling: where in each kernel the
+                    // GPU stalls. "Why is this kernel slow." (CUPTI PC Sampling)
+    SassMetrics,    // + Per-instruction SASS counters: executed / divergent
+                    // instruction counts per source line. (CUPTI SASS Metrics)
+    RangeProfiler,  // + Hardware throughput counters: SM / memory / tensor
+                    // utilization, L1/L2 hit rates, DRAM bandwidth.
+                    // (CUPTI Range Profiler; requires GPUFL_HAS_PERFWORKS)
+    Deep,           // PcSampling + SassMetrics in a single run — the
+                    // deepest single-session profile. (Was PcSamplingWithSass.)
 };
 
 struct MonitorOptions {
@@ -110,7 +124,11 @@ struct MonitorOptions {
     // samples per hot range, not 10⁶. Users doing fine-grained stall
     // attribution can lower this back via InitOptions.
     uint32_t pc_sampling_period = 16;
-    ProfilingEngine profiling_engine = ProfilingEngine::None;
+    // Default Monitor: no CUPTI. The user-facing default lives on
+    // InitOptions (gpufl.hpp); this internal default matches it so a
+    // bare MonitorOptions (e.g. the system-monitor daemon, which only
+    // wants telemetry) doesn't accidentally subscribe CUPTI.
+    ProfilingEngine profiling_engine = ProfilingEngine::Monitor;
     MonitorBackendKind backend_kind = MonitorBackendKind::Auto;
 };
 

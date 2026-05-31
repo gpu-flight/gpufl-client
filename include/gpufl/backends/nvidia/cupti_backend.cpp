@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <exception>
+#include <filesystem>
 #include <mutex>
 #include <set>
 #include <string>
@@ -178,6 +179,101 @@ void LogCuptiIfUnexpected(const char* scope, const char* op, CUptiResult res) {
     }
     LogCuptiErrorIfFailed(scope, op, res);
 }
+
+#if defined(__linux__)
+// CUPTI loads PerfWorks by soname the first time a profiling feature
+// runs — cuptiPCSamplingEnable (PC sampling) and cuptiProfilerInitialize
+// (SASS / Range / Deep) both do. PerfWorks is NOT one library: the host
+// API (libnvperf_host.so) pulls in companions — libnvperf_target.so (the
+// driver-side counterpart that NVPW_CUDA_LoadDriver initializes) and, for
+// PC sampling, libpcsamplingutil.so. ALL of them must come from the SAME
+// CUDA install as the libcupti we're bound to. If the dynamic loader
+// resolves ANY of them from a DIFFERENT install (classic case: a pip
+// `nvidia-cu13` CUPTI inside a venv + the system /usr/local/cuda nvperf),
+// NVPW_CUDA_LoadDriver SEGFAULTs on the version mismatch — the crash that
+// killed BOTH Deep and PcSampling in PyTorch venvs.
+//
+// Putting the matching directory on LD_LIBRARY_PATH fixes it because that
+// redirects the WHOLE set. An earlier version of this preloaded ONLY
+// libnvperf_host.so, which was NOT enough: host resolved to the venv copy
+// but its companion libnvperf_target.so still resolved to the mismatched
+// system copy, so NVPW_CUDA_LoadDriver kept crashing. So we preload the
+// ENTIRE PerfWorks set sitting next to our libcupti, RTLD_GLOBAL, in
+// dependency order (target before host). The loader tracks shared objects
+// by SONAME, so once these are resident CUPTI's later internal dlopen()s
+// return THESE regardless of LD_LIBRARY_PATH ordering. Best-effort:
+// anything missing is logged and skipped — CUPTI falls back to the
+// loader's choice (prior behavior).
+void PreloadMatchingPerfWorks() {
+    Dl_info info{};
+    // &cuptiSubscribe resolves into whichever libcupti this binary is
+    // bound to; dladdr hands back that library's on-disk path.
+    if (!dladdr(reinterpret_cast<void*>(&cuptiSubscribe), &info) ||
+        !info.dli_fname || !info.dli_fname[0]) {
+        GFL_LOG_DEBUG("[CuptiBackend] PerfWorks preload: couldn't locate our "
+                      "libcupti via dladdr; skipping (CUPTI will use the "
+                      "loader's PerfWorks libs).");
+        return;
+    }
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path dir = fs::path(info.dli_fname).parent_path();
+    if (dir.empty() || !fs::is_directory(dir, ec)) {
+        GFL_LOG_DEBUG("[CuptiBackend] PerfWorks preload: our libcupti's "
+                      "directory is not accessible; skipping.");
+        return;
+    }
+
+    auto tryLoad = [](const fs::path& p) {
+        if (dlopen(p.string().c_str(), RTLD_LAZY | RTLD_GLOBAL)) {
+            GFL_LOG_DEBUG("[CuptiBackend] Preloaded PerfWorks lib: ",
+                          p.string());
+        } else {
+            const char* err = dlerror();
+            GFL_LOG_DEBUG("[CuptiBackend] PerfWorks preload skipped ",
+                          p.string(), " (", err ? err : "n/a", ")");
+        }
+    };
+
+    // Bucket the companion libs in our CUPTI's directory. Load order
+    // matters: dependencies before dependents. libnvperf_target.so (driver
+    // side) and other helpers go first, libnvperf_host.so last — otherwise
+    // host's DT_NEEDED on the target soname resolves to the system copy
+    // BEFORE we make the matching one resident, and soname-dedup then locks
+    // in the wrong target.
+    std::vector<fs::path> targets, hosts, others;
+    for (const auto& entry : fs::directory_iterator(dir, ec)) {
+        if (ec) break;
+        const std::string name = entry.path().filename().string();
+        if (name.find(".so") == std::string::npos) continue;
+        if (name.rfind("libnvperf_target", 0) == 0) {
+            targets.push_back(entry.path());
+        } else if (name.rfind("libnvperf_host", 0) == 0) {
+            hosts.push_back(entry.path());
+        } else if (name.rfind("libnvperf", 0) == 0 ||
+                   name.rfind("libpcsamplingutil", 0) == 0) {
+            others.push_back(entry.path());
+        }
+    }
+
+    if (targets.empty() && hosts.empty() && others.empty()) {
+        GFL_LOG_DEBUG("[CuptiBackend] No PerfWorks libs found next to our "
+                      "CUPTI in ", dir.string(), " — CUPTI will use the "
+                      "loader's choice, which may mismatch and crash in "
+                      "NVPW_CUDA_LoadDriver on split CUDA installs.");
+        return;
+    }
+
+    for (const auto& p : targets) tryLoad(p);  // driver-side first
+    for (const auto& p : others) tryLoad(p);   // pcsamplingutil, etc.
+    for (const auto& p : hosts) tryLoad(p);     // host API last
+}
+#else
+// Non-Linux: the same split-install hazard exists on Windows
+// (cupti64_*.dll loading a mismatched nvperf_host.dll) but isn't wired
+// up yet — Windows users typically run a single consistent CUDA toolkit.
+inline void PreloadMatchingPerfWorks() {}
+#endif
 }  // namespace
 
 void CuptiBackend::initialize(const MonitorOptions& opts) {
@@ -202,17 +298,38 @@ void CuptiBackend::initialize(const MonitorOptions& opts) {
 #else
             GFL_LOG_ERROR(
                 "[CuptiBackend] RangeProfiler engine requires "
-                "GPUFL_HAS_PERFWORKS; falling back to None");
+                "GPUFL_HAS_PERFWORKS; falling back to kernel-trace only");
 #endif
             break;
-        case ProfilingEngine::PcSamplingWithSass:
+        case ProfilingEngine::Deep:
+            // Deep = the deepest analysis the GPU supports. SASS (Profiler
+            // API) and PC sampling are mutually exclusive on current drivers,
+            // so the composite collects one or the other: SASS metrics on
+            // Blackwell+ (where lazy patching is safe), PC sampling on older
+            // GPUs (SASS lazy patching deadlocks against concurrent kernel
+            // launches there — observed on Ampere sm_86). The engine logs
+            // which path it selected in initialize().
             engine_ = std::make_unique<PcSamplingWithSassEngine>();
-            GFL_LOG_DEBUG("[CuptiBackend] Engine: PcSamplingWithSass");
+            GFL_LOG_DEBUG("[CuptiBackend] Engine: Deep");
             break;
-        case ProfilingEngine::None:
+        case ProfilingEngine::Trace:
         default:
-            GFL_LOG_DEBUG("[CuptiBackend] Engine: None (monitoring only)");
+            // No sampling engine — activity records only (kernels, memcpy,
+            // sync). ProfilingEngine::Monitor never reaches here:
+            // CreateMonitorAdapter returns nullptr for it, so no
+            // CuptiBackend is created at all.
+            GFL_LOG_DEBUG("[CuptiBackend] Engine: none (activity trace only)");
             break;
+    }
+
+    // Any engine that touches PerfWorks (PcSampling via cuptiPCSamplingEnable;
+    // SassMetrics / RangeProfiler / Deep via cuptiProfilerInitialize) must use
+    // the libnvperf_host.so that MATCHES our libcupti, or NVPW_CUDA_LoadDriver
+    // segfaults on a split CUDA install. Preload it now, before any of those
+    // CUPTI calls run. `engine_` is null only for Trace, which needs no
+    // PerfWorks, so we skip the preload there.
+    if (engine_) {
+        PreloadMatchingPerfWorks();
     }
 
     g_activeBackend.store(this, std::memory_order_release);
@@ -509,7 +626,7 @@ void CuptiBackend::start() {
             }
             if (chosen[0]) {
                 _putenv_s("NVTX_INJECTION64_PATH", chosen);
-                GFL_LOG_DEBUG("[CuptiBackend] NVTX injection path: {}", chosen);
+                GFL_LOG_DEBUG("[CuptiBackend] NVTX injection path: ", chosen);
             }
         }
 #elif defined(__linux__)
@@ -532,7 +649,7 @@ void CuptiBackend::start() {
                     Dl_info info{};
                     if (dladdr(sym, &info) && info.dli_fname && info.dli_fname[0]) {
                         setenv("NVTX_INJECTION64_PATH", info.dli_fname, 0);
-                        GFL_LOG_DEBUG("[CuptiBackend] NVTX injection path: {}",
+                        GFL_LOG_DEBUG("[CuptiBackend] NVTX injection path: ",
                                       info.dli_fname);
                     }
                 }
@@ -546,7 +663,7 @@ void CuptiBackend::start() {
                 Dl_info info{};
                 if (dladdr(sym, &info) && info.dli_fname && info.dli_fname[0]) {
                     setenv("NVTX_INJECTION64_PATH", info.dli_fname, 0);
-                    GFL_LOG_DEBUG("[CuptiBackend] NVTX injection path: {}",
+                    GFL_LOG_DEBUG("[CuptiBackend] NVTX injection path: ",
                                   info.dli_fname);
                 }
             }

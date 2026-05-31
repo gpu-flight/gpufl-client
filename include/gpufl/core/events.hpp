@@ -83,9 +83,9 @@ struct InitEvent {
     //                    sessions ran with an engine?".
     // profiling_engine : vendor-namespaced detail like
     //                    "nvidia.pc_sampling" / "nvidia.sass_metrics"
-    //                    / "nvidia.none" (the latter is the explicit
-    //                    "user chose ProfilingEngine::None" sentinel).
-    //                    Stored verbatim by the backend.
+    //                    / "nvidia.none" (the latter is what
+    //                    ProfilingEngine::Monitor — telemetry only —
+    //                    emits). Stored verbatim by the backend.
     //                    The "nvidia.none" string lets the backend
     //                    distinguish "user explicitly disabled
     //                    profiling" from "pre-V40 client that omitted

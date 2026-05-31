@@ -47,7 +47,7 @@ def run_stress_test():
                enable_cuda_graphs_tracking=True,
                api_key=api_key,
                backend_url=backend_url,
-               profiling_engine=gpufl.ProfilingEngine.None_)
+               profiling_engine=gpufl.ProfilingEngine.Deep)
 
     try:
         # 2. Allocate (Uses approx 3GB VRAM)

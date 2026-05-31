@@ -363,31 +363,27 @@ bool init(const InitOptions& opts) {
     mOpts.profiling_engine = g_opts.profiling_engine;
 
     // Allow environment variable override: GPUFL_PROFILING_ENGINE.
-    // Accepts both technical names (PcSampling / PcSamplingWithSass /
-    // RangeProfiler) and friendly aliases (Continuous / Deep / Range)
-    // — same underlying enum values. Unrecognized values are logged but
-    // do not change the engine (it stays at whatever g_opts set above);
-    // previously such values fell through silently, which made
-    // `GPUFL_PROFILING_ENGINE=Deep` (documented in the manual) appear to
-    // work while actually doing nothing.
+    // Accepts exactly the six canonical engine names. Unrecognized
+    // values are logged and ignored (the engine stays at whatever
+    // g_opts set above) rather than silently doing nothing.
     if (const char* envEngine = std::getenv("GPUFL_PROFILING_ENGINE")) {
         const std::string val(envEngine);
         bool matched = true;
-        if (val == "None")                                       mOpts.profiling_engine = ProfilingEngine::None;
-        else if (val == "PcSampling" || val == "Continuous")     mOpts.profiling_engine = ProfilingEngine::PcSampling;
-        else if (val == "SassMetrics")                           mOpts.profiling_engine = ProfilingEngine::SassMetrics;
-        else if (val == "RangeProfiler" || val == "Range")       mOpts.profiling_engine = ProfilingEngine::RangeProfiler;
-        else if (val == "PcSamplingWithSass" || val == "Deep")   mOpts.profiling_engine = ProfilingEngine::PcSamplingWithSass;
+        if (val == "Monitor")                  mOpts.profiling_engine = ProfilingEngine::Monitor;
+        else if (val == "Trace")               mOpts.profiling_engine = ProfilingEngine::Trace;
+        else if (val == "PcSampling")          mOpts.profiling_engine = ProfilingEngine::PcSampling;
+        else if (val == "SassMetrics")         mOpts.profiling_engine = ProfilingEngine::SassMetrics;
+        else if (val == "RangeProfiler")       mOpts.profiling_engine = ProfilingEngine::RangeProfiler;
+        else if (val == "Deep")                mOpts.profiling_engine = ProfilingEngine::Deep;
         else matched = false;
         if (matched) {
             GFL_LOG_DEBUG("GPUFL_PROFILING_ENGINE override: ", val);
         } else {
             GFL_LOG_ERROR(
                 "GPUFL_PROFILING_ENGINE='", val, "' is not a recognized "
-                "engine name. Valid values: None, Continuous (alias "
-                "PcSampling), Deep (alias PcSamplingWithSass), Range "
-                "(alias RangeProfiler), SassMetrics. Keeping current "
-                "engine selection.");
+                "engine name. Valid values: Monitor, Trace, PcSampling, "
+                "SassMetrics, RangeProfiler, Deep. Keeping current engine "
+                "selection.");
         }
     }
     mOpts.kernel_sample_rate_ms = g_opts.kernel_sample_rate_ms;
@@ -402,6 +398,37 @@ bool init(const InitOptions& opts) {
     mOpts.enable_cuda_graphs_tracking = g_opts.enable_cuda_graphs_tracking;
     mOpts.backend_kind = ToMonitorBackendKind(g_opts.backend);
 
+    // EAGER module loading is OPT-IN. By default we leave CUDA on its normal
+    // LAZY loading; the per-architecture SASS exclusion gate
+    // (GPUFL_SASS_EXCLUDE_ARCHS, in SassMetricsEngine) is the default guard
+    // for the CUPTI lazy-patching deadlock — it disables SASS only on
+    // architectures confirmed to hang, rather than paying EAGER's
+    // whole-process startup/memory cost everywhere. EAGER remains available
+    // as a per-run alternative: GPUFL_EAGER_MODULE_LOADING=1 forces it (it
+    // finalizes every module up front, while the process is quiescent, so the
+    // concurrent-launch finalize that triggers the deadlock never happens).
+    //
+    // This MUST run before the first CUDA call below (cudaGetDevice creates
+    // the context, which reads CUDA_MODULE_LOADING). Honor a value the user
+    // already set. Python callers apply the same opt-in earlier in
+    // gpufl.init(); this covers the pure-C++ path.
+    if (mOpts.profiling_engine == ProfilingEngine::SassMetrics ||
+        mOpts.profiling_engine == ProfilingEngine::Deep) {
+        const char* knobEnv = std::getenv("GPUFL_EAGER_MODULE_LOADING");
+        const std::string knob = knobEnv ? knobEnv : "";
+        const bool optedIn = (knob == "1" || knob == "true" ||
+                              knob == "yes" || knob == "on");
+        if (optedIn && std::getenv("CUDA_MODULE_LOADING") == nullptr) {
+#if defined(_WIN32)
+            _putenv_s("CUDA_MODULE_LOADING", "EAGER");
+#else
+            setenv("CUDA_MODULE_LOADING", "EAGER", /*overwrite=*/0);
+#endif
+            GFL_LOG_DEBUG("[gpufl] CUDA_MODULE_LOADING=EAGER set "
+                          "(GPUFL_EAGER_MODULE_LOADING opt-in) for SASS/Deep.");
+        }
+    }
+
     // Auto-tune kernel_sample_rate_ms on older NVIDIA GPUs where SASS metric
     // overhead per kernel launch is much higher. A default 50ms on sm_86 can
     // lead to hundreds of captured kernels per second each carrying
@@ -411,7 +438,7 @@ bool init(const InitOptions& opts) {
 #if GPUFL_HAS_CUDA || defined(__CUDACC__)
     if (mOpts.kernel_sample_rate_ms > 0 && mOpts.kernel_sample_rate_ms < 200 &&
         (mOpts.profiling_engine == ProfilingEngine::SassMetrics ||
-         mOpts.profiling_engine == ProfilingEngine::PcSamplingWithSass)) {
+         mOpts.profiling_engine == ProfilingEngine::Deep)) {
         cudaDeviceProp prop{};
         int devId = 0;
         if (cudaGetDevice(&devId) == cudaSuccess &&
@@ -467,9 +494,21 @@ bool init(const InitOptions& opts) {
     ie.host = rt_ptr->host_collector->sample();
 
     switch (mOpts.profiling_engine) {
-        case ProfilingEngine::None:
+        case ProfilingEngine::Monitor:
+            // Telemetry-only. Reuse the legacy "nvidia.none" wire string
+            // so the dashboard keeps suppressing the engine badge for
+            // these sessions (SessionList.formatEngineBadge special-cases
+            // "nvidia.none"). session_kind stays "monitor".
             ie.session_kind = "monitor";
             ie.profiling_engine = "nvidia.none";
+            break;
+        case ProfilingEngine::Trace:
+            // Activity trace, no sampling. New wire string; the dashboard
+            // title-cases unknown values, so it renders a "Trace" badge
+            // and (correctly) does not show the Source/SASS tab
+            // (engineImpliesSamples only matches the sampling strings).
+            ie.session_kind = "monitor";
+            ie.profiling_engine = "nvidia.trace";
             break;
         case ProfilingEngine::PcSampling:
             ie.session_kind = "trace";
@@ -483,7 +522,7 @@ bool init(const InitOptions& opts) {
             ie.session_kind = "trace";
             ie.profiling_engine = "nvidia.range_profiler";
             break;
-        case ProfilingEngine::PcSamplingWithSass:
+        case ProfilingEngine::Deep:
             ie.session_kind = "trace";
             ie.profiling_engine = "nvidia.pc_sampling_with_sass";
             break;
@@ -735,7 +774,8 @@ void ScopedMonitor::init_(const ScopeMeta& meta) {
 
     // Scope callbacks are useful for both tracing and profiling backends.
     Monitor::BeginProfilerScope(name_.c_str());
-    if (g_opts.profiling_engine != ProfilingEngine::None) {
+    if (g_opts.profiling_engine != ProfilingEngine::Monitor &&
+        g_opts.profiling_engine != ProfilingEngine::Trace) {
         Monitor::BeginPerfScope(name_.c_str());
     }
 
@@ -785,7 +825,8 @@ ScopedMonitor::~ScopedMonitor() {
     Monitor::PushScopeRow(row);
 
     Monitor::EndProfilerScope(name_.c_str());
-    if (g_opts.profiling_engine != ProfilingEngine::None) {
+    if (g_opts.profiling_engine != ProfilingEngine::Monitor &&
+        g_opts.profiling_engine != ProfilingEngine::Trace) {
         Monitor::EndPerfScope(
             name_.c_str());  // triggers EndPerfPassAndDecode first
         if (IMonitorBackend* b = Monitor::GetBackend()) {

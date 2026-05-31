@@ -63,7 +63,7 @@ int main() {
     opts.kernel_sample_rate_ms = 10;
     opts.continuous_system_sampling = true;
     opts.enable_debug_output = true;
-    opts.profiling_engine = gpufl::ProfilingEngine::PcSamplingWithSass;
+    opts.profiling_engine = gpufl::ProfilingEngine::Deep;
     gpufl::init(opts);
 
     constexpr int M = 512, K = 256, N = 512;
