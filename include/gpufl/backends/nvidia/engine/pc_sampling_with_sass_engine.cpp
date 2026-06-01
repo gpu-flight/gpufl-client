@@ -186,4 +186,8 @@ void PcSamplingWithSassEngine::drainData() {
     if (pc_) pc_->drainData();
 }
 
+void PcSamplingWithSassEngine::flushBeforeCudaTeardown(const char* reason) {
+    if (sass_ok_ && sass_) sass_->flushBeforeCudaTeardown(reason);
+}
+
 }  // namespace gpufl

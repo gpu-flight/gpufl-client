@@ -64,6 +64,12 @@ class IProfilingEngine {
      *  Called from the collector thread every ~250ms. */
     virtual void drainData() {}
 
+    /**
+     * @brief Last-chance drain before CUDA cleanup APIs such as cudaFree or
+     * cudaDeviceReset can invalidate state needed by a profiling engine.
+     */
+    virtual void flushBeforeCudaTeardown(const char* /*reason*/) {}
+
     // ---- Perf-scope hooks (Range Profiler / Perfworks) ----
     virtual void onPerfScopeStart(const char* /*name*/) {}
     virtual void onPerfScopeStop(const char* /*name*/) {}

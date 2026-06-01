@@ -329,6 +329,13 @@ void SassMetricsEngine::onScopeStop(const char* /*name*/) {
     // launch.  SASS remains enabled; samples are drained once during shutdown.
 }
 
+void SassMetricsEngine::flushBeforeCudaTeardown(const char* reason) {
+    if (!enabled_) return;
+    GFL_LOG_DEBUG("[SassMetricsEngine] flushing SASS metrics before CUDA cleanup: ",
+                  reason ? reason : "unknown");
+    StopAndCollectSassMetrics_();
+}
+
 // ---- Private helpers -------------------------------------------------------
 
 void SassMetricsEngine::EnableSassMetrics_() {

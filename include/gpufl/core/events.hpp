@@ -112,6 +112,23 @@ struct SassConfigEvent {
     std::vector<std::string> skipped_metrics;     // metrics CUPTI rejected for this GPU
 };
 
+struct CaptureCapability {
+    std::string feature;
+    bool requested = false;
+    std::string status;
+    std::string mode;
+    std::string reason_code;
+    std::string message;
+};
+
+struct CaptureCapabilitiesEvent {
+    std::string session_id;
+    int64_t ts_ns = 0;
+    std::string requested_engine;
+    std::string selected_engine;
+    std::vector<CaptureCapability> capabilities;
+};
+
 struct KernelEvent {
     int pid = 0;
     std::string app;

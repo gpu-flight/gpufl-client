@@ -77,6 +77,29 @@ std::string truncate(const std::string& s, size_t maxLen) {
     return (s.size() > maxLen) ? s.substr(0, maxLen - 3) + "..." : s;
 }
 
+std::string titleFromSnake(std::string s) {
+    bool capNext = true;
+    for (char& ch : s) {
+        if (ch == '_') {
+            ch = ' ';
+            capNext = true;
+        } else if (capNext) {
+            ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+            capNext = false;
+        }
+    }
+    return s;
+}
+
+std::string capabilityStatusLabel(const std::string& status) {
+    if (status == "collected") return "collected";
+    if (status == "fallback") return "fallback";
+    if (status == "partial") return "partial";
+    if (status == "skipped") return "skipped";
+    if (status == "not_requested") return "not requested";
+    return status.empty() ? "unknown" : status;
+}
+
 const std::map<int, std::string> kCopyKindNames = {
     {1, "HtoD"}, {2, "DtoH"}, {3, "HtoA"}, {4, "AtoH"},
     {5, "AtoA"}, {6, "AtoD"}, {7, "DtoA"}, {8, "DtoD"},
@@ -103,21 +126,33 @@ std::string resolveStallReason(int reason) {
     return (it != kStallNames.end()) ? it->second : "Stall_" + std::to_string(reason);
 }
 
-// Resolve log file path for a given channel
+// Resolve log file path for a given channel. Supports both the legacy
+// flat layout (<prefix>.<channel>.log) and the v1.2 session-directory layout
+// (<session>/<channel>.log.gz).
 std::string resolveLogPath(const std::string& dir, const std::string& prefix,
                            const std::string& channel) {
     std::string base = prefix;
     if (base.size() > 4 && base.substr(base.size() - 4) == ".log")
         base = base.substr(0, base.size() - 4);
 
-    fs::path active = fs::path(dir) / (base + "." + channel + ".log");
-    if (fs::exists(active)) return active.string();
+    const fs::path root(dir);
+    std::vector<fs::path> direct;
+    if (base.empty()) {
+        direct.push_back(root / (channel + ".log"));
+        direct.push_back(root / (channel + ".log.gz"));
+    } else {
+        direct.push_back(root / (base + "." + channel + ".log"));
+        direct.push_back(root / (base + "." + channel + ".log.gz"));
+    }
+    for (const auto& path : direct) {
+        if (fs::exists(path)) return path.string();
+    }
 
     std::vector<std::pair<int, std::string>> candidates;
     std::error_code ec;
-    for (auto& entry : fs::directory_iterator(dir, ec)) {
+    for (auto& entry : fs::directory_iterator(root, ec)) {
         const std::string name = entry.path().filename().string();
-        const std::string pat = base + "." + channel + ".";
+        const std::string pat = base.empty() ? (channel + ".") : (base + "." + channel + ".");
         if (name.rfind(pat, 0) == 0) {
             std::string rest = name.substr(pat.size());
             auto dotPos = rest.find(".log");
@@ -214,9 +249,33 @@ void TextReport::parseLogFiles(const Options& opts) {
         parseDictionaries(*recs, kernel_dict, scope_name_dict, function_dict, metric_dict);
 
     // Pass 2: typed records
+    for (const auto* recs : {&deviceRecords, &scopeRecords, &systemRecords})
+        parseCaptureCapabilities(*recs);
     parseDeviceLog(deviceRecords, kernel_dict);
     parseScopeLog(scopeRecords, scope_name_dict, function_dict, metric_dict);
     parseSystemLog(systemRecords);
+}
+
+void TextReport::parseCaptureCapabilities(const std::vector<JsonValue>& records) {
+    for (const auto& rec : records) {
+        if (rec.value<std::string>("type", "") != "capture_capabilities") continue;
+        if (!rec.contains("capabilities") || !rec["capabilities"].is_array()) continue;
+
+        requested_engine_ = rec.value<std::string>("requested_engine", requested_engine_);
+        selected_engine_ = rec.value<std::string>("selected_engine", selected_engine_);
+        capture_capabilities_.clear();
+        for (const auto& cap : rec["capabilities"].get_array()) {
+            if (!cap.is_object()) continue;
+            CaptureCapabilityRecord row;
+            row.feature = cap.value<std::string>("feature", "");
+            row.requested = cap.value<bool>("requested", false);
+            row.status = cap.value<std::string>("status", "");
+            row.mode = cap.value<std::string>("mode", "");
+            row.reason_code = cap.value<std::string>("reason_code", "");
+            row.message = cap.value<std::string>("message", "");
+            if (!row.feature.empty()) capture_capabilities_.push_back(std::move(row));
+        }
+    }
 }
 
 void TextReport::parseDictionaries(const std::vector<JsonValue>& records,
@@ -494,6 +553,32 @@ void TextReport::writeSessionSummary(std::ostringstream& out) const {
         if (info_.l2_cache_size > 0)
             out << "    L2 Cache:           " << fmtBytes(info_.l2_cache_size) << "\n";
     }
+
+    if (!capture_capabilities_.empty()) {
+        out << "\n  Capabilities:\n";
+        if (!requested_engine_.empty())
+            out << "    Requested Engine:   " << requested_engine_ << "\n";
+        if (!selected_engine_.empty())
+            out << "    Selected Engine:    " << selected_engine_ << "\n";
+        out << "    " << std::left << std::setw(24) << "Feature"
+            << std::setw(15) << "Status"
+            << std::setw(24) << "Mode"
+            << "Note" << std::right << "\n";
+        out << "    " << std::string(76, '-') << "\n";
+        for (const auto& cap : capture_capabilities_) {
+            std::string note;
+            if (!cap.reason_code.empty()) note = cap.reason_code;
+            else if (!cap.message.empty()) note = cap.message;
+            else if (!cap.requested) note = "not requested";
+
+            out << "    " << std::left
+                << std::setw(24) << truncate(titleFromSnake(cap.feature), 22)
+                << std::setw(15) << truncate(capabilityStatusLabel(cap.status), 13)
+                << std::setw(24) << truncate(cap.mode.empty() ? "-" : cap.mode, 22)
+                << truncate(note, 42)
+                << std::right << "\n";
+        }
+    }
 }
 
 void TextReport::writeKernelSummary(std::ostringstream& out) const {
@@ -506,7 +591,6 @@ void TextReport::writeKernelSummary(std::ostringstream& out) const {
                    [](const KernelRecord& k) { return k.duration_ms; });
 
     double totalMs = std::accumulate(durations.begin(), durations.end(), 0.0);
-    auto [minIt, maxIt] = std::minmax_element(durations.begin(), durations.end());
     std::sort(durations.begin(), durations.end());
 
     auto pctile = [&durations](double p) -> double {
@@ -539,8 +623,8 @@ void TextReport::writeKernelSummary(std::ostringstream& out) const {
     out << "  Median Duration:      " << fmtDuration(durations[durations.size() / 2]) << "\n";
     out << "  P90 Duration:         " << fmtDuration(pctile(0.90)) << "\n";
     out << "  P99 Duration:         " << fmtDuration(pctile(0.99)) << "\n";
-    out << "  Min Duration:         " << fmtDuration(*minIt) << "\n";
-    out << "  Max Duration:         " << fmtDuration(*maxIt) << "\n";
+    out << "  Min Duration:         " << fmtDuration(durations.front()) << "\n";
+    out << "  Max Duration:         " << fmtDuration(durations.back()) << "\n";
 
     if (sass_active_)
         out << "\n  Note: SASS metrics were active - kernel durations include "

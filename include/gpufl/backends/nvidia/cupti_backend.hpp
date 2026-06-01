@@ -101,6 +101,10 @@ class CuptiBackend : public IMonitorBackend {
         return !UseSafeSassActivityDefaults() ||
                EnvFlagEnabled_("GPUFL_SASS_ALLOW_EXTERNAL_CORRELATION");
     }
+    void FlushProfilingDataBeforeCudaTeardown(const char* reason);
+    void NoteKernelLaunchForCleanupFlush() {
+        last_cleanup_flush_ns_.store(0, std::memory_order_release);
+    }
 
     // Whether the active engine consumes cubin binaries. Cubin capture
     // feeds two consumers, and both want the binary for the SAME three
@@ -130,6 +134,8 @@ class CuptiBackend : public IMonitorBackend {
     // reflect actual GPU execution time.
     void FlushPendingKernels();
     CUpti_SubscriberHandle GetSubscriber() const { return subscriber_; }
+
+    void EmitCaptureCapabilities_() const;
 
     void OnScopeStart(const char* name) override {
         GFL_LOG_DEBUG("OnScopeStart");
@@ -222,6 +228,7 @@ class CuptiBackend : public IMonitorBackend {
     std::atomic<uint64_t> kernel_activity_seen_{0};
     std::atomic<uint64_t> kernel_activity_emitted_{0};
     std::atomic<uint64_t> kernel_activity_throttled_{0};
+    std::atomic<int64_t> last_cleanup_flush_ns_{0};
     uint32_t device_id_ = 0;
     std::string chip_name_;
 

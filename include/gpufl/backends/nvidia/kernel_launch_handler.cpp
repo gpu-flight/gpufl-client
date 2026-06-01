@@ -235,6 +235,7 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
     }
 
     if (cbInfo->callbackSite == CUPTI_API_ENTER) {
+        backend_->NoteKernelLaunchForCleanupFlush();
         LaunchMeta meta{};
         meta.api_enter_ns = detail::GetTimestampNs();
 
@@ -354,25 +355,34 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
         }
 
         // Store metadata — emit later from scope stop (PC Sampling path)
-        // or handleActivityRecord (normal path).
+        // or handleActivityRecord (normal path). Runtime and driver launch
+        // callbacks can share one correlation id, so keep the richest metadata
+        // and avoid duplicate diagnostic lines for the same logical launch.
+        bool shouldLogLaunch = false;
         {
             std::lock_guard lk(backend_->meta_mu_);
-            auto& existing = backend_->meta_by_corr_[cbInfo->correlationId];
-            if (existing.has_details && !meta.has_details) {
+            auto it = backend_->meta_by_corr_.find(cbInfo->correlationId);
+            if (it == backend_->meta_by_corr_.end()) {
+                backend_->meta_by_corr_.emplace(cbInfo->correlationId, meta);
+                shouldLogLaunch = true;
+            } else if (it->second.has_details && !meta.has_details) {
                 GFL_LOG_DEBUG(
                     "[DEBUG-CALLBACK] Skipping overwrite of rich metadata "
                     "for CorrID ",
                     cbInfo->correlationId, " by Driver API.");
-            } else {
-                existing = meta;
+            } else if (!it->second.has_details && meta.has_details) {
+                it->second = meta;
+                shouldLogLaunch = true;
             }
         }
-        // Diagnostic: confirm every kernel launch fires this callback.
+        // Diagnostic: confirm every logical kernel launch fires this callback.
         // If "GPU Time by Scope" shows only N kernels but this logs M>N,
         // the loss is downstream (activity records / FlushPendingKernels).
-        GFL_LOG_DEBUG("[KernelLaunchHandler] API_ENTER corr=",
-                      cbInfo->correlationId, " name=", meta.name,
-                      " scope=", meta.user_scope);
+        if (shouldLogLaunch) {
+            GFL_LOG_DEBUG("[KernelLaunchHandler] API_ENTER corr=",
+                          cbInfo->correlationId, " name=", meta.name,
+                          " scope=", meta.user_scope);
+        }
     } else if (cbInfo->callbackSite == CUPTI_API_EXIT) {
         const int64_t exitNs = detail::GetTimestampNs();
         std::lock_guard lk(backend_->meta_mu_);

@@ -1,4 +1,5 @@
 #include "gpufl/backends/nvidia/cupti_backend.hpp"
+#include "gpufl/backends/nvidia/cuda_cleanup_handler.hpp"
 
 #include <cupti_pcsampling.h>
 
@@ -38,6 +39,9 @@
 #include "gpufl/core/activity_record.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
+#include "gpufl/core/logger/logger.hpp"
+#include "gpufl/core/model/lifecycle_model.hpp"
+#include "gpufl/core/runtime.hpp"
 #include "gpufl/core/ring_buffer.hpp"
 #include "gpufl/core/stack_registry.hpp"
 #include "gpufl/core/trace_type.hpp"
@@ -46,6 +50,15 @@ namespace gpufl {
 std::atomic<CuptiBackend*> g_activeBackend{nullptr};
 
 namespace {
+
+void AddCapability(CaptureCapabilitiesEvent& evt, std::string feature,
+                   bool requested, std::string status, std::string mode,
+                   std::string reason, std::string message) {
+    evt.capabilities.push_back(CaptureCapability{
+        std::move(feature), requested, std::move(status), std::move(mode),
+        std::move(reason), std::move(message)});
+}
+
 // Persistent maps for ActivityAPI PC sampling companion records.
 // SOURCE_LOCATOR records map sourceLocatorId → (fileName, lineNumber).
 // FUNCTION records map functionId → functionName.
@@ -336,6 +349,7 @@ void CuptiBackend::initialize(const MonitorOptions& opts) {
 
     // Internal handler registration
     RegisterHandler(std::make_shared<ResourceHandler>(this));
+    RegisterHandler(std::make_shared<CudaCleanupHandler>(this));
     RegisterHandler(std::make_shared<KernelLaunchHandler>(this));
     RegisterHandler(std::make_shared<MemTransferHandler>(this));
     RegisterHandler(std::make_shared<SynchronizationHandler>(this));
@@ -819,8 +833,142 @@ void CuptiBackend::start() {
             " (CUptiResult=", static_cast<int>(g_res), ")");
     }
 
+    EmitCaptureCapabilities_();
+
     active_.store(true);
     GFL_LOG_DEBUG("Backend started.");
+}
+
+
+void CuptiBackend::EmitCaptureCapabilities_() const {
+    const Runtime* rt = runtime();
+    if (!(rt && rt->logger)) return;
+
+    const bool sassMode = IsSassProfilerMode();
+    const bool kernelActivity = !sassMode || AllowSassKernelActivity();
+    const bool syntheticKernels = sassMode && !kernelActivity;
+    const bool cubinCapture = NeedsCubinCapture();
+
+    bool sassActive = opts_.profiling_engine == ProfilingEngine::SassMetrics &&
+                      engine_ && engine_->isOperational();
+    bool pcActive = opts_.profiling_engine == ProfilingEngine::PcSampling &&
+                    engine_ && engine_->isOperational();
+    if (opts_.profiling_engine == ProfilingEngine::Deep) {
+        if (const auto* deep = dynamic_cast<const PcSamplingWithSassEngine*>(engine_.get())) {
+            sassActive = deep->sassActive();
+            pcActive = deep->pcSamplingActive();
+        }
+    }
+
+    std::string selected = ProfilingEngineWireName(opts_.profiling_engine);
+    if (opts_.profiling_engine == ProfilingEngine::Deep) {
+        if (sassActive) selected = "nvidia.sass_metrics";
+        else if (pcActive) selected = "nvidia.pc_sampling";
+        else selected = "nvidia.none";
+    }
+
+    CaptureCapabilitiesEvent evt;
+    evt.session_id = rt->session_id;
+    evt.ts_ns = detail::GetTimestampNs();
+    evt.requested_engine = ProfilingEngineWireName(opts_.profiling_engine);
+    evt.selected_engine = selected;
+
+    AddCapability(evt, "kernel_events", true,
+                  syntheticKernels ? "fallback" : "collected",
+                  syntheticKernels ? "launch_callbacks_synthetic" : "cupti_activity",
+                  syntheticKernels ? "cupti_kernel_activity_deadlock_risk" : "",
+                  syntheticKernels
+                      ? "Kernel rows were collected from launch callbacks; durations are estimated because CUPTI kernel activity is disabled in SASS safe mode."
+                      : "Kernel rows were collected from CUPTI kernel activity records.");
+    AddCapability(evt, "kernel_names", true,
+                  syntheticKernels ? "partial" : "collected",
+                  syntheticKernels ? "callback_symbol_probe" : "cupti_activity_name",
+                  syntheticKernels ? "symbol_name_may_be_unavailable" : "",
+                  syntheticKernels
+                      ? "Kernel names use CUPTI callback symbolName when safely readable, otherwise the CUDA launch API name."
+                      : "Kernel names came from CUPTI activity records.");
+    AddCapability(evt, "kernel_details", true,
+                  syntheticKernels ? "partial" : "collected",
+                  syntheticKernels ? "launch_callback_params" : "cupti_activity_details",
+                  syntheticKernels ? "activity_details_unavailable" : "",
+                  syntheticKernels
+                      ? "Grid/block parameters are captured from launch callbacks; register and occupancy details may be unavailable."
+                      : "Kernel details came from CUPTI activity records and launch metadata.");
+    AddCapability(evt, "cubin_disassembly", cubinCapture,
+                  cubinCapture ? "collected" : "not_requested",
+                  cubinCapture ? "module_resource_callbacks" : "disabled",
+                  "",
+                  cubinCapture
+                      ? "CUBINs were captured for offline SASS disassembly."
+                      : "This profiling engine does not request CUBIN capture.");
+    AddCapability(evt, "sass_metrics",
+                  opts_.profiling_engine == ProfilingEngine::SassMetrics ||
+                      opts_.profiling_engine == ProfilingEngine::Deep,
+                  sassActive ? "collected" :
+                      ((opts_.profiling_engine == ProfilingEngine::SassMetrics ||
+                        opts_.profiling_engine == ProfilingEngine::Deep) ? "skipped" : "not_requested"),
+                  sassActive ? "cupti_sass_metrics" : "disabled",
+                  sassActive ? "" : "not_selected_or_not_operational",
+                  sassActive
+                      ? "SASS metrics were collected for this session."
+                      : "SASS metrics were not collected for this session.");
+    AddCapability(evt, "pc_sampling",
+                  opts_.profiling_engine == ProfilingEngine::PcSampling ||
+                      opts_.profiling_engine == ProfilingEngine::Deep,
+                  pcActive ? "collected" :
+                      (opts_.profiling_engine == ProfilingEngine::Deep && sassActive ? "skipped" :
+                       (opts_.profiling_engine == ProfilingEngine::PcSampling ? "skipped" : "not_requested")),
+                  pcActive ? "cupti_pc_sampling" : "disabled",
+                  opts_.profiling_engine == ProfilingEngine::Deep && sassActive
+                      ? "mutually_exclusive_with_sass_metrics" :
+                    (pcActive ? "" : "not_selected_or_not_operational"),
+                  opts_.profiling_engine == ProfilingEngine::Deep && sassActive
+                      ? "Deep selected SASS metrics; PC sampling was skipped because SASS metrics and PC sampling are mutually exclusive in one run."
+                      : (pcActive ? "PC sampling was collected for this session."
+                                  : "PC sampling was not collected for this session."));
+    AddCapability(evt, "source_correlation", pcActive,
+                  pcActive ? "collected" : (sassActive ? "skipped" : "not_requested"),
+                  pcActive ? "pc_sampling_source_locator" : "disabled",
+                  pcActive ? "" : (sassActive ? "sass_metrics_have_no_source_lines" : "not_requested"),
+                  pcActive
+                      ? "PC sampling source locator records can provide CUDA source correlation when available."
+                      : "CUDA source-line correlation was not collected in this session.");
+    AddCapability(evt, "memory_activity", opts_.enable_memory_tracking,
+                  opts_.enable_memory_tracking && AllowSassMemory2Activity() ? "collected" :
+                      (opts_.enable_memory_tracking ? "skipped" : "not_requested"),
+                  opts_.enable_memory_tracking && AllowSassMemory2Activity() ? "cupti_memory2" : "disabled",
+                  opts_.enable_memory_tracking && !AllowSassMemory2Activity()
+                      ? "sass_safe_mode_memory_activity_disabled" : "",
+                  opts_.enable_memory_tracking && AllowSassMemory2Activity()
+                      ? "CUPTI MEMORY2 activity was enabled."
+                      : "CUPTI memory activity was not collected.");
+    AddCapability(evt, "external_correlation", opts_.enable_external_correlation,
+                  opts_.enable_external_correlation && AllowSassExternalCorrelation() ? "collected" :
+                      (opts_.enable_external_correlation ? "skipped" : "not_requested"),
+                  opts_.enable_external_correlation && AllowSassExternalCorrelation() ? "cupti_external_correlation" : "disabled",
+                  opts_.enable_external_correlation && !AllowSassExternalCorrelation()
+                      ? "sass_safe_mode_external_correlation_disabled" : "",
+                  opts_.enable_external_correlation && AllowSassExternalCorrelation()
+                      ? "Framework external correlation was enabled."
+                      : "Framework external correlation was not collected.");
+
+    rt->logger->write(model::CaptureCapabilitiesModel(evt));
+}
+
+void CuptiBackend::FlushProfilingDataBeforeCudaTeardown(const char* reason) {
+    if (!initialized_ || !active_.load(std::memory_order_relaxed) || !engine_) {
+        return;
+    }
+    if (!IsSassProfilerMode()) return;
+
+    const int64_t now = detail::GetTimestampNs();
+    int64_t expected = 0;
+    if (!last_cleanup_flush_ns_.compare_exchange_strong(
+            expected, now, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+        return;
+    }
+
+    engine_->flushBeforeCudaTeardown(reason);
 }
 
 void CuptiBackend::stop() {

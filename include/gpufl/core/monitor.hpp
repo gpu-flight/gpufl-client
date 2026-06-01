@@ -92,6 +92,32 @@ enum class ProfilingEngine {
                     // deepest single-session profile. (Was PcSamplingWithSass.)
 };
 
+inline const char* ProfilingEngineWireName(const ProfilingEngine engine) {
+    switch (engine) {
+        case ProfilingEngine::Monitor:       return "nvidia.none";
+        case ProfilingEngine::Trace:         return "nvidia.trace";
+        case ProfilingEngine::PcSampling:    return "nvidia.pc_sampling";
+        case ProfilingEngine::SassMetrics:   return "nvidia.sass_metrics";
+        case ProfilingEngine::RangeProfiler: return "nvidia.range_profiler";
+        case ProfilingEngine::Deep:          return "nvidia.pc_sampling_with_sass";
+    }
+    return "nvidia.unknown";
+}
+
+inline const char* ProfilingEngineSessionKind(const ProfilingEngine engine) {
+    switch (engine) {
+        case ProfilingEngine::Monitor:
+        case ProfilingEngine::Trace:
+            return "monitor";
+        case ProfilingEngine::PcSampling:
+        case ProfilingEngine::SassMetrics:
+        case ProfilingEngine::RangeProfiler:
+        case ProfilingEngine::Deep:
+            return "trace";
+    }
+    return "monitor";
+}
+
 struct MonitorOptions {
     bool enable_debug_output = false;
     bool enable_stack_trace = false;

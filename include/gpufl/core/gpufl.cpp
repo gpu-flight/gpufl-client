@@ -203,6 +203,7 @@ static std::string defaultLogPath_(const std::string& app) {
 
 // Remembered after init() for use by generateReport() after shutdown()
 static std::string g_lastLogPath;
+static std::string g_lastSessionId;
 static std::string g_lastAppName;
 
 static std::atomic<uint64_t> g_nextScopeId{1};
@@ -315,6 +316,7 @@ bool init(const InitOptions& opts) {
     logOpts.flush_always = g_opts.flush_logs_always;
 
     g_lastLogPath = logPath;
+    g_lastSessionId = rt->session_id;
     g_lastAppName = rt->app_name;
 
     GFL_LOG_DEBUG("Opening log file: ", logPath);
@@ -493,40 +495,8 @@ bool init(const InitOptions& opts) {
     }
     ie.host = rt_ptr->host_collector->sample();
 
-    switch (mOpts.profiling_engine) {
-        case ProfilingEngine::Monitor:
-            // Telemetry-only. Reuse the legacy "nvidia.none" wire string
-            // so the dashboard keeps suppressing the engine badge for
-            // these sessions (SessionList.formatEngineBadge special-cases
-            // "nvidia.none"). session_kind stays "monitor".
-            ie.session_kind = "monitor";
-            ie.profiling_engine = "nvidia.none";
-            break;
-        case ProfilingEngine::Trace:
-            // Activity trace, no sampling. New wire string; the dashboard
-            // title-cases unknown values, so it renders a "Trace" badge
-            // and (correctly) does not show the Source/SASS tab
-            // (engineImpliesSamples only matches the sampling strings).
-            ie.session_kind = "monitor";
-            ie.profiling_engine = "nvidia.trace";
-            break;
-        case ProfilingEngine::PcSampling:
-            ie.session_kind = "trace";
-            ie.profiling_engine = "nvidia.pc_sampling";
-            break;
-        case ProfilingEngine::SassMetrics:
-            ie.session_kind = "trace";
-            ie.profiling_engine = "nvidia.sass_metrics";
-            break;
-        case ProfilingEngine::RangeProfiler:
-            ie.session_kind = "trace";
-            ie.profiling_engine = "nvidia.range_profiler";
-            break;
-        case ProfilingEngine::Deep:
-            ie.session_kind = "trace";
-            ie.profiling_engine = "nvidia.pc_sampling_with_sass";
-            break;
-    }
+    ie.session_kind = ProfilingEngineSessionKind(mOpts.profiling_engine);
+    ie.profiling_engine = ProfilingEngineWireName(mOpts.profiling_engine);
 
     rt_ptr->logger->write(model::InitEventModel(ie));
 
@@ -849,16 +819,21 @@ void generateReport(const std::string& output_path) {
     namespace fs = std::filesystem;
 
     fs::path p(g_lastLogPath);
-    std::string dir = p.parent_path().string();
-    if (dir.empty()) dir = ".";
-
-    std::string prefix = p.filename().string();
-    if (prefix.size() > 4 && prefix.substr(prefix.size() - 4) == ".log")
-        prefix = prefix.substr(0, prefix.size() - 4);
+    if (p.extension() == ".log") {
+        p.replace_extension();
+    }
 
     report::TextReport::Options opts;
-    opts.log_dir = dir;
-    opts.log_prefix = prefix;
+    const fs::path sessionDir = p / g_lastSessionId;
+    if (!g_lastSessionId.empty() && fs::exists(sessionDir)) {
+        opts.log_dir = sessionDir.string();
+        opts.log_prefix.clear();
+    } else {
+        std::string dir = p.parent_path().string();
+        if (dir.empty()) dir = ".";
+        opts.log_dir = dir;
+        opts.log_prefix = p.filename().string();
+    }
     std::string text = report::TextReport(opts).generate();
 
     if (output_path.empty()) {

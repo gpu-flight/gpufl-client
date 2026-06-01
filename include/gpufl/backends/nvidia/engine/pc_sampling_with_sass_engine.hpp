@@ -57,6 +57,7 @@ class PcSamplingWithSassEngine final : public IProfilingEngine {
      *  driver back-pressured sample collection, and a CUPTI helper thread
      *  deadlocked on a driver lock. No-op when SASS won the session. */
     void drainData() override;
+    void flushBeforeCudaTeardown(const char* reason) override;
 
     /** Insufficient if EITHER sub-engine was blocked — the composite
      *  requires both to be fully operational. */
@@ -72,6 +73,9 @@ class PcSamplingWithSassEngine final : public IProfilingEngine {
     bool isOperational() const override {
         return (pc_ && pc_->isOperational()) || sass_ok_;
     }
+
+    bool sassActive() const { return sass_ok_; }
+    bool pcSamplingActive() const { return pc_ && pc_->isOperational(); }
 
    private:
     std::unique_ptr<PcSamplingEngine>  pc_;

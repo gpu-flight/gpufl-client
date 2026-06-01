@@ -242,6 +242,7 @@ if(GPUFL_ENABLE_NVIDIA)
                 include/gpufl/backends/nvidia/sampler/cupti_sass.hpp
                 include/gpufl/backends/nvidia/cuda_collector.cpp
                 include/gpufl/backends/nvidia/cupti_utils.cpp
+                include/gpufl/backends/nvidia/cuda_cleanup_handler.cpp
                 include/gpufl/backends/nvidia/resource_handler.cpp
                 include/gpufl/backends/nvidia/kernel_launch_handler.cpp
                 include/gpufl/backends/nvidia/mem_transfer_handler.cpp
