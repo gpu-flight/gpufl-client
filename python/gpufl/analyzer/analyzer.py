@@ -120,6 +120,28 @@ class GpuFlightSession:
             if not shut.empty and 'ts_ns' in shut.columns and self.session_end_ns is None:
                 self.session_end_ns = pd.to_numeric(shut.iloc[-1]['ts_ns'], errors='coerce')
 
+        # 2b. Capture capabilities — what was actually collected vs. enabled
+        # but empty vs. skipped. Emitted once at shutdown (type
+        # 'capture_capabilities'), routed to all channels.
+        self.requested_engine = None
+        self.selected_engine = None
+        self.capture_capabilities = []
+        for df in [device_df, scope_df, system_df]:
+            if df.empty or 'type' not in df.columns:
+                continue
+            caps = df[df['type'] == 'capture_capabilities']
+            if caps.empty:
+                continue
+            row = caps.iloc[-1]
+            if 'requested_engine' in caps.columns:
+                self.requested_engine = row.get('requested_engine')
+            if 'selected_engine' in caps.columns:
+                self.selected_engine = row.get('selected_engine')
+            cap_list = row.get('capabilities') if 'capabilities' in caps.columns else None
+            if isinstance(cap_list, list):
+                self.capture_capabilities = cap_list
+            break
+
         # 3. Detect format: batch (new) vs per-event (old)
         _BATCH_TYPES = {
             'kernel_event_batch', 'memcpy_event_batch', 'device_metric_batch',

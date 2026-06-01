@@ -2,6 +2,7 @@
 
 #include <cupti_sass_metrics.h>
 
+#include <atomic>
 #include <string>
 #include <unordered_map>
 
@@ -38,6 +39,11 @@ class SassMetricsEngine final : public IProfilingEngine {
 
     bool isOperational() const override { return enabled_; }
 
+    /** True once at least one SASS metric sample was pushed this session. */
+    bool producedData() const override {
+        return produced_data_.load(std::memory_order_relaxed);
+    }
+
    private:
     void EnableSassMetrics_();
     void StopAndCollectSassMetrics_();
@@ -66,6 +72,7 @@ class SassMetricsEngine final : public IProfilingEngine {
     std::unordered_map<uint64_t, std::string> metric_id_to_name_;
     std::vector<std::string> skipped_metrics_;
     bool enabled_ = false;
+    std::atomic<bool> produced_data_{false};
     bool config_set_ = false;
     bool insufficient_privileges_ = false;
     // True after cuptiProfilerInitialize() returned CUPTI_SUCCESS in

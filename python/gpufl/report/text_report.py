@@ -41,6 +41,24 @@ def _fmt_power(mw):
     return f"{mw:.0f} mW"
 
 
+def _title_from_snake(s: str) -> str:
+    return " ".join(w.capitalize() for w in s.split("_")) if s else s
+
+
+_CAP_STATUS_LABELS = {
+    "collected": "collected",
+    "fallback": "fallback",
+    "partial": "partial",
+    "skipped": "skipped",
+    "enabled_no_data": "on, no data",
+    "not_requested": "not requested",
+}
+
+
+def _capability_status_label(status: str) -> str:
+    return _CAP_STATUS_LABELS.get(status, status or "unknown")
+
+
 class TextReport:
     def __init__(self, session: GpuFlightSession, top_n: int = 10):
         self.session = session
@@ -50,6 +68,7 @@ class TextReport:
         sections = [
             self._section_header(),
             self._section_session_summary(),
+            self._section_capabilities(),
             self._section_kernel_summary(),
             self._section_top_kernels(),
             self._section_kernel_details(),
@@ -125,6 +144,33 @@ class TextReport:
                 if l2 is not None:
                     lines.append(f"    L2 Cache:           {_fmt_bytes(l2)}")
 
+        return lines
+
+    def _section_capabilities(self) -> list[str]:
+        caps = getattr(self.session, "capture_capabilities", None)
+        if not caps:
+            return []
+        lines = ["", _SEP, "  Capture Capabilities", _SEP]
+        req = getattr(self.session, "requested_engine", None)
+        sel = getattr(self.session, "selected_engine", None)
+        if req:
+            lines.append(f"  Requested Engine:     {req}")
+        if sel:
+            lines.append(f"  Selected Engine:      {sel}")
+        lines.append(f"  {'Feature':<22}{'Status':<14}Note")
+        lines.append("  " + "-" * 74)
+        for cap in caps:
+            if not isinstance(cap, dict):
+                continue
+            feature = _title_from_snake(str(cap.get("feature", "")))[:20]
+            status = _capability_status_label(str(cap.get("status", "")))[:12]
+            note = cap.get("reason_code") or cap.get("message") or ""
+            if not cap.get("requested", True) and not note:
+                note = "not requested"
+            note = str(note)
+            if len(note) > 40:
+                note = note[:37] + "..."
+            lines.append(f"  {feature:<22}{status:<14}{note}")
         return lines
 
     def _section_kernel_summary(self) -> list[str]:

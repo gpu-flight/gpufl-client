@@ -96,6 +96,7 @@ std::string capabilityStatusLabel(const std::string& status) {
     if (status == "fallback") return "fallback";
     if (status == "partial") return "partial";
     if (status == "skipped") return "skipped";
+    if (status == "enabled_no_data") return "on, no data";
     if (status == "not_requested") return "not requested";
     return status.empty() ? "unknown" : status;
 }

@@ -77,6 +77,11 @@ class PcSamplingWithSassEngine final : public IProfilingEngine {
     bool sassActive() const { return sass_ok_; }
     bool pcSamplingActive() const { return pc_ && pc_->isOperational(); }
 
+    /** True once the corresponding sub-engine actually emitted rows (not merely
+     *  armed) — drives the "enabled but 0 data" capability state. */
+    bool sassProducedData() const { return sass_ && sass_->producedData(); }
+    bool pcProducedData() const { return pc_ && pc_->producedData(); }
+
    private:
     std::unique_ptr<PcSamplingEngine>  pc_;
     std::unique_ptr<SassMetricsEngine> sass_;

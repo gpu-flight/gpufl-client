@@ -860,6 +860,23 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
         }
     }
 
+    // Did each path actually emit rows (vs merely arm)? Drives the
+    // "enabled_no_data" status so a capability that was turned ON but produced
+    // zero records is reported honestly instead of as "collected".
+    bool sassHasData = false;
+    bool pcHasData = false;
+    if (engine_) {
+        if (const auto* deep =
+                dynamic_cast<const PcSamplingWithSassEngine*>(engine_.get())) {
+            sassHasData = deep->sassProducedData();
+            pcHasData = deep->pcProducedData();
+        } else if (opts_.profiling_engine == ProfilingEngine::SassMetrics) {
+            sassHasData = engine_->producedData();
+        } else if (opts_.profiling_engine == ProfilingEngine::PcSampling) {
+            pcHasData = engine_->producedData();
+        }
+    }
+
     std::string selected = ProfilingEngineWireName(opts_.profiling_engine);
     if (opts_.profiling_engine == ProfilingEngine::Deep) {
         if (sassActive) selected = "nvidia.sass_metrics";
@@ -904,27 +921,33 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
     AddCapability(evt, "sass_metrics",
                   opts_.profiling_engine == ProfilingEngine::SassMetrics ||
                       opts_.profiling_engine == ProfilingEngine::Deep,
-                  sassActive ? "collected" :
+                  sassActive ? (sassHasData ? "collected" : "enabled_no_data") :
                       ((opts_.profiling_engine == ProfilingEngine::SassMetrics ||
                         opts_.profiling_engine == ProfilingEngine::Deep) ? "skipped" : "not_requested"),
                   sassActive ? "cupti_sass_metrics" : "disabled",
-                  sassActive ? "" : "not_selected_or_not_operational",
+                  sassActive ? (sassHasData ? "" : "enabled_but_no_samples")
+                             : "not_selected_or_not_operational",
                   sassActive
-                      ? "SASS metrics were collected for this session."
+                      ? (sassHasData
+                            ? "SASS metrics were collected for this session."
+                            : "SASS metrics were enabled but produced no instruction-level samples this session (e.g. kernels too short, or CUPTI replay returned no data).")
                       : "SASS metrics were not collected for this session.");
     AddCapability(evt, "pc_sampling",
                   opts_.profiling_engine == ProfilingEngine::PcSampling ||
                       opts_.profiling_engine == ProfilingEngine::Deep,
-                  pcActive ? "collected" :
+                  pcActive ? (pcHasData ? "collected" : "enabled_no_data") :
                       (opts_.profiling_engine == ProfilingEngine::Deep && sassActive ? "skipped" :
                        (opts_.profiling_engine == ProfilingEngine::PcSampling ? "skipped" : "not_requested")),
                   pcActive ? "cupti_pc_sampling" : "disabled",
                   opts_.profiling_engine == ProfilingEngine::Deep && sassActive
                       ? "mutually_exclusive_with_sass_metrics" :
-                    (pcActive ? "" : "not_selected_or_not_operational"),
+                    (pcActive ? (pcHasData ? "" : "enabled_but_no_samples")
+                              : "not_selected_or_not_operational"),
                   opts_.profiling_engine == ProfilingEngine::Deep && sassActive
                       ? "Deep selected SASS metrics; PC sampling was skipped because SASS metrics and PC sampling are mutually exclusive in one run."
-                      : (pcActive ? "PC sampling was collected for this session."
+                      : (pcActive ? (pcHasData
+                            ? "PC sampling was collected for this session."
+                            : "PC sampling was enabled but produced no stall samples this session (e.g. kernels too short for the sampling period).")
                                   : "PC sampling was not collected for this session."));
     AddCapability(evt, "source_correlation", pcActive,
                   pcActive ? "collected" : (sassActive ? "skipped" : "not_requested"),

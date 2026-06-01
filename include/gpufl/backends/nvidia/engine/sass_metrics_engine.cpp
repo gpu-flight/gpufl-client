@@ -389,11 +389,22 @@ void SassMetricsEngine::EnableSassMetrics_() {
             "unavailable.");
     }
 
+    // The op-level ideal-sector fallbacks (smsp__sass_sectors_mem_global_op_*_ideal)
+    // are ALSO invalid on sm_120+ (Blackwell): cuptiSassMetricsGetProperties returns
+    // CUPTI_ERROR_INVALID_PARAMETER there because they're superseded by the aggregate
+    // smsp__sass_sectors_mem_global_ideal. Querying them on sm_120 produced 2 failed
+    // queries that tripped the conservative sm_120 bail below and discarded ALL of
+    // SASS — so Deep collected zero SASS metrics on Blackwell. Skip them on every
+    // identified architecture: expensive on pre-sm_120, invalid on sm_120+. They're
+    // only ever attempted on an UNKNOWN arch (cc invalid) as a last resort.
+    const bool skipOpLevelIdeal = cc.valid();
+
     size_t validConfigs = 0;
     size_t failedQueries = 0;
     for (size_t i = 0; i < kSassMetricNames.size(); ++i) {
-        // Proactive skip for known-expensive metrics on older GPUs.
-        if (skipExpensive && IsExpensiveOnPreSm120(kSassMetricNames[i])) {
+        // Skip the op-level ideal-sector fallbacks: expensive (~120x replay) on
+        // pre-sm_120, invalid (INVALID_PARAMETER) on sm_120+. See skipOpLevelIdeal.
+        if (skipOpLevelIdeal && IsExpensiveOnPreSm120(kSassMetricNames[i])) {
             skipped_metrics_.push_back(kSassMetricNames[i]);
             continue;
         }
@@ -429,28 +440,20 @@ void SassMetricsEngine::EnableSassMetrics_() {
         return;
     }
 
-    // Conservative bail on sm_120+ (Blackwell): any metric-query failure
-    // here historically indicated a deeper compatibility issue with the
-    // SASS API on this hardware path (Blackwell laptop + Windows WDDM),
-    // not just an isolated unsupported metric. Proceeding to
-    // cuptiSassMetricsSetConfig + cuptiSassMetricsEnable in that
-    // partially-failed state hung the next cuLaunchKernel in lazy-
-    // patching interception, because CUPTI's profiler state was
-    // already corrupted by the partial init. Bail cleanly instead so
-    // Deep mode degrades to PC Sampling only — same UX as the all-
-    // failed case above, just triggered by one-or-more failures
-    // instead of strictly all.
-    if (failedQueries > 0 && cc.valid() && cc.atLeast(12, 0)) {
-        GFL_LOG_ERROR(
+    // Partial metric availability is NOT fatal — collect whatever armed.
+    // (Historically sm_120 bailed entirely on ANY failed metric query, to dodge
+    // a CUPTI hang seen on Blackwell laptop + Windows WDDM. That hang was a
+    // property of LAZY patching — no longer the default (see enableLazyPatching
+    // below) — and the only metrics that failed on sm_120 were the op-level
+    // ideal-sector fallbacks, now skipped above. A non-zero failedQueries here
+    // therefore just means a few optional metrics were unavailable; proceed with
+    // the validConfigs we have. The "nothing usable" case already returned at
+    // validConfigs == 0 above.)
+    if (failedQueries > 0) {
+        GFL_LOG_DEBUG(
             "[SassMetricsEngine] ", failedQueries,
-            " of ", kSassMetricNames.size(),
-            " SASS metric queries failed on sm_", cc.major, cc.minor,
-            ". On this hardware family a partial-failure state has been "
-            "observed to hang subsequent kernel launches via CUPTI's "
-            "lazy-patching path. Skipping SASS entirely; Deep mode will "
-            "degrade to PC Sampling only this session.");
-        DeInitProfilerIfNeeded_();
-        return;
+            " optional SASS metric(s) unavailable on sm_", cc.major, cc.minor,
+            "; continuing with ", validConfigs, " metric(s).");
     }
 
     CUpti_SassMetricsSetConfig_Params setConfigParams = {
@@ -549,10 +552,31 @@ void SassMetricsEngine::StopAndCollectSassMetrics_() {
     CUpti_SassMetricsGetDataProperties_Params props = {
         CUpti_SassMetricsGetDataProperties_Params_STRUCT_SIZE};
     props.ctx = ctx_.cuda_ctx;
-    if (cuptiSassMetricsGetDataProperties(&props) != CUPTI_SUCCESS ||
-        props.numOfPatchedInstructionRecords == 0) {
+    CUptiResult propRes = cuptiSassMetricsGetDataProperties(&props);
+    if (propRes != CUPTI_SUCCESS) {
+        // CUPTI errored on the data-properties query — distinct from "armed but
+        // patched nothing". Surface it so the empty-SASS case isn't silent.
+        LogCuptiErrorIfFailed(this->name(),
+                              "cuptiSassMetricsGetDataProperties", propRes);
         return;
     }
+    if (props.numOfPatchedInstructionRecords == 0) {
+        // SASS enabled successfully but CUPTI instrumented ZERO instructions
+        // this session — no patched records to flush. Seen on consumer
+        // Blackwell (sm_120) laptops under Windows WDDM with CUPTI 13.x, and
+        // when GPU performance-counter access is restricted. This is the
+        // "sass_metrics: on, no data" capability state; not a code error.
+        GFL_LOG_ERROR(
+            "[SassMetricsEngine] SASS armed but CUPTI reports 0 patched "
+            "instruction records — no kernel was SASS-instrumented this "
+            "session. Check GPU performance-counter access (NVIDIA Control "
+            "Panel / run elevated); may be unsupported on this GPU+driver.");
+        return;
+    }
+    GFL_LOG_DEBUG("[SassMetricsEngine] draining ",
+                  props.numOfPatchedInstructionRecords,
+                  " patched instruction record(s), ", props.numOfInstances,
+                  " instance(s).");
 
     size_t nRecords = props.numOfPatchedInstructionRecords;
     size_t nInstances = props.numOfInstances;
@@ -662,6 +686,8 @@ void SassMetricsEngine::StopAndCollectSassMetrics_() {
                 samples.push_back(std::move(s));
             }
         }
+        if (!samples.empty())
+            produced_data_.store(true, std::memory_order_relaxed);
         Monitor::PushProfileSamples(samples);
     } else {
         LogCuptiErrorIfFailed(this->name(), "cuptiSassMetricsFlushData",

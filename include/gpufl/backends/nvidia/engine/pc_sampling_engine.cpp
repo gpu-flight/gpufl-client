@@ -248,6 +248,7 @@ void PcSamplingEngine::drainData() {
 
     auto numPcs = pc_sampling_buffers_->data->totalNumPcs;
     if (numPcs == 0) return;
+    produced_data_.store(true, std::memory_order_relaxed);
 
     GFL_LOG_DEBUG("[PC Sampling] drainData: ", numPcs, " PC records");
 
@@ -545,26 +546,21 @@ void PcSamplingEngine::StopAndCollectPcSampling_() {
         return;
     }
 
-    if (pc_sampling_ref_count_.load() <= 0) {
-        GFL_LOG_DEBUG("[PC Sampling] StopAndCollect: exit — refCount <= 0");
-        return;
-    }
-
-    int refs = pc_sampling_ref_count_.fetch_sub(1);
-    if (refs > 1) {
-        GFL_LOG_DEBUG("[PC Sampling] still active (RefCount=", refs - 1, ")");
-        return;
-    }
-    if (refs < 1) {
-        GFL_LOG_ERROR("[PC Sampling] RefCount underflow!");
-        pc_sampling_ref_count_.store(0);
-        return;
-    }
-
+    // Terminal drain. Both callers — stop() and shutdown() — run at session
+    // teardown, and onScopeStop is a deliberate no-op, so pc_sampling_ref_count_
+    // is NOT a "still inside a scope" signal here: it only ever increments (once
+    // per scope start) and is never decremented per-scope. A refcount-gated
+    // collect therefore never reaches the drain for a multi-scope session — that
+    // was the "Deep on Blackwell armed PC sampling but drained ZERO rows" bug
+    // (refcount climbed to 7, the two terminal calls only walked it 7→6→5, never
+    // hit the refs==1 collect path). sampling_api_started_ (set by start() once
+    // CUPTI sampling actually armed) is the correct once-only guard here.
     if (!sampling_api_started_.exchange(false)) {
-        GFL_LOG_DEBUG("[PC Sampling] StopAndCollect: exit — sampling_api_started was false");
+        GFL_LOG_DEBUG(
+            "[PC Sampling] StopAndCollect: exit — already collected / not started");
         return;
     }
+    pc_sampling_ref_count_.store(0);
 
     if (!ctx_.cuda_ctx || !IsContextValid(ctx_.cuda_ctx)) {
         GFL_LOG_ERROR("[GPUFL] Aborting PC Sampling: Context invalid.");
@@ -621,6 +617,7 @@ void PcSamplingEngine::StopAndCollectPcSampling_() {
         }
 
         auto numPcs = pc_sampling_buffers_->data->totalNumPcs;
+        if (numPcs > 0) produced_data_.store(true, std::memory_order_relaxed);
         GFL_LOG_DEBUG("[PC Sampling] Collected ", numPcs, " PC records",
                       (hasMore ? " (more remaining)." : "."));
 
