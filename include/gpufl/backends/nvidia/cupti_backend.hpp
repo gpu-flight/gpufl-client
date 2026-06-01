@@ -4,6 +4,8 @@
 #include <cupti.h>
 
 #include <atomic>
+#include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -13,6 +15,7 @@
 #include <vector>
 
 #include "gpufl/backends/nvidia/cupti_common.hpp"
+#include "gpufl/backends/nvidia/cupti_utils.hpp"
 #include "gpufl/backends/nvidia/engine/profiling_engine.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/monitor.hpp"
@@ -44,6 +47,60 @@ class CuptiBackend : public IMonitorBackend {
 
     bool IsMonitoringMode() override { return true; }
     bool IsProfilingMode()  override { return engine_ != nullptr; }
+
+    bool IsSassProfilerMode() const {
+        return opts_.profiling_engine == ProfilingEngine::SassMetrics ||
+               opts_.profiling_engine == ProfilingEngine::Deep;
+    }
+    bool UseSafeSassActivityDefaults() const {
+        if (!IsSassProfilerMode()) return false;
+        if (EnvFlagEnabled_("GPUFL_SASS_FORCE_SAFE_ACTIVITY")) return true;
+        if (EnvFlagEnabled_("GPUFL_SASS_FORCE_FULL_ACTIVITY")) return false;
+
+        const ComputeCapability cc = GetComputeCapability(static_cast<int>(device_id_));
+        const uint32_t cuptiVersion = GetCuptiVersion();
+        if (cc.valid() && cc.atLeast(12, 0)) return false;
+        if (cuptiVersion >= 130200) return false;
+        return true;
+    }
+    bool AllowSassKernelActivity() const {
+        return !UseSafeSassActivityDefaults() ||
+               EnvFlagEnabled_("GPUFL_SASS_ALLOW_KERNEL_ACTIVITY");
+    }
+    bool AllowSassMarkerActivity() const {
+        return !UseSafeSassActivityDefaults() ||
+               EnvFlagEnabled_("GPUFL_SASS_ALLOW_MARKER_ACTIVITY");
+    }
+    bool AllowSassMemTransferActivity() const {
+        if (!UseSafeSassActivityDefaults()) return true;
+        return EnvFlagEnabled_("GPUFL_SASS_ALLOW_MEM_TRANSFER_ACTIVITY");
+    }
+    bool AllowSassMemory2Activity() const {
+        if (!UseSafeSassActivityDefaults()) return true;
+        const bool memTransferRequested =
+            EnvFlagEnabled_("GPUFL_SASS_ALLOW_MEM_TRANSFER_ACTIVITY");
+        const bool memory2Requested =
+            EnvFlagEnabled_("GPUFL_SASS_ALLOW_MEMORY2_ACTIVITY") ||
+            EnvFlagEnabled_("GPUFL_SASS_ALLOW_MEMORY_ACTIVITY");
+        // Safe-mode default keeps MEMORY2 because it is tied to the explicit
+        // enable_memory_tracking option.  If the user asks to test mem-transfer
+        // activity, keep MEMORY2 off unless it is explicitly requested too;
+        // enabling both is the confirmed deadlocking combination on sm_86 +
+        // CUPTI 13.1.
+        return memory2Requested || !memTransferRequested;
+    }
+    bool AllowSassSyncActivity() const {
+        return !UseSafeSassActivityDefaults() ||
+               EnvFlagEnabled_("GPUFL_SASS_ALLOW_SYNC_ACTIVITY");
+    }
+    bool AllowSassGraphActivity() const {
+        return !UseSafeSassActivityDefaults() ||
+               EnvFlagEnabled_("GPUFL_SASS_ALLOW_GRAPH_ACTIVITY");
+    }
+    bool AllowSassExternalCorrelation() const {
+        return !UseSafeSassActivityDefaults() ||
+               EnvFlagEnabled_("GPUFL_SASS_ALLOW_EXTERNAL_CORRELATION");
+    }
 
     // Whether the active engine consumes cubin binaries. Cubin capture
     // feeds two consumers, and both want the binary for the SAME three
@@ -110,6 +167,13 @@ class CuptiBackend : public IMonitorBackend {
     friend class KernelLaunchHandler;
     friend class MemTransferHandler;
     friend class SynchronizationHandler;
+
+    static bool EnvFlagEnabled_(const char* name) {
+        const char* v = std::getenv(name);
+        return v && v[0] != '\0' && v[0] != '0' && std::strcmp(v, "false") != 0 &&
+               std::strcmp(v, "FALSE") != 0 && std::strcmp(v, "off") != 0 &&
+               std::strcmp(v, "OFF") != 0;
+    }
 
     // CUPTI callback functions
     static void CUPTIAPI BufferRequested(uint8_t** buffer, size_t* size,

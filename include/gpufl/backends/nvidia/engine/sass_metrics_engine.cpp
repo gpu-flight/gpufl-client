@@ -150,6 +150,23 @@ bool ArchExcludedForSass(const ComputeCapability& cc) {
     }
     return false;
 }
+
+bool EnvFlagEnabled(const char* name) {
+    const char* v = std::getenv(name);
+    return v && v[0] != '\0' && v[0] != '0';
+}
+
+bool ShouldUseLazyPatching() {
+    // Lazy SASS patching instruments each cubin on its first kernel launch.
+    // That is cheap for small standalone CUDA programs, but framework stacks
+    // such as PyTorch often issue many first launches from multiple runtime
+    // paths while CUDA/CUPTI helper threads are also active.  The observed
+    // deadlock has the app thread in cuLaunchKernel -> libcupti and a CUPTI
+    // helper blocked on a libcuda rwlock.  Patch modules at load/profile time
+    // by default so SASS remains enabled without entering the launch-time
+    // patching path.  Keep an env override for experiments and tiny samples.
+    return EnvFlagEnabled("GPUFL_SASS_LAZY_PATCHING");
+}
 }  // namespace
 
 bool SassMetricsEngine::initialize(const MonitorOptions& opts,
@@ -257,21 +274,11 @@ void SassMetricsEngine::DeInitProfilerIfNeeded_() {
 }
 
 void SassMetricsEngine::stop() {
-    // Drain any SASS samples still pending in CUPTI's internal buffer
-    // BEFORE the engine is torn down. Without this, sessions that end
-    // without a final scope-stop (e.g. PyTorch training pipelines that
-    // run iterations outside a `with gpufl.Scope(...)` block, or where
-    // the last scope's onScopeStop hasn't fired before shutdown) lose
-    // every SASS sample — silently — because shutdown() below calls
-    // cuptiSassMetricsDisable + frees buffers without flushing.
-    //
-    // The drain itself is the same path onScopeStop uses
-    // (StopAndCollectSassMetrics_), which is safe to call multiple
-    // times: each call only collects what's currently in CUPTI's
-    // queue. Belt-and-suspenders.
-    if (enabled_) {
-        StopAndCollectSassMetrics_();
-    }
+    // Do not drain SASS data at ordinary scope/session stop.  On CUDA 13.1
+    // + PyTorch + sm_86, calling cuptiSassMetricsFlushData while the process
+    // continues launching kernels leaves CUPTI's launch-path mutex wedged; the
+    // next cudaLaunchKernel blocks in libcupti.  Keep SASS armed and defer the
+    // one required drain until shutdown(), immediately before disable/teardown.
 }
 
 void SassMetricsEngine::shutdown() {
@@ -318,8 +325,8 @@ void SassMetricsEngine::shutdown() {
 }
 
 void SassMetricsEngine::onScopeStop(const char* /*name*/) {
-    if (!enabled_) return;
-    StopAndCollectSassMetrics_();
+    // See stop(): mid-run SASS flush can deadlock the following PyTorch kernel
+    // launch.  SASS remains enabled; samples are drained once during shutdown.
 }
 
 // ---- Private helpers -------------------------------------------------------
@@ -451,19 +458,14 @@ void SassMetricsEngine::EnableSassMetrics_() {
         CUpti_SassMetricsEnable_Params enableParams = {
             CUpti_SassMetricsEnable_Params_STRUCT_SIZE};
         enableParams.ctx = ctx_.cuda_ctx;
-        // Always use lazy patching (=1): cubins are patched on their first
-        // cuLaunchKernel call rather than at module-load time, avoiding upfront
-        // cost on unexecuted kernels.
-        //
-        // The original concern was that lazy patching intercepts cuLaunchKernel
-        // at the same level as KERNEL_SERIALIZED PC Sampling (SamplingAPI),
-        // which could deadlock in PcSamplingWithSass mode.  In practice this
-        // conflict is impossible: SamplingAPI requires cuptiPCSamplingEnable(),
-        // but SASS requires cuptiProfilerInitialize() first, and that call
-        // blocks the PC Sampling API.  Whenever SASS enables successfully,
-        // SamplingAPI PC sampling is already disabled, so the deadlock
-        // condition can never be reached.
-        enableParams.enableLazyPatching = 1;
+        // Default to non-lazy patching.  Lazy patching hooks the first
+        // cuLaunchKernel for each cubin, which is exactly where PyTorch
+        // deadlocks on CUDA 13/CUPTI 13 in the captured gdb dump.  Non-lazy
+        // patching keeps SASS metrics enabled but moves CUPTI's work out of
+        // the hot launch path.  Set GPUFL_SASS_LAZY_PATCHING=1 to restore the
+        // old behavior for experiments.
+        const bool lazyPatching = ShouldUseLazyPatching();
+        enableParams.enableLazyPatching = lazyPatching ? 1 : 0;
         CUptiResult enableRes = cuptiSassMetricsEnable(&enableParams);
         if (LogCuptiErrorIfFailed(this->name(), "cuptiSassMetricsEnable",
                                   enableRes)) {
@@ -517,7 +519,8 @@ void SassMetricsEngine::EnableSassMetrics_() {
         DeInitProfilerIfNeeded_();
         return;
     }
-    GFL_LOG_DEBUG("[SassMetricsEngine] SASS Metrics Enabled");
+    GFL_LOG_DEBUG("[SassMetricsEngine] SASS Metrics Enabled (lazy_patching=",
+                  ShouldUseLazyPatching() ? "true" : "false", ")");
 
     // Emit sass_config event so the backend can distinguish "metric not
     // supported on this GPU" from "metric produced no data for this kernel".

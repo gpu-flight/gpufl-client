@@ -63,6 +63,14 @@ const std::string& KernelLaunchHandler::cachedDemangle(const char* mangled) {
 
 std::vector<std::pair<CUpti_CallbackDomain, CUpti_CallbackId>>
 KernelLaunchHandler::requiredCallbacks() const {
+    if (backend_ && backend_->IsSassProfilerMode()) {
+        GFL_LOG_DEBUG(
+            "[KernelLaunchHandler] launch API callbacks disabled in SASS "
+            "profiler mode; kernel activity records and SASS metrics remain "
+            "enabled.");
+        return {};
+    }
+
     // The set of launch APIs that produce a kernel record we want
     // api_enter_ns / api_exit_ns for. Anything missing here means the
     // backend stores 0 for the API timestamps, the frontend can't
@@ -135,6 +143,13 @@ KernelLaunchHandler::requiredCallbacks() const {
 
 std::vector<CUpti_ActivityKind> KernelLaunchHandler::requiredActivityKinds()
     const {
+    if (backend_ && !backend_->AllowSassKernelActivity()) {
+        GFL_LOG_DEBUG(
+            "[KernelLaunchHandler] kernel activity tracing disabled in SASS "
+            "profiler mode. Set GPUFL_SASS_ALLOW_KERNEL_ACTIVITY=1 to test it.");
+        return {};
+    }
+
     // CONCURRENT_KERNEL only — deliberately NOT CUPTI_ACTIVITY_KIND_KERNEL.
     // Per CUPTI docs, enabling KERNEL "serializes all kernel executions on
     // the GPU," which distorts timing (hides real kernel overlap), adds

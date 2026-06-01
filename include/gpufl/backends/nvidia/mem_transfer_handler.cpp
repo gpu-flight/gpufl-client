@@ -19,6 +19,12 @@ MemTransferHandler::MemTransferHandler(CuptiBackend* backend)
 
 std::vector<std::pair<CUpti_CallbackDomain, CUpti_CallbackId>>
 MemTransferHandler::requiredCallbacks() const {
+    if (backend_ && backend_->IsSassProfilerMode()) {
+        GFL_LOG_DEBUG(
+            "[MemTransferHandler] memcpy/memset API callbacks disabled in "
+            "SASS profiler mode.");
+        return {};
+    }
     return {
         // Runtime API memcpy
         {CUPTI_CB_DOMAIN_RUNTIME_API, CUPTI_RUNTIME_TRACE_CBID_cudaMemcpy_v3020},
@@ -85,6 +91,7 @@ MemTransferHandler::requiredCallbacks() const {
 
 std::vector<CUpti_ActivityKind> MemTransferHandler::requiredActivityKinds()
     const {
+    if (backend_ && !backend_->AllowSassMemTransferActivity()) return {};
     return {CUPTI_ACTIVITY_KIND_MEMCPY, CUPTI_ACTIVITY_KIND_MEMCPY2,
             CUPTI_ACTIVITY_KIND_MEMSET};
 }

@@ -12,6 +12,14 @@ SynchronizationHandler::SynchronizationHandler(CuptiBackend* backend)
 
 std::vector<std::pair<CUpti_CallbackDomain, CUpti_CallbackId>>
 SynchronizationHandler::requiredCallbacks() const {
+    if (backend_ && backend_->IsSassProfilerMode()) {
+        GFL_LOG_DEBUG(
+            "[SynchronizationHandler] synchronization API callbacks disabled "
+            "in SASS profiler mode; synchronization activity records remain "
+            "available without stack attribution.");
+        return {};
+    }
+
     // CUDA synchronization API CBIDs we capture stacks for. Add new
     // CBIDs here as CUPTI exposes them (e.g. cuStreamWaitValue32/64
     // are semaphore-style waits that can also produce SYNCHRONIZATION

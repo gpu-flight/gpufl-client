@@ -423,6 +423,16 @@ void CuptiBackend::start() {
     kernel_activity_emitted_.store(0, std::memory_order_relaxed);
     kernel_activity_throttled_.store(0, std::memory_order_relaxed);
 
+    if (IsSassProfilerMode()) {
+        const ComputeCapability cc =
+            GetComputeCapability(static_cast<int>(device_id_));
+        const uint32_t cuptiVersion = GetCuptiVersion();
+        GFL_LOG_DEBUG("[CuptiBackend] SASS activity policy: ",
+                      UseSafeSassActivityDefaults() ? "safe" : "full",
+                      " (sm=", cc.major, cc.minor,
+                      ", cupti_version=", cuptiVersion, ")");
+    }
+
     // SOURCE_LOCATOR + FUNCTION activity records feed only the Activity-API
     // PC-sampling source-correlation maps (g_sourceLocatorMap /
     // g_functionNameMap, read solely by the CUPTI_ACTIVITY_KIND_PC_SAMPLING
@@ -439,7 +449,13 @@ void CuptiBackend::start() {
     //   - The cost is ~zero when no NVTX traffic exists
     // Paired START/END records are merged into NvtxMarkerEvent below
     // in BufferCompleted.
-    CUPTI_CHECK(cuptiActivityEnable(CUPTI_ACTIVITY_KIND_MARKER));
+    if (AllowSassMarkerActivity()) {
+        CUPTI_CHECK(cuptiActivityEnable(CUPTI_ACTIVITY_KIND_MARKER));
+    } else {
+        GFL_LOG_DEBUG(
+            "[CuptiBackend] MARKER activity disabled in SASS profiler mode. "
+            "Set GPUFL_SASS_ALLOW_MARKER_ACTIVITY=1 to test it.");
+    }
 
     // SYNCHRONIZATION records capture every cudaStreamSynchronize /
     // cudaDeviceSynchronize / cudaEventSynchronize / cuStreamWaitEvent
@@ -447,7 +463,7 @@ void CuptiBackend::start() {
     // activity kind required (CUPTI emits these regardless of which
     // API kinds are enabled). Soft-fail on enable so a CUPTI build that
     // doesn't support the kind still lets the rest of collection work.
-    if (opts_.enable_synchronization) {
+    if (opts_.enable_synchronization && AllowSassSyncActivity()) {
         const CUptiResult res_sync =
             cuptiActivityEnable(CUPTI_ACTIVITY_KIND_SYNCHRONIZATION);
         if (res_sync != CUPTI_SUCCESS) {
@@ -468,7 +484,7 @@ void CuptiBackend::start() {
     // without MEMORY2 — they had MEMORY (deprecated) which has a
     // different record shape. We don't try to fall back; if MEMORY2
     // isn't available we log and continue without F3 attribution.
-    if (opts_.enable_memory_tracking) {
+    if (opts_.enable_memory_tracking && AllowSassMemory2Activity()) {
         const CUptiResult res_mem =
             cuptiActivityEnable(CUPTI_ACTIVITY_KIND_MEMORY2);
         if (res_mem != CUPTI_SUCCESS) {
@@ -483,7 +499,7 @@ void CuptiBackend::start() {
     // because some Blackwell driver builds reset PC sampling on first
     // graph launch — the planning doc has the full risk note. Soft-
     // fail on enable so older CUPTI without the kind keeps working.
-    if (opts_.enable_cuda_graphs_tracking) {
+    if (opts_.enable_cuda_graphs_tracking && AllowSassGraphActivity()) {
         const CUptiResult res_g =
             cuptiActivityEnable(CUPTI_ACTIVITY_KIND_GRAPH_TRACE);
         if (res_g != CUPTI_SUCCESS) {
@@ -515,7 +531,15 @@ void CuptiBackend::start() {
     // API, not the driver API directly. If a workload only uses cuLaunch
     // we may need DRIVER too — defer until we see a session that needs
     // it.)
-    if (opts_.enable_external_correlation) {
+    const bool enableExternalCorrelation =
+        opts_.enable_external_correlation && AllowSassExternalCorrelation();
+    if (opts_.enable_external_correlation && IsSassProfilerMode() &&
+        !AllowSassExternalCorrelation()) {
+        GFL_LOG_DEBUG(
+            "[CuptiBackend] EXTERNAL_CORRELATION disabled in SASS profiler "
+            "mode. Set GPUFL_SASS_ALLOW_EXTERNAL_CORRELATION=1 to test it.");
+    }
+    if (enableExternalCorrelation) {
         const CUptiResult res_ec =
             cuptiActivityEnable(CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION);
         if (res_ec != CUPTI_SUCCESS) {
@@ -733,7 +757,7 @@ void CuptiBackend::start() {
     //
     // RUNTIME is the anchor that makes EXTERNAL_CORRELATION actually
     // emit records (see the start-of-start() block for the rationale).
-    if (opts_.enable_external_correlation) {
+    if (enableExternalCorrelation) {
         const CUptiResult ec_res =
             cuptiActivityEnable(CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION);
         const CUptiResult rt_res =
@@ -761,7 +785,7 @@ void CuptiBackend::start() {
     // initialize() phase. Idempotent; CUPTI ignores the second enable
     // when the kind is already on. SYNCHRONIZATION isn't tied to any
     // handler so it would otherwise be silently dropped.
-    if (opts_.enable_synchronization) {
+    if (opts_.enable_synchronization && AllowSassSyncActivity()) {
         const CUptiResult sync_res =
             cuptiActivityEnable(CUPTI_ACTIVITY_KIND_SYNCHRONIZATION);
         GFL_LOG_DEBUG(
@@ -771,7 +795,7 @@ void CuptiBackend::start() {
     }
 
     // F3: matching post-engine re-enable for MEMORY2.
-    if (opts_.enable_memory_tracking) {
+    if (opts_.enable_memory_tracking && AllowSassMemory2Activity()) {
         const CUptiResult mem_res =
             cuptiActivityEnable(CUPTI_ACTIVITY_KIND_MEMORY2);
         GFL_LOG_DEBUG(
@@ -781,7 +805,7 @@ void CuptiBackend::start() {
     }
 
     // F4: matching post-engine re-enable for GRAPH_TRACE.
-    if (opts_.enable_cuda_graphs_tracking) {
+    if (opts_.enable_cuda_graphs_tracking && AllowSassGraphActivity()) {
         const CUptiResult g_res =
             cuptiActivityEnable(CUPTI_ACTIVITY_KIND_GRAPH_TRACE);
         GFL_LOG_DEBUG(
