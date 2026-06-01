@@ -423,6 +423,22 @@ void CuptiBackend::start() {
     kernel_activity_emitted_.store(0, std::memory_order_relaxed);
     kernel_activity_throttled_.store(0, std::memory_order_relaxed);
 
+    // Resolve CUDA context/device before asking handlers for activity kinds.
+    // SASS safe-mode policy is device dependent, and the policy log should
+    // report the real SM version. Querying requiredActivityKinds() before this
+    // point used device_id_=0 and could choose the wrong activity policy.
+    const bool haveCudaContext = EnsureCudaContext(&ctx_);
+    if (haveCudaContext) {
+        cuptiGetDeviceId(ctx_, &device_id_);
+        GetSMProps(device_id_);
+        chip_name_ = getChipName(device_id_);
+        cached_device_name_ = GetCurrentDeviceName();
+    } else if (engine_) {
+        GFL_LOG_ERROR(
+            "[CuptiBackend] Failed to get CUDA context; "
+            "engine will not start.");
+    }
+
     if (IsSassProfilerMode()) {
         const ComputeCapability cc =
             GetComputeCapability(static_cast<int>(device_id_));
@@ -715,22 +731,11 @@ void CuptiBackend::start() {
     }
 
     // Initialize and start the engine (requires CUDA context)
-    if (engine_) {
-        if (EnsureCudaContext(&ctx_)) {
-            cuptiGetDeviceId(ctx_, &device_id_);
-            GetSMProps(device_id_);
-            chip_name_ = getChipName(device_id_);
-            cached_device_name_ = GetCurrentDeviceName();
-
-            EngineContext ectx{ctx_, device_id_, chip_name_, &cubin_mu_,
-                               &cubin_by_crc_};
-            engine_->initialize(opts_, ectx);
-            engine_->start();
-        } else {
-            GFL_LOG_ERROR(
-                "[CuptiBackend] Failed to get CUDA context; "
-                "engine will not start.");
-        }
+    if (engine_ && haveCudaContext) {
+        EngineContext ectx{ctx_, device_id_, chip_name_, &cubin_mu_,
+                           &cubin_by_crc_};
+        engine_->initialize(opts_, ectx);
+        engine_->start();
     }
 
     // Re-enable activity kinds after engine start. Some engines call

@@ -465,18 +465,23 @@ void Monitor::Initialize(const MonitorOptions& opts) {
 void Monitor::Shutdown() {
     if (!g_initialized.exchange(false)) return;
 
-    // Stop the backend BEFORE joining the collector thread.
+    // Stop and tear down the backend BEFORE joining the collector thread.
+    //
     // CuptiBackend::stop() calls cuptiActivityFlushAll(1), which fires
-    // BufferCompleted → pushes kernel activity records to the ring buffer.
-    // If we join the collector first and THEN call stop() (via shutdown()),
-    // those records arrive after the collector has drained and they are lost.
-    // Calling stop() here ensures all records land in the ring buffer while
-    // the collector thread is still running and will consume them.
+    // BufferCompleted -> pushes activity records to the ring buffer. Some
+    // engines also emit final profiling rows from shutdown(); SassMetrics
+    // deliberately defers cuptiSassMetricsFlushData until shutdown to avoid
+    // mid-run PyTorch deadlocks. If we join the collector first and only then
+    // call backend shutdown, those final PC_SAMPLE rows arrive after the
+    // collector has drained and never become profile_sample_batch records.
+    //
+    // Keeping the collector alive until after backend shutdown ensures every
+    // final activity/profiling record lands in the ring buffer and is consumed.
     if (g_adapter) g_adapter->stop();
+    if (g_adapter) g_adapter->shutdown();
 
     g_collectorRunning.store(false);
     if (g_collectorThread.joinable()) g_collectorThread.join();
-    if (g_adapter) g_adapter->shutdown();
     g_adapter.reset();
 }
 
