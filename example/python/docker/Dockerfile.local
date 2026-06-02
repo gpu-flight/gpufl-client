@@ -6,10 +6,10 @@
 # This avoids "not a supported wheel" errors caused by host/container version mismatches.
 #
 #   Build:
-#      docker build -t gpufl-jupyter:1.1.0rc1-dev -f example/python/docker/Dockerfile.local .
+#      docker build -t gpufl-jupyter:1.1.0rc2-dev -f example/python/docker/Dockerfile.local .
 #
 #   Run:
-#      docker run --gpus all -p 8888:8888 gpufl-jupyter:1.1.0rc1-dev
+#      docker run --gpus all -p 8888:8888 gpufl-jupyter:1.1.0rc2-dev
 
 # ── Stage 1: Build the Python wheel ───────────────────────────────────────────
 FROM nvidia/cuda:13.1.0-devel-ubuntu24.04 AS builder
