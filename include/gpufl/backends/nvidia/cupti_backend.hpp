@@ -54,24 +54,15 @@ class CuptiBackend : public IMonitorBackend {
     }
     bool SassMetricsOnlyMode() const {
         if (!IsSassProfilerMode()) return false;
-        // CUPTI SASS Metrics can return patched instruction rows with all-zero
-        // counter values when normal CUPTI activity/callback tracing is active
-        // at the same time (confirmed on RTX 3090 + CUDA/CUPTI 13.1). Default
-        // to the official-sample-like path: SASS Metrics only. The opt-out is
-        // for experiments on driver/GPU combinations that prove coexistence.
-        return !EnvFlagEnabled_("GPUFL_SASS_ALLOW_ACTIVITY_WITH_METRICS");
+        // Isolation mode only. By default match main: allow normal CUPTI
+        // activity/callback tracing to coexist with SASS metrics.
+        return EnvFlagEnabled_("GPUFL_SASS_METRICS_ONLY");
     }
     bool UseSafeSassActivityDefaults() const {
         if (!IsSassProfilerMode()) return false;
         if (SassMetricsOnlyMode()) return true;
         if (EnvFlagEnabled_("GPUFL_SASS_FORCE_SAFE_ACTIVITY")) return true;
-        if (EnvFlagEnabled_("GPUFL_SASS_FORCE_FULL_ACTIVITY")) return false;
-
-        const ComputeCapability cc = GetComputeCapability(static_cast<int>(device_id_));
-        const uint32_t cuptiVersion = GetCuptiVersion();
-        if (cc.valid() && cc.atLeast(12, 0)) return false;
-        if (cuptiVersion >= 130200) return false;
-        return true;
+        return false;
     }
     bool AllowSassKernelActivity() const {
         if (SassMetricsOnlyMode()) return false;

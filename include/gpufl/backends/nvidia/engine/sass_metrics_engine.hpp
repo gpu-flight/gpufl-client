@@ -22,7 +22,8 @@ class SassMetricsEngine final : public IProfilingEngine {
     void stop()     override;
     void shutdown() override;
 
-    // SASS metrics are armed at scope start and collected at scope end.
+    // SASS metrics are configured at engine start, armed at scope start, and
+    // collected at scope end.
     void onScopeStart(const char* name) override;
     void onScopeStop(const char* name) override;
     void flushBeforeCudaTeardown(const char* reason) override;

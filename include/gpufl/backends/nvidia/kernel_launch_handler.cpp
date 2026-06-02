@@ -201,16 +201,11 @@ std::vector<CUpti_ActivityKind> KernelLaunchHandler::requiredActivityKinds()
         return {};
     }
 
-    // CONCURRENT_KERNEL only — deliberately NOT CUPTI_ACTIVITY_KIND_KERNEL.
-    // Per CUPTI docs, enabling KERNEL "serializes all kernel executions on
-    // the GPU," which distorts timing (hides real kernel overlap), adds
-    // overhead, and routes every launch through CUPTI's serialization path.
-    // CONCURRENT_KERNEL produces the same CUpti_ActivityKernel records
-    // without serializing. The serialized kind was historically needed
-    // because the PC Sampling API required serialized kernels; CUDA 12.8
-    // Update 1 made PC sampling compatible with concurrent kernel tracing,
-    // so it's pure downside now.
-    return {CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL};
+    // SASS metrics on sm_86/CUDA 13.2 produce all-zero counters when only
+    // CONCURRENT_KERNEL is enabled. Main's validated coexistence path enables
+    // both serialized and concurrent kernel activity; keep that combination so
+    // kernel rows and non-zero SASS counters are collected in one run.
+    return {CUPTI_ACTIVITY_KIND_KERNEL, CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL};
 }
 
 bool KernelLaunchHandler::shouldHandle(const CUpti_CallbackDomain domain,

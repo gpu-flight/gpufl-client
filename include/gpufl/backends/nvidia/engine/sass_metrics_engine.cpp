@@ -157,14 +157,9 @@ bool EnvFlagEnabled(const char* name) {
 }
 
 bool ShouldUseLazyPatching() {
-    // Lazy SASS patching instruments each cubin on its first kernel launch.
-    // That is cheap for small standalone CUDA programs, but framework stacks
-    // such as PyTorch often issue many first launches from multiple runtime
-    // paths while CUDA/CUPTI helper threads are also active.  The observed
-    // deadlock has the app thread in cuLaunchKernel -> libcupti and a CUPTI
-    // helper blocked on a libcuda rwlock.  Patch modules at load/profile time
-    // by default so SASS remains enabled without entering the launch-time
-    // patching path.  Keep an env override for experiments and tiny samples.
+    // Isolation test: keep main-like SASS start timing and kernel activity, but
+    // switch lazy patching off by default to test whether eager patching causes
+    // the all-zero SASS counter behavior.
     return EnvFlagEnabled("GPUFL_SASS_LAZY_PATCHING");
 }
 }  // namespace
@@ -277,8 +272,11 @@ void SassMetricsEngine::DeInitProfilerIfNeeded_() {
 }
 
 void SassMetricsEngine::stop() {
-    // Scope-bounded mode drains at onScopeStop(). If the application exits while
-    // a scope is still armed, shutdown() performs the final drain/disable.
+    // Scope-bounded isolation test: scope stop drains and disables SASS. If a
+    // scope is still armed at session stop, drain it here before shutdown.
+    if (enabled_) {
+        StopAndCollectSassMetrics_();
+    }
 }
 
 void SassMetricsEngine::shutdown() {
@@ -574,11 +572,15 @@ void SassMetricsEngine::StopAndCollectSassMetrics_() {
         return;
     }
     if (props.numOfPatchedInstructionRecords == 0) {
+        if (produced_data_.load(std::memory_order_relaxed)) {
+            GFL_LOG_DEBUG(
+                "[SassMetricsEngine] no pending SASS instruction records to "
+                "flush; data was already collected earlier in the session.");
+            return;
+        }
         // SASS enabled successfully but CUPTI instrumented ZERO instructions
-        // this session — no patched records to flush. Seen on consumer
-        // Blackwell (sm_120) laptops under Windows WDDM with CUPTI 13.x, and
-        // when GPU performance-counter access is restricted. This is the
-        // "sass_metrics: on, no data" capability state; not a code error.
+        // before any data was collected. This is the "sass_metrics: on, no
+        // data" capability state; not a code error.
         GFL_LOG_ERROR(
             "[SassMetricsEngine] SASS armed but CUPTI reports 0 patched "
             "instruction records — no kernel was SASS-instrumented this "
