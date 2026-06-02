@@ -22,11 +22,12 @@ class SassMetricsEngine final : public IProfilingEngine {
     void stop()     override;
     void shutdown() override;
 
-    // SASS metrics are collected at scope end.
+    // SASS metrics are armed at scope start and collected at scope end.
+    void onScopeStart(const char* name) override;
     void onScopeStop(const char* name) override;
     void flushBeforeCudaTeardown(const char* reason) override;
 
-    bool isEnabled() const { return enabled_; }
+    bool isEnabled() const { return profiler_initialized_ && config_set_ && !insufficient_privileges_; }
 
     /**
      * True when cuptiProfilerInitialize / cuptiSassMetricsEnable returned
@@ -37,7 +38,7 @@ class SassMetricsEngine final : public IProfilingEngine {
         return insufficient_privileges_;
     }
 
-    bool isOperational() const override { return enabled_; }
+    bool isOperational() const override { return isEnabled(); }
 
     /** True once at least one SASS metric sample was pushed this session. */
     bool producedData() const override {
@@ -45,7 +46,8 @@ class SassMetricsEngine final : public IProfilingEngine {
     }
 
    private:
-    void EnableSassMetrics_();
+    void ConfigureSassMetrics_();
+    void ArmSassMetrics_();
     void StopAndCollectSassMetrics_();
     /**
      * Undo cuptiProfilerInitialize if start() got that far before

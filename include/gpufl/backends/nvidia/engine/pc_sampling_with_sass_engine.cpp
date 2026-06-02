@@ -160,6 +160,7 @@ void PcSamplingWithSassEngine::shutdown() {
 
 void PcSamplingWithSassEngine::onScopeStart(const char* name) {
     if (pc_ && !skip_pc_scope_) pc_->onScopeStart(name);
+    if (sass_ok_) sass_->onScopeStart(name);
 }
 
 void PcSamplingWithSassEngine::onScopeStop(const char* name) {

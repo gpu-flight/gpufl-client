@@ -264,6 +264,7 @@ bool MemTransferHandler::handleActivityRecord(const CUpti_Activity* record,
             }
         }
         g_monitorBuffer.Push(out);
+        backend_->NoteMemoryActivityEmitted();
         return true;
     }
 
@@ -295,6 +296,7 @@ bool MemTransferHandler::handleActivityRecord(const CUpti_Activity* record,
             }
         }
         g_monitorBuffer.Push(out);
+        backend_->NoteMemoryActivityEmitted();
         return true;
     }
 

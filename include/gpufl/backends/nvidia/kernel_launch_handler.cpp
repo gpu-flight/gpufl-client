@@ -106,6 +106,13 @@ const std::string& KernelLaunchHandler::cachedDemangle(const char* mangled) {
 
 std::vector<std::pair<CUpti_CallbackDomain, CUpti_CallbackId>>
 KernelLaunchHandler::requiredCallbacks() const {
+    if (backend_ && backend_->SassMetricsOnlyMode()) {
+        GFL_LOG_DEBUG(
+            "[KernelLaunchHandler] launch API callbacks disabled in SASS "
+            "metrics-only mode. Set GPUFL_SASS_ALLOW_ACTIVITY_WITH_METRICS=1 "
+            "to test CUPTI activity/callback coexistence.");
+        return {};
+    }
     if (backend_ && backend_->IsSassProfilerMode()) {
         GFL_LOG_DEBUG(
             "[KernelLaunchHandler] launch API callbacks enabled in SASS "

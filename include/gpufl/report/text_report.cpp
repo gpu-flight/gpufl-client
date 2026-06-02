@@ -1038,6 +1038,18 @@ void TextReport::writeProfileAnalysis(std::ostringstream& out) const {
     out << "\n" << SEP << "\n  Profile / SASS Analysis\n" << SEP << "\n";
     if (profile_samples_.empty()) { out << "  (No profile sample data)\n"; return; }
 
+    const bool hasNonZeroSample = std::any_of(
+        profile_samples_.begin(), profile_samples_.end(),
+        [](const ProfileSampleRecord& ps) { return ps.metric_value > 0; });
+    if (!hasNonZeroSample) {
+        out << "  (Profile sample rows were present, but every metric value was 0.)\n";
+        if (sass_active_) {
+            out << "  SASS instrumentation was configured, but CUPTI returned no "
+                   "non-zero SASS counter values for this session.\n";
+        }
+        return;
+    }
+
     // Convert a raw CUPTI stall metric name to a human-readable short name.
     // e.g. "smsp__pcsamp_warps_issue_stalled_wait_not_issued" → "Wait (not issued)"
     auto shortenStallName = [](const std::string& raw) -> std::string {
