@@ -29,4 +29,12 @@ private:
     const SassConfigEvent& e_;
 };
 
+struct CaptureCapabilitiesModel final : IJsonSerializable {
+    explicit CaptureCapabilitiesModel(const CaptureCapabilitiesEvent& e) : e_(e) {}
+    std::string buildJson() const override;
+    Channel channel() const override { return Channel::All; }
+private:
+    const CaptureCapabilitiesEvent& e_;
+};
+
 }  // namespace gpufl::model

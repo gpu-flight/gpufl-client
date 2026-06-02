@@ -2,6 +2,7 @@
 
 #include <cupti_sass_metrics.h>
 
+#include <atomic>
 #include <string>
 #include <unordered_map>
 
@@ -21,10 +22,13 @@ class SassMetricsEngine final : public IProfilingEngine {
     void stop()     override;
     void shutdown() override;
 
-    // SASS metrics are collected at scope end.
+    // SASS metrics are configured at engine start, armed at scope start, and
+    // collected at scope end.
+    void onScopeStart(const char* name) override;
     void onScopeStop(const char* name) override;
+    void flushBeforeCudaTeardown(const char* reason) override;
 
-    bool isEnabled() const { return enabled_; }
+    bool isEnabled() const { return profiler_initialized_ && config_set_ && !insufficient_privileges_; }
 
     /**
      * True when cuptiProfilerInitialize / cuptiSassMetricsEnable returned
@@ -35,10 +39,16 @@ class SassMetricsEngine final : public IProfilingEngine {
         return insufficient_privileges_;
     }
 
-    bool isOperational() const override { return enabled_; }
+    bool isOperational() const override { return isEnabled(); }
+
+    /** True once at least one SASS metric sample was pushed this session. */
+    bool producedData() const override {
+        return produced_data_.load(std::memory_order_relaxed);
+    }
 
    private:
-    void EnableSassMetrics_();
+    void ConfigureSassMetrics_();
+    void ArmSassMetrics_();
     void StopAndCollectSassMetrics_();
     /**
      * Undo cuptiProfilerInitialize if start() got that far before
@@ -65,6 +75,7 @@ class SassMetricsEngine final : public IProfilingEngine {
     std::unordered_map<uint64_t, std::string> metric_id_to_name_;
     std::vector<std::string> skipped_metrics_;
     bool enabled_ = false;
+    std::atomic<bool> produced_data_{false};
     bool config_set_ = false;
     bool insufficient_privileges_ = false;
     // True after cuptiProfilerInitialize() returned CUPTI_SUCCESS in

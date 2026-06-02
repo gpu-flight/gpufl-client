@@ -123,11 +123,17 @@ TEST_P(EngineCoverageTest, EmitsExpectedEvents) {
         << "No job_start event in scope log for engine "
         << gpufl::test::EngineName(engine);
 
-    // Activity API is always on: kernel batches should appear for any engine
-    // once a kernel runs.
-    EXPECT_FALSE(gpufl::test::FilterByType(logs.device, "kernel_event_batch").empty())
-        << "No kernel_event_batch events for engine "
-        << gpufl::test::EngineName(engine);
+    // Activity API is on for every engine EXCEPT Off (which subscribes no
+    // CUPTI at all). So kernel batches must appear for the CUPTI engines
+    // and must be ABSENT for Off.
+    if (engine == gpufl::ProfilingEngine::Monitor) {
+        EXPECT_TRUE(gpufl::test::FilterByType(logs.device, "kernel_event_batch").empty())
+            << "Monitor engine must not capture kernel_event_batch (no CUPTI)";
+    } else {
+        EXPECT_FALSE(gpufl::test::FilterByType(logs.device, "kernel_event_batch").empty())
+            << "No kernel_event_batch events for engine "
+            << gpufl::test::EngineName(engine);
+    }
 
     // ── Engine-specific contracts ────────────────────────────────────────
     // profile_sample_batch events are emitted to the Scope channel.
@@ -149,15 +155,30 @@ TEST_P(EngineCoverageTest, EmitsExpectedEvents) {
               << " perf_events=" << perfEvents.size() << "\n";
 
     switch (engine) {
-        case gpufl::ProfilingEngine::None: {
+        case gpufl::ProfilingEngine::Monitor: {
+            // Telemetry-only: no CUPTI, so none of the CUPTI-derived
+            // event types appear. (kernel_event_batch absence is checked
+            // in the shared section above.)
             EXPECT_EQ(pcSamples, 0)
-                << "None engine must not produce pc_sampling rows";
+                << "Monitor engine must not produce pc_sampling rows";
             EXPECT_EQ(sassSamples, 0)
-                << "None engine must not produce sass_metric rows";
+                << "Monitor engine must not produce sass_metric rows";
             EXPECT_TRUE(sassConfigs.empty())
-                << "None engine must not emit sass_config";
+                << "Monitor engine must not emit sass_config";
             EXPECT_TRUE(perfEvents.empty())
-                << "None engine must not emit perf_metric_event";
+                << "Monitor engine must not emit perf_metric_event";
+            break;
+        }
+
+        case gpufl::ProfilingEngine::Trace: {
+            EXPECT_EQ(pcSamples, 0)
+                << "Trace engine must not produce pc_sampling rows";
+            EXPECT_EQ(sassSamples, 0)
+                << "Trace engine must not produce sass_metric rows";
+            EXPECT_TRUE(sassConfigs.empty())
+                << "Trace engine must not emit sass_config";
+            EXPECT_TRUE(perfEvents.empty())
+                << "Trace engine must not emit perf_metric_event";
             break;
         }
 
@@ -248,7 +269,7 @@ TEST_P(EngineCoverageTest, EmitsExpectedEvents) {
             break;
         }
 
-        case gpufl::ProfilingEngine::PcSamplingWithSass: {
+        case gpufl::ProfilingEngine::Deep: {
             if (samplesBestEffort) {
                 std::cerr << "[engine_coverage] sample collection best-effort "
                              "(PC sampling may be skipped due to Profiler API "
@@ -281,11 +302,12 @@ TEST_P(EngineCoverageTest, EmitsExpectedEvents) {
 
 INSTANTIATE_TEST_SUITE_P(
     AllEngines, EngineCoverageTest,
-    ::testing::Values(gpufl::ProfilingEngine::None,
+    ::testing::Values(gpufl::ProfilingEngine::Monitor,
+                      gpufl::ProfilingEngine::Trace,
                       gpufl::ProfilingEngine::PcSampling,
                       gpufl::ProfilingEngine::SassMetrics,
                       gpufl::ProfilingEngine::RangeProfiler,
-                      gpufl::ProfilingEngine::PcSamplingWithSass),
+                      gpufl::ProfilingEngine::Deep),
     [](const ::testing::TestParamInfo<gpufl::ProfilingEngine>& info) {
         return std::string(gpufl::test::EngineName(info.param));
     });

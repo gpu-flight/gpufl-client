@@ -68,8 +68,14 @@ class GpuFlightSession:
         self.console = Console()
         self.max_stack_depth = max_stack_depth
         self.app_name = None
+        self._requested_session = session_id
 
-        # 1. Load raw DataFrames from JSONL
+        # 1. Load raw DataFrames from JSONL. Channel logs live either flat in
+        #    `log_dir` (legacy / demo layout) or nested under a per-run session
+        #    subdir written by the current client
+        #    (<log_dir>/<session_id>/<channel>.log[.gz]). Resolve which dir
+        #    actually holds this run's logs before loading.
+        self._read_dir = self._resolve_read_dir(session_id)
         device_df = self._load_log(self._resolve_log_path(log_prefix, "device"))
         scope_df  = self._load_log(self._resolve_log_path(log_prefix, "scope"))
         system_df = self._load_log(self._resolve_log_path(log_prefix, "system"))
@@ -119,6 +125,28 @@ class GpuFlightSession:
             shut = df[df['type'] == 'shutdown']
             if not shut.empty and 'ts_ns' in shut.columns and self.session_end_ns is None:
                 self.session_end_ns = pd.to_numeric(shut.iloc[-1]['ts_ns'], errors='coerce')
+
+        # 2b. Capture capabilities — what was actually collected vs. enabled
+        # but empty vs. skipped. Emitted once at shutdown (type
+        # 'capture_capabilities'), routed to all channels.
+        self.requested_engine = None
+        self.selected_engine = None
+        self.capture_capabilities = []
+        for df in [device_df, scope_df, system_df]:
+            if df.empty or 'type' not in df.columns:
+                continue
+            caps = df[df['type'] == 'capture_capabilities']
+            if caps.empty:
+                continue
+            row = caps.iloc[-1]
+            if 'requested_engine' in caps.columns:
+                self.requested_engine = row.get('requested_engine')
+            if 'selected_engine' in caps.columns:
+                self.selected_engine = row.get('selected_engine')
+            cap_list = row.get('capabilities') if 'capabilities' in caps.columns else None
+            if isinstance(cap_list, list):
+                self.capture_capabilities = cap_list
+            break
 
         # 3. Detect format: batch (new) vs per-event (old)
         _BATCH_TYPES = {
@@ -224,30 +252,74 @@ class GpuFlightSession:
 
     # ── Log loading ───────────────────────────────────────────────────────────
 
-    def _resolve_log_path(self, log_prefix: str, channel: str) -> Path | None:
-        """Find a channel log path for current naming + rotation scheme.
+    def _resolve_read_dir(self, session_id: str = None) -> Path:
+        """Directory that actually holds this run's channel logs.
 
-        Preferred order:
-        1) <prefix>.<channel>.log
-        2) latest rotated file (<prefix>.<channel>.<N>.log[.gz], lowest N wins)
+        Two on-disk layouts are supported:
+          * flat (legacy / demo):    <log_dir>/[<prefix>.]<channel>.log[.gz]
+          * nested (current client): <log_dir>/<session_id>/<channel>.log[.gz]
+
+        If channel logs sit directly in `log_dir` we use it as-is; otherwise we
+        descend into a session subdir, preferring an exact `session_id` match
+        and falling back to the most-recently-written run.
+        """
+        if self._dir_has_any_channel(self.log_dir):
+            return self.log_dir
+        try:
+            subs = [p for p in self.log_dir.iterdir()
+                    if p.is_dir() and self._dir_has_any_channel(p)]
+        except (OSError, FileNotFoundError):
+            subs = []
+        if not subs:
+            return self.log_dir  # nothing found — _load_log() no-ops gracefully
+        if session_id:
+            exact = [p for p in subs if p.name == session_id]
+            if exact:
+                return exact[0]
+        return max(subs, key=lambda p: p.stat().st_mtime)
+
+    @staticmethod
+    def _dir_has_any_channel(d: Path) -> bool:
+        rx = re.compile(r"^(?:.+\.)?(?:device|scope|system)(?:\.\d+)?\.log(?:\.gz)?$")
+        try:
+            return any(rx.match(p.name) for p in d.iterdir() if p.is_file())
+        except (OSError, FileNotFoundError):
+            return False
+
+    def _resolve_log_path(self, log_prefix: str, channel: str) -> "Path | None":
+        """Find the best file for `channel` under the resolved read dir.
+
+        Handles current (bare `<channel>.log[.gz]`) and legacy
+        (`<prefix>.<channel>.log[.gz]`) names, active and rotated
+        (`...<channel>.<N>.log[.gz]`), compressed or not. Active wins over
+        rotated; among rotated the lowest index wins; uncompressed breaks ties.
         """
         base = log_prefix[:-4] if log_prefix.endswith(".log") else log_prefix
+        ch = re.escape(channel)
+        prefix = rf"(?:{re.escape(base)}\.)?" if base else ""
+        rx = re.compile(rf"^{prefix}{ch}(?:\.(\d+))?\.log(\.gz)?$")
 
-        active = self.log_dir / f"{base}.{channel}.log"
-        if active.exists():
-            return active
-
-        candidates = list(self.log_dir.glob(f"{base}.{channel}.*.log"))
-        candidates += list(self.log_dir.glob(f"{base}.{channel}.*.log.gz"))
-        indexed: list[tuple[int, Path]] = []
-        for p in candidates:
-            m = re.search(rf"\.{re.escape(channel)}\.(\d+)\.log(?:\.gz)?$", p.name)
-            if m:
-                indexed.append((int(m.group(1)), p))
-        if not indexed:
+        d = getattr(self, "_read_dir", self.log_dir)
+        try:
+            entries = list(d.iterdir())
+        except (OSError, FileNotFoundError):
             return None
-        indexed.sort(key=lambda t: t[0])
-        return indexed[0][1]
+
+        best = None  # (rank_tuple, Path)
+        for p in entries:
+            if not p.is_file():
+                continue
+            m = rx.match(p.name)
+            if not m:
+                continue
+            idx = int(m.group(1)) if m.group(1) else -1
+            compressed = 1 if m.group(2) else 0
+            # active (idx -1) before rotated; lowest rotated index next;
+            # uncompressed before compressed as a final tiebreak.
+            key = (0 if idx < 0 else 1, idx if idx >= 0 else 0, compressed)
+            if best is None or key < best[0]:
+                best = (key, p)
+        return best[1] if best else None
 
     def _load_log(self, path: Path | None):
         """Efficiently loads JSONL into Pandas"""
@@ -376,7 +448,8 @@ class GpuFlightSession:
                 ci   = {c: i for i, c in enumerate(cols)}
                 for row in (batch.get('rows') or []):
                     sk_int      = row[ci['sample_kind']]
-                    sample_kind = 'pc_sampling' if sk_int == 0 else 'sass_metric'
+                    sample_kind = {0: 'pc_sampling', 1: 'sass_metric',
+                                   2: 'isa_source_map'}.get(sk_int, 'sass_metric')
                     metric_id   = row[ci['metric_id']]
                     metric_name = dict_maps['metric'].get(metric_id) if metric_id else None
                     fn_id       = row[ci['function_id']]
@@ -1047,6 +1120,52 @@ class GpuFlightSession:
             for fn, value in by_func.items():
                 func_table.add_row(str(fn), str(int(value)))
             self.console.print(func_table)
+
+            # Per-function warp + memory efficiency (mirrors text_report.cpp /
+            # hint_engine.cpp so this matches the C++ report number-for-number).
+            eff_pivot = (
+                sass.groupby(['function_name', 'metric_name'])['metric_value']
+                .sum().unstack(fill_value=0)
+            )
+
+            def _ev(series, name):
+                return float(series[name]) if name in series.index else 0.0
+
+            eff_table = Table(title="SASS Efficiency — per function")
+            eff_table.add_column("Function", style="cyan")
+            eff_table.add_column("Warp Eff", justify="right")
+            eff_table.add_column("Mem Eff", justify="right")
+            eff_table.add_column("Hints", style="yellow")
+            order = eff_pivot.sum(axis=1).sort_values(ascending=False)
+            any_eff = False
+            for fn in order.index[:top_n]:
+                r        = eff_pivot.loc[fn]
+                warp     = _ev(r, "smsp__sass_inst_executed")
+                thread   = _ev(r, "smsp__sass_thread_inst_executed")
+                gsect    = _ev(r, "smsp__sass_sectors_mem_global")
+                ideal    = _ev(r, "smsp__sass_sectors_mem_global_ideal")
+                ideal_ld = _ev(r, "smsp__sass_sectors_mem_global_op_ld_ideal")
+                ideal_st = _ev(r, "smsp__sass_sectors_mem_global_op_st_ideal")
+                if warp <= 0 and thread <= 0 and gsect <= 0:
+                    continue
+                eff_ideal = ideal if ideal > 0 else (ideal_ld + ideal_st)
+                warp_pct = (thread / warp / 32.0 * 100) if (warp > 0 and thread > 0) else None
+                mem_pct  = (eff_ideal / gsect * 100) if (gsect > 0 and eff_ideal > 0) else None
+                warp_s = f"{warp_pct:.1f}%" if warp_pct is not None else "-"
+                mem_s  = (f"{mem_pct:.1f}%" if mem_pct is not None
+                          else ("n/a" if gsect > 0 else "-"))
+                tips = []
+                if warp_pct is not None and warp_pct < 90:
+                    tips.append("divergence")
+                if mem_pct is not None and mem_pct < 50:
+                    tips.append("coalescing")
+                fn_s = str(fn).split("@", 1)[0]
+                if len(fn_s) > 44:
+                    fn_s = fn_s[:41] + "..."
+                eff_table.add_row(fn_s, warp_s, mem_s, ", ".join(tips))
+                any_eff = True
+            if any_eff:
+                self.console.print(eff_table)
         else:
             self.console.print("[yellow]No sass_metric records found in profile_sample stream.[/yellow]")
 
@@ -1162,7 +1281,7 @@ class GpuFlightSession:
             "    1. [bold]profiling_engine[/bold]: pass "
             "[cyan]ProfilingEngine.PcSampling[/cyan], "
             "[cyan]ProfilingEngine.SassMetrics[/cyan], or "
-            "[cyan]ProfilingEngine.PcSamplingWithSass[/cyan] to "
+            "[cyan]ProfilingEngine.Deep[/cyan] to "
             "[cyan]gpufl.init()[/cyan].\n"
             "    2. [bold]Scopes required[/bold]: wrap GPU work in "
             "[cyan]with gpufl.Scope(\"name\"):[/cyan] blocks — sample "

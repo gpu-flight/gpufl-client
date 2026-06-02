@@ -63,6 +63,11 @@ class PcSamplingEngine final : public IProfilingEngine {
                && !sampling_api_blocked_.load(std::memory_order_relaxed);
     }
 
+    /** True once at least one PC sample was emitted this session. */
+    bool producedData() const override {
+        return produced_data_.load(std::memory_order_relaxed);
+    }
+
    private:
     enum class Method {
         None,        // PC Sampling not available / not initialized
@@ -82,6 +87,7 @@ class PcSamplingEngine final : public IProfilingEngine {
     std::atomic<bool> sampling_api_ready_{false};
     std::atomic<bool> sampling_api_started_{false};
     std::atomic<bool> sampling_api_blocked_{false};
+    std::atomic<bool> produced_data_{false};
     bool privilege_probed_ = false;
 
     std::unique_ptr<PCSamplingBuffers, PCSamplingDeleter> pc_sampling_buffers_;

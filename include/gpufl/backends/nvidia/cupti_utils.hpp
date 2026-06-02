@@ -42,6 +42,12 @@ struct ComputeCapability {
 ComputeCapability GetComputeCapability(int deviceId);
 
 /**
+ * @brief Returns the CUPTI runtime version encoded as CUDA_VERSION style
+ * integer (e.g. 130100 for 13.1, 130200 for 13.2). Returns 0 if unavailable.
+ */
+uint32_t GetCuptiVersion();
+
+/**
  * @brief Gets the maximum number of threads per SM for a given device.
  */
 int GetMaxThreadsPerSM(int deviceId);

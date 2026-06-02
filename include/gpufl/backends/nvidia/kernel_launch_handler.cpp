@@ -5,6 +5,11 @@
 #include <cstring>    // strnlen — bounded read in cachedDemangle
 #include <iterator>   // std::begin / std::end on the user_scope C-array
 #include <set>
+#include <string>
+#if defined(__linux__)
+#include <sys/uio.h>
+#include <unistd.h>
+#endif
 
 #include "gpufl/backends/nvidia/cuda_feature_guards.hpp"
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
@@ -20,6 +25,44 @@
 using gpufl::core::DemangleName;
 
 namespace gpufl {
+
+namespace {
+
+bool CopyReadableCString(const char* src, std::string* out) {
+    if (!src || !out) return false;
+
+#if defined(__linux__)
+    constexpr size_t kMaxNameLen = 4096;
+    char buf[kMaxNameLen] = {};
+
+    iovec local{};
+    local.iov_base = buf;
+    local.iov_len = sizeof(buf);
+
+    iovec remote{};
+    remote.iov_base = const_cast<char*>(src);
+    remote.iov_len = sizeof(buf);
+
+    const ssize_t nread = process_vm_readv(getpid(), &local, 1, &remote, 1, 0);
+    if (nread <= 0) return false;
+
+    const size_t n = static_cast<size_t>(nread);
+    const void* nul = std::memchr(buf, '\0', n);
+    if (!nul) return false;
+
+    const size_t len = static_cast<const char*>(nul) - buf;
+    if (len == 0) return false;
+
+    out->assign(buf, len);
+    return true;
+#else
+    (void)src;
+    (void)out;
+    return false;
+#endif
+}
+
+}  // namespace
 
 KernelLaunchHandler::KernelLaunchHandler(CuptiBackend* backend)
     : backend_(backend) {}
@@ -63,6 +106,20 @@ const std::string& KernelLaunchHandler::cachedDemangle(const char* mangled) {
 
 std::vector<std::pair<CUpti_CallbackDomain, CUpti_CallbackId>>
 KernelLaunchHandler::requiredCallbacks() const {
+    if (backend_ && backend_->SassMetricsOnlyMode()) {
+        GFL_LOG_DEBUG(
+            "[KernelLaunchHandler] launch API callbacks disabled in SASS "
+            "metrics-only mode. Set GPUFL_SASS_ALLOW_ACTIVITY_WITH_METRICS=1 "
+            "to test CUPTI activity/callback coexistence.");
+        return {};
+    }
+    if (backend_ && backend_->IsSassProfilerMode()) {
+        GFL_LOG_DEBUG(
+            "[KernelLaunchHandler] launch API callbacks enabled in SASS "
+            "profiler mode for synthetic kernel rows; CUPTI kernel activity "
+            "remains controlled by the SASS activity policy.");
+    }
+
     // The set of launch APIs that produce a kernel record we want
     // api_enter_ns / api_exit_ns for. Anything missing here means the
     // backend stores 0 for the API timestamps, the frontend can't
@@ -135,6 +192,28 @@ KernelLaunchHandler::requiredCallbacks() const {
 
 std::vector<CUpti_ActivityKind> KernelLaunchHandler::requiredActivityKinds()
     const {
+    if (backend_ && backend_->GetOptions().profiling_engine ==
+                        ProfilingEngine::PcSampling) {
+        GFL_LOG_DEBUG(
+            "[KernelLaunchHandler] CUPTI kernel activity disabled in PC "
+            "Sampling mode; launch callbacks will provide synthetic kernel "
+            "rows.");
+        return {};
+    }
+
+    if (backend_ && !backend_->AllowSassKernelActivity()) {
+        GFL_LOG_DEBUG(
+            "[KernelLaunchHandler] CUPTI kernel activity disabled in SASS "
+            "profiler safe mode; launch callbacks will provide synthetic "
+            "kernel rows. Set GPUFL_SASS_ALLOW_KERNEL_ACTIVITY=1 to test "
+            "CONCURRENT_KERNEL explicitly.");
+        return {};
+    }
+
+    // SASS metrics on sm_86/CUDA 13.2 produce all-zero counters when only
+    // CONCURRENT_KERNEL is enabled. Main's validated coexistence path enables
+    // both serialized and concurrent kernel activity; keep that combination so
+    // kernel rows and non-zero SASS counters are collected in one run.
     return {CUPTI_ACTIVITY_KIND_KERNEL, CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL};
 }
 
@@ -167,38 +246,26 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
     }
 
     if (cbInfo->callbackSite == CUPTI_API_ENTER) {
+        backend_->NoteKernelLaunchForCleanupFlush();
         LaunchMeta meta{};
         meta.api_enter_ns = detail::GetTimestampNs();
 
-        // Always use cbInfo->functionName for the callback-path name.
-        //
-        // Background: cbInfo->symbolName was the obvious choice (it's
-        // documented as the kernel's symbol name), but on CUDA 13.1
-        // CUPTI populates that field with non-pointer values for some
-        // launch callbacks — e.g. 0x8000000001 (high bit + low bit
-        // set, clearly a tagged value or internal handle, not an
-        // address). Reading it as a pointer segfaults. An earlier
-        // address-range heuristic (reject pointers below 0x10000)
-        // worked on hardware where the garbage was zero-shaped but
-        // missed the high-bit-tagged variant — we can't reliably
-        // detect "is this a real pointer" from the value alone
-        // without a mincore() check or SIGSEGV-handler probe, both of
-        // which add complexity for marginal benefit.
-        //
-        // cbInfo->functionName is always the CUDA API name (literal
-        // string constant in libcupti.so's read-only data, e.g.
-        // "cudaLaunchKernel" / "cuLaunchKernel"), so it's safe on
-        // every CUDA version. The trade-off: meta.name shows the
-        // API name instead of the kernel symbol for a brief window
-        // between the launch callback and the corresponding
-        // CUpti_ActivityKernel record arriving. onActivityRecord (see
-        // below in this file) overwrites meta.name with the real
-        // kernel name from k->name before any record ships. So the
-        // user-visible output is unchanged; only the in-flight
-        // meta_by_corr_ entry briefly carries the API name.
-        const char* nm = cbInfo->functionName;
-        const std::string& demangledName = cachedDemangle(nm);
-        std::snprintf(meta.name, sizeof(meta.name), "%s", demangledName.c_str());
+        // Prefer cbInfo->symbolName so callback-only SASS safe mode can still
+        // group kernels by real symbol. CUDA 13.1 sometimes puts invalid tagged
+        // values in symbolName, so never dereference it directly; copy through
+        // process_vm_readv first and fall back to the stable API function name
+        // (cudaLaunchKernel / cuLaunchKernelEx) if the probe fails.
+        std::string copiedSymbol;
+        if (CopyReadableCString(cbInfo->symbolName, &copiedSymbol)) {
+            const std::string demangledName = DemangleName(copiedSymbol.c_str());
+            std::snprintf(meta.name, sizeof(meta.name), "%s",
+                          demangledName.c_str());
+        } else {
+            const char* nm = cbInfo->functionName;
+            const std::string& demangledName = cachedDemangle(nm);
+            std::snprintf(meta.name, sizeof(meta.name), "%s",
+                          demangledName.c_str());
+        }
 
         if (backend_->GetOptions().enable_stack_trace) {
             const std::string trace = core::GetCallStack(2);
@@ -299,25 +366,34 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
         }
 
         // Store metadata — emit later from scope stop (PC Sampling path)
-        // or handleActivityRecord (normal path).
+        // or handleActivityRecord (normal path). Runtime and driver launch
+        // callbacks can share one correlation id, so keep the richest metadata
+        // and avoid duplicate diagnostic lines for the same logical launch.
+        bool shouldLogLaunch = false;
         {
             std::lock_guard lk(backend_->meta_mu_);
-            auto& existing = backend_->meta_by_corr_[cbInfo->correlationId];
-            if (existing.has_details && !meta.has_details) {
+            auto it = backend_->meta_by_corr_.find(cbInfo->correlationId);
+            if (it == backend_->meta_by_corr_.end()) {
+                backend_->meta_by_corr_.emplace(cbInfo->correlationId, meta);
+                shouldLogLaunch = true;
+            } else if (it->second.has_details && !meta.has_details) {
                 GFL_LOG_DEBUG(
                     "[DEBUG-CALLBACK] Skipping overwrite of rich metadata "
                     "for CorrID ",
                     cbInfo->correlationId, " by Driver API.");
-            } else {
-                existing = meta;
+            } else if (!it->second.has_details && meta.has_details) {
+                it->second = meta;
+                shouldLogLaunch = true;
             }
         }
-        // Diagnostic: confirm every kernel launch fires this callback.
+        // Diagnostic: confirm every logical kernel launch fires this callback.
         // If "GPU Time by Scope" shows only N kernels but this logs M>N,
         // the loss is downstream (activity records / FlushPendingKernels).
-        GFL_LOG_DEBUG("[KernelLaunchHandler] API_ENTER corr=",
-                      cbInfo->correlationId, " name=", meta.name,
-                      " scope=", meta.user_scope);
+        if (shouldLogLaunch) {
+            GFL_LOG_DEBUG("[KernelLaunchHandler] API_ENTER corr=",
+                          cbInfo->correlationId, " name=", meta.name,
+                          " scope=", meta.user_scope);
+        }
     } else if (cbInfo->callbackSite == CUPTI_API_EXIT) {
         const int64_t exitNs = detail::GetTimestampNs();
         std::lock_guard lk(backend_->meta_mu_);

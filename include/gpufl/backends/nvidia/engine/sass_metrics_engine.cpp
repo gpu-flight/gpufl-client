@@ -5,7 +5,9 @@
 #include <cupti_profiler_target.h>
 #include <cupti_sass_metrics.h>
 
+#include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -70,6 +72,96 @@ void FreeCuptiCorrelationString(char* s) {
     std::free(s);
 #endif
 }
+
+// ── Device-architecture exclusion for SASS ───────────────────────────────
+// SASS metrics intermittently hang or fail on specific GPU architectures
+// (notably RTX 3090 / Ampere sm_86: cuptiSassMetricsSetConfig OUT_OF_MEMORY,
+// plus lazy-patch launch hangs that EAGER module loading does not always
+// cure). GPUFL_SASS_EXCLUDE_ARCHS turns SASS off for confirmed-bad
+// architectures WITHOUT a rebuild, so we can compare e.g. sm_86 vs sm_120
+// empirically and then exclude only what is actually broken.
+//
+// Syntax: comma-separated compute capabilities. Each entry is one of:
+//   "86"  / "8.6"  → exact match (major 8, minor 6)
+//   "120" / "12.0" → exact match (major 12, minor 0)
+//   "8"   / "8.x"  → whole generation (any sm_8x)
+// Default (env unset): use kDefaultSassExcludeArchs (empty = attempt on every
+// architecture). Setting the env var — even to "" — overrides the compiled
+// default, so an end user can clear a baked-in exclusion at runtime.
+constexpr const char* kDefaultSassExcludeArchs = "";
+
+// True if the trimmed token [begin, end) names the given compute capability.
+bool CcMatchesToken(const ComputeCapability& cc, const char* begin,
+                    const char* end) {
+    while (begin < end && std::isspace(static_cast<unsigned char>(*begin)))
+        ++begin;
+    while (end > begin && std::isspace(static_cast<unsigned char>(end[-1])))
+        --end;
+    if (begin >= end) return false;
+
+    const std::string tok(begin, end);
+    int wantMajor = -1;
+    int wantMinor = -1;
+    bool wholeGen = false;
+
+    const auto dot = tok.find('.');
+    if (dot != std::string::npos) {
+        wantMajor = std::atoi(tok.substr(0, dot).c_str());
+        const std::string m = tok.substr(dot + 1);
+        if (m.empty() || m == "x" || m == "X") {
+            wholeGen = true;
+        } else {
+            wantMinor = std::atoi(m.c_str());
+        }
+    } else {
+        // All-digit form. A single digit means the whole generation;
+        // otherwise the last digit is the minor and the rest is the major
+        // (so "86" → 8.6, "120" → 12.0).
+        for (const char c : tok)
+            if (c < '0' || c > '9') return false;
+        if (tok.size() == 1) {
+            wantMajor = tok[0] - '0';
+            wholeGen = true;
+        } else {
+            wantMinor = tok.back() - '0';
+            wantMajor = std::atoi(tok.substr(0, tok.size() - 1).c_str());
+        }
+    }
+
+    if (wantMajor < 0 || cc.major != wantMajor) return false;
+    return wholeGen || cc.minor == wantMinor;
+}
+
+// True if SASS is excluded on this GPU's architecture via the configured
+// exclusion list. Never excludes on an unknown architecture (don't
+// over-exclude when the capability query failed).
+bool ArchExcludedForSass(const ComputeCapability& cc) {
+    if (!cc.valid()) return false;
+    const char* env = std::getenv("GPUFL_SASS_EXCLUDE_ARCHS");
+    const char* list = env ? env : kDefaultSassExcludeArchs;
+    if (!list || !*list) return false;
+
+    for (const char* p = list; *p;) {
+        const char* comma = std::strchr(p, ',');
+        const char* end = comma ? comma : (p + std::strlen(p));
+        if (CcMatchesToken(cc, p, end)) return true;
+        if (!comma) break;
+        p = comma + 1;
+    }
+    return false;
+}
+
+bool EnvFlagEnabled(const char* name) {
+    const char* v = std::getenv(name);
+    return v && v[0] != '\0' && v[0] != '0';
+}
+
+bool ShouldUseLazyPatching() {
+    // Isolation test: keep main-like SASS start timing and kernel activity, but
+    // switch lazy patching off by default to test whether eager patching causes
+    // the all-zero SASS counter behavior.
+    return EnvFlagEnabled("GPUFL_SASS_LAZY_PATCHING");
+}
 }  // namespace
 
 bool SassMetricsEngine::initialize(const MonitorOptions& opts,
@@ -88,6 +180,41 @@ void SassMetricsEngine::start() {
         return;
     }
 
+    // Resolve the device id + chip name up front. cuptiGetDeviceId is a
+    // standalone query (it does NOT require the Profiler API), so it's safe
+    // to call before cuptiProfilerInitialize — and it lets the architecture
+    // gate below run BEFORE we touch any Profiler/SASS state on an excluded
+    // GPU. EnableSassMetrics_ repeats this guarded by chip_name.empty(), so
+    // it becomes a no-op there.
+    if (ctx_.chip_name.empty()) {
+        if (LogCuptiErrorIfFailed(
+                this->name(), "cuptiGetDeviceId",
+                cuptiGetDeviceId(ctx_.cuda_ctx, &ctx_.device_id))) {
+            return;
+        }
+        ctx_.chip_name = getChipName(ctx_.device_id);
+    }
+
+    // ── Device-architecture exclusion gate ───────────────────────────────
+    // Turn SASS off for architectures confirmed to hang/fail — e.g. run with
+    // GPUFL_SASS_EXCLUDE_ARCHS=86 for RTX 3090 / Ampere sm_86. This runs
+    // before cuptiProfilerInitialize, so an excluded GPU never enters the
+    // Profiler API / lazy-patching path at all. enabled_ stays false →
+    // standalone SassMetrics produces no data (use PcSampling instead) and
+    // Deep mode degrades to PC sampling (sass_->isEnabled() == false).
+    const ComputeCapability cc =
+        GetComputeCapability(static_cast<int>(ctx_.device_id));
+    if (ArchExcludedForSass(cc)) {
+        GFL_LOG_ERROR(
+            "[SassMetricsEngine] SASS metrics DISABLED on sm_", cc.major,
+            cc.minor,
+            " via GPUFL_SASS_EXCLUDE_ARCHS (this architecture is configured as "
+            "unsupported for SASS). Standalone SassMetrics produces no data — "
+            "use ProfilingEngine.PcSampling instead; Deep mode degrades to PC "
+            "sampling. Monitor / Trace / PcSampling are unaffected.");
+        return;
+    }
+
     // Initialize profiler device — required before SASS Metrics APIs.
     // Mark profiler_initialized_ on success so EnableSassMetrics_'s
     // failure paths can undo this via cuptiProfilerDeInitialize.
@@ -103,13 +230,34 @@ void SassMetricsEngine::start() {
             insufficient_privileges_ = true;
             GFL_LOG_ERROR(
                 "[SassMetricsEngine] Insufficient privileges for CUPTI "
-                "SASS metrics. Skipping SASS instrumentation.");
+                "SASS metrics. Enable GPU performance counter access or "
+                "run with elevated privileges. Skipping SASS; the session "
+                "continues with kernel-trace data only.");
+        } else {
+            // The Profiler API wants to initialize against a context that
+            // hasn't already loaded modules / run kernels. The #1 cause
+            // of this failure in framework apps (PyTorch, etc.) is calling
+            // gpufl.init() AFTER GPU work has started. Name that explicitly
+            // so users get an actionable fix instead of a raw CUPTI code.
+            GFL_LOG_ERROR(
+                "[SassMetricsEngine] cuptiProfilerInitialize failed (CUptiResult ",
+                static_cast<int>(initRes),
+                "). SASS / Deep mode cannot start. Two common causes: "
+                "(1) gpufl.init() was called AFTER CUDA work already "
+                "began — the CUPTI Profiler API must initialize against a "
+                "clean context, so call gpufl.init() BEFORE the first CUDA "
+                "kernel (right after `import torch`); (2) this GPU + driver "
+                "does not support CUPTI SASS metrics. Skipping SASS; "
+                "Monitor / Trace / PcSampling are unaffected.");
         }
         return;
     }
     profiler_initialized_ = true;
-
-    EnableSassMetrics_();
+    ConfigureSassMetrics_();
+    if (!config_set_) return;
+    GFL_LOG_DEBUG(
+        "[SassMetricsEngine] profiler initialized and SASS config is set; "
+        "metrics will arm on scope start and flush on scope stop.");
 }
 
 void SassMetricsEngine::DeInitProfilerIfNeeded_() {
@@ -124,25 +272,16 @@ void SassMetricsEngine::DeInitProfilerIfNeeded_() {
 }
 
 void SassMetricsEngine::stop() {
-    // Drain any SASS samples still pending in CUPTI's internal buffer
-    // BEFORE the engine is torn down. Without this, sessions that end
-    // without a final scope-stop (e.g. PyTorch training pipelines that
-    // run iterations outside a `with gpufl.Scope(...)` block, or where
-    // the last scope's onScopeStop hasn't fired before shutdown) lose
-    // every SASS sample — silently — because shutdown() below calls
-    // cuptiSassMetricsDisable + frees buffers without flushing.
-    //
-    // The drain itself is the same path onScopeStop uses
-    // (StopAndCollectSassMetrics_), which is safe to call multiple
-    // times: each call only collects what's currently in CUPTI's
-    // queue. Belt-and-suspenders.
+    // Scope-bounded isolation test: scope stop drains and disables SASS. If a
+    // scope is still armed at session stop, drain it here before shutdown.
     if (enabled_) {
         StopAndCollectSassMetrics_();
     }
 }
 
 void SassMetricsEngine::shutdown() {
-    if (enabled_) {
+    if (enabled_ && ctx_.cuda_ctx) {
+        cudaDeviceSynchronize();
         // Final drain pass — Monitor::Shutdown() may call shutdown()
         // directly without going through stop() in some teardown paths,
         // so we belt-and-suspender here too. StopAndCollectSassMetrics_
@@ -184,14 +323,45 @@ void SassMetricsEngine::shutdown() {
     config_set_ = false;
 }
 
-void SassMetricsEngine::onScopeStop(const char* /*name*/) {
-    if (!enabled_) return;
+void SassMetricsEngine::onScopeStart(const char* name) {
+    if (!profiler_initialized_ || !config_set_ || enabled_) return;
+    GFL_LOG_DEBUG("[SassMetricsEngine] arming SASS metrics for scope: ",
+                  name ? name : "<unnamed>");
+    ArmSassMetrics_();
+}
+
+void SassMetricsEngine::onScopeStop(const char* name) {
+    if (!enabled_ || !ctx_.cuda_ctx) return;
+
+    GFL_LOG_DEBUG("[SassMetricsEngine] flushing SASS metrics for scope: ",
+                  name ? name : "<unnamed>");
+    cudaDeviceSynchronize();
     StopAndCollectSassMetrics_();
+
+    CUpti_SassMetricsDisable_Params disableParams = {
+        CUpti_SassMetricsDisable_Params_STRUCT_SIZE};
+    disableParams.ctx = ctx_.cuda_ctx;
+    CUptiResult disableRes = cuptiSassMetricsDisable(&disableParams);
+    if (!IsExpectedTeardownError(disableRes)) {
+        LogCuptiErrorIfFailed(this->name(), "cuptiSassMetricsDisable",
+                              disableRes);
+    }
+
+    enabled_ = false;
+}
+
+void SassMetricsEngine::flushBeforeCudaTeardown(const char* reason) {
+    if (!enabled_) return;
+    GFL_LOG_DEBUG(
+        "[SassMetricsEngine] skipping SASS flush from CUDA cleanup callback: ",
+        reason ? reason : "unknown",
+        "; SASS metrics flush must run from gpufl shutdown before CUDA "
+        "teardown, after cudaDeviceSynchronize().");
 }
 
 // ---- Private helpers -------------------------------------------------------
 
-void SassMetricsEngine::EnableSassMetrics_() {
+void SassMetricsEngine::ConfigureSassMetrics_() {
     if (ctx_.chip_name.empty()) {
         if (LogCuptiErrorIfFailed(
                 this->name(), "cuptiGetDeviceId",
@@ -209,9 +379,13 @@ void SassMetricsEngine::EnableSassMetrics_() {
     // cuptiSassMetricsSetConfig OOM, the partial-failure bailout for
     // Blackwell below — all call DeInitProfilerIfNeeded_ and return
     // with isEnabled() == false, which the composite engine handles
-    // cleanly. No reason to blocklist Ampere preemptively.)
+    // cleanly. No reason to blocklist Ampere preemptively. An opt-in,
+    // per-architecture gate now lives at the top of start()
+    // (GPUFL_SASS_EXCLUDE_ARCHS) for architectures CONFIRMED broken; it
+    // defaults to empty, so nothing is excluded unless explicitly set.)
 
     metric_id_to_name_.clear();
+    skipped_metrics_.clear();
     if (!sass_metrics_buffers_) {
         sass_metrics_buffers_ = new SassMetricsBuffers();
         sass_metrics_buffers_->numMetrics = kSassMetricNames.size();
@@ -239,11 +413,22 @@ void SassMetricsEngine::EnableSassMetrics_() {
             "unavailable.");
     }
 
+    // The op-level ideal-sector fallbacks (smsp__sass_sectors_mem_global_op_*_ideal)
+    // are ALSO invalid on sm_120+ (Blackwell): cuptiSassMetricsGetProperties returns
+    // CUPTI_ERROR_INVALID_PARAMETER there because they're superseded by the aggregate
+    // smsp__sass_sectors_mem_global_ideal. Querying them on sm_120 produced 2 failed
+    // queries that tripped the conservative sm_120 bail below and discarded ALL of
+    // SASS — so Deep collected zero SASS metrics on Blackwell. Skip them on every
+    // identified architecture: expensive on pre-sm_120, invalid on sm_120+. They're
+    // only ever attempted on an UNKNOWN arch (cc invalid) as a last resort.
+    const bool skipOpLevelIdeal = cc.valid();
+
     size_t validConfigs = 0;
     size_t failedQueries = 0;
     for (size_t i = 0; i < kSassMetricNames.size(); ++i) {
-        // Proactive skip for known-expensive metrics on older GPUs.
-        if (skipExpensive && IsExpensiveOnPreSm120(kSassMetricNames[i])) {
+        // Skip the op-level ideal-sector fallbacks: expensive (~120x replay) on
+        // pre-sm_120, invalid (INVALID_PARAMETER) on sm_120+. See skipOpLevelIdeal.
+        if (skipOpLevelIdeal && IsExpensiveOnPreSm120(kSassMetricNames[i])) {
             skipped_metrics_.push_back(kSassMetricNames[i]);
             continue;
         }
@@ -279,28 +464,20 @@ void SassMetricsEngine::EnableSassMetrics_() {
         return;
     }
 
-    // Conservative bail on sm_120+ (Blackwell): any metric-query failure
-    // here historically indicated a deeper compatibility issue with the
-    // SASS API on this hardware path (Blackwell laptop + Windows WDDM),
-    // not just an isolated unsupported metric. Proceeding to
-    // cuptiSassMetricsSetConfig + cuptiSassMetricsEnable in that
-    // partially-failed state hung the next cuLaunchKernel in lazy-
-    // patching interception, because CUPTI's profiler state was
-    // already corrupted by the partial init. Bail cleanly instead so
-    // Deep mode degrades to PC Sampling only — same UX as the all-
-    // failed case above, just triggered by one-or-more failures
-    // instead of strictly all.
-    if (failedQueries > 0 && cc.valid() && cc.atLeast(12, 0)) {
-        GFL_LOG_ERROR(
+    // Partial metric availability is NOT fatal — collect whatever armed.
+    // (Historically sm_120 bailed entirely on ANY failed metric query, to dodge
+    // a CUPTI hang seen on Blackwell laptop + Windows WDDM. That hang was a
+    // property of LAZY patching — no longer the default (see enableLazyPatching
+    // below) — and the only metrics that failed on sm_120 were the op-level
+    // ideal-sector fallbacks, now skipped above. A non-zero failedQueries here
+    // therefore just means a few optional metrics were unavailable; proceed with
+    // the validConfigs we have. The "nothing usable" case already returned at
+    // validConfigs == 0 above.)
+    if (failedQueries > 0) {
+        GFL_LOG_DEBUG(
             "[SassMetricsEngine] ", failedQueries,
-            " of ", kSassMetricNames.size(),
-            " SASS metric queries failed on sm_", cc.major, cc.minor,
-            ". On this hardware family a partial-failure state has been "
-            "observed to hang subsequent kernel launches via CUPTI's "
-            "lazy-patching path. Skipping SASS entirely; Deep mode will "
-            "degrade to PC Sampling only this session.");
-        DeInitProfilerIfNeeded_();
-        return;
+            " optional SASS metric(s) unavailable on sm_", cc.major, cc.minor,
+            "; continuing with ", validConfigs, " metric(s).");
     }
 
     CUpti_SassMetricsSetConfig_Params setConfigParams = {
@@ -311,55 +488,36 @@ void SassMetricsEngine::EnableSassMetrics_() {
     CUptiResult res = cuptiSassMetricsSetConfig(&setConfigParams);
     if (res == CUPTI_SUCCESS || res == CUPTI_ERROR_INVALID_OPERATION) {
         if (res == CUPTI_SUCCESS) config_set_ = true;
-
-        CUpti_SassMetricsEnable_Params enableParams = {
-            CUpti_SassMetricsEnable_Params_STRUCT_SIZE};
-        enableParams.ctx = ctx_.cuda_ctx;
-        // Always use lazy patching (=1): cubins are patched on their first
-        // cuLaunchKernel call rather than at module-load time, avoiding upfront
-        // cost on unexecuted kernels.
-        //
-        // The original concern was that lazy patching intercepts cuLaunchKernel
-        // at the same level as KERNEL_SERIALIZED PC Sampling (SamplingAPI),
-        // which could deadlock in PcSamplingWithSass mode.  In practice this
-        // conflict is impossible: SamplingAPI requires cuptiPCSamplingEnable(),
-        // but SASS requires cuptiProfilerInitialize() first, and that call
-        // blocks the PC Sampling API.  Whenever SASS enables successfully,
-        // SamplingAPI PC sampling is already disabled, so the deadlock
-        // condition can never be reached.
-        enableParams.enableLazyPatching = 1;
-        CUptiResult enableRes = cuptiSassMetricsEnable(&enableParams);
-        if (LogCuptiErrorIfFailed(this->name(), "cuptiSassMetricsEnable",
-                                  enableRes)) {
-            if (config_set_) {
-                CUpti_SassMetricsUnsetConfig_Params unsetParams = {
-                    CUpti_SassMetricsUnsetConfig_Params_STRUCT_SIZE};
-                unsetParams.deviceIndex = ctx_.device_id;
-                CUptiResult unsetRes =
-                    cuptiSassMetricsUnsetConfig(&unsetParams);
-                if (!IsExpectedTeardownError(unsetRes)) {
-                    LogCuptiErrorIfFailed(
-                        this->name(), "cuptiSassMetricsUnsetConfig", unsetRes);
-                }
-                config_set_ = false;
-            }
-            if (IsInsufficientPrivilege(enableRes)) {
-                insufficient_privileges_ = true;
-                GFL_LOG_ERROR(
-                    "[SassMetricsEngine] Insufficient privileges for CUPTI "
-                    "SASS metrics. Skipping SASS instrumentation.");
-            }
-            DeInitProfilerIfNeeded_();
-            return;
-        }
-        enabled_ = true;
+        GFL_LOG_DEBUG("[SassMetricsEngine] SASS metric config set (",
+                      validConfigs, " metric(s)).");
     } else {
         LogCuptiErrorIfFailed(this->name(), "cuptiSassMetricsSetConfig", res);
-        GFL_LOG_ERROR("[SassMetricsEngine] Failed to enable SASS Metrics");
+        // OUT_OF_MEMORY here is the signature of a GPU/driver that can't
+        // allocate the SASS metric configuration — observed on Ampere
+        // (RTX 3090, sm_86). It is a hardware/driver limitation, NOT a
+        // late-init problem (cuptiProfilerInitialize already succeeded by
+        // this point). SASS metrics simply aren't available on this
+        // setup; Deep degrades to PC sampling and the other engines are
+        // unaffected. Spell that out so the raw CUPTI code isn't the only
+        // signal the user gets.
+        if (res == CUPTI_ERROR_OUT_OF_MEMORY) {
+            GFL_LOG_ERROR(
+                "[SassMetricsEngine] cuptiSassMetricsSetConfig returned "
+                "OUT_OF_MEMORY — this GPU/driver can't allocate SASS metric "
+                "counters (seen on Ampere / sm_86). SASS metrics are "
+                "unavailable on this setup; this is a hardware/driver limit, "
+                "not a configuration error. Deep mode runs as PC Sampling "
+                "here; use ProfilingEngine.PcSampling directly to skip this "
+                "message. Monitor / Trace / PcSampling are unaffected.");
+        } else {
+            GFL_LOG_ERROR(
+                "[SassMetricsEngine] Failed to enable SASS Metrics "
+                "(cuptiSassMetricsSetConfig). Deep degrades to PC sampling; "
+                "Monitor / Trace / PcSampling are unaffected.");
+        }
         DeInitProfilerIfNeeded_();
         return;
     }
-    GFL_LOG_DEBUG("[SassMetricsEngine] SASS Metrics Enabled");
 
     // Emit sass_config event so the backend can distinguish "metric not
     // supported on this GPU" from "metric produced no data for this kernel".
@@ -375,16 +533,65 @@ void SassMetricsEngine::EnableSassMetrics_() {
     }
 }
 
+void SassMetricsEngine::ArmSassMetrics_() {
+    if (!config_set_ || enabled_ || !ctx_.cuda_ctx) return;
+
+    CUpti_SassMetricsEnable_Params enableParams = {
+        CUpti_SassMetricsEnable_Params_STRUCT_SIZE};
+    enableParams.ctx = ctx_.cuda_ctx;
+    const bool lazyPatching = ShouldUseLazyPatching();
+    enableParams.enableLazyPatching = lazyPatching ? 1 : 0;
+    CUptiResult enableRes = cuptiSassMetricsEnable(&enableParams);
+    if (LogCuptiErrorIfFailed(this->name(), "cuptiSassMetricsEnable",
+                              enableRes)) {
+        if (IsInsufficientPrivilege(enableRes)) {
+            insufficient_privileges_ = true;
+            GFL_LOG_ERROR(
+                "[SassMetricsEngine] Insufficient privileges for CUPTI "
+                "SASS metrics. Skipping SASS instrumentation.");
+        }
+        return;
+    }
+    enabled_ = true;
+    GFL_LOG_DEBUG("[SassMetricsEngine] SASS Metrics Enabled (lazy_patching=",
+                  lazyPatching ? "true" : "false", ")");
+}
+
 void SassMetricsEngine::StopAndCollectSassMetrics_() {
     if (!enabled_ || !ctx_.cuda_ctx) return;
 
     CUpti_SassMetricsGetDataProperties_Params props = {
         CUpti_SassMetricsGetDataProperties_Params_STRUCT_SIZE};
     props.ctx = ctx_.cuda_ctx;
-    if (cuptiSassMetricsGetDataProperties(&props) != CUPTI_SUCCESS ||
-        props.numOfPatchedInstructionRecords == 0) {
+    CUptiResult propRes = cuptiSassMetricsGetDataProperties(&props);
+    if (propRes != CUPTI_SUCCESS) {
+        // CUPTI errored on the data-properties query — distinct from "armed but
+        // patched nothing". Surface it so the empty-SASS case isn't silent.
+        LogCuptiErrorIfFailed(this->name(),
+                              "cuptiSassMetricsGetDataProperties", propRes);
         return;
     }
+    if (props.numOfPatchedInstructionRecords == 0) {
+        if (produced_data_.load(std::memory_order_relaxed)) {
+            GFL_LOG_DEBUG(
+                "[SassMetricsEngine] no pending SASS instruction records to "
+                "flush; data was already collected earlier in the session.");
+            return;
+        }
+        // SASS enabled successfully but CUPTI instrumented ZERO instructions
+        // before any data was collected. This is the "sass_metrics: on, no
+        // data" capability state; not a code error.
+        GFL_LOG_ERROR(
+            "[SassMetricsEngine] SASS armed but CUPTI reports 0 patched "
+            "instruction records — no kernel was SASS-instrumented this "
+            "session. Check GPU performance-counter access (NVIDIA Control "
+            "Panel / run elevated); may be unsupported on this GPU+driver.");
+        return;
+    }
+    GFL_LOG_DEBUG("[SassMetricsEngine] draining ",
+                  props.numOfPatchedInstructionRecords,
+                  " patched instruction record(s), ", props.numOfInstances,
+                  " instance(s).");
 
     size_t nRecords = props.numOfPatchedInstructionRecords;
     size_t nInstances = props.numOfInstances;
@@ -422,6 +629,7 @@ void SassMetricsEngine::StopAndCollectSassMetrics_() {
         // g_profileBatch under g_scopeBatchMu eliminates the contention.
         std::vector<ProfileSampleInput> samples;
         samples.reserve(nRecords * nInstances);
+        bool anyNonZeroMetric = false;
         const int64_t now_ns = detail::GetTimestampNs();
         for (size_t i = 0; i < nRecords; ++i) {
             char srcFile[256]{};
@@ -489,10 +697,30 @@ void SassMetricsEngine::StopAndCollectSassMetrics_() {
                                     ? itName->second
                                     : "metric_" + std::to_string(metricId);
                 s.metric_value = value;
+                if (value != 0) anyNonZeroMetric = true;
                 s.source_file = sourceFile;
                 s.source_line = hasSource ? srcLine : 0;
                 samples.push_back(std::move(s));
             }
+            // functionName is a CUPTI-filled (Release-CRT) string, same as the
+            // source-correlation fileName/dirName above. Free it via the same
+            // guarded helper so a _DEBUG build doesn't trip
+            // _CrtIsValidHeapPointer when the debug-CRT app frees a pointer
+            // from CUPTI's heap (the assertion seen running this demo from
+            // cmake-build-debug on Windows). On Release it still frees.
+            if (data[i].functionName) {
+                FreeCuptiCorrelationString(
+                    const_cast<char*>(data[i].functionName));
+                data[i].functionName = nullptr;
+            }
+        }
+        if (anyNonZeroMetric) {
+            produced_data_.store(true, std::memory_order_relaxed);
+        } else if (!samples.empty()) {
+            GFL_LOG_ERROR(
+                "[SassMetricsEngine] SASS metrics produced ", samples.size(),
+                " profile row(s), but every metric value was 0. Treating this "
+                "as enabled-but-no-data for capabilities/reporting.");
         }
         Monitor::PushProfileSamples(samples);
     } else {

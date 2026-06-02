@@ -15,19 +15,17 @@ void ConfigFileLoader::apply(InitOptions& opts, const std::string& path) {
 
     GFL_LOG_DEBUG("Config file loaded: ", path, " (", cfg.size(), " keys)");
 
-    // Profiling engine (string → enum). Accepts both the technical
-    // names (PcSampling / PcSamplingWithSass / RangeProfiler) and the
-    // friendly aliases (Continuous / Deep / Range) — same underlying
-    // enum values, so customer configs from either generation work.
-    // See gpufl-manual/client/mode-data-layers.html for the naming
-    // rationale.
+    // Profiling engine (string → enum). Accepts the six canonical
+    // engine names (see ProfilingEngine in monitor.hpp). Unrecognized
+    // values leave the existing default untouched.
     if (cfg.contains("profiling_engine")) {
         const auto& v = cfg["profiling_engine"].get_string();
-        if (v == "None")                                       opts.profiling_engine = ProfilingEngine::None;
-        else if (v == "PcSampling" || v == "Continuous")       opts.profiling_engine = ProfilingEngine::PcSampling;
-        else if (v == "SassMetrics")                           opts.profiling_engine = ProfilingEngine::SassMetrics;
-        else if (v == "RangeProfiler" || v == "Range")         opts.profiling_engine = ProfilingEngine::RangeProfiler;
-        else if (v == "PcSamplingWithSass" || v == "Deep")     opts.profiling_engine = ProfilingEngine::PcSamplingWithSass;
+        if (v == "Monitor")            opts.profiling_engine = ProfilingEngine::Monitor;
+        else if (v == "Trace")         opts.profiling_engine = ProfilingEngine::Trace;
+        else if (v == "PcSampling")    opts.profiling_engine = ProfilingEngine::PcSampling;
+        else if (v == "SassMetrics")   opts.profiling_engine = ProfilingEngine::SassMetrics;
+        else if (v == "RangeProfiler") opts.profiling_engine = ProfilingEngine::RangeProfiler;
+        else if (v == "Deep")          opts.profiling_engine = ProfilingEngine::Deep;
     }
 
     // Integer fields

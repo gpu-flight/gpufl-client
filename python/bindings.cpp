@@ -49,12 +49,13 @@ private:
 PYBIND11_MODULE(_gpufl_client, m) {
     m.doc() = "GPUFL Internal C++ Binding";
 
-    // BackendKind / ProfilingEngine both have a "None" value, which is a
-    // Python keyword — accessible as ProfilingEngine.__members__["None"]
-    // but ugly. Add a `None_` Python alias on each enum so users can write
-    // `gpufl.ProfilingEngine.None_` directly. The underscore-suffix is the
-    // standard Python convention for keyword-clashing names (mirrors
-    // pybind11's `class_`, `type_`, etc.).
+    // BackendKind has a "None" value, which is a Python keyword —
+    // accessible as BackendKind.__members__["None"] but ugly. Add a
+    // `None_` alias so users can write `gpufl.BackendKind.None_`. The
+    // underscore-suffix is the standard Python convention for
+    // keyword-clashing names (mirrors pybind11's `class_`, `type_`).
+    // (ProfilingEngine no longer has a "None" member — its floor is
+    // `Monitor` — so it needs no such alias.)
     auto backendKindEnum = py::enum_<gpufl::BackendKind>(m, "BackendKind")
         .value("Auto",   gpufl::BackendKind::Auto)
         .value("Nvidia", gpufl::BackendKind::Nvidia)
@@ -63,28 +64,17 @@ PYBIND11_MODULE(_gpufl_client, m) {
         .export_values();
     backendKindEnum.attr("None_") = backendKindEnum.attr("__members__")[py::str("None")];
 
-    auto profilingEngineEnum = py::enum_<gpufl::ProfilingEngine>(m, "ProfilingEngine")
-        .value("None",               gpufl::ProfilingEngine::None)
-        .value("PcSampling",         gpufl::ProfilingEngine::PcSampling)
-        .value("SassMetrics",        gpufl::ProfilingEngine::SassMetrics)
-        .value("RangeProfiler",      gpufl::ProfilingEngine::RangeProfiler)
-        .value("PcSamplingWithSass", gpufl::ProfilingEngine::PcSamplingWithSass)
+    // Six canonical names, one per level, no aliases — see the enum in
+    // monitor.hpp for the naming rationale (clarity-first, plain intent
+    // with the precise CUPTI term where it's the searchable one).
+    py::enum_<gpufl::ProfilingEngine>(m, "ProfilingEngine")
+        .value("Monitor",       gpufl::ProfilingEngine::Monitor)
+        .value("Trace",         gpufl::ProfilingEngine::Trace)
+        .value("PcSampling",    gpufl::ProfilingEngine::PcSampling)
+        .value("SassMetrics",   gpufl::ProfilingEngine::SassMetrics)
+        .value("RangeProfiler", gpufl::ProfilingEngine::RangeProfiler)
+        .value("Deep",          gpufl::ProfilingEngine::Deep)
         .export_values();
-    profilingEngineEnum.attr("None_") = profilingEngineEnum.attr("__members__")[py::str("None")];
-    // Friendly aliases — Phase 1 of mode renaming. Bound as class
-    // attributes pointing at the existing enum entries (not as
-    // additional `.value()` calls, which would either fight pybind11's
-    // deduplication or end up shadowing the canonical name in repr).
-    // gpufl.ProfilingEngine.Deep is the same value as
-    // gpufl.ProfilingEngine.PcSamplingWithSass, and repr() will still
-    // show the technical name. See
-    // gpufl-manual/client/mode-data-layers.html for naming rationale.
-    profilingEngineEnum.attr("Continuous") =
-        profilingEngineEnum.attr("__members__")[py::str("PcSampling")];
-    profilingEngineEnum.attr("Deep") =
-        profilingEngineEnum.attr("__members__")[py::str("PcSamplingWithSass")];
-    profilingEngineEnum.attr("Range") =
-        profilingEngineEnum.attr("__members__")[py::str("RangeProfiler")];
 
     py::class_<gpufl::InitOptions>(m, "InitOptions")
         .def(py::init<>())
@@ -185,7 +175,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
        py::arg("enable_debug_output")         = false,
        py::arg("enable_stack_trace")          = false,
        py::arg("enable_source_collection")    = true,
-       py::arg("profiling_engine")            = gpufl::ProfilingEngine::PcSampling,
+       py::arg("profiling_engine")            = gpufl::ProfilingEngine::Monitor,
        py::arg("config_file")                 = "",
        py::arg("backend_url")                 = "",
        py::arg("api_key")                     = "",

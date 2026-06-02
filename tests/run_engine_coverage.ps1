@@ -4,8 +4,8 @@
 
 .DESCRIPTION
     CUPTI does not reliably tolerate multiple init/shutdown cycles in a single
-    process, so each of the 5 profiling engines (None, PcSampling, SassMetrics,
-    RangeProfiler, PcSamplingWithSass) is exercised in its own invocation of
+    process, so each of the 6 profiling engines (Monitor, Trace, PcSampling,
+    SassMetrics, RangeProfiler, Deep) is exercised in its own invocation of
     gpufl_tests.exe. Per-engine pass/fail is reported; script exits 1 if any
     engine fails.
 
@@ -34,7 +34,7 @@ if (-not (Test-Path $TestExe)) {
     exit 2
 }
 
-$engines = @("None", "PcSampling", "SassMetrics", "RangeProfiler", "PcSamplingWithSass")
+$engines = @("Monitor", "Trace", "PcSampling", "SassMetrics", "RangeProfiler", "Deep")
 $failed = @()
 $passed = @()
 $skipped = @()

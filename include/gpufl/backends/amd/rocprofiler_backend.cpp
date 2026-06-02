@@ -262,14 +262,20 @@ int RocprofilerBackend::toolInitialize() {
     // Create profiling engine based on user configuration.
     // On AMD, PC sampling and counter collection cannot coexist in the same
     // context, so PcSamplingWithSass falls back to dispatch counters.
-    if (opts_.profiling_engine != ProfilingEngine::None && primary_gpu_agent_.handle != 0) {
+    // Trace (activity records only) creates no engine — the switch
+    // default covers it. ProfilingEngine::Monitor never reaches this
+    // backend (CreateMonitorAdapter returns nullptr for it), but guard
+    // anyway so a directly-constructed Monitor backend stays engine-free.
+    if (opts_.profiling_engine != ProfilingEngine::Trace &&
+        opts_.profiling_engine != ProfilingEngine::Monitor &&
+        primary_gpu_agent_.handle != 0) {
         switch (opts_.profiling_engine) {
             case ProfilingEngine::PcSampling:
                 // TODO: engine_ = std::make_unique<AmdPcSamplingEngine>();
                 GFL_LOG_DEBUG("[ROCProfilerBackend] PC sampling engine requested (not yet implemented)");
                 break;
             case ProfilingEngine::SassMetrics:
-            case ProfilingEngine::PcSamplingWithSass:
+            case ProfilingEngine::Deep:
             case ProfilingEngine::RangeProfiler:
                 engine_ = std::make_unique<DispatchCounterEngine>();
                 break;

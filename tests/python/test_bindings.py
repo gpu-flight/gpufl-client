@@ -66,16 +66,12 @@ class TestInitOptions:
 # ---------------------------------------------------------------------------
 
 EXPECTED_PROFILING_ENGINES = [
+    "Monitor",       # no CUPTI — telemetry only (the safe default)
+    "Trace",         # activity trace (kernels + memcpy + sync), no sampling
     "PcSampling",
     "SassMetrics",
     "RangeProfiler",
-    "PcSamplingWithSass",
-    # Friendly aliases (Phase 1 of mode renaming). Same underlying enum
-    # values as their technical counterparts above; locked in here so
-    # the binding regression test catches a missing alias.
-    "Continuous",
-    "Deep",
-    "Range",
+    "Deep",          # PcSampling + SassMetrics
 ]
 
 EXPECTED_BACKEND_KINDS = [
@@ -93,9 +89,14 @@ class TestEnums:
                 f"Missing ProfilingEngine.{name}"
             )
 
-    def test_profiling_engine_none(self):
-        """ProfilingEngine.None_ exists (Python keyword workaround)."""
-        assert hasattr(gpufl.ProfilingEngine, "None_")
+    def test_profiling_engine_no_legacy_aliases(self):
+        """The pre-1.1 names are gone — clean six-value enum only."""
+        for gone in ("None_", "None", "Off", "KernelTrace",
+                     "Continuous", "Range", "PcSamplingWithSass"):
+            assert not hasattr(gpufl.ProfilingEngine, gone), (
+                f"ProfilingEngine.{gone} should have been removed in the "
+                f"1.1 rename"
+            )
 
     def test_backend_kind_values(self):
         """All C++ BackendKind enum values are accessible."""

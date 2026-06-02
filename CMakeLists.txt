@@ -11,7 +11,7 @@ project(gpufl_client
 # `project(... VERSION ...)`, so we layer them on top here. To promote
 # 1.1.0rc1 → 1.1.0 final, set this to the empty string. To bump rc1 →
 # rc2 mid-validation, change just this line.
-set(GPUFL_VERSION_SUFFIX "rc1")
+set(GPUFL_VERSION_SUFFIX "rc2")
 
 # -----------------------
 # CUDA Architectures (CI Friendly)
@@ -242,6 +242,7 @@ if(GPUFL_ENABLE_NVIDIA)
                 include/gpufl/backends/nvidia/sampler/cupti_sass.hpp
                 include/gpufl/backends/nvidia/cuda_collector.cpp
                 include/gpufl/backends/nvidia/cupti_utils.cpp
+                include/gpufl/backends/nvidia/cuda_cleanup_handler.cpp
                 include/gpufl/backends/nvidia/resource_handler.cpp
                 include/gpufl/backends/nvidia/kernel_launch_handler.cpp
                 include/gpufl/backends/nvidia/mem_transfer_handler.cpp

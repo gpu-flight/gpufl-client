@@ -83,9 +83,9 @@ struct InitEvent {
     //                    sessions ran with an engine?".
     // profiling_engine : vendor-namespaced detail like
     //                    "nvidia.pc_sampling" / "nvidia.sass_metrics"
-    //                    / "nvidia.none" (the latter is the explicit
-    //                    "user chose ProfilingEngine::None" sentinel).
-    //                    Stored verbatim by the backend.
+    //                    / "nvidia.none" (the latter is what
+    //                    ProfilingEngine::Monitor — telemetry only —
+    //                    emits). Stored verbatim by the backend.
     //                    The "nvidia.none" string lets the backend
     //                    distinguish "user explicitly disabled
     //                    profiling" from "pre-V40 client that omitted
@@ -110,6 +110,23 @@ struct SassConfigEvent {
     uint32_t device_id = 0;
     std::vector<std::string> configured_metrics;  // metrics successfully enabled
     std::vector<std::string> skipped_metrics;     // metrics CUPTI rejected for this GPU
+};
+
+struct CaptureCapability {
+    std::string feature;
+    bool requested = false;
+    std::string status;
+    std::string mode;
+    std::string reason_code;
+    std::string message;
+};
+
+struct CaptureCapabilitiesEvent {
+    std::string session_id;
+    int64_t ts_ns = 0;
+    std::string requested_engine;
+    std::string selected_engine;
+    std::vector<CaptureCapability> capabilities;
 };
 
 struct KernelEvent {

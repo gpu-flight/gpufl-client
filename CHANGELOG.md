@@ -107,17 +107,23 @@ suggesting `--force`; `--all-sessions` mode silently skips completed
 sessions and uploads the rest. Survives across runs to skip
 already-uploaded rotated files.
 
-#### `ProfilingEngine` friendly aliases
+#### `ProfilingEngine` — clarified names
 
-| Alias | Underlying enum value |
+The engine enum was reworked into a single, plainly-named ladder
+(no aliases). New default is `Monitor` (telemetry only, no CUPTI).
+
+| Name | What it captures |
 |---|---|
-| `Continuous` | `PcSampling` |
-| `Deep` | `PcSamplingWithSass` |
-| `Range` | `RangeProfiler` |
+| `Monitor` | GPU/host health metrics only — no CUPTI. The default. |
+| `Trace` | + activity trace: kernels, memcpy, sync (no sampling) |
+| `PcSampling` | + PC stall-reason sampling |
+| `SassMetrics` | + per-instruction SASS counters |
+| `RangeProfiler` | + hardware throughput counters |
+| `Deep` | `PcSampling` + `SassMetrics` in one run |
 
-Both names are accepted as wire-format values, kwarg values, and
-env-var values. Old names stay as the canonical enum members; new
-names are class attributes pointing at the same values.
+Replaces the earlier `None` / `KernelTrace` / `Continuous` / `Range` /
+`PcSamplingWithSass` names. Pre-1.0, no deprecation shim — the old
+names are gone.
 
 #### Ref-counted system-metric sampler
 

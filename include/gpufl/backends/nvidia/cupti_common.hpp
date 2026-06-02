@@ -5,20 +5,53 @@
 #include <utility>
 #include <vector>
 
-#define CUPTI_CHECK(call)                                            \
-    do {                                                             \
-        CUptiResult res = (call);                                    \
-        if (res != CUPTI_SUCCESS) {                                  \
-            const char* errStr;                                      \
-            cuptiGetResultString(res, &errStr);                      \
-            ::gpufl::DebugLogger::error("[GPUFL Monitor] ", errStr); \
-        }                                                            \
+#include "gpufl/core/debug_logger.hpp"
+
+namespace gpufl {
+
+/**
+ * CUPTI result codes that are EXPECTED on healthy modern systems and
+ * should not be surfaced as errors. The legacy activity-based PC
+ * sampling path isn't supported on Volta+ GPUs, which return
+ * LEGACY_PROFILER_NOT_SUPPORTED / NOT_COMPATIBLE when probed — gpufl
+ * handles that by falling back to the modern PC Sampling API, so these
+ * are routine fallback signals, not failures. CUPTI_CHECK logs them at
+ * debug level (visible with enable_debug_output) instead of as errors,
+ * so a healthy session doesn't spew scary `[GPUFL Monitor]` lines.
+ * Genuinely-unexpected codes still print as errors.
+ */
+inline bool IsBenignCuptiResult(CUptiResult res) {
+    switch (res) {
+        case CUPTI_ERROR_LEGACY_PROFILER_NOT_SUPPORTED:
+        case CUPTI_ERROR_NOT_COMPATIBLE:
+            return true;
+        default:
+            return false;
+    }
+}
+
+}  // namespace gpufl
+
+#define CUPTI_CHECK(call)                                                  \
+    do {                                                                   \
+        CUptiResult _cupti_res = (call);                                   \
+        if (_cupti_res != CUPTI_SUCCESS) {                                 \
+            const char* _cupti_err = nullptr;                              \
+            cuptiGetResultString(_cupti_res, &_cupti_err);                 \
+            if (::gpufl::IsBenignCuptiResult(_cupti_res)) {                \
+                GFL_LOG_DEBUG("[Monitor] expected CUPTI fallback: ",       \
+                              _cupti_err ? _cupti_err : "");               \
+            } else {                                                       \
+                ::gpufl::DebugLogger::error("[GPUFL Monitor] ",            \
+                                            _cupti_err ? _cupti_err : ""); \
+            }                                                              \
+        }                                                                  \
     } while (0)
 
 #define CUPTI_CHECK_RETURN(call, failMsg)                               \
     do {                                                                \
-        CUptiResult res = (call);                                       \
-        if (res != CUPTI_SUCCESS) {                                     \
+        CUptiResult _cupti_res = (call);                                \
+        if (_cupti_res != CUPTI_SUCCESS) {                              \
             ::gpufl::DebugLogger::error("[GPUFL Monitor] ", (failMsg)); \
             return;                                                     \
         }                                                               \

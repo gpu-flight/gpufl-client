@@ -72,4 +72,26 @@ std::string SassConfigModel::buildJson() const {
     return oss.str();
 }
 
+std::string CaptureCapabilitiesModel::buildJson() const {
+    std::ostringstream oss;
+    oss << "{\"version\":1,\"type\":\"capture_capabilities\""
+        << ",\"session_id\":\"" << jsonEscape(e_.session_id) << "\""
+        << ",\"ts_ns\":" << e_.ts_ns
+        << ",\"requested_engine\":\"" << jsonEscape(e_.requested_engine) << "\""
+        << ",\"selected_engine\":\"" << jsonEscape(e_.selected_engine) << "\""
+        << ",\"capabilities\":[";
+    for (size_t i = 0; i < e_.capabilities.size(); ++i) {
+        const auto& c = e_.capabilities[i];
+        if (i) oss << ',';
+        oss << "{\"feature\":\"" << jsonEscape(c.feature) << "\""
+            << ",\"requested\":" << (c.requested ? "true" : "false")
+            << ",\"status\":\"" << jsonEscape(c.status) << "\""
+            << ",\"mode\":\"" << jsonEscape(c.mode) << "\""
+            << ",\"reason_code\":\"" << jsonEscape(c.reason_code) << "\""
+            << ",\"message\":\"" << jsonEscape(c.message) << "\"}";
+    }
+    oss << "]}";
+    return oss.str();
+}
+
 }  // namespace gpufl::model

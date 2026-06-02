@@ -30,7 +30,7 @@ int main() {
     opts.continuous_system_sampling = true;
     opts.enable_debug_output = true;
     opts.enable_source_collection = true;
-    opts.profiling_engine = gpufl::ProfilingEngine::None;
+    opts.profiling_engine = gpufl::ProfilingEngine::Trace;
 
     if (!gpufl::init(opts)) {
         std::cerr << "Failed to initialize gpufl" << std::endl;

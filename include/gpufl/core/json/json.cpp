@@ -6,6 +6,9 @@
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
+#include <vector>
+
+#include <zlib.h>
 
 namespace gpufl {
 namespace json {
@@ -353,14 +356,41 @@ std::vector<JsonValue> loadJsonLines(const std::string& path) {
     std::vector<JsonValue> records;
     if (path.empty()) return records;
 
+    auto parseLine = [&](const std::string& line) {
+        if (line.empty() || line[0] != '{') return;
+        auto val = parseJson(line);
+        if (!val.is_null()) records.push_back(std::move(val));
+    };
+
+    if (path.size() > 3 && path.substr(path.size() - 3) == ".gz") {
+        gzFile file = gzopen(path.c_str(), "rb");
+        if (!file) return records;
+
+        std::vector<char> buf(65536);
+        std::string line;
+        while (gzgets(file, buf.data(), static_cast<int>(buf.size())) != nullptr) {
+            line += buf.data();
+            if (!line.empty() && line.back() == '\n') {
+                if (line.size() > 1 && line[line.size() - 2] == '\r') {
+                    line.erase(line.size() - 2);
+                } else {
+                    line.pop_back();
+                }
+                parseLine(line);
+                line.clear();
+            }
+        }
+        if (!line.empty()) parseLine(line);
+        gzclose(file);
+        return records;
+    }
+
     std::ifstream file(path);
     if (!file.is_open()) return records;
 
     std::string line;
     while (std::getline(file, line)) {
-        if (line.empty() || line[0] != '{') continue;
-        auto val = parseJson(line);
-        if (!val.is_null()) records.push_back(std::move(val));
+        parseLine(line);
     }
     return records;
 }

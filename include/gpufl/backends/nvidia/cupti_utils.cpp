@@ -61,6 +61,16 @@ ComputeCapability GetComputeCapability(int deviceId) {
     return cc;
 }
 
+uint32_t GetCuptiVersion() {
+    static std::once_flag once;
+    static uint32_t version = 0;
+    std::call_once(once, [] {
+        uint32_t v = 0;
+        if (cuptiGetVersion(&v) == CUPTI_SUCCESS) version = v;
+    });
+    return version;
+}
+
 void CalculateOccupancy(LaunchMeta& meta, const void* funcPtr) {
     if (!funcPtr) return;
 

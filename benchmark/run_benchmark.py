@@ -32,7 +32,7 @@ CONFIGS = [
     {
         'name': 'Monitoring only',
         'use_gpufl': True,
-        'engine': 'None_',
+        'engine': 'Monitor',
         'desc': 'System metrics sampling, no CUPTI',
     },
     {
@@ -50,8 +50,8 @@ CONFIGS = [
     {
         'name': 'PcSampling + SASS',
         'use_gpufl': True,
-        'engine': 'PcSamplingWithSass',
-        'desc': 'Full profiling (default)',
+        'engine': 'Deep',
+        'desc': 'Full profiling (PC sampling + SASS)',
     },
 ]
 
@@ -65,10 +65,7 @@ def setup_gpufl(config: dict, log_dir: str) -> bool:
     try:
         import gpufl
         engine_name = config['engine']
-        # C++ binding uses 'None', Python stub uses 'None_'
-        engine = getattr(gpufl.ProfilingEngine, engine_name, None)
-        if engine is None and engine_name == 'None_':
-            engine = getattr(gpufl.ProfilingEngine, 'None')
+        engine = getattr(gpufl.ProfilingEngine, engine_name)
         log_path = os.path.join(log_dir, 'bench')
         result = gpufl.init(
             app_name='benchmark',

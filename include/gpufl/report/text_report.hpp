@@ -119,6 +119,15 @@ class TextReport {
         int l2_cache_size = 0;
     };
 
+    struct CaptureCapabilityRecord {
+        std::string feature;
+        bool requested = false;
+        std::string status;
+        std::string mode;
+        std::string reason_code;
+        std::string message;
+    };
+
     // Aggregation helper used by multiple sections
     struct AggStats {
         int count = 0;
@@ -137,6 +146,9 @@ class TextReport {
     std::vector<HostMetricRecord> host_metrics_;
     std::vector<ScopeEventRecord> scope_events_;
     std::vector<ProfileSampleRecord> profile_samples_;
+    std::vector<CaptureCapabilityRecord> capture_capabilities_;
+    std::string requested_engine_;
+    std::string selected_engine_;
     bool sass_active_ = false;
     int top_n_;
 
@@ -155,6 +167,7 @@ class TextReport {
                        const std::unordered_map<int, std::string>& function_dict,
                        const std::unordered_map<int, std::string>& metric_dict);
     void parseSystemLog(const std::vector<JsonValue>& records);
+    void parseCaptureCapabilities(const std::vector<JsonValue>& records);
     void mergeKernelDetails(std::unordered_map<unsigned, JsonValue>& details);
 
     static void parseJobStart(const JsonValue& record, SessionInfo& info);

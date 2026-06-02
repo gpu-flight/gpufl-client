@@ -4,6 +4,8 @@
 #include <cupti.h>
 
 #include <atomic>
+#include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -13,6 +15,7 @@
 #include <vector>
 
 #include "gpufl/backends/nvidia/cupti_common.hpp"
+#include "gpufl/backends/nvidia/cupti_utils.hpp"
 #include "gpufl/backends/nvidia/engine/profiling_engine.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/monitor.hpp"
@@ -45,6 +48,75 @@ class CuptiBackend : public IMonitorBackend {
     bool IsMonitoringMode() override { return true; }
     bool IsProfilingMode()  override { return engine_ != nullptr; }
 
+    bool IsSassProfilerMode() const {
+        return opts_.profiling_engine == ProfilingEngine::SassMetrics ||
+               opts_.profiling_engine == ProfilingEngine::Deep;
+    }
+    bool SassMetricsOnlyMode() const {
+        if (!IsSassProfilerMode()) return false;
+        // Isolation mode only. By default match main: allow normal CUPTI
+        // activity/callback tracing to coexist with SASS metrics.
+        return EnvFlagEnabled_("GPUFL_SASS_METRICS_ONLY");
+    }
+    bool UseSafeSassActivityDefaults() const {
+        if (!IsSassProfilerMode()) return false;
+        if (SassMetricsOnlyMode()) return true;
+        if (EnvFlagEnabled_("GPUFL_SASS_FORCE_SAFE_ACTIVITY")) return true;
+        return false;
+    }
+    bool AllowSassKernelActivity() const {
+        if (SassMetricsOnlyMode()) return false;
+        return !UseSafeSassActivityDefaults() ||
+               EnvFlagEnabled_("GPUFL_SASS_ALLOW_KERNEL_ACTIVITY");
+    }
+    bool AllowSassMarkerActivity() const {
+        if (SassMetricsOnlyMode()) return false;
+        return !UseSafeSassActivityDefaults() ||
+               EnvFlagEnabled_("GPUFL_SASS_ALLOW_MARKER_ACTIVITY");
+    }
+    bool AllowSassMemTransferActivity() const {
+        if (SassMetricsOnlyMode()) return false;
+        if (!UseSafeSassActivityDefaults()) return true;
+        return EnvFlagEnabled_("GPUFL_SASS_ALLOW_MEM_TRANSFER_ACTIVITY");
+    }
+    bool AllowSassMemory2Activity() const {
+        if (SassMetricsOnlyMode()) return false;
+        if (!UseSafeSassActivityDefaults()) return true;
+        const bool memTransferRequested =
+            EnvFlagEnabled_("GPUFL_SASS_ALLOW_MEM_TRANSFER_ACTIVITY");
+        const bool memory2Requested =
+            EnvFlagEnabled_("GPUFL_SASS_ALLOW_MEMORY2_ACTIVITY") ||
+            EnvFlagEnabled_("GPUFL_SASS_ALLOW_MEMORY_ACTIVITY");
+        // Safe-mode default keeps MEMORY2 because it is tied to the explicit
+        // enable_memory_tracking option.  If the user asks to test mem-transfer
+        // activity, keep MEMORY2 off unless it is explicitly requested too;
+        // enabling both is the confirmed deadlocking combination on sm_86 +
+        // CUPTI 13.1.
+        return memory2Requested || !memTransferRequested;
+    }
+    bool AllowSassSyncActivity() const {
+        if (SassMetricsOnlyMode()) return false;
+        return !UseSafeSassActivityDefaults() ||
+               EnvFlagEnabled_("GPUFL_SASS_ALLOW_SYNC_ACTIVITY");
+    }
+    bool AllowSassGraphActivity() const {
+        if (SassMetricsOnlyMode()) return false;
+        return !UseSafeSassActivityDefaults() ||
+               EnvFlagEnabled_("GPUFL_SASS_ALLOW_GRAPH_ACTIVITY");
+    }
+    bool AllowSassExternalCorrelation() const {
+        if (SassMetricsOnlyMode()) return false;
+        return !UseSafeSassActivityDefaults() ||
+               EnvFlagEnabled_("GPUFL_SASS_ALLOW_EXTERNAL_CORRELATION");
+    }
+    void FlushProfilingDataBeforeCudaTeardown(const char* reason);
+    void NoteKernelLaunchForCleanupFlush() {
+        last_cleanup_flush_ns_.store(0, std::memory_order_release);
+    }
+    void NoteMemoryActivityEmitted() {
+        memory_activity_emitted_.fetch_add(1, std::memory_order_relaxed);
+    }
+
     // Whether the active engine consumes cubin binaries. Cubin capture
     // feeds two consumers, and both want the binary for the SAME three
     // instruction-level engines:
@@ -52,14 +124,15 @@ class CuptiBackend : public IMonitorBackend {
     //      Source/SASS dashboard view), and
     //   2. the engine's own per-PC cubin lookups (PcSampling and
     //      SassMetrics read cubin_by_crc_ to correlate samples).
-    // None (monitoring only) and RangeProfiler (scope-level HW counters)
-    // need neither, so we skip cubin capture/disassembly entirely for
-    // them — there's no per-instruction data to attach it to. This is
-    // what makes profiling_engine=None truly "monitoring only".
+    // Trace (activity records only) and RangeProfiler (scope-level HW
+    // counters) need neither, so we skip cubin capture/disassembly
+    // entirely for them — there's no per-instruction data to attach it
+    // to. (ProfilingEngine::Monitor never constructs a CuptiBackend at
+    // all, so it doesn't reach this method.)
     bool NeedsCubinCapture() const {
         return opts_.profiling_engine == ProfilingEngine::PcSampling ||
                opts_.profiling_engine == ProfilingEngine::SassMetrics ||
-               opts_.profiling_engine == ProfilingEngine::PcSamplingWithSass;
+               opts_.profiling_engine == ProfilingEngine::Deep;
     }
 
     void RegisterHandler(const std::shared_ptr<ICuptiHandler>& handler);
@@ -72,6 +145,8 @@ class CuptiBackend : public IMonitorBackend {
     // reflect actual GPU execution time.
     void FlushPendingKernels();
     CUpti_SubscriberHandle GetSubscriber() const { return subscriber_; }
+
+    void EmitCaptureCapabilities_() const;
 
     void OnScopeStart(const char* name) override {
         GFL_LOG_DEBUG("OnScopeStart");
@@ -89,7 +164,7 @@ class CuptiBackend : public IMonitorBackend {
         // and are flushed at session stop() instead.  cudaDeviceSynchronize
         // ensures GPU work completes before the scope exits.
         if (opts_.profiling_engine == ProfilingEngine::PcSampling ||
-            opts_.profiling_engine == ProfilingEngine::PcSamplingWithSass) {
+            opts_.profiling_engine == ProfilingEngine::Deep) {
             cudaDeviceSynchronize();
         }
     }
@@ -109,6 +184,13 @@ class CuptiBackend : public IMonitorBackend {
     friend class KernelLaunchHandler;
     friend class MemTransferHandler;
     friend class SynchronizationHandler;
+
+    static bool EnvFlagEnabled_(const char* name) {
+        const char* v = std::getenv(name);
+        return v && v[0] != '\0' && v[0] != '0' && std::strcmp(v, "false") != 0 &&
+               std::strcmp(v, "FALSE") != 0 && std::strcmp(v, "off") != 0 &&
+               std::strcmp(v, "OFF") != 0;
+    }
 
     // CUPTI callback functions
     static void CUPTIAPI BufferRequested(uint8_t** buffer, size_t* size,
@@ -157,6 +239,12 @@ class CuptiBackend : public IMonitorBackend {
     std::atomic<uint64_t> kernel_activity_seen_{0};
     std::atomic<uint64_t> kernel_activity_emitted_{0};
     std::atomic<uint64_t> kernel_activity_throttled_{0};
+    std::atomic<uint64_t> memory_activity_emitted_{0};
+    std::atomic<uint64_t> external_correlation_seen_{0};
+    std::atomic<uint64_t> source_locator_seen_{0};
+    std::atomic<uint64_t> function_record_seen_{0};
+    std::atomic<int64_t> last_cleanup_flush_ns_{0};
+    mutable std::atomic<bool> capture_capabilities_emitted_{false};
     uint32_t device_id_ = 0;
     std::string chip_name_;
 

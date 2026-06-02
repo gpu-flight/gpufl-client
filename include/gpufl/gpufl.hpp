@@ -93,14 +93,20 @@ struct InitOptions {
     // the kind. Cost when on: one record per cudaGraphLaunch (very
     // low volume).
     bool enable_cuda_graphs_tracking = false;
-    // Default: PC Sampling alone. The cubin-disassembly pipeline
-    // (ResourceHandler + nvdisasm) already provides SASS listings and
-    // source correlation, so PC Sampling gives users the full SASS view
-    // plus stall reasons. Opt into SassMetrics or PcSamplingWithSass only
-    // when per-instruction execution/divergence counters are needed —
-    // those paths use CUPTI kernel replay and are ~100× more expensive
-    // on pre-sm_120 GPUs.
-    ProfilingEngine profiling_engine = ProfilingEngine::PcSampling;
+    // Default: Monitor — telemetry only (GPU/host metrics), no CUPTI
+    // kernel capture. The safe, lowest-overhead default: it can't hit
+    // the CUPTI kernel-path overhead (PyTorch training saw +650% under
+    // PC Sampling) or the kernel-path crash/hang modes, and it's all a
+    // "just watch my GPU" user needs.
+    //
+    // Opt in explicitly for tracing/profiling, in order of cost:
+    //   Trace         — per-op timeline (kernels, memcpy, sync)
+    //   PcSampling    — + stall-reason sampling ("why is it slow")
+    //   SassMetrics   — + per-instruction counters (CUPTI replay,
+    //                   ~100× costlier on pre-sm_120 GPUs)
+    //   RangeProfiler — hardware throughput counters (SM/mem/tensor util)
+    //   Deep          — PcSampling + SassMetrics in one run
+    ProfilingEngine profiling_engine = ProfilingEngine::Monitor;
 
     // ── Configuration sources, in precedence order (low → high) ────────────
     //

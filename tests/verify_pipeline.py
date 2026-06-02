@@ -16,11 +16,12 @@ def test_pipeline():
     keep = False
     try:
         print("2. Initializing GPUFL...")
-        # Passing 0 for interval. ProfilingEngine.None_ is the Python-
-        # keyword-safe alias for the "no profiling, monitor only" mode —
-        # equivalent to ProfilingEngine.__members__["None"] but readable.
+        # Trace = activity trace (kernels, memcpy, sync), no sampling. We
+        # exercise the CUPTI activity path here so the pipeline smoke test
+        # covers it; the no-CUPTI Monitor mode is covered by the
+        # engine-coverage suite.
         res = gfl.init("CI_Test_App", log_base_path, True, 50,
-                       profiling_engine=gfl.ProfilingEngine.None_)
+                       profiling_engine=gfl.ProfilingEngine.Trace)
         print(f"   Result: {res}")
         if res is False:
             print("\n[CI-INFO] GPUFL initialized in Stub Mode (No GPU detected).")

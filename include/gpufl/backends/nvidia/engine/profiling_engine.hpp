@@ -64,6 +64,12 @@ class IProfilingEngine {
      *  Called from the collector thread every ~250ms. */
     virtual void drainData() {}
 
+    /**
+     * @brief Last-chance drain before CUDA cleanup APIs such as cudaFree or
+     * cudaDeviceReset can invalidate state needed by a profiling engine.
+     */
+    virtual void flushBeforeCudaTeardown(const char* /*reason*/) {}
+
     // ---- Perf-scope hooks (Range Profiler / Perfworks) ----
     virtual void onPerfScopeStart(const char* /*name*/) {}
     virtual void onPerfScopeStop(const char* /*name*/) {}
@@ -98,6 +104,15 @@ class IProfilingEngine {
      * data. False if start() was skipped, failed, or the engine is None.
      */
     virtual bool isOperational() const { return true; }
+
+    /**
+     * @brief True if this engine actually emitted at least one profiling
+     * record/sample this session — not merely armed. Lets the capability
+     * report distinguish "collected" from "enabled but produced 0 data"
+     * (e.g. SASS / PC sampling armed but the kernels were too short, or CUPTI
+     * returned nothing). Default false; engines that emit data override it.
+     */
+    virtual bool producedData() const { return false; }
 };
 
 }  // namespace gpufl
