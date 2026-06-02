@@ -33,10 +33,10 @@ def init(log_pattern: Union[str, List[str]]):
         log_pattern: File path, directory, or glob pattern (e.g., "logs/*.log").
     """
     global _GLOBAL_DF
-    if isinstance(log_pattern, str) and os.path.isdir(log_pattern):
-        pattern = os.path.join(log_pattern, "*.log")
-    else:
-        pattern = log_pattern
+    # read_df / read_events expand a directory recursively and read both
+    # plain and gzipped (`.log.gz`) logs, so pass directories straight
+    # through rather than pinning to a non-recursive "<dir>/*.log".
+    pattern = log_pattern
 
     print(f"Loading logs from: {pattern} ...")
     df = read_df(pattern)

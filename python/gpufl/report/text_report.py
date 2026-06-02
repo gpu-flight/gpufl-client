@@ -501,48 +501,110 @@ class TextReport:
                         .head(self.top_n)
                     )
                     for fn, count in kern_stalls.items():
-                        short, _ = _shorten_kernel_name(str(fn))
+                        short, _ = _shorten_kernel_name(str(fn).split("@", 1)[0])
                         if len(short) > 50:
                             short = short[:47] + "..."
                         lines.append(f"    {short:<52}{int(count):>8} samples")
 
-        # SASS metrics summary
+        # SASS metrics — per-function instruction + memory efficiency.
+        # Mirrors include/gpufl/report/text_report.cpp + hint_engine.cpp so this
+        # Python report agrees number-for-number with the C++ generateReport():
+        #   warp efficiency   = thread_insts / warp_insts / 32
+        #   memory efficiency = ideal_sectors / global_sectors  (tiered ideal:
+        #     aggregate `_ideal` on sm_120+, op_ld + op_st on sm_86)
         if has_sass:
-            lines.append("")
-            lines.append("  SASS Metrics Summary:")
+            sass = samples[samples["metric_name"].notna()].copy()
+            sass["metric_value"] = pd.to_numeric(
+                sass["metric_value"], errors="coerce"
+            ).fillna(0)
+            if "function_name" not in sass.columns:
+                sass["function_name"] = "(unknown)"
+            sass["function_name"] = sass["function_name"].fillna("(unknown)")
 
-            sass = samples[samples["metric_name"].notna()]
-            metric_sums = (
-                sass.groupby("metric_name")["metric_value"]
+            per_func = (
+                sass.groupby(["function_name", "metric_name"])["metric_value"]
                 .sum()
-                .sort_values(ascending=False)
+                .unstack(fill_value=0)
             )
 
-            hdr = f"  {'Metric':<50}{'Total':>12}"
-            lines.append(hdr)
-            lines.append("  " + "-" * 62)
-            for metric, total in metric_sums.items():
-                mname = str(metric)
-                if len(mname) > 48:
-                    mname = mname[:45] + "..."
-                lines.append(f"  {mname:<50}{int(total):>12}")
+            def _metric(series, name):
+                return float(series[name]) if name in series.index else 0.0
 
-            # Divergence analysis: thread_inst / warp_inst ratio
-            warp_metric = "smsp__sass_inst_executed"
-            thread_metric = "smsp__sass_thread_inst_executed"
-            if warp_metric in metric_sums.index and thread_metric in metric_sums.index:
-                warp_total = metric_sums[warp_metric]
-                thread_total = metric_sums[thread_metric]
-                if warp_total > 0:
-                    # For a warp of 32 threads, thread/warp ratio should be 32 if no divergence
-                    ratio = thread_total / warp_total
-                    efficiency = ratio / 32.0 * 100
+            order = per_func.sum(axis=1).sort_values(ascending=False)
+            wrote_header = False
+            for fn in order.index[: self.top_n]:
+                row = per_func.loc[fn]
+                warp     = _metric(row, "smsp__sass_inst_executed")
+                thread   = _metric(row, "smsp__sass_thread_inst_executed")
+                gsect    = _metric(row, "smsp__sass_sectors_mem_global")
+                ideal    = _metric(row, "smsp__sass_sectors_mem_global_ideal")
+                ideal_ld = _metric(row, "smsp__sass_sectors_mem_global_op_ld_ideal")
+                ideal_st = _metric(row, "smsp__sass_sectors_mem_global_op_st_ideal")
+                if warp <= 0 and thread <= 0 and gsect <= 0:
+                    continue
+
+                if not wrote_header:
                     lines.append("")
-                    lines.append(f"  Thread Divergence Analysis:")
-                    lines.append(f"    Warp Instructions:    {int(warp_total)}")
-                    lines.append(f"    Thread Instructions:  {int(thread_total)}")
-                    lines.append(f"    Avg Threads/Warp:     {ratio:.1f} / 32")
-                    lines.append(f"    Warp Efficiency:      {efficiency:.1f}%")
+                    lines.append("  SASS Analysis (per function):")
+                    wrote_header = True
+
+                short, _ = _shorten_kernel_name(str(fn).split("@", 1)[0])
+                lines.append("")
+                lines.append(f"  {short}")
+                lines.append("  " + "-" * min(len(short) + 2, 60))
+
+                if warp > 0 or thread > 0:
+                    lines.append("    Instructions:")
+                    if warp > 0:
+                        lines.append(f"      Warp Insts:        {int(warp):>18,}")
+                    if thread > 0:
+                        lines.append(f"      Thread Insts:      {int(thread):>18,}")
+                    if warp > 0 and thread > 0:
+                        ratio = thread / warp
+                        eff = ratio / 32.0 * 100
+                        lines.append(
+                            f"      Warp Efficiency:   {ratio:>10.1f} / 32 ({eff:.1f}%)"
+                        )
+
+                if gsect > 0:
+                    eff_ideal = ideal if ideal > 0 else (ideal_ld + ideal_st)
+                    lines.append("    Memory:")
+                    lines.append(f"      Global Sectors:    {int(gsect):>18,}")
+                    if eff_ideal > 0:
+                        tag = " (ld+st)" if ideal == 0 else ""
+                        lines.append(
+                            f"      Ideal Sectors:     {int(eff_ideal):>18,}{tag}"
+                        )
+                        mem_eff = eff_ideal / gsect * 100
+                        lines.append(f"      Memory Efficiency: {mem_eff:>17.1f}%")
+                    else:
+                        lines.append(
+                            "      Memory Efficiency: (not available on this GPU)"
+                        )
+
+                # Interpretation hints — same thresholds as hint_engine.cpp
+                # (int-truncated percentages). Stall-based hints require PC
+                # sampling data, which the SASS path doesn't carry.
+                eff_ideal = ideal if ideal > 0 else (ideal_ld + ideal_st)
+                hints = []
+                if gsect > 0 and eff_ideal > 0:
+                    mem_eff = eff_ideal / gsect * 100
+                    if mem_eff < 50:
+                        hints.append(
+                            f"Low memory efficiency ({int(mem_eff)}%) - consider "
+                            "coalesced access patterns or shared memory tiling."
+                        )
+                if warp > 0 and thread > 0:
+                    eff = thread / warp / 32.0 * 100
+                    if eff < 90:
+                        hints.append(
+                            f"Low warp efficiency ({int(eff)}%) - reduce branch "
+                            "divergence within warps."
+                        )
+                if hints:
+                    lines.append("    Hints:")
+                    for h in hints:
+                        lines.append(f"      * {h}")
 
         return lines
 

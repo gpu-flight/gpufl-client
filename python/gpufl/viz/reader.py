@@ -28,6 +28,7 @@ batch row — which is why the legacy `gpufl.viz` plots looked empty.
 """
 
 import glob
+import gzip
 import json
 import os
 from typing import Any, Dict, List
@@ -162,6 +163,35 @@ def _resolve_names(sample: Dict[str, Any],
         sample["name"] = dicts["kernel"].get(kid, f"#{kid}")
 
 
+def _gather_files(file_pattern: str) -> List[str]:
+    """Resolve a path / dir / glob into a concrete list of log files.
+
+    Understands the current client layout (gzipped, session-nested):
+      * a directory          -> all `<dir>/**/*.log[.gz]` (recursive)
+      * a `*.log` glob/path  -> that glob *plus* its `.gz` siblings
+      * an explicit `*.gz`   -> as given
+
+    so callers can pass `read_df("logs/")`, `read_df("logs/scope.*.log")`,
+    or `read_df("logs/run/scope.log.gz")` interchangeably.
+    """
+    if os.path.isdir(file_pattern):
+        pats = [os.path.join(file_pattern, "**", "*.log"),
+                os.path.join(file_pattern, "**", "*.log.gz")]
+    elif file_pattern.endswith(".gz"):
+        pats = [file_pattern]
+    else:
+        pats = [file_pattern, file_pattern + ".gz"]
+
+    out: List[str] = []
+    seen = set()
+    for pat in pats:
+        for f in glob.glob(pat, recursive=True):
+            if f not in seen and os.path.isfile(f):
+                seen.add(f)
+                out.append(f)
+    return out
+
+
 def read_events(file_pattern: str) -> List[dict]:
     """Read NDJSON files and return one dict per *expanded* event.
 
@@ -169,8 +199,11 @@ def read_events(file_pattern: str) -> List[dict]:
     `ts_ns` and resolved name fields where dictionary ids exist. Non-
     batch lines (lifecycle, dictionary_update, sass_config) pass through
     unchanged so downstream code can still see them if it needs to.
+
+    Accepts a file path, a directory, or a glob; gzipped (`.log.gz`) and
+    session-nested logs written by the current client are handled.
     """
-    files = glob.glob(file_pattern)
+    files = _gather_files(file_pattern)
 
     # Pass 1: parse every line. We have to buffer to do dictionary
     # resolution in pass 2 — `dictionary_update` events are usually
@@ -180,7 +213,8 @@ def read_events(file_pattern: str) -> List[dict]:
     for fpath in files:
         if not os.path.isfile(fpath):
             continue
-        with open(fpath, "r", encoding="utf-8") as f:
+        open_fn = gzip.open if fpath.endswith(".gz") else open
+        with open_fn(fpath, "rt", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line or not line.startswith("{"):
