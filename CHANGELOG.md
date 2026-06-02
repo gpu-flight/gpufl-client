@@ -7,9 +7,9 @@ versioning follows PEP 440 for the Python wheel and semver-style
 
 ## [1.1.0] — Unreleased
 
-Currently validating as **`1.1.0rc1`**. Once it survives a full smoke
+Currently validating as **`1.1.0rc2`**. Once it survives a full smoke
 cycle in dev + a sample PyTorch run + the example Dockerfile build,
-the `rc1` suffix gets dropped to ship as `1.1.0`.
+the `rc2` suffix gets dropped to ship as `1.1.0`.
 
 ### Breaking changes
 
@@ -174,10 +174,10 @@ Regression test added in `tests/upload/test_upload_logs.cpp`.
   target sources.
 - `CMakeLists.txt` `project(VERSION)` bumped to 1.1.0; new
   `GPUFL_VERSION_SUFFIX` variable layers the PEP 440 pre-release
-  token onto `GPUFL_CLIENT_VERSION` (currently `"rc1"`; set to `""`
+  token onto `GPUFL_CLIENT_VERSION` (currently `"rc2"`; set to `""`
   to promote to 1.1.0 final).
 
-### Migration checklist for 1.0.x → 1.1.0rc1
+### Migration checklist for 1.0.x → 1.1.0rc2
 
 **Optional in v1.1, required by v1.2:**
 

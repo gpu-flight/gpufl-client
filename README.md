@@ -11,7 +11,7 @@ Built on CUPTI for NVIDIA GPUs and rocprofiler-sdk for AMD GPUs, GPUFlight is de
 ## Project Status: 1.1.0 release candidate
 
 GPUFlight is published to PyPI; the current release candidate is
-`v1.1.0rc1`. **Breaking changes vs 1.0.x** — `remote_upload` /
+`v1.1.0rc2`. **Breaking changes vs 1.0.x** — `remote_upload` /
 `HttpLogSink` removed (upload moves to a post-shutdown step), and
 `sampling_auto_start` renamed to `continuous_system_sampling`. See
 [CHANGELOG.md](./CHANGELOG.md) for the full migration notes. Pin an
@@ -64,7 +64,7 @@ include(FetchContent)
 FetchContent_Declare(
     gpufl
     GIT_REPOSITORY https://github.com/gpu-flight/gpufl-client.git
-    GIT_TAG        v1.1.0rc1   # pin a release tag — see the Releases page for the latest
+    GIT_TAG        v1.1.0rc2   # pin a release tag — see the Releases page for the latest
 )
 FetchContent_MakeAvailable(gpufl)
 
