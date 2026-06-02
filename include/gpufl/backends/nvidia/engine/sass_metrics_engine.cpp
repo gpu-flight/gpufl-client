@@ -702,8 +702,15 @@ void SassMetricsEngine::StopAndCollectSassMetrics_() {
                 s.source_line = hasSource ? srcLine : 0;
                 samples.push_back(std::move(s));
             }
+            // functionName is a CUPTI-filled (Release-CRT) string, same as the
+            // source-correlation fileName/dirName above. Free it via the same
+            // guarded helper so a _DEBUG build doesn't trip
+            // _CrtIsValidHeapPointer when the debug-CRT app frees a pointer
+            // from CUPTI's heap (the assertion seen running this demo from
+            // cmake-build-debug on Windows). On Release it still frees.
             if (data[i].functionName) {
-                std::free(const_cast<char*>(data[i].functionName));
+                FreeCuptiCorrelationString(
+                    const_cast<char*>(data[i].functionName));
                 data[i].functionName = nullptr;
             }
         }
