@@ -192,6 +192,15 @@ KernelLaunchHandler::requiredCallbacks() const {
 
 std::vector<CUpti_ActivityKind> KernelLaunchHandler::requiredActivityKinds()
     const {
+    if (backend_ && backend_->GetOptions().profiling_engine ==
+                        ProfilingEngine::PcSampling) {
+        GFL_LOG_DEBUG(
+            "[KernelLaunchHandler] CUPTI kernel activity disabled in PC "
+            "Sampling mode; launch callbacks will provide synthetic kernel "
+            "rows.");
+        return {};
+    }
+
     if (backend_ && !backend_->AllowSassKernelActivity()) {
         GFL_LOG_DEBUG(
             "[KernelLaunchHandler] CUPTI kernel activity disabled in SASS "

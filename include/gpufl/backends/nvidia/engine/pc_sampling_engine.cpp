@@ -46,15 +46,14 @@ BuildPcSamplingConfig(const uint32_t samplingPeriod,
         configInfo[configCount++] = info;
     };
 
-    // CONTINUOUS mode: avoids deadlock between KERNEL_SERIALIZED and
-    // cudaDeviceSynchronize().  Kernel activity records are re-enabled
-    // explicitly after PC sampling configuration.
+    // Kernel-serialized collection plus explicit start/stop lets GPUFL own
+    // the PC sampling lifetime while avoiding mid-session GetData drains.
     {
         CUpti_PCSamplingConfigurationInfo info = {};
         info.attributeType =
             CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_COLLECTION_MODE;
         info.attributeData.collectionModeData.collectionMode =
-            CUPTI_PC_SAMPLING_COLLECTION_MODE_CONTINUOUS;
+            CUPTI_PC_SAMPLING_COLLECTION_MODE_KERNEL_SERIALIZED;
         addConfig(info);
     }
     {
@@ -81,17 +80,15 @@ BuildPcSamplingConfig(const uint32_t samplingPeriod,
         addConfig(info);
     }
 
-    // CUPTI auto-managed start/stop.  With enableStartStopControl=0, CUPTI
-    // samples automatically per kernel.  We reset the session between scopes
-    // (disable + re-enable) to ensure each scope gets fresh stall data.
-    // Note: enableStartStopControl=1 (explicit Start/Stop) returns zero data
-    // on Blackwell/WDDM — a CUPTI platform limitation.
+    // Explicit start/stop is required before cuptiPCSamplingStart/Stop.
+    // Do not call cuptiPCSamplingGetData while sampling is active; on CUDA
+    // 13.x this can drain the buffer and leave the final collection empty.
     {
         CUpti_PCSamplingConfigurationInfo info = {};
         info.attributeType =
             CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_ENABLE_START_STOP_CONTROL;
         info.attributeData.enableStartStopControlData.enableStartStopControl =
-            0;
+            1;
         addConfig(info);
     }
     {
@@ -208,6 +205,7 @@ void PcSamplingEngine::stop() {
     if (pc_sampling_method_ == Method::SamplingAPI &&
         sampling_api_ready_.load() && ctx_.cuda_ctx) {
         if (sampling_api_started_.load()) {
+            pc_sampling_ref_count_.store(1);
             StopAndCollectPcSampling_();
         }
         CUpti_PCSamplingDisableParams dp = {};
@@ -219,90 +217,17 @@ void PcSamplingEngine::stop() {
 }
 
 void PcSamplingEngine::drainData() {
-    if (pc_sampling_method_ != Method::SamplingAPI) return;
-    if (!sampling_api_started_.load()) return;
-    if (!pc_sampling_buffers_ || !pc_sampling_buffers_->data) return;
-    if (!ctx_.cuda_ctx) return;
-
-    // Non-blocking getData call — CUPTI docs say this never does device
-    // synchronization, so it's safe to call from the collector thread.
-    CUpti_PCSamplingGetDataParams getDataParams = {};
-    getDataParams.size = sizeof(CUpti_PCSamplingGetDataParams);
-    getDataParams.ctx = ctx_.cuda_ctx;
-    getDataParams.pcSamplingData = pc_sampling_buffers_->data;
-
-    // stallReasonCount is both input (available slots) and output (slots
-    // written) in CUpti_PCSamplingPCData.  Reset to original capacity so CUPTI
-    // can write into each entry again.
-    if (num_stall_reasons_ > 0) {
-        const size_t cap = pc_sampling_buffers_->data->collectNumPcs;
-        for (size_t i = 0; i < cap; ++i)
-            pc_sampling_buffers_->pcRecords[i].stallReasonCount =
-                num_stall_reasons_;
-    }
-
-    pc_sampling_buffers_->data->totalNumPcs = 0;
-    if (const CUptiResult getRes = cuptiPCSamplingGetData(&getDataParams);
-        getRes != CUPTI_SUCCESS && getRes != CUPTI_ERROR_OUT_OF_MEMORY)
-        return;
-
-    auto numPcs = pc_sampling_buffers_->data->totalNumPcs;
-    if (numPcs == 0) return;
-    produced_data_.store(true, std::memory_order_relaxed);
-
-    GFL_LOG_DEBUG("[PC Sampling] drainData: ", numPcs, " PC records");
-
-    for (size_t i = 0; i < numPcs; ++i) {
-        const CUpti_PCSamplingPCData& pc =
-            pc_sampling_buffers_->data->pPcData[i];
-        if (pc.stallReasonCount > 0 && pc.stallReason) {
-            for (uint32_t j = 0; j < pc.stallReasonCount; ++j) {
-                if (pc.stallReason[j].samples > 0) {
-                    ActivityRecord out{};
-                    out.type = TraceType::PC_SAMPLE;
-                    cuptiGetDeviceId(ctx_.cuda_ctx, &out.device_id);
-                    out.corr_id = pc.correlationId;
-                    std::snprintf(out.sample_kind, sizeof(out.sample_kind),
-                                  "%s", "pc_sampling");
-                    out.samples_count = pc.stallReason[j].samples;
-                    out.stall_reason =
-                        pc.stallReason[j].pcSamplingStallReasonIndex;
-                    out.cpu_start_ns = detail::GetTimestampNs();
-
-                    if (pc.functionName) {
-                        std::snprintf(out.function_name,
-                                      sizeof(out.function_name), "%s",
-                                      pc.functionName);
-                    } else {
-                        std::snprintf(out.function_name,
-                                      sizeof(out.function_name), "unknown");
-                    }
-
-                    {
-                        std::lock_guard lk(stall_reason_mu_);
-                        if (auto it = stall_reason_map_.find(out.stall_reason);
-                            it != stall_reason_map_.end()) {
-                            out.reason_name = it->second;
-                        } else {
-                            out.reason_name =
-                                "Stall_" + std::to_string(out.stall_reason);
-                        }
-                    }
-
-                    g_monitorBuffer.Push(out);
-                }
-            }
-        }
-    }
+    // SamplingAPI data is collected only after cuptiPCSamplingStop().  Calling
+    // cuptiPCSamplingGetData() from the periodic collector while kernels are
+    // still inside a scope can drain CUPTI's PC buffer and make the final
+    // stop-side collection report zero records.
 }
 
 void PcSamplingEngine::shutdown() {
-    // Collect any deferred SamplingAPI data before teardown.
-    // For SamplingAPI with enableStartStopControl=0, onScopeStop is a no-op
-    // (to avoid killing CUPTI callbacks), so the accumulated samples are
-    // collected here where callback corruption no longer matters.
+    // Collect a still-active SamplingAPI session before teardown.
     if (sampling_api_started_.load() &&
         pc_sampling_method_ == Method::SamplingAPI) {
+        pc_sampling_ref_count_.store(1);
         StopAndCollectPcSampling_();
     }
 
@@ -331,10 +256,7 @@ void PcSamplingEngine::onScopeStart(const char* /*name*/) {
 }
 
 void PcSamplingEngine::onScopeStop(const char* /*name*/) {
-    // Intentionally a no-op: per-scope stop/collect is disabled.
-    // SamplingAPI collection is deferred to stop()/shutdown() to avoid callback
-    // corruption on some driver versions, and non-SamplingAPI paths do not use
-    // StopAndCollectPcSampling_().
+    // Keep SamplingAPI armed across scopes; collect once at session stop.
 }
 
 // ---- Private helpers -------------------------------------------------------
@@ -475,31 +397,6 @@ bool PcSamplingEngine::EnableSamplingFeatures_() {
         return false;
     }
 
-    // Privilege probe: call getData with empty buffers to detect privilege
-    // errors early.  Only on first initialization — on re-init (after
-    // session reset between scopes), calling getData resets CUPTI's
-    // auto-sampling state on Blackwell and causes zero data collection.
-    if (!privilege_probed_) {
-        privilege_probed_ = true;
-        pc_sampling_buffers_->data->totalNumPcs = 0;
-        CUpti_PCSamplingGetDataParams probeParams = {};
-        probeParams.size = sizeof(CUpti_PCSamplingGetDataParams);
-        probeParams.ctx = ctx_.cuda_ctx;
-        probeParams.pcSamplingData = pc_sampling_buffers_->data;
-        CUptiResult probeRes = cuptiPCSamplingGetData(&probeParams);
-        if (IsInsufficientPrivilege(probeRes) ||
-            probeRes == CUPTI_ERROR_NOT_INITIALIZED) {
-            GFL_LOG_DEBUG(
-                "[PC Sampling] Probe failed (", probeRes,
-                ") — "
-                "PC sampling unavailable on this GPU/driver combination "
-                "(may conflict with Profiler API); disabling.");
-            sampling_api_blocked_.store(true);
-            pc_sampling_method_ = Method::None;
-            return false;
-        }
-    }
-
     sampling_api_ready_.store(true);
 
     // cuptiPCSamplingEnable / SetConfigurationAttribute can internally
@@ -532,6 +429,25 @@ void PcSamplingEngine::StartPcSampling_() {
         return;
     }
 
+    if (!ctx_.cuda_ctx || !IsContextValid(ctx_.cuda_ctx)) {
+        pc_sampling_ref_count_.store(0);
+        GFL_LOG_ERROR("[GPUFL] Cannot start PC Sampling: Context invalid.");
+        return;
+    }
+
+    CUpti_PCSamplingStartParams startParams = {};
+    startParams.size = sizeof(CUpti_PCSamplingStartParams);
+    startParams.ctx = ctx_.cuda_ctx;
+    const CUptiResult startRes = cuptiPCSamplingStart(&startParams);
+    if (startRes != CUPTI_SUCCESS) {
+        pc_sampling_ref_count_.store(0);
+        if (IsInsufficientPrivilege(startRes)) {
+            sampling_api_blocked_.store(true);
+        }
+        LogCuptiErrorIfFailed(this->name(), "cuptiPCSamplingStart", startRes);
+        return;
+    }
+
     sampling_api_started_.store(true);
     GFL_LOG_DEBUG("[PC Sampling] >>> STARTED (Scope Begin) <<<");
 }
@@ -546,21 +462,22 @@ void PcSamplingEngine::StopAndCollectPcSampling_() {
         return;
     }
 
-    // Terminal drain. Both callers — stop() and shutdown() — run at session
-    // teardown, and onScopeStop is a deliberate no-op, so pc_sampling_ref_count_
-    // is NOT a "still inside a scope" signal here: it only ever increments (once
-    // per scope start) and is never decremented per-scope. A refcount-gated
-    // collect therefore never reaches the drain for a multi-scope session — that
-    // was the "Deep on Blackwell armed PC sampling but drained ZERO rows" bug
-    // (refcount climbed to 7, the two terminal calls only walked it 7→6→5, never
-    // hit the refs==1 collect path). sampling_api_started_ (set by start() once
-    // CUPTI sampling actually armed) is the correct once-only guard here.
-    if (!sampling_api_started_.exchange(false)) {
-        GFL_LOG_DEBUG(
-            "[PC Sampling] StopAndCollect: exit — already collected / not started");
+    const int refs = pc_sampling_ref_count_.load();
+    if (refs <= 0) {
+        GFL_LOG_DEBUG("[PC Sampling] StopAndCollect: exit — no active scope");
+        return;
+    }
+    if (refs > 1) {
+        const int remaining = pc_sampling_ref_count_.fetch_sub(1) - 1;
+        GFL_LOG_DEBUG("[PC Sampling] still active (RefCount=", remaining, ")");
         return;
     }
     pc_sampling_ref_count_.store(0);
+
+    if (!sampling_api_started_.exchange(false)) {
+        GFL_LOG_DEBUG("[PC Sampling] StopAndCollect: exit — already collected / not started");
+        return;
+    }
 
     if (!ctx_.cuda_ctx || !IsContextValid(ctx_.cuda_ctx)) {
         GFL_LOG_ERROR("[GPUFL] Aborting PC Sampling: Context invalid.");
@@ -572,8 +489,23 @@ void PcSamplingEngine::StopAndCollectPcSampling_() {
         return;
     }
 
-    GFL_LOG_DEBUG("[PC Sampling] <<< COLLECTING (Scope End) >>>");
+    const auto collectNumPcs = pc_sampling_buffers_->data->collectNumPcs;
+    GFL_LOG_DEBUG("[PC Sampling] <<< COLLECTING (Session End) >>> collectNumPcs=",
+                  collectNumPcs);
     cudaDeviceSynchronize();
+
+    CUpti_PCSamplingStopParams stopParams = {};
+    stopParams.size = sizeof(CUpti_PCSamplingStopParams);
+    stopParams.ctx = ctx_.cuda_ctx;
+    const CUptiResult stopRes = cuptiPCSamplingStop(&stopParams);
+    if (stopRes != CUPTI_SUCCESS) {
+        if (IsInsufficientPrivilege(stopRes) ||
+            stopRes == CUPTI_ERROR_NOT_INITIALIZED) {
+            sampling_api_blocked_.store(true);
+        }
+        LogCuptiErrorIfFailed(this->name(), "cuptiPCSamplingStop", stopRes);
+        return;
+    }
 
     CUpti_PCSamplingGetDataParams getDataParams = {};
     getDataParams.size = sizeof(CUpti_PCSamplingGetDataParams);
@@ -701,11 +633,6 @@ void PcSamplingEngine::StopAndCollectPcSampling_() {
 
         if (!hasMore) break;
     }
-    // Note: on Blackwell/WDDM with enableStartStopControl=0, CUPTI only
-    // auto-samples the first kernel batch.  Subsequent getData calls drain
-    // leftover data from that kernel.  Session reset (Disable+Enable) was
-    // tested but the re-initialized session never collects new data.
-    // This is a known CUPTI platform limitation.
 }
 
 }  // namespace gpufl

@@ -852,8 +852,11 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
     }
 
     const bool sassMode = IsSassProfilerMode();
-    const bool kernelActivity = !sassMode || AllowSassKernelActivity();
-    const bool syntheticKernels = sassMode && !kernelActivity;
+    const bool pcSamplingMode =
+        opts_.profiling_engine == ProfilingEngine::PcSampling;
+    const bool kernelActivity =
+        pcSamplingMode ? false : (!sassMode || AllowSassKernelActivity());
+    const bool syntheticKernels = !kernelActivity && (sassMode || pcSamplingMode);
     const bool cubinCapture = NeedsCubinCapture();
 
     bool sassActive = false;
@@ -928,12 +931,17 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
                       ? "sass_metrics_only"
                       : (syntheticKernels ? "launch_callbacks_synthetic" : "cupti_activity"),
                   kernelHasData
-                      ? (syntheticKernels ? "cupti_kernel_activity_deadlock_risk" : "")
+                      ? (syntheticKernels
+                            ? (pcSamplingMode ? "cupti_kernel_activity_conflicts_with_pc_sampling"
+                                              : "cupti_kernel_activity_deadlock_risk")
+                            : "")
                       : (metricsOnly ? "disabled_to_preserve_sass_counters"
                                      : "enabled_but_no_records"),
                   kernelHasData
                       ? (syntheticKernels
-                            ? "Kernel rows were collected from launch callbacks; durations are estimated because CUPTI kernel activity is disabled in SASS safe mode."
+                            ? (pcSamplingMode
+                                  ? "Kernel rows were collected from launch callbacks; durations are estimated because CUPTI kernel activity is disabled while PC Sampling API is active."
+                                  : "Kernel rows were collected from launch callbacks; durations are estimated because CUPTI kernel activity is disabled in SASS safe mode.")
                             : "Kernel rows were collected from CUPTI kernel activity records.")
                       : (metricsOnly
                             ? "Kernel activity was intentionally disabled because CUPTI SASS Metrics requires metrics-only mode on this GPU/driver to produce non-zero counters."

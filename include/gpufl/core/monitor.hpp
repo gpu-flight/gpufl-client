@@ -149,7 +149,7 @@ struct MonitorOptions {
     // statistical signal for "which PCs dominate" needs maybe 10⁴
     // samples per hot range, not 10⁶. Users doing fine-grained stall
     // attribution can lower this back via InitOptions.
-    uint32_t pc_sampling_period = 16;
+    uint32_t pc_sampling_period = 10;
     // Default Monitor: no CUPTI. The user-facing default lives on
     // InitOptions (gpufl.hpp); this internal default matches it so a
     // bare MonitorOptions (e.g. the system-monitor daemon, which only
