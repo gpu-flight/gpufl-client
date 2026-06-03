@@ -13,7 +13,8 @@ services:
       GPUFL_MONITOR_INTERVAL_MS: ${GPUFL_MONITOR_INTERVAL_MS:-5000}
 
       # Java agent — source folders (auto-discovers all log prefixes)
-      GPUFL_SOURCE_FOLDERS: ${GPUFL_SOURCE_FOLDERS:-/var/gpufl/monitor}
+      GPUFL_SOURCE_FOLDERS: ${GPUFL_SOURCE_FOLDERS:-/var/gpufl/monitor/session}
+      GPUFL_LOG_TYPES: ${GPUFL_LOG_TYPES:-system}
       GPUFL_CURSOR_FILE: ${GPUFL_CURSOR_FILE:-/var/gpufl/monitor/cursor.json}
 
       # Java agent — publisher (HTTP). Set GPUFL_HTTP_HOST to just the
