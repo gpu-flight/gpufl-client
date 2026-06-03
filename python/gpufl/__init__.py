@@ -297,7 +297,7 @@ except Exception as e:
     print(f"[FATAL] Unexpected error importing _gpufl_client: {e}", file=sys.stderr)
     raise e
 
-__version__ = "1.1.0rc2"
+__version__ = "1.1.0"
 
 # ── Backend upload ────────────────────────────────────────────────────────────
 #
