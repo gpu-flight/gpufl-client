@@ -201,7 +201,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
        py::arg("enable_synchronization")      = true,
        py::arg("enable_memory_tracking")      = false,
        py::arg("enable_cuda_graphs_tracking") = false,
-       py::arg("pm_sampling_interval_us")     = 1000,
+       py::arg("pm_sampling_interval_us")     = 100,
        py::arg("pm_sampling_max_samples")     = 4096,
        py::arg("pm_sampling_preset")          = "overview",
        py::arg("pm_sampling_metrics")         = std::vector<std::string>{},

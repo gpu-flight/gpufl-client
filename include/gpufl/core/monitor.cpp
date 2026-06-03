@@ -6,6 +6,7 @@
 #include <mutex>
 #include <stack>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "gpufl/core/activity_record.hpp"
@@ -49,6 +50,41 @@ static std::vector<KernelDetailRow> g_pendingDetails;
 // Tracks the most recently begun scope name ID.
 // Updated by PushScopeRow (user thread) when a scope begin row is pushed.
 static std::atomic<uint32_t> g_activeScopeNameId{0};
+
+struct ScopeWindow {
+    int64_t  start_ns = 0;
+    int64_t  end_ns   = 0;
+    uint64_t instance_id = 0;
+    uint32_t name_id = 0;
+    int      depth = 0;
+};
+
+struct OpenScopeWindow {
+    int64_t  start_ns = 0;
+    uint32_t name_id = 0;
+    int      depth = 0;
+};
+
+static std::unordered_map<uint64_t, OpenScopeWindow> g_openScopeWindows;
+static std::vector<ScopeWindow> g_completedScopeWindows;
+
+static uint32_t ResolveScopeNameIdForTimestampLocked(const int64_t ts_ns) {
+    uint32_t best_id = 0;
+    int best_depth = -1;
+    int64_t best_start = 0;
+
+    for (auto it = g_completedScopeWindows.rbegin();
+         it != g_completedScopeWindows.rend(); ++it) {
+        if (ts_ns < it->start_ns || ts_ns > it->end_ns) continue;
+        if (it->depth > best_depth ||
+            (it->depth == best_depth && it->start_ns >= best_start)) {
+            best_id = it->name_id;
+            best_depth = it->depth;
+            best_start = it->start_ns;
+        }
+    }
+    return best_id;
+}
 
 static BatchBuffer<ScopeBatchRow>         g_scopeBatch;
 static BatchBuffer<ProfileSampleBatchRow> g_profileBatch;
@@ -457,10 +493,17 @@ void Monitor::Initialize(const MonitorOptions& opts) {
     g_memcpyBatchId  = 0;
     g_scopeBatch.clear();
     g_profileBatch.clear();
+    g_pmSampleBatch.clear();
     g_scopeBatchId   = 0;
     g_profileBatchId = 0;
+    g_pmSampleBatchId = 0;
     g_nextScopeInstanceId.store(1);
     g_activeScopeNameId.store(0);
+    {
+        std::lock_guard lk(g_scopeBatchMu);
+        g_openScopeWindows.clear();
+        g_completedScopeWindows.clear();
+    }
 
     DebugLogger::setEnabled(opts.enable_debug_output);
     g_adapter = CreateMonitorAdapter(opts);
@@ -566,7 +609,20 @@ void Monitor::PushScopeRow(const ScopeBatchRow& row) {
     if (row.event_type == 0) {  // begin: update active scope for PC sample association
         g_activeScopeNameId.store(row.name_id, std::memory_order_relaxed);
     }
+
     std::lock_guard lk(g_scopeBatchMu);
+    if (row.event_type == 0) {
+        g_openScopeWindows[row.scope_instance_id] = OpenScopeWindow{
+            row.ts_ns, row.name_id, row.depth};
+    } else {
+        if (const auto it = g_openScopeWindows.find(row.scope_instance_id);
+            it != g_openScopeWindows.end()) {
+            g_completedScopeWindows.push_back(ScopeWindow{
+                it->second.start_ns, row.ts_ns, row.scope_instance_id,
+                row.name_id, it->second.depth});
+            g_openScopeWindows.erase(it);
+        }
+    }
     g_scopeBatch.push(row);
 }
 
@@ -606,7 +662,7 @@ void Monitor::PushProfileSamples(
 
 void Monitor::PushPmSamples(const std::vector<PmSampleInput>& samples) {
     if (samples.empty()) return;
-    const uint32_t scope_name_id =
+    const uint32_t fallback_scope_name_id =
         g_activeScopeNameId.load(std::memory_order_relaxed);
     std::lock_guard lk(g_scopeBatchMu);
     for (const auto& s : samples) {
@@ -617,7 +673,8 @@ void Monitor::PushPmSamples(const std::vector<PmSampleInput>& samples) {
         row.device_id = s.device_id;
         row.metric_id = g_dictManager.internMetric(s.metric_name);
         row.value = s.value;
-        row.scope_name_id = scope_name_id;
+        row.scope_name_id = ResolveScopeNameIdForTimestampLocked(s.ts_ns);
+        if (row.scope_name_id == 0) row.scope_name_id = fallback_scope_name_id;
         g_pmSampleBatch.push(row);
     }
 }
