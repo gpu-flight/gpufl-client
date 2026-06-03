@@ -8,10 +8,9 @@ project(gpufl_client
 
 # Pre-release suffix appended to GPUFL_CLIENT_VERSION below. PEP 440
 # pre-release tokens (`rc1`, `a1`, `b1`, …) aren't valid in CMake's
-# `project(... VERSION ...)`, so we layer them on top here. To promote
-# 1.1.0rc2 → 1.1.0 final, set this to the empty string. To bump rc2 →
-# rc3 mid-validation, change just this line.
-set(GPUFL_VERSION_SUFFIX "rc2")
+# `project(... VERSION ...)`, so we layer them on top here. Final releases
+# leave this empty.
+set(GPUFL_VERSION_SUFFIX "")
 
 # -----------------------
 # CUDA Architectures (CI Friendly)

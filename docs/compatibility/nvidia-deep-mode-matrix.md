@@ -42,7 +42,7 @@ device behavior.
 | Python | 3.13.5, 64-bit |
 | PyTorch | 2.12.0+cu132 |
 | PyTorch CUDA | 13.2 |
-| Client package | `gpufl-1.1.0rc2-cp313-cp313-win_amd64.whl` |
+| Client package | `gpufl-1.1.0-cp313-cp313-win_amd64.whl` |
 | Workload | `C1M2_Assignment.py`, EMNIST one-epoch training workload |
 | Init options | `ProfilingEngine.Deep`, `enable_stack_trace=True`, `enable_memory_tracking=True`, `enable_cuda_graphs_tracking=False`, `enable_debug_output=False` |
 | Scope setup | One outer `gpufl.Scope("train_epoch")` unless otherwise noted |
