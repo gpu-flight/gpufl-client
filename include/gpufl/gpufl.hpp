@@ -110,7 +110,7 @@ struct InitOptions {
     //   Deep          — PcSampling + SassMetrics in one run
     ProfilingEngine profiling_engine = ProfilingEngine::Monitor;
 
-    uint32_t pm_sampling_interval_us = 1000;
+    uint32_t pm_sampling_interval_us = 100;
     uint32_t pm_sampling_max_samples = 4096;
     std::string pm_sampling_preset = "overview";
     std::vector<std::string> pm_sampling_metrics;

@@ -292,6 +292,9 @@ inline void PreloadMatchingPerfWorks() {}
 
 void CuptiBackend::initialize(const MonitorOptions& opts) {
     opts_ = opts;
+    profiling_request_ = MakeProfilingRequest(opts_);
+    resolved_plan_ = NvidiaProfilingPolicy::Resolve(
+        profiling_request_, device_facts_, EnvOverrides::FromProcess());
 
     DebugLogger::setEnabled(opts_.enable_debug_output);
 
@@ -464,6 +467,13 @@ void CuptiBackend::start() {
         GetSMProps(device_id_);
         chip_name_ = getChipName(device_id_);
         cached_device_name_ = GetCurrentDeviceName();
+        const ComputeCapability cc =
+            GetComputeCapability(static_cast<int>(device_id_));
+        device_facts_.compute_major = cc.major;
+        device_facts_.compute_minor = cc.minor;
+        device_facts_.cupti_version = GetCuptiVersion();
+        resolved_plan_ = NvidiaProfilingPolicy::Resolve(
+            profiling_request_, device_facts_, EnvOverrides::FromProcess());
     } else if (engine_) {
         GFL_LOG_ERROR(
             "[CuptiBackend] Failed to get CUDA context; "
@@ -471,13 +481,11 @@ void CuptiBackend::start() {
     }
 
     if (IsSassProfilerMode()) {
-        const ComputeCapability cc =
-            GetComputeCapability(static_cast<int>(device_id_));
-        const uint32_t cuptiVersion = GetCuptiVersion();
         GFL_LOG_DEBUG("[CuptiBackend] SASS activity policy: ",
                       UseSafeSassActivityDefaults() ? "safe" : "full",
-                      " (sm=", cc.major, cc.minor,
-                      ", cupti_version=", cuptiVersion, ")");
+                      " (sm=", device_facts_.compute_major,
+                      device_facts_.compute_minor,
+                      ", cupti_version=", device_facts_.cupti_version, ")");
     }
 
     // SOURCE_LOCATOR + FUNCTION activity records feed only the Activity-API

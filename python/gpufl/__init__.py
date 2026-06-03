@@ -238,7 +238,7 @@ except ImportError as e:
             self.enable_source_collection = True
             self.flush_logs_always = False
             self.profiling_engine = ProfilingEngine.Monitor
-            self.pm_sampling_interval_us = 1000
+            self.pm_sampling_interval_us = 100
             self.pm_sampling_max_samples = 4096
             self.pm_sampling_preset = "overview"
             self.pm_sampling_metrics = []

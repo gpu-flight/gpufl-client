@@ -160,8 +160,8 @@ struct MonitorOptions {
     uint32_t pc_sampling_period = 10;
     // PM sampling interval in microseconds when using the GPU time trigger.
     // PM Sampling is a hardware time-series engine, so this controls timeline
-    // density rather than per-kernel attribution. Default 1000us = 1ms.
-    uint32_t pm_sampling_interval_us = 1000;
+    // density rather than per-kernel attribution. Default 100us catches short scopes better.
+    uint32_t pm_sampling_interval_us = 100;
     // Maximum decoded PM samples retained in the counter data image.
     uint32_t pm_sampling_max_samples = 4096;
     // PM sampling preset. "overview" is the default product view; engines may
