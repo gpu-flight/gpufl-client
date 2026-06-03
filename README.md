@@ -203,10 +203,13 @@ gpufl.init("my-app",
 
 | Engine | What it collects | Analyzer method | Best for |
 |---|---|---|---|
+| `Monitor` | GPU/host health metrics only; no CUPTI activity tracing | Text report / dashboard | Lowest-overhead production monitoring |
+| `Trace` | Kernel, memcpy/memset, and synchronization activity: names, timing, streams, grid/block metadata | `session.inspect_hotspots()` | Understanding what ran and how long it took |
 | `PcSampling` | Warp stall reasons (statistical sampling) | `session.inspect_stalls()` | Finding *why* warps are stalling |
-| `SassMetrics` | Per-instruction execution counts (binary instrumentation) | `session.inspect_profile_samples()` | Thread divergence detection |
+| `SassMetrics` | Per-instruction execution counts (binary instrumentation) | `session.inspect_profile_samples()` | Thread divergence and instruction-level behavior |
+| `PmSampling` | Time-series hardware counter samples from CUPTI PM Sampling | `session.inspect_pm_sampling()` | Hardware-counter timelines by scope |
 | `RangeProfiler` | SM throughput, L1/L2 hit rates, DRAM bandwidth, tensor core % | `session.inspect_perf_metrics()` | Hardware counter deep-dives |
-| `None` | Kernel metadata only (names, timing, occupancy) | `session.inspect_hotspots()` | Production monitoring with minimal overhead |
+| `Deep` | Deep decision pipeline: SASS first, PC-sampling fallback, PM Sampling when available | Text report plus profiling analyzer views | Single-run deep profiling with safe defaults |
 
 ### C++ Usage
 
@@ -379,6 +382,9 @@ it drops cleanly into CI logs, PR comments, or a plain terminal.
 
 The report includes:
 - **Session Summary** — app name, session ID, duration, GPU device + SM count.
+- **Capture Capabilities** — requested/selected engine and per-feature status,
+  including `on, no data` when PM Sampling or another requested feature was
+  enabled but produced no rows.
 - **Kernel Execution Summary** — total / unique kernels, GPU-busy %, and
   duration statistics (avg / median / P90 / P99 / min / max). When a SASS
   profiling engine was active, kernel durations include instrumentation
@@ -386,6 +392,8 @@ The report includes:
 - **Top kernels by total GPU time** — with per-kernel call counts.
 - **Per-kernel details** — grid/block dimensions, occupancy, registers,
   shared memory (static + dynamic), register spills, and Waves/SM.
+- **PM Sampling Summary** — total samples, metric averages/peaks, and top
+  scopes when `pm_sample_batch` rows are present.
 
 ### From C++
 

@@ -75,6 +75,7 @@ class TextReport:
             self._section_memcpy_summary(),
             self._section_system_metrics(),
             self._section_scope_summary(),
+            self._section_pm_sampling_summary(),
             self._section_profile_analysis(),
         ]
         return "\n".join("\n".join(s) for s in sections) + "\n"
@@ -457,6 +458,77 @@ class TextReport:
                     f"{_fmt_duration(row['mean']):>12}"
                 )
 
+        return lines
+
+    def _section_pm_sampling_summary(self) -> list[str]:
+        pm = getattr(self.session, "pm_samples", pd.DataFrame())
+        if pm.empty or "value" not in pm.columns:
+            return []
+
+        rows = pm.copy()
+        rows["_value"] = pd.to_numeric(rows["value"], errors="coerce")
+        rows = rows.dropna(subset=["_value"])
+        if rows.empty:
+            return []
+
+        def shorten(value, limit):
+            text = str(value) if value is not None else "unknown"
+            return text if len(text) <= limit else text[:limit - 3] + "..."
+
+        lines = ["", _SEP, "  PM Sampling Summary", _SEP]
+        lines.append(f"  Total Samples:        {len(rows)}")
+
+        if "metric_name" in rows.columns:
+            metric_rows = rows.copy()
+            metric_rows["_metric"] = metric_rows["metric_name"].fillna("unknown").astype(str)
+            metric_stats = (
+                metric_rows.groupby("_metric")["_value"]
+                .agg(["count", "mean", "max"])
+                .sort_values("max", ascending=False)
+                .head(self.top_n)
+            )
+            if not metric_stats.empty:
+                lines.append("")
+                lines.append("  Metrics:")
+                lines.append(f"  {'Metric':<38}{'Samples':>8}{'Avg':>16}{'Peak':>16}")
+                lines.append("  " + "-" * 72)
+                for metric, row in metric_stats.iterrows():
+                    lines.append(
+                        f"  {shorten(metric, 36):<38}"
+                        f"{int(row['count']):>8}"
+                        f"{row['mean']:>16.2f}"
+                        f"{row['max']:>16.2f}"
+                    )
+
+        if "scope_name" in rows.columns:
+            scope_rows = rows[rows["scope_name"].notna()].copy()
+            if not scope_rows.empty:
+                scope_rows["_scope"] = scope_rows["scope_name"].astype(str)
+                scope_stats = (
+                    scope_rows.groupby("_scope")["_value"]
+                    .agg(["count", "sum", "max"])
+                    .sort_values("sum", ascending=False)
+                    .head(self.top_n)
+                )
+                if not scope_stats.empty:
+                    lines.append("")
+                    lines.append("  Top Scopes by PM Sample Value:")
+                    lines.append(f"  {'Scope':<30}{'Samples':>8}{'Total':>16}{'Peak':>16}")
+                    lines.append("  " + "-" * 70)
+                    for scope, row in scope_stats.iterrows():
+                        lines.append(
+                            f"  {shorten(scope, 28):<30}"
+                            f"{int(row['count']):>8}"
+                            f"{row['sum']:>16.2f}"
+                            f"{row['max']:>16.2f}"
+                        )
+
+        lines.append("")
+        lines.append(
+            "  Note: PM Sampling rows are hardware-counter timeline samples. "
+            "They are aggregated by scope here; use analyzer.inspect_pm_sampling() "
+            "for the raw table."
+        )
         return lines
 
     def _section_profile_analysis(self) -> list[str]:

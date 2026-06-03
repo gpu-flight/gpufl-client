@@ -39,6 +39,7 @@ add_executable(cupti_basic cupti_basic.cu)
 add_executable(occupancy_demo occupancy_demo.cu)
 add_executable(sass_divergence_demo sass_divergence_demo.cu)
 add_executable(memory_coalescing_demo memory_coalescing_demo.cu)
+add_executable(deep_deadlock_repro deep_deadlock_repro.cu)
 
 target_compile_options(gfl_block_example PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:
@@ -48,6 +49,15 @@ target_compile_options(gfl_block_example PRIVATE
         >)
 
 target_compile_options(sass_divergence_demo PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:
+        -lineinfo
+        -gencode=arch=compute_86,code=sm_86
+        -gencode=arch=compute_86,code=compute_86
+        >)
+
+# SASS needs the cubin embedded so the disassembly + patching path engages —
+# same -lineinfo + gencode treatment as the other SASS-exercising examples.
+target_compile_options(deep_deadlock_repro PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:
         -lineinfo
         -gencode=arch=compute_86,code=sm_86
@@ -145,6 +155,12 @@ target_compile_options(memory_coalescing_demo PRIVATE
         -lineinfo
         >)
 
+target_link_libraries(deep_deadlock_repro PRIVATE
+        gpufl::gpufl
+        CUDA::cupti
+        CUDA::cudart
+)
+
 
 # Properties
 set_target_properties(gfl_block_example PROPERTIES
@@ -183,6 +199,9 @@ set_target_properties(sass_divergence_demo PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
 )
 set_target_properties(memory_coalescing_demo PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+)
+set_target_properties(deep_deadlock_repro PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
 )
 
@@ -245,7 +264,7 @@ if (WIN32)
                 "${CUPTI_DLL_DIR}/nvperf_host*.dll"
                 "${CUPTI_DLL_DIR}/nvperf_target*.dll")
 
-        foreach (TARGET_NAME test_occupancy system_monitor gfl_block_example cupti_pc_sampling list_sass_metrics vector_add_benchmark manykernel_benchmark occupancy_demo sass_divergence_demo)
+        foreach (TARGET_NAME test_occupancy system_monitor gfl_block_example cupti_pc_sampling list_sass_metrics vector_add_benchmark manykernel_benchmark occupancy_demo sass_divergence_demo deep_deadlock_repro)
             add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
                     COMMAND ${CMAKE_COMMAND} -E copy_if_different
                     "${CUPTI_DLL_TO_COPY}"
