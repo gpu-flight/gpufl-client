@@ -4,8 +4,6 @@
 #include <cupti.h>
 
 #include <atomic>
-#include <cstdlib>
-#include <cstring>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -17,6 +15,7 @@
 #include "gpufl/backends/nvidia/cupti_common.hpp"
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
 #include "gpufl/backends/nvidia/engine/profiling_engine.hpp"
+#include "gpufl/backends/nvidia/profiling_plan.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/monitor.hpp"
 #include "gpufl/core/monitor_backend.hpp"
@@ -48,67 +47,31 @@ class CuptiBackend : public IMonitorBackend {
     bool IsMonitoringMode() override { return true; }
     bool IsProfilingMode()  override { return engine_ != nullptr; }
 
-    bool IsSassProfilerMode() const {
-        return opts_.profiling_engine == ProfilingEngine::SassMetrics ||
-               opts_.profiling_engine == ProfilingEngine::Deep;
-    }
-    bool SassMetricsOnlyMode() const {
-        if (!IsSassProfilerMode()) return false;
-        // Isolation mode: disable CUPTI activity/callback tracing around SASS
-        // metrics while keeping SASS itself enabled.
-        return EnvFlagEnabled_("GPUFL_SASS_METRICS_ONLY");
-    }
+    bool IsSassProfilerMode() const { return resolved_plan_.is_sass_profiler; }
+    bool SassMetricsOnlyMode() const { return resolved_plan_.sass_metrics_only; }
     bool UseSafeSassActivityDefaults() const {
-        if (!IsSassProfilerMode()) return false;
-        if (SassMetricsOnlyMode()) return true;
-        if (EnvFlagEnabled_("GPUFL_SASS_FORCE_SAFE_ACTIVITY")) return true;
-        if (EnvFlagEnabled_("GPUFL_SASS_ALLOW_FULL_ACTIVITY")) return false;
-        return true;
+        return resolved_plan_.safe_sass_activity_defaults;
     }
     bool AllowSassKernelActivity() const {
-        if (SassMetricsOnlyMode()) return false;
-        return !UseSafeSassActivityDefaults() ||
-               EnvFlagEnabled_("GPUFL_SASS_ALLOW_KERNEL_ACTIVITY");
+        return resolved_plan_.allow_sass_kernel_activity;
     }
     bool AllowSassMarkerActivity() const {
-        if (SassMetricsOnlyMode()) return false;
-        return !UseSafeSassActivityDefaults() ||
-               EnvFlagEnabled_("GPUFL_SASS_ALLOW_MARKER_ACTIVITY");
+        return resolved_plan_.allow_sass_marker_activity;
     }
     bool AllowSassMemTransferActivity() const {
-        if (SassMetricsOnlyMode()) return false;
-        if (!UseSafeSassActivityDefaults()) return true;
-        return EnvFlagEnabled_("GPUFL_SASS_ALLOW_MEM_TRANSFER_ACTIVITY");
+        return resolved_plan_.allow_sass_mem_transfer_activity;
     }
     bool AllowSassMemory2Activity() const {
-        if (SassMetricsOnlyMode()) return false;
-        if (!UseSafeSassActivityDefaults()) return true;
-        const bool memTransferRequested =
-            EnvFlagEnabled_("GPUFL_SASS_ALLOW_MEM_TRANSFER_ACTIVITY");
-        const bool memory2Requested =
-            EnvFlagEnabled_("GPUFL_SASS_ALLOW_MEMORY2_ACTIVITY") ||
-            EnvFlagEnabled_("GPUFL_SASS_ALLOW_MEMORY_ACTIVITY");
-        // Safe-mode default keeps MEMORY2 because it is tied to the explicit
-        // enable_memory_tracking option.  If the user asks to test mem-transfer
-        // activity, keep MEMORY2 off unless it is explicitly requested too;
-        // enabling both is the confirmed deadlocking combination on sm_86 +
-        // CUPTI 13.1.
-        return memory2Requested || !memTransferRequested;
+        return resolved_plan_.allow_sass_memory2_activity;
     }
     bool AllowSassSyncActivity() const {
-        if (SassMetricsOnlyMode()) return false;
-        return !UseSafeSassActivityDefaults() ||
-               EnvFlagEnabled_("GPUFL_SASS_ALLOW_SYNC_ACTIVITY");
+        return resolved_plan_.allow_sass_sync_activity;
     }
     bool AllowSassGraphActivity() const {
-        if (SassMetricsOnlyMode()) return false;
-        return !UseSafeSassActivityDefaults() ||
-               EnvFlagEnabled_("GPUFL_SASS_ALLOW_GRAPH_ACTIVITY");
+        return resolved_plan_.allow_sass_graph_activity;
     }
     bool AllowSassExternalCorrelation() const {
-        if (SassMetricsOnlyMode()) return false;
-        return !UseSafeSassActivityDefaults() ||
-               EnvFlagEnabled_("GPUFL_SASS_ALLOW_EXTERNAL_CORRELATION");
+        return resolved_plan_.allow_sass_external_correlation;
     }
     void FlushProfilingDataBeforeCudaTeardown(const char* reason);
     void NoteKernelLaunchForCleanupFlush() {
@@ -130,15 +93,7 @@ class CuptiBackend : public IMonitorBackend {
     // entirely for them — there's no per-instruction data to attach it
     // to. (ProfilingEngine::Monitor never constructs a CuptiBackend at
     // all, so it doesn't reach this method.)
-    bool NeedsCubinCapture() const {
-        if (EnvFlagEnabled_("GPUFL_DISABLE_CUBIN_CAPTURE")) return false;
-        if (IsSassProfilerMode() &&
-            EnvFlagEnabled_("GPUFL_SASS_DISABLE_CUBIN_CAPTURE"))
-            return false;
-        return opts_.profiling_engine == ProfilingEngine::PcSampling ||
-               opts_.profiling_engine == ProfilingEngine::SassMetrics ||
-               opts_.profiling_engine == ProfilingEngine::Deep;
-    }
+    bool NeedsCubinCapture() const { return resolved_plan_.needs_cubin_capture; }
 
     void RegisterHandler(const std::shared_ptr<ICuptiHandler>& handler);
 
@@ -190,13 +145,6 @@ class CuptiBackend : public IMonitorBackend {
     friend class MemTransferHandler;
     friend class SynchronizationHandler;
 
-    static bool EnvFlagEnabled_(const char* name) {
-        const char* v = std::getenv(name);
-        return v && v[0] != '\0' && v[0] != '0' && std::strcmp(v, "false") != 0 &&
-               std::strcmp(v, "FALSE") != 0 && std::strcmp(v, "off") != 0 &&
-               std::strcmp(v, "OFF") != 0;
-    }
-
     // CUPTI callback functions
     static void CUPTIAPI BufferRequested(uint8_t** buffer, size_t* size,
                                          size_t* maxNumRecords);
@@ -211,6 +159,9 @@ class CuptiBackend : public IMonitorBackend {
     std::atomic<bool> active_{false};
     bool initialized_{false};
     MonitorOptions opts_;
+    ProfilingRequest profiling_request_;
+    DeviceFacts device_facts_;
+    ResolvedProfilingPlan resolved_plan_;
 
     std::mutex meta_mu_;
     std::unordered_map<uint64_t, LaunchMeta> meta_by_corr_;
