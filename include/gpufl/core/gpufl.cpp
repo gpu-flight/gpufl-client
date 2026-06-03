@@ -375,6 +375,7 @@ bool init(const InitOptions& opts) {
         else if (val == "Trace")               mOpts.profiling_engine = ProfilingEngine::Trace;
         else if (val == "PcSampling")          mOpts.profiling_engine = ProfilingEngine::PcSampling;
         else if (val == "SassMetrics")         mOpts.profiling_engine = ProfilingEngine::SassMetrics;
+        else if (val == "PmSampling")          mOpts.profiling_engine = ProfilingEngine::PmSampling;
         else if (val == "RangeProfiler")       mOpts.profiling_engine = ProfilingEngine::RangeProfiler;
         else if (val == "Deep")                mOpts.profiling_engine = ProfilingEngine::Deep;
         else matched = false;
@@ -384,7 +385,7 @@ bool init(const InitOptions& opts) {
             GFL_LOG_ERROR(
                 "GPUFL_PROFILING_ENGINE='", val, "' is not a recognized "
                 "engine name. Valid values: Monitor, Trace, PcSampling, "
-                "SassMetrics, RangeProfiler, Deep. Keeping current engine "
+                "SassMetrics, PmSampling, RangeProfiler, Deep. Keeping current engine "
                 "selection.");
         }
     }
@@ -398,6 +399,11 @@ bool init(const InitOptions& opts) {
     mOpts.enable_synchronization      = g_opts.enable_synchronization;
     mOpts.enable_memory_tracking      = g_opts.enable_memory_tracking;
     mOpts.enable_cuda_graphs_tracking = g_opts.enable_cuda_graphs_tracking;
+    mOpts.pm_sampling_interval_us = g_opts.pm_sampling_interval_us;
+    mOpts.pm_sampling_max_samples = g_opts.pm_sampling_max_samples;
+    mOpts.pm_sampling_preset = g_opts.pm_sampling_preset;
+    mOpts.pm_sampling_metrics = g_opts.pm_sampling_metrics;
+    mOpts.pm_sampling_scope_only = g_opts.pm_sampling_scope_only;
     mOpts.backend_kind = ToMonitorBackendKind(g_opts.backend);
 
     // EAGER module loading is OPT-IN. By default we leave CUDA on its normal

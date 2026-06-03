@@ -73,6 +73,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
         .value("Trace",         gpufl::ProfilingEngine::Trace)
         .value("PcSampling",    gpufl::ProfilingEngine::PcSampling)
         .value("SassMetrics",   gpufl::ProfilingEngine::SassMetrics)
+        .value("PmSampling",    gpufl::ProfilingEngine::PmSampling)
         .value("RangeProfiler", gpufl::ProfilingEngine::RangeProfiler)
         .value("Deep",          gpufl::ProfilingEngine::Deep)
         .export_values();
@@ -96,6 +97,11 @@ PYBIND11_MODULE(_gpufl_client, m) {
         .def_readwrite("enable_synchronization",      &gpufl::InitOptions::enable_synchronization)
         .def_readwrite("enable_memory_tracking",      &gpufl::InitOptions::enable_memory_tracking)
         .def_readwrite("enable_cuda_graphs_tracking", &gpufl::InitOptions::enable_cuda_graphs_tracking)
+        .def_readwrite("pm_sampling_interval_us", &gpufl::InitOptions::pm_sampling_interval_us)
+        .def_readwrite("pm_sampling_max_samples", &gpufl::InitOptions::pm_sampling_max_samples)
+        .def_readwrite("pm_sampling_preset", &gpufl::InitOptions::pm_sampling_preset)
+        .def_readwrite("pm_sampling_metrics", &gpufl::InitOptions::pm_sampling_metrics)
+        .def_readwrite("pm_sampling_scope_only", &gpufl::InitOptions::pm_sampling_scope_only)
         .def_readwrite("profiling_engine",      &gpufl::InitOptions::profiling_engine)
         // Backend interactions — backend_url is the BASE URL of the
         // GPUFlight backend. Upload is a separate post-shutdown step
@@ -144,7 +150,12 @@ PYBIND11_MODULE(_gpufl_client, m) {
                      bool enable_external_correlation,
                      bool enable_synchronization,
                      bool enable_memory_tracking,
-                     bool enable_cuda_graphs_tracking) -> bool {
+                     bool enable_cuda_graphs_tracking,
+                     uint32_t pm_sampling_interval_us,
+                     uint32_t pm_sampling_max_samples,
+                     std::string pm_sampling_preset,
+                     std::vector<std::string> pm_sampling_metrics,
+                     bool pm_sampling_scope_only) -> bool {
 
         gpufl::InitOptions opts;
         opts.app_name              = app_name;
@@ -165,6 +176,11 @@ PYBIND11_MODULE(_gpufl_client, m) {
         opts.enable_synchronization      = enable_synchronization;
         opts.enable_memory_tracking      = enable_memory_tracking;
         opts.enable_cuda_graphs_tracking = enable_cuda_graphs_tracking;
+        opts.pm_sampling_interval_us     = pm_sampling_interval_us;
+        opts.pm_sampling_max_samples     = pm_sampling_max_samples;
+        opts.pm_sampling_preset          = std::move(pm_sampling_preset);
+        opts.pm_sampling_metrics         = std::move(pm_sampling_metrics);
+        opts.pm_sampling_scope_only      = pm_sampling_scope_only;
 
         return gpufl::init(opts);
     }, py::arg("app_name"),
@@ -184,7 +200,12 @@ PYBIND11_MODULE(_gpufl_client, m) {
        py::arg("enable_external_correlation") = true,
        py::arg("enable_synchronization")      = true,
        py::arg("enable_memory_tracking")      = false,
-       py::arg("enable_cuda_graphs_tracking") = false);
+       py::arg("enable_cuda_graphs_tracking") = false,
+       py::arg("pm_sampling_interval_us")     = 1000,
+       py::arg("pm_sampling_max_samples")     = 4096,
+       py::arg("pm_sampling_preset")          = "overview",
+       py::arg("pm_sampling_metrics")         = std::vector<std::string>{},
+       py::arg("pm_sampling_scope_only")      = true);
 
     m.def("system_start", [](std::string name) { gpufl::systemStart(std::move(name)); },
         py::arg("name") = "system");

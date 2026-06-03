@@ -161,7 +161,7 @@ class GpuFlightSession:
         if is_batch_format:
             dict_maps = self._build_dict_maps(device_df, scope_df, system_df)
             (self.kernels, self.memcpy, self.memset,
-             self.scopes, self.perf,
+             self.scopes, self.perf, self.pm_samples,
              self.device_metrics, self.host_metrics,
              self.scope_events) = self._expand_batches(
                 device_df, scope_df, system_df, dict_maps
@@ -181,9 +181,11 @@ class GpuFlightSession:
             if not scope_df.empty and 'type' in scope_df.columns:
                 self.scopes = scope_df
                 self.perf   = scope_df[scope_df['type'] == 'perf_metric_event'].copy()
+                self.pm_samples = scope_df[scope_df['type'] == 'pm_sample'].copy() if 'pm_sample' in set(scope_df['type']) else pd.DataFrame()
             else:
                 self.scopes = pd.DataFrame()
                 self.perf   = pd.DataFrame()
+                self.pm_samples = pd.DataFrame()
 
             self.system         = system_df
             self.device_metrics = pd.DataFrame()
@@ -198,6 +200,8 @@ class GpuFlightSession:
                     setattr(self, attr, df[df['session_id'] == session_id])
             if not self.perf.empty and 'session_id' in self.perf.columns:
                 self.perf = self.perf[self.perf['session_id'] == session_id]
+            if not self.pm_samples.empty and 'session_id' in self.pm_samples.columns:
+                self.pm_samples = self.pm_samples[self.pm_samples['session_id'] == session_id]
             if not self.device_metrics.empty and 'session_id' in self.device_metrics.columns:
                 self.device_metrics = self.device_metrics[self.device_metrics['session_id'] == session_id]
             if not self.host_metrics.empty and 'session_id' in self.host_metrics.columns:
@@ -477,6 +481,28 @@ class GpuFlightSession:
                     })
         scopes_df = pd.DataFrame(sample_rows)
 
+        # ── pm_sample_batch (scope log) ───────────────────────────────────────
+        pm_rows = []
+        if not scope_df.empty and 'type' in scope_df.columns:
+            for _, batch in scope_df[scope_df['type'] == 'pm_sample_batch'].iterrows():
+                cols = batch.get('columns', [])
+                base = int(batch.get('base_time_ns', 0))
+                ci = {c: i for i, c in enumerate(cols)}
+                for row in (batch.get('rows') or []):
+                    metric_id = row[ci['metric_id']]
+                    scope_id = row[ci['scope_name_id']]
+                    pm_rows.append({
+                        'type': 'pm_sample',
+                        'session_id': batch.get('session_id'),
+                        'ts_ns': base + row[ci['dt_ns']],
+                        'device_id': row[ci['device_id']],
+                        'metric_id': metric_id,
+                        'metric_name': dict_maps['metric'].get(metric_id) if metric_id else None,
+                        'value': row[ci['value']],
+                        'scope_name': dict_maps['scope_name'].get(scope_id) if scope_id else None,
+                    })
+        pm_df = pd.DataFrame(pm_rows)
+
         # ── perf_metric_event (scope log — still per-event, not batched) ──────
         perf_df = pd.DataFrame()
         if not scope_df.empty and 'type' in scope_df.columns:
@@ -544,7 +570,7 @@ class GpuFlightSession:
                     })
         scope_events_df = pd.DataFrame(scope_event_rows)
 
-        return (kernels_df, memcpy_df, pd.DataFrame(), scopes_df, perf_df,
+        return (kernels_df, memcpy_df, pd.DataFrame(), scopes_df, perf_df, pm_df,
                 device_metrics_df, host_metrics_df, scope_events_df)
 
     # ── Derived metrics ───────────────────────────────────────────────────────
@@ -1313,6 +1339,50 @@ class GpuFlightSession:
             "    5. [bold]Hardware[/bold]: Volta+ for SM throughput / "
             "DRAM bytes; Turing+ for tensor-core utilization."
         )
+
+    def _print_pm_sampling_hint(self):
+        self.console.print(
+            "[yellow]No pm_sample_batch records found in scope log.[/yellow]\n"
+            "  To collect PM sampling hardware timeline data:\n"
+            "    1. [bold]profiling_engine[/bold]: pass "
+            "[cyan]ProfilingEngine.PmSampling[/cyan] to "
+            "[cyan]gpufl.init()[/cyan].\n"
+            "    2. [bold]Scopes recommended[/bold]: wrap GPU work in "
+            "[cyan]with gpufl.Scope(\"name\"):[/cyan] blocks so "
+            "samples can be attributed to workload phases.\n"
+            "    3. [bold]Build[/bold]: wheel must have "
+            "[cyan]GPUFL_HAS_PERFWORKS=1[/cyan] and a CUDA toolkit with "
+            "[cyan]cupti_pmsampling.h[/cyan]."
+        )
+
+    def inspect_pm_sampling(self, top_n: int = 10):
+        """Summarize PM sampling hardware timeline rows."""
+        pm = getattr(self, 'pm_samples', pd.DataFrame())
+        if pm.empty:
+            self._print_pm_sampling_hint()
+            return
+
+        p = pm.copy()
+        p['value'] = pd.to_numeric(p['value'], errors='coerce')
+        grouped = (p.groupby('metric_name', dropna=False)['value']
+                   .agg(['count', 'mean', 'max'])
+                   .reset_index()
+                   .sort_values('max', ascending=False)
+                   .head(top_n))
+
+        table = Table(title="PM Sampling Hardware Timeline")
+        table.add_column("Metric", style="cyan")
+        table.add_column("Samples", justify="right")
+        table.add_column("Avg", justify="right")
+        table.add_column("Peak", justify="right")
+        for _, row in grouped.iterrows():
+            table.add_row(
+                str(row.get('metric_name') or 'unknown'),
+                str(int(row['count'])),
+                f"{row['mean']:.3f}" if pd.notna(row['mean']) else "n/a",
+                f"{row['max']:.3f}" if pd.notna(row['max']) else "n/a",
+            )
+        self.console.print(table)
 
     def inspect_perf_metrics(self, top_n: int = 10):
         """Summarize perf_metric_event records from scope logs."""

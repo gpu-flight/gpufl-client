@@ -105,6 +105,14 @@ class TextReport {
         std::string reason_name;
     };
 
+    struct PmSampleRecord {
+        int64_t ts_ns = 0;
+        uint32_t device_id = 0;
+        std::string metric_name;
+        double value = 0.0;
+        std::string scope_name;
+    };
+
     struct SessionInfo {
         std::string app_name;
         std::string session_id;
@@ -146,6 +154,7 @@ class TextReport {
     std::vector<HostMetricRecord> host_metrics_;
     std::vector<ScopeEventRecord> scope_events_;
     std::vector<ProfileSampleRecord> profile_samples_;
+    std::vector<PmSampleRecord> pm_samples_;
     std::vector<CaptureCapabilityRecord> capture_capabilities_;
     std::string requested_engine_;
     std::string selected_engine_;
@@ -182,6 +191,7 @@ class TextReport {
     void writeMemcpySummary(std::ostringstream& out) const;
     void writeSystemMetrics(std::ostringstream& out) const;
     void writeScopeSummary(std::ostringstream& out) const;
+    void writePmSamplingSummary(std::ostringstream& out) const;
     void writeProfileAnalysis(std::ostringstream& out) const;
 };
 

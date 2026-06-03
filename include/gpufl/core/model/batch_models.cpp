@@ -216,6 +216,51 @@ std::string ProfileSampleBatchModel::buildJson() const {
     return oss.str();
 }
 
+// ── PmSampleBatchModel ───────────────────────────────────────────────────
+
+std::string PmSampleBatchModel::buildJson() const {
+    const auto& rows = buf_.rows();
+    if (rows.empty()) return {};
+    const int64_t base = rows.front().ts_ns;
+
+    std::ostringstream oss;
+    oss << "{\"version\":1,\"type\":\"pm_sample_batch\""
+        << ",\"session_id\":\"" << jsonEscape(session_id_) << '"'
+        << ",\"batch_id\":" << batch_id_ << ",\"base_time_ns\":" << base
+        << ",\"columns\":[\"sample_index\",\"dt_ns\",\"device_id\",\"metric_id\","
+           "\"value\",\"scope_name_id\"]"
+        << ",\"rows\":[";
+
+    bool first = true;
+    for (const auto& r : rows) {
+        if (!first) oss << ',';
+        first = false;
+        oss << '[' << r.sample_index << ',' << (r.ts_ns - base) << ','
+            << r.device_id << ',' << r.metric_id << ',' << r.value << ','
+            << r.scope_name_id << ']';
+    }
+    oss << "]}";
+    return oss.str();
+}
+
+std::string PmSamplingConfigModel::buildJson() const {
+    std::ostringstream oss;
+    oss << "{\"version\":1,\"type\":\"pm_sampling_config\""
+        << ",\"session_id\":\"" << jsonEscape(e_.session_id) << '"'
+        << ",\"ts_ns\":" << e_.ts_ns
+        << ",\"device_id\":" << e_.device_id
+        << ",\"interval_us\":" << e_.interval_us
+        << ",\"max_samples\":" << e_.max_samples
+        << ",\"preset\":\"" << jsonEscape(e_.preset) << "\""
+        << ",\"metrics\":[";
+    for (size_t i = 0; i < e_.metrics.size(); ++i) {
+        if (i) oss << ',';
+        oss << '"' << jsonEscape(e_.metrics[i]) << '"';
+    }
+    oss << "]}";
+    return oss.str();
+}
+
 // ── HostMetricBatchModel ──────────────────────────────────────────────────
 
 std::string HostMetricBatchModel::buildJson() const {

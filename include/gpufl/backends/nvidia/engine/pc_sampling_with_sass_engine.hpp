@@ -3,6 +3,7 @@
 #include <memory>
 
 #include "gpufl/backends/nvidia/engine/pc_sampling_engine.hpp"
+#include "gpufl/backends/nvidia/engine/pm_sampling_engine.hpp"
 #include "gpufl/backends/nvidia/engine/profiling_engine.hpp"
 #include "gpufl/backends/nvidia/engine/sass_metrics_engine.hpp"
 
@@ -81,10 +82,13 @@ class PcSamplingWithSassEngine final : public IProfilingEngine {
      *  armed) — drives the "enabled but 0 data" capability state. */
     bool sassProducedData() const { return sass_ && sass_->producedData(); }
     bool pcProducedData() const { return pc_ && pc_->producedData(); }
+    bool pmSamplingActive() const { return pm_ && pm_->isOperational(); }
+    bool pmProducedData() const { return pm_ && pm_->producedData(); }
 
    private:
     std::unique_ptr<PcSamplingEngine>  pc_;
     std::unique_ptr<SassMetricsEngine> sass_;
+    std::unique_ptr<PmSamplingEngine>  pm_;
     bool sass_ok_ = false;        // true only if SASS engine started successfully
     bool sass_gate_open_ = false; // GPU is one where Deep may attempt SASS (Blackwell+)
     bool skip_pc_scope_ = false;  // SamplingAPI + SASS conflict → skip PC scope work

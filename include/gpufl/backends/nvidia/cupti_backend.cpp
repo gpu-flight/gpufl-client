@@ -30,6 +30,7 @@
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
 #include "gpufl/backends/nvidia/engine/pc_sampling_engine.hpp"
 #include "gpufl/backends/nvidia/engine/pc_sampling_with_sass_engine.hpp"
+#include "gpufl/backends/nvidia/engine/pm_sampling_engine.hpp"
 #include "gpufl/backends/nvidia/engine/range_profiler_engine.hpp"
 #include "gpufl/backends/nvidia/engine/sass_metrics_engine.hpp"
 #include "gpufl/backends/nvidia/kernel_launch_handler.hpp"
@@ -303,6 +304,16 @@ void CuptiBackend::initialize(const MonitorOptions& opts) {
         case ProfilingEngine::SassMetrics:
             engine_ = std::make_unique<SassMetricsEngine>();
             GFL_LOG_DEBUG("[CuptiBackend] Engine: SassMetrics");
+            break;
+        case ProfilingEngine::PmSampling:
+#if GPUFL_HAS_PERFWORKS
+            engine_ = std::make_unique<PmSamplingEngine>();
+            GFL_LOG_DEBUG("[CuptiBackend] Engine: PmSampling");
+#else
+            GFL_LOG_ERROR(
+                "[CuptiBackend] PmSampling engine requires "
+                "GPUFL_HAS_PERFWORKS; falling back to kernel-trace only");
+#endif
             break;
         case ProfilingEngine::RangeProfiler:
 #if GPUFL_HAS_PERFWORKS
@@ -861,6 +872,7 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
 
     bool sassActive = false;
     bool pcActive = false;
+    bool pmActive = false;
 
     // Capability emission happens after final engine shutdown so the report can
     // see late-flushed samples. Some engines drop their operational flag during
@@ -869,11 +881,14 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
         sassActive = engine_->isOperational() || engine_->producedData();
     } else if (opts_.profiling_engine == ProfilingEngine::PcSampling && engine_) {
         pcActive = engine_->isOperational() || engine_->producedData();
+    } else if (opts_.profiling_engine == ProfilingEngine::PmSampling && engine_) {
+        pmActive = engine_->isOperational() || engine_->producedData();
     } else if (opts_.profiling_engine == ProfilingEngine::Deep) {
         if (const auto* deep =
                 dynamic_cast<const PcSamplingWithSassEngine*>(engine_.get())) {
             sassActive = deep->sassActive() || deep->sassProducedData();
             pcActive = deep->pcSamplingActive() || deep->pcProducedData();
+            pmActive = deep->pmSamplingActive() || deep->pmProducedData();
         }
     }
 
@@ -897,15 +912,19 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
 
     bool sassHasData = false;
     bool pcHasData = false;
+    bool pmHasData = false;
     if (engine_) {
         if (const auto* deep =
                 dynamic_cast<const PcSamplingWithSassEngine*>(engine_.get())) {
             sassHasData = deep->sassProducedData();
             pcHasData = deep->pcProducedData();
+            pmHasData = deep->pmProducedData();
         } else if (opts_.profiling_engine == ProfilingEngine::SassMetrics) {
             sassHasData = engine_->producedData();
         } else if (opts_.profiling_engine == ProfilingEngine::PcSampling) {
             pcHasData = engine_->producedData();
+        } else if (opts_.profiling_engine == ProfilingEngine::PmSampling) {
+            pmHasData = engine_->producedData();
         }
     }
 
@@ -1020,6 +1039,20 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
                             ? "PC sampling was collected for this session."
                             : "PC sampling was enabled but produced no stall samples this session (e.g. kernels too short for the sampling period).")
                                   : "PC sampling was not collected for this session."));
+    AddCapability(evt, "pm_sampling",
+                  opts_.profiling_engine == ProfilingEngine::PmSampling ||
+                      opts_.profiling_engine == ProfilingEngine::Deep,
+                  pmActive ? (pmHasData ? "collected" : "enabled_no_data")
+                           : ((opts_.profiling_engine == ProfilingEngine::PmSampling ||
+                               opts_.profiling_engine == ProfilingEngine::Deep) ? "skipped" : "not_requested"),
+                  pmActive ? "cupti_pm_sampling" : "disabled",
+                  pmActive ? (pmHasData ? "" : "enabled_but_no_samples")
+                           : "not_selected_or_not_operational",
+                  pmActive
+                      ? (pmHasData
+                            ? "PM sampling hardware metric samples were collected for this session."
+                            : "PM sampling was enabled but produced no hardware samples this session.")
+                      : "PM sampling was not collected for this session.");
     AddCapability(evt, "source_correlation", pcActive,
                   pcActive ? (sourceHasData ? "collected" : "enabled_no_data")
                            : (sassActive ? "skipped" : "not_requested"),
