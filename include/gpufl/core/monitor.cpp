@@ -52,8 +52,10 @@ static std::atomic<uint32_t> g_activeScopeNameId{0};
 
 static BatchBuffer<ScopeBatchRow>         g_scopeBatch;
 static BatchBuffer<ProfileSampleBatchRow> g_profileBatch;
-static uint64_t g_scopeBatchId   = 0;
-static uint64_t g_profileBatchId = 0;
+static BatchBuffer<PmSampleBatchRow>      g_pmSampleBatch;
+static uint64_t g_scopeBatchId    = 0;
+static uint64_t g_profileBatchId  = 0;
+static uint64_t g_pmSampleBatchId = 0;
 static std::mutex g_scopeBatchMu;
 static std::atomic<uint64_t> g_nextScopeInstanceId{1};
 
@@ -127,7 +129,8 @@ static void flushBatches(Logger& logger, const std::string& session_id) {
         // release. Flushing dict here emits exactly the names the
         // outgoing batch references.
         std::lock_guard lk(g_scopeBatchMu);
-        if (!g_scopeBatch.empty() || !g_profileBatch.empty()) {
+        if (!g_scopeBatch.empty() || !g_profileBatch.empty() ||
+            !g_pmSampleBatch.empty()) {
             g_dictManager.flushDictionary(logger, session_id);
         }
         if (!g_scopeBatch.empty()) {
@@ -139,6 +142,11 @@ static void flushBatches(Logger& logger, const std::string& session_id) {
             logger.write(model::ProfileSampleBatchModel(
                 g_profileBatch, session_id, ++g_profileBatchId));
             g_profileBatch.clear();
+        }
+        if (!g_pmSampleBatch.empty()) {
+            logger.write(model::PmSampleBatchModel(
+                g_pmSampleBatch, session_id, ++g_pmSampleBatchId));
+            g_pmSampleBatch.clear();
         }
     }
 }
@@ -594,6 +602,42 @@ void Monitor::PushProfileSamples(
         row.source_line    = s.source_line;
         g_profileBatch.push(row);
     }
+}
+
+void Monitor::PushPmSamples(const std::vector<PmSampleInput>& samples) {
+    if (samples.empty()) return;
+    const uint32_t scope_name_id =
+        g_activeScopeNameId.load(std::memory_order_relaxed);
+    std::lock_guard lk(g_scopeBatchMu);
+    for (const auto& s : samples) {
+        if (s.metric_name.empty()) continue;
+        PmSampleBatchRow row;
+        row.sample_index = s.sample_index;
+        row.ts_ns = s.ts_ns;
+        row.device_id = s.device_id;
+        row.metric_id = g_dictManager.internMetric(s.metric_name);
+        row.value = s.value;
+        row.scope_name_id = scope_name_id;
+        g_pmSampleBatch.push(row);
+    }
+}
+
+void Monitor::EmitPmSamplingConfig(uint32_t device_id,
+                                   uint32_t interval_us,
+                                   uint32_t max_samples,
+                                   const std::string& preset,
+                                   const std::vector<std::string>& metrics) {
+    Runtime* rt = runtime();
+    if (!(rt && rt->logger)) return;
+    PmSamplingConfigEvent ev;
+    ev.session_id = rt->session_id;
+    ev.ts_ns = detail::GetTimestampNs();
+    ev.device_id = device_id;
+    ev.interval_us = interval_us;
+    ev.max_samples = max_samples;
+    ev.preset = preset;
+    ev.metrics = metrics;
+    rt->logger->write(model::PmSamplingConfigModel(ev));
 }
 
 }  // namespace gpufl

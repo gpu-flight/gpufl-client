@@ -65,6 +65,10 @@ enum class MonitorBackendKind {
  *
  *   By extension: Deep + RangeProfiler is also impossible (the
  *   PC-sampling half conflicts; the SASS half would be fine).
+ *
+ *   PmSampling is a time-series hardware metric sampler. It is introduced
+ *   as a standalone engine first because it also consumes PM hardware state;
+ *   compatibility with SASS / PC sampling is validated separately.
  */
 enum class ProfilingEngine {
     // A monotonic ladder of increasing capture depth + cost. One name
@@ -85,6 +89,8 @@ enum class ProfilingEngine {
                     // GPU stalls. "Why is this kernel slow." (CUPTI PC Sampling)
     SassMetrics,    // + Per-instruction SASS counters: executed / divergent
                     // instruction counts per source line. (CUPTI SASS Metrics)
+    PmSampling,     // + Time-series PM hardware samples: SM / memory /
+                    // tensor utilization over time. (CUPTI PM Sampling)
     RangeProfiler,  // + Hardware throughput counters: SM / memory / tensor
                     // utilization, L1/L2 hit rates, DRAM bandwidth.
                     // (CUPTI Range Profiler; requires GPUFL_HAS_PERFWORKS)
@@ -98,6 +104,7 @@ inline const char* ProfilingEngineWireName(const ProfilingEngine engine) {
         case ProfilingEngine::Trace:         return "nvidia.trace";
         case ProfilingEngine::PcSampling:    return "nvidia.pc_sampling";
         case ProfilingEngine::SassMetrics:   return "nvidia.sass_metrics";
+        case ProfilingEngine::PmSampling:    return "nvidia.pm_sampling";
         case ProfilingEngine::RangeProfiler: return "nvidia.range_profiler";
         case ProfilingEngine::Deep:          return "nvidia.pc_sampling_with_sass";
     }
@@ -111,6 +118,7 @@ inline const char* ProfilingEngineSessionKind(const ProfilingEngine engine) {
             return "monitor";
         case ProfilingEngine::PcSampling:
         case ProfilingEngine::SassMetrics:
+        case ProfilingEngine::PmSampling:
         case ProfilingEngine::RangeProfiler:
         case ProfilingEngine::Deep:
             return "trace";
@@ -150,6 +158,17 @@ struct MonitorOptions {
     // samples per hot range, not 10⁶. Users doing fine-grained stall
     // attribution can lower this back via InitOptions.
     uint32_t pc_sampling_period = 10;
+    // PM sampling interval in microseconds when using the GPU time trigger.
+    // PM Sampling is a hardware time-series engine, so this controls timeline
+    // density rather than per-kernel attribution. Default 1000us = 1ms.
+    uint32_t pm_sampling_interval_us = 1000;
+    // Maximum decoded PM samples retained in the counter data image.
+    uint32_t pm_sampling_max_samples = 4096;
+    // PM sampling preset. "overview" is the default product view; engines may
+    // map it to chip-available metrics and skip unavailable entries.
+    std::string pm_sampling_preset = "overview";
+    std::vector<std::string> pm_sampling_metrics;
+    bool pm_sampling_scope_only = true;
     // Default Monitor: no CUPTI. The user-facing default lives on
     // InitOptions (gpufl.hpp); this internal default matches it so a
     // bare MonitorOptions (e.g. the system-monitor daemon, which only
@@ -178,6 +197,14 @@ struct ProfileSampleInput {
     uint8_t  sample_kind   = 0;  // 0 = pc_sampling, 1 = sass_metric
     std::string source_file;
     uint32_t source_line   = 0;
+};
+
+struct PmSampleInput {
+    uint32_t sample_index = 0;
+    int64_t ts_ns = 0;
+    uint32_t device_id = 0;
+    std::string metric_name;
+    double value = 0.0;
 };
 
 /**
@@ -276,6 +303,20 @@ class Monitor {
      */
     static void PushProfileSamples(
         const std::vector<ProfileSampleInput>& samples);
+
+    /**
+     * @brief Push decoded PM sampling time-series rows.
+     */
+    static void PushPmSamples(const std::vector<PmSampleInput>& samples);
+
+    /**
+     * @brief Emit PM sampling configuration metadata for readers/UI.
+     */
+    static void EmitPmSamplingConfig(uint32_t device_id,
+                                     uint32_t interval_us,
+                                     uint32_t max_samples,
+                                     const std::string& preset,
+                                     const std::vector<std::string>& metrics);
 
    private:
     Monitor() = delete;

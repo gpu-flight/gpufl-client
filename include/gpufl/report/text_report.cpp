@@ -191,6 +191,11 @@ uint64_t rowU64(const JsonValue& row, const ColIndex& ci, const std::string& col
     return (it != ci.end()) ? row[it->second].as_uint64(def) : def;
 }
 
+double rowDouble(const JsonValue& row, const ColIndex& ci, const std::string& col, double def = 0.0) {
+    auto it = ci.find(col);
+    return (it != ci.end()) ? row[it->second].as_double(def) : def;
+}
+
 // Functional: sort a map by value descending, return top-N as vector of pairs
 template <typename K, typename V, typename Fn>
 std::vector<std::pair<K, V>> sortedTopN(const std::map<K, V>& m, int n,
@@ -454,6 +459,20 @@ void TextReport::parseScopeLog(const std::vector<JsonValue>& records,
                     std::move(rname),
                 });
             }
+        } else if (type == "pm_sample_batch") {
+            auto ci = buildColumnIndex(rec["columns"]);
+            int64_t base = rec.value<int64_t>("base_time_ns", 0);
+            for (const auto& row : rec["rows"].get_array()) {
+                int met_id = static_cast<int>(rowInt(row, ci, "metric_id"));
+                int scope_id = static_cast<int>(rowInt(row, ci, "scope_name_id"));
+                pm_samples_.push_back({
+                    base + rowInt(row, ci, "dt_ns"),
+                    static_cast<uint32_t>(rowInt(row, ci, "device_id")),
+                    lookupOr(metric_dict, met_id, "metric_"),
+                    rowDouble(row, ci, "value"),
+                    lookupOr(scope_name_dict, scope_id, "scope_"),
+                });
+            }
         } else if (type == "sass_config") {
             sass_active_ = true;
         }
@@ -520,6 +539,7 @@ std::string TextReport::generate() const {
     writeMemcpySummary(out);
     writeSystemMetrics(out);
     writeScopeSummary(out);
+    writePmSamplingSummary(out);
     writeProfileAnalysis(out);
     return out.str();
 }
@@ -1009,6 +1029,55 @@ void TextReport::writeScopeSummary(std::ostringstream& out) const {
                    "Use GPU Time to compare kernel perf.\n";
         }
     }
+}
+
+
+void TextReport::writePmSamplingSummary(std::ostringstream& out) const {
+    if (pm_samples_.empty()) return;
+
+    out << "\n" << SEP << "\n  PM Sampling Summary\n" << SEP << "\n";
+    out << "  Total Samples:        " << pm_samples_.size() << "\n";
+
+    std::map<std::string, AggStats> byMetric;
+    std::map<std::string, AggStats> byScope;
+    for (const auto& s : pm_samples_) {
+        byMetric[s.metric_name].add(s.value);
+        if (!s.scope_name.empty()) byScope[s.scope_name].add(s.value);
+    }
+
+    out << "\n  Metrics:\n";
+    out << "  " << std::left << std::setw(38) << "Metric"
+        << std::right << std::setw(8) << "Samples"
+        << std::setw(16) << "Avg"
+        << std::setw(16) << "Peak" << "\n";
+    out << "  " << std::string(72, '-') << "\n";
+    for (const auto& [metric, st] : sortedTopN(byMetric, top_n_, [](const AggStats& s) { return s.max_val; })) {
+        out << "  " << std::left << std::setw(38) << truncate(metric, 36)
+            << std::right << std::setw(8) << st.count
+            << std::setw(16) << std::fixed << std::setprecision(2) << st.avg()
+            << std::setw(16) << std::fixed << std::setprecision(2) << st.max_val
+            << "\n";
+    }
+
+    if (!byScope.empty()) {
+        out << "\n  Top Scopes by PM Sample Value:\n";
+        out << "  " << std::left << std::setw(30) << "Scope"
+            << std::right << std::setw(8) << "Samples"
+            << std::setw(16) << "Total"
+            << std::setw(16) << "Peak" << "\n";
+        out << "  " << std::string(70, '-') << "\n";
+        for (const auto& [scope, st] : sortedTopN(byScope, top_n_, [](const AggStats& s) { return s.total; })) {
+            out << "  " << std::left << std::setw(30) << truncate(scope, 28)
+                << std::right << std::setw(8) << st.count
+                << std::setw(16) << std::fixed << std::setprecision(2) << st.total
+                << std::setw(16) << std::fixed << std::setprecision(2) << st.max_val
+                << "\n";
+        }
+    }
+
+    out << "\n  Note: PM Sampling rows are hardware-counter timeline samples. "
+           "They are aggregated by scope here; use analyzer.inspect_pm_sampling() "
+           "for the raw table.\n";
 }
 
 // ── Profile analysis helpers ────────────────────────────────────────────────

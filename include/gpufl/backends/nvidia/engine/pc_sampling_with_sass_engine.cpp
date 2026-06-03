@@ -3,6 +3,7 @@
 #include <cupti.h>
 
 #include <cstdlib>
+#include <memory>
 
 #include "gpufl/core/debug_logger.hpp"
 
@@ -50,6 +51,9 @@ bool PcSamplingWithSassEngine::initialize(const MonitorOptions& opts,
     pc_ = std::make_unique<PcSamplingEngine>();
     pc_->initialize(opts, ctx);
 
+    pm_ = std::make_unique<PmSamplingEngine>();
+    pm_->initialize(opts, ctx);
+
     // Decide once whether Deep should try SASS this session. Only construct
     // the SASS sub-engine when it will — otherwise Deep touches no
     // Profiler-API state and behaves as a PC sampling engine.
@@ -73,6 +77,8 @@ bool PcSamplingWithSassEngine::initialize(const MonitorOptions& opts,
 }
 
 void PcSamplingWithSassEngine::start() {
+    if (pm_) pm_->start();
+
     // Deep attempts SASS only where ShouldAttemptSassInDeep() allowed it
     // (eager module loading in effect, unless GPUFL_DEEP_PC_ONLY is set).
     // Otherwise sass_ was never constructed and we go straight to PC
@@ -145,6 +151,7 @@ void PcSamplingWithSassEngine::stop() {
     // training loop), which would otherwise lose all pending SASS data
     // because nothing pulls CUPTI's buffer into g_profileBatch before
     // shutdown tears it down.
+    if (pm_) pm_->stop();
     if (sass_ok_) sass_->stop();
     if (pc_) pc_->stop();
 }
@@ -154,11 +161,13 @@ void PcSamplingWithSassEngine::shutdown() {
     // SassMetricsEngine::shutdown() also drains before disabling CUPTI, so a
     // teardown path that skipped stop() (or where stop()'s drain was a no-op)
     // still gets a final flush.
+    if (pm_) pm_->shutdown();
     if (sass_ok_) sass_->shutdown();
     if (pc_) pc_->shutdown();
 }
 
 void PcSamplingWithSassEngine::onScopeStart(const char* name) {
+    if (pm_) pm_->onScopeStart(name);
     if (pc_ && !skip_pc_scope_) pc_->onScopeStart(name);
     if (sass_ok_) sass_->onScopeStart(name);
 }
@@ -166,6 +175,7 @@ void PcSamplingWithSassEngine::onScopeStart(const char* name) {
 void PcSamplingWithSassEngine::onScopeStop(const char* name) {
     if (pc_ && !skip_pc_scope_) pc_->onScopeStop(name);
     if (sass_ok_) sass_->onScopeStop(name);
+    if (pm_) pm_->onScopeStop(name);
 }
 
 void PcSamplingWithSassEngine::drainData() {

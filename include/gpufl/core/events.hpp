@@ -471,6 +471,25 @@ struct ProfileSampleBatchRow {
     uint32_t source_line     = 0;   // source line number (0 = unknown)
 };
 
+struct PmSampleBatchRow {
+    uint32_t sample_index  = 0;
+    int64_t  ts_ns         = 0;
+    uint32_t device_id     = 0;
+    uint32_t metric_id     = 0;   // metric_dict ID
+    double   value         = 0.0;
+    uint32_t scope_name_id = 0;   // scope_name_dict ID (0 = no scope)
+};
+
+struct PmSamplingConfigEvent {
+    std::string session_id;
+    int64_t ts_ns = 0;
+    uint32_t device_id = 0;
+    uint32_t interval_us = 0;
+    uint32_t max_samples = 0;
+    std::string preset;
+    std::vector<std::string> metrics;
+};
+
 struct PerfMetricEvent {
     int pid = 0;
     std::string app;

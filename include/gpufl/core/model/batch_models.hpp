@@ -109,6 +109,33 @@ struct ProfileSampleBatchModel final : IJsonSerializable {
     uint64_t batch_id_;
 };
 
+// ── pm_sample_batch ──────────────────────────────────────────────────────
+
+struct PmSampleBatchModel final : IJsonSerializable {
+    PmSampleBatchModel(const BatchBuffer<PmSampleBatchRow>& buf,
+                       std::string session_id, uint64_t batch_id)
+        : buf_(buf),
+          session_id_(std::move(session_id)),
+          batch_id_(batch_id) {}
+
+    std::string buildJson() const override;
+    Channel channel() const override { return Channel::Scope; }
+
+   private:
+    const BatchBuffer<PmSampleBatchRow>& buf_;
+    std::string session_id_;
+    uint64_t batch_id_;
+};
+
+struct PmSamplingConfigModel final : IJsonSerializable {
+    explicit PmSamplingConfigModel(const PmSamplingConfigEvent& e) : e_(e) {}
+    std::string buildJson() const override;
+    Channel channel() const override { return Channel::Scope; }
+
+   private:
+    const PmSamplingConfigEvent& e_;
+};
+
 // ── synchronization_event_batch ───────────────────────────────────────────
 
 struct SynchronizationEventBatchModel final : IJsonSerializable {

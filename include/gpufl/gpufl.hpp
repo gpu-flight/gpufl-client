@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 #include "gpufl/core/monitor.hpp"
 
@@ -104,9 +105,16 @@ struct InitOptions {
     //   PcSampling    — + stall-reason sampling ("why is it slow")
     //   SassMetrics   — + per-instruction counters (CUPTI replay,
     //                   ~100× costlier on pre-sm_120 GPUs)
-    //   RangeProfiler — hardware throughput counters (SM/mem/tensor util)
+    //   PmSampling    — time-series hardware PM samples
+    //   RangeProfiler — scope-level hardware throughput counters
     //   Deep          — PcSampling + SassMetrics in one run
     ProfilingEngine profiling_engine = ProfilingEngine::Monitor;
+
+    uint32_t pm_sampling_interval_us = 1000;
+    uint32_t pm_sampling_max_samples = 4096;
+    std::string pm_sampling_preset = "overview";
+    std::vector<std::string> pm_sampling_metrics;
+    bool pm_sampling_scope_only = true;
 
     // ── Configuration sources, in precedence order (low → high) ────────────
     //
