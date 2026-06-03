@@ -47,7 +47,7 @@ device behavior.
 | Scope setup | One outer `gpufl.Scope("train_epoch")` unless otherwise noted |
 | Timeout threshold | 240 seconds |
 
-## Observed Results
+## Observed Results: Windows RTX 5060 PyTorch
 
 | Run | Scope | Flags / policy | Result | Marker progress | Interpretation |
 | --- | --- | --- | --- | --- | --- |
@@ -64,6 +64,95 @@ device behavior.
 approval prompt for that diagnostic run was declined. The current evidence
 therefore proves the unsafe bundle-level condition, not the exact individual
 CUPTI activity kind that triggers the hang.
+
+## Test Environment: 2026-06-02 Linux RTX 3090 PyTorch Run
+
+| Field | Value |
+| --- | --- |
+| Date | 2026-06-02 |
+| OS | Ubuntu 24.04.1, Linux kernel 6.17.0-29-generic |
+| GPU | NVIDIA GeForce RTX 3090 |
+| Compute capability | 8.6 |
+| NVIDIA driver | 590.48.01 |
+| CUDA Toolkit | 13.1, `nvcc` 13.1.115 |
+| Toolkit CUPTI library | `/usr/local/cuda-13.1/lib64/libcupti.so.13` |
+| CUPTI version reported by gpufl | 13.1.1 (`130101`) |
+| Python | 3.13.11 |
+| PyTorch | 2.12.0+cu132 |
+| PyTorch CUDA | 13.2 |
+| Client build | Local `features/pm_sampling` branch rebased on `origin/main` at `f4462ad`, commit `6d55a21` |
+| Workload | PyTorch EMNIST MLP derived from `/home/myounghoshin/PyCharmMiscProject/C1M2_Assignment.py` |
+| Init options | `ProfilingEngine.Deep`, `enable_stack_trace=True`, `enable_memory_tracking=True`, `enable_cuda_graphs_tracking=False`, `enable_debug_output=False` |
+| Scope setup | One outer `gpufl.Scope("train_epoch")` for full-epoch attempts; `warmup` plus `train_subset_2048` for completed smoke run |
+| Timeout threshold | 240 seconds for full epoch; 180 seconds for subset smoke |
+
+## Observed Results: Linux RTX 3090 PyTorch
+
+| Run | Scope | Flags / policy | Result | Marker progress | Interpretation |
+| --- | --- | --- | --- | --- | --- |
+| `pytorch_full_epoch_default_safe_20260602` | Outer `train_epoch` | Post-patch default safe SASS activity; PM Sampling enabled by Deep | Timeout | Scope log recorded `train_epoch` start; no scope stop, shutdown, kernel, SASS, or PM sample rows were flushed before timeout | The full EMNIST epoch did not complete within 240 seconds, so it is not a clean compatibility pass/fail. |
+| `pytorch_full_epoch_pc_only_20260602` | Outer `train_epoch` | `GPUFL_DEEP_PC_ONLY=1` | Timeout | Reached `entered train_epoch scope`; no scope stop, shutdown, kernel, PC, or PM sample rows were flushed before timeout | PC-only also exceeded 240 seconds on the same full-epoch workload, which points to workload/runtime duration as a confounder rather than SASS alone. |
+| `pytorch_subset_2048_default_safe_20260602` | `warmup`, `train_subset_2048` | Post-patch default safe SASS activity; no override flags | Exit | Reached `marker after shutdown` and emitted text report | Default safe Deep completed on sm_86 PyTorch. SASS won, PC sampling was skipped as mutually exclusive, PM Sampling also collected, and memory allocation tracking produced rows. |
+| `pytorch_subset_2048_kernel_activity_20260602` | `warmup`, `train_subset_2048` | `GPUFL_SASS_ALLOW_KERNEL_ACTIVITY=1` | Timeout | Reached `marker before warmup`; `scope.log` remained empty and no shutdown/report was emitted | Enabling CUPTI kernel activity alongside SASS reproduced a hang on Linux sm_86 PyTorch subset. Kernel activity should remain opt-in and should not be selected automatically for this arch/OS/workload class. |
+
+Collected data from `pytorch_subset_2048_default_safe_20260602`:
+
+| Feature | Result |
+| --- | --- |
+| Selected engine | `nvidia.sass_metrics` |
+| Kernel events | Fallback/partial; CUPTI kernel activity disabled by safe SASS policy, so the report's kernel execution tables had no kernel rows |
+| Scope rows | 4 rows: start/stop for `warmup` and `train_subset_2048` |
+| SASS metrics | Collected; 37,364 `profile_sample_batch` rows and per-function SASS efficiency in the report |
+| PC sampling | Skipped as mutually exclusive with SASS metrics |
+| PM Sampling | Collected; 1,570 `pm_sample_batch` rows for the overview preset |
+| Memory activity | Collected; 1,023 memory allocation rows |
+| CUBIN disassembly | Collected |
+| External correlation | Skipped by safe SASS policy |
+| Diagnostics | One second-scope SASS re-arm message was printed: `cuptiSassMetricsEnable failed: CUPTI_ERROR_INVALID_PARAMETER`; the run still completed and emitted SASS rows. PM decode also printed one `CUPTI_ERROR_UNKNOWN` message while still reporting PM Sampling as collected. |
+
+`pytorch_subset_2048_kernel_activity_20260602` used the same subset workload and
+only added `GPUFL_SASS_ALLOW_KERNEL_ACTIVITY=1`. It timed out after 180 seconds
+with an empty `scope.log`, while the default safe run completed in 40.91 seconds.
+That makes kernel activity unsafe as an automatic Deep choice for this Linux
+sm_86 PyTorch case.
+
+## Supplemental Test Environment: 2026-06-02 Linux RTX 3090 CUDA Demo
+
+| Field | Value |
+| --- | --- |
+| Date | 2026-06-02 |
+| OS | Ubuntu 24.04.1, Linux kernel 6.17.0-29-generic |
+| GPU | NVIDIA GeForce RTX 3090 |
+| Compute capability | 8.6 |
+| NVIDIA driver | 590.48.01 |
+| CUDA Toolkit | 13.1, `nvcc` 13.1.115 |
+| Toolkit CUPTI library | `/usr/local/cuda-13.1/lib64/libcupti.so.13` |
+| CUPTI version reported by gpufl | 13.1.1 (`130101`) |
+| Client build | Local `features/pm_sampling` branch rebased on `origin/main` at `f4462ad`, commit `6d55a21` |
+| Workload | `example/cuda/sass_divergence_demo`, CUDA divergence demo |
+| Init options | `ProfilingEngine.Deep`, default demo options |
+| Scope setup | `0_warmup`, `1_uniform_work_warmup`, `1_uniform_work`, `2_branch_by_lane`, `3_branch_by_quad`, `4_early_exit`, `5_indirect_branch` |
+| Timeout threshold | 60 seconds |
+
+## Observed Results: Linux RTX 3090 CUDA Demo
+
+| Run | Scope | Flags / policy | Result | Marker progress | Interpretation |
+| --- | --- | --- | --- | --- | --- |
+| `sass_divergence_default_safe_20260602` | Seven demo scopes | Post-patch default safe SASS activity; no override flags | Exit | Reached `Shutdown complete` and emitted text report | Default safe Deep completed on sm_86. SASS armed and was selected; PC sampling was skipped as mutually exclusive; PM Sampling also collected. |
+
+Collected data from `sass_divergence_default_safe_20260602`:
+
+| Feature | Result |
+| --- | --- |
+| Selected engine | `nvidia.sass_metrics` |
+| Kernel events | Fallback synthetic rows from launch callbacks; CUPTI kernel activity disabled by safe SASS policy |
+| Kernel rows | 22 |
+| SASS metrics | Collected; per-function warp efficiency and memory efficiency reported |
+| PC sampling | Skipped as mutually exclusive with SASS metrics |
+| PM Sampling | Collected; 52 `sm__warps_launched.sum` samples |
+| CUBIN disassembly | Collected; 5 functions parsed |
+| Memory activity | Not requested in this demo |
+| External correlation | Skipped by safe SASS policy |
 
 ## Deep Mode Feature Collection Semantics
 
