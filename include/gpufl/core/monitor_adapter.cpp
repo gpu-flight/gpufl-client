@@ -37,6 +37,8 @@ std::unique_ptr<IMonitorAdapter> CreateMonitorAdapter(const MonitorOptions& opts
 #endif
         case MonitorBackendKind::None:
             return nullptr;
+        case MonitorBackendKind::Metal:
+            return nullptr;
         case MonitorBackendKind::Auto:
         default:
 #if GPUFL_ENABLE_NVIDIA && GPUFL_HAS_CUDA

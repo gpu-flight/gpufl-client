@@ -98,6 +98,18 @@ BackendCollectors CreateBackendCollectors(const BackendKind backend,
             }
             break;
 
+        case BackendKind::Metal:
+#if GPUFL_ENABLE_METAL && GPUFL_HAS_METAL
+            setReason(
+                "Requested backend=metal. Phase-1 Metal backend compiles but "
+                "telemetry/profiling collection is not implemented yet.");
+#else
+            setReason(
+                "Requested backend=metal but Metal support is not enabled in this "
+                "build (set GPUFL_ENABLE_METAL=ON on macOS).");
+#endif
+            break;
+
         case BackendKind::Auto:
         default:
             out.telemetry_collector = tryNvml();

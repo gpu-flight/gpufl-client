@@ -28,6 +28,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # -----------------------
 option(GPUFL_ENABLE_NVIDIA "Enable NVIDIA backends (CUDA + NVML when available)" ON)
 option(GPUFL_ENABLE_AMD    "Enable AMD backends (ROCm when available)" OFF)
+option(GPUFL_ENABLE_METAL  "Enable Apple Metal backend (macOS only, phase-1 build stub)" OFF)
 option(GPUFL_ENABLE_AMD_ROCPROFILER "Enable AMD rocprofiler-sdk tracing backend when available" ON)
 # OFF builds the configuration release wheels ship (manylinux has no nvperf),
 # so CI can catch #if GPUFL_HAS_PERFWORKS mistakes.
@@ -226,6 +227,7 @@ set(GPUFL_HAS_ROCM 0)
 set(GPUFL_HAS_ROCM_SMI 0)
 set(GPUFL_HAS_HIP 0)
 set(GPUFL_HAS_ROCPROFILER_SDK 0)
+set(GPUFL_HAS_METAL 0)
 set(GPUFL_HAS_CUPTI 0)
 set(GPUFL_HAS_PERFWORKS 0)
 # ZLIB - try system install first, fall back to FetchContent so every platform
@@ -351,6 +353,12 @@ if(GPUFL_ENABLE_AMD)
     target_compile_definitions(gpufl PUBLIC GPUFL_ENABLE_AMD=1)
 else()
     target_compile_definitions(gpufl PUBLIC GPUFL_ENABLE_AMD=0)
+endif()
+
+if(GPUFL_ENABLE_METAL)
+    target_compile_definitions(gpufl PUBLIC GPUFL_ENABLE_METAL=1)
+else()
+    target_compile_definitions(gpufl PUBLIC GPUFL_ENABLE_METAL=0)
 endif()
 
 if(GPUFL_ENABLE_NVIDIA)
@@ -729,6 +737,24 @@ if(GPUFL_ENABLE_AMD)
     endif()
 endif()
 
+# -----------------------
+# Metal backend (phase-1: buildable stub path)
+# -----------------------
+if(GPUFL_ENABLE_METAL)
+    if(APPLE)
+        find_library(METAL_FRAMEWORK Metal)
+        if(METAL_FRAMEWORK)
+            set(GPUFL_HAS_METAL 1)
+            target_link_libraries(gpufl PRIVATE ${METAL_FRAMEWORK})
+            message(STATUS "Found Metal framework: ${METAL_FRAMEWORK}")
+        else()
+            message(WARNING "GPUFL_ENABLE_METAL=ON but Metal framework not found; GPUFL_HAS_METAL=0.")
+        endif()
+    else()
+        message(WARNING "GPUFL_ENABLE_METAL=ON is only supported on macOS; GPUFL_HAS_METAL=0.")
+    endif()
+endif()
+
 target_compile_definitions(gpufl PUBLIC
     GPUFL_HAS_CUDA=${GPUFL_HAS_CUDA}
     GPUFL_HAS_NVML=${GPUFL_HAS_NVML}
@@ -739,6 +765,7 @@ target_compile_definitions(gpufl PUBLIC
     GPUFL_HAS_ROCM_SMI=${GPUFL_HAS_ROCM_SMI}
     GPUFL_HAS_HIP=${GPUFL_HAS_HIP}
     GPUFL_HAS_ROCPROFILER_SDK=${GPUFL_HAS_ROCPROFILER_SDK}
+    GPUFL_HAS_METAL=${GPUFL_HAS_METAL}
 )
 
 # -----------------------

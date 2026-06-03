@@ -41,6 +41,7 @@ enum class MonitorBackendKind {
     Nvidia,
     Amd,
     None,
+    Metal,
 };
 
 /**

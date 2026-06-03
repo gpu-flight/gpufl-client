@@ -1,11 +1,13 @@
 ### ai
 .claude/
 .junie/
+.cache/
 
 ### idea
 .idea/**
 build/
 build-*/
+build_metal_stub/
 build_tests/
 cmake-build-*/
 CMakeFiles/
@@ -92,6 +94,7 @@ dist/
 
 *.log
 
+<<<<<<< HEAD
 ### Python
 # Byte-compiled / optimized files
 __pycache__/
@@ -116,3 +119,6 @@ coverage.xml
 .venv/
 venv/
 env/
+=======
+AGENTS.md
+>>>>>>> 5d127f9 (Add phase 1 Metal backend stub)
