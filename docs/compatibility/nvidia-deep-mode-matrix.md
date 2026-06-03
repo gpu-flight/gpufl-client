@@ -24,6 +24,7 @@ device behavior.
 | Deep falls back to PC sampling | Yes | If SASS is disabled, excluded, unavailable, or fails to arm, Deep should still produce stall/hot-PC data. |
 | SASS-safe activity policy | Yes | SASS plus the full CUPTI activity bundle reproduced a scoped PyTorch hang on Windows/CUDA 13.2. |
 | Full activity bundle | Opt-in only | Available for diagnostics through `GPUFL_SASS_ALLOW_FULL_ACTIVITY=1`, but not safe as a default. |
+| PM Sampling in Deep | Yes when built with PerfWorks | Deep starts PM Sampling as a side-channel; successful rows still require NVIDIA performance-counter access. |
 | SASS + PC sampling together | Experimental only | Controlled by `GPUFL_DEEP_TRY_BOTH=1`; current assumption is mutual exclusion. |
 
 ## Test Environment: 2026-06-02 Windows PyTorch Run
@@ -64,6 +65,51 @@ device behavior.
 approval prompt for that diagnostic run was declined. The current evidence
 therefore proves the unsafe bundle-level condition, not the exact individual
 CUPTI activity kind that triggers the hang.
+
+## PM Sampling Smoke Test: 2026-06-02 Windows RTX 5060 PyTorch
+
+| Field | Value |
+| --- | --- |
+| Date | 2026-06-02 |
+| OS | Microsoft Windows 11, NT version 10.0.26200.8457 |
+| GPU | NVIDIA GeForce RTX 5060 Laptop GPU |
+| Compute capability | 12.0 |
+| NVIDIA driver | 592.01 |
+| CUDA Toolkit | 13.2, `nvcc` 13.2.51 |
+| Toolkit CUPTI DLL | `cupti64_2026.1.0.dll` |
+| PyTorch bundled CUPTI DLL | `cupti64_2026.1.1.dll` |
+| Python | 3.13.5, 64-bit |
+| PyTorch | 2.12.0+cu132 |
+| PyTorch CUDA | 13.2 |
+| Client build | `main` at `708ceab`; Windows wheel built with `GPUFL_HAS_PERFWORKS=1` and linked against `cupti.lib`, `nvperf_host.lib`, and `nvperf_target.lib` from CUDA 13.2 |
+| Workload | PyTorch FP32 `4096 x 4096` matmul plus ReLU, 16 iterations inside `gpufl.Scope("pm_sampling_matmul")` |
+| Init options | `ProfilingEngine.PmSampling`, `pm_sampling_interval_us=1000`, `pm_sampling_max_samples=4096`, `pm_sampling_metrics=["sm__warps_launched.sum"]`, `pm_sampling_scope_only=True`, `enable_debug_output=True`, `enable_stack_trace=False`, `enable_memory_tracking=False`, `continuous_system_sampling=False` |
+| Log path | `C:\Temp\gpufl-pm-smoke-20260602_212250` |
+| Generated report | `C:\Temp\gpufl-pm-smoke-20260602_212250-report.txt` |
+| Timeout threshold | 180 seconds |
+
+## Observed Results: Windows RTX 5060 PM Sampling Smoke
+
+| Run | Result | PM config rows | PM sample rows | Report status | Diagnostic | Interpretation |
+| --- | --- | ---: | ---: | --- | --- | --- |
+| `pm_sampling_smoke_20260602_212250` | Exit | 1 | 0 | `Pm Sampling: on, no data`; `enabled_but_no_samples` | `cuptiProfilerGetCounterAvailability(data)` failed with `CUPTI_ERROR_INSUFFICIENT_PRIVILEGES (35)` | The PM Sampling build/API/report path works, but this non-elevated Windows environment cannot read NVIDIA performance counters yet. Enable local NVIDIA performance-counter access or rerun elevated, then retest sample collection. |
+
+Collected data from `pm_sampling_smoke_20260602_212250`:
+
+| Feature | Result |
+| --- | --- |
+| Build | Succeeded; the wheel was built with `GPUFL_HAS_PERFWORKS=1`. |
+| Python API | `gpufl.ProfilingEngine.PmSampling` was available and `gpufl.init(...)` returned `True`. |
+| Kernel events | Collected; 34 kernel rows across 3 unique kernels. |
+| Scope rows | Collected for `pm_sampling_matmul`. |
+| PM Sampling config | Collected; one `pm_sampling_config` row was emitted for `sm__warps_launched.sum`. |
+| PM Sampling samples | Not collected in this run because CUPTI performance-counter access was denied by the driver (`CUPTI_ERROR_INSUFFICIENT_PRIVILEGES`). |
+| Text report | Generated successfully; the Capture Capabilities section reported `Requested Engine: nvidia.pm_sampling`, `Selected Engine: nvidia.pm_sampling`, and `Pm Sampling: on, no data`. |
+
+This run validates PM Sampling packaging and report plumbing on Windows/CUDA 13.2.
+It does not validate successful hardware-counter sample collection on this
+machine account because NVIDIA performance-counter privileges blocked the CUPTI
+counter-availability query before `cuptiPmSamplingStart` could arm.
 
 ## Test Environment: 2026-06-02 Linux RTX 3090 PyTorch Run
 
