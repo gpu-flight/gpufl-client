@@ -9,7 +9,13 @@ if(GPUFL_HAS_CUDA)
 endif()
 
 if(GPUFL_HAS_NVML)
-    target_link_libraries(gpufl-monitor PRIVATE CUDA::nvml)
+    if(TARGET CUDA::nvml)
+        target_link_libraries(gpufl-monitor PRIVATE CUDA::nvml)
+    elseif(NVML_LIBRARY)
+        target_link_libraries(gpufl-monitor PRIVATE ${NVML_LIBRARY})
+    else()
+        message(WARNING "GPUFL_HAS_NVML is true, but no NVML import target or library is available for gpufl-monitor")
+    endif()
 endif()
 
 install(TARGETS gpufl-monitor

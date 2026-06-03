@@ -79,7 +79,7 @@ all = [
 
 [tool.scikit-build]
 cmake.args = ["-DCMAKE_BUILD_TYPE=Release", "--log-level=STATUS"]
-cmake.define = { BUILD_PYTHON = "ON", BUILD_GPUFL_EXAMPLE = "OFF" }
+cmake.define = { BUILD_PYTHON = "ON", BUILD_GPUFL_EXAMPLE = "OFF", BUILD_TESTING = "OFF", PYBIND11_FINDPYTHON = "ON" }
 cmake.build-type = "Release"
 cmake.verbose = true
 logging.level = "INFO"

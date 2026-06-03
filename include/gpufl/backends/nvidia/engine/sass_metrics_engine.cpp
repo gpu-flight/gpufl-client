@@ -162,6 +162,13 @@ bool ShouldUseLazyPatching() {
     // the all-zero SASS counter behavior.
     return EnvFlagEnabled("GPUFL_SASS_LAZY_PATCHING");
 }
+
+bool ShouldDeferScopeFlush() {
+    // Diagnostic mode: keep SASS armed across scope boundaries and flush only
+    // at session stop/shutdown. This separates "SASS + activity" issues from
+    // "disable/flush raced a concurrent framework launch" issues.
+    return EnvFlagEnabled("GPUFL_SASS_DEFER_SCOPE_FLUSH");
+}
 }  // namespace
 
 bool SassMetricsEngine::initialize(const MonitorOptions& opts,
@@ -332,6 +339,15 @@ void SassMetricsEngine::onScopeStart(const char* name) {
 
 void SassMetricsEngine::onScopeStop(const char* name) {
     if (!enabled_ || !ctx_.cuda_ctx) return;
+
+    if (ShouldDeferScopeFlush()) {
+        GFL_LOG_DEBUG(
+            "[SassMetricsEngine] deferring SASS metrics flush/disable for "
+            "scope: ",
+            name ? name : "<unnamed>",
+            " (GPUFL_SASS_DEFER_SCOPE_FLUSH=1)");
+        return;
+    }
 
     GFL_LOG_DEBUG("[SassMetricsEngine] flushing SASS metrics for scope: ",
                   name ? name : "<unnamed>");
