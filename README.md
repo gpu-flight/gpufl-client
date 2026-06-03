@@ -55,6 +55,83 @@ git clone https://github.com/gpu-flight/gpufl-client.git
 CMAKE_ARGS="-DBUILD_TESTING=OFF" pip install "./gpufl-client[analyzer,viz]"
 ```
 
+### Build Scripts
+
+The repository includes platform-specific helper scripts for local source
+builds. Use these scripts when you need to build against a specific CUDA
+Toolkit, Python virtual environment, or wheel ABI.
+
+#### Ubuntu / Linux
+
+`build.sh` is the Linux entrypoint. It delegates to `build-ubuntu.sh`.
+
+```bash
+# Install into the active Python environment
+./build.sh
+
+# Build a wheel into ./dist
+./build.sh --wheel
+
+# Use an explicit Python and CUDA Toolkit
+./build-ubuntu.sh --wheel \
+  --python .venv/bin/python \
+  --cuda-root /usr/local/cuda-13.2
+```
+
+Useful options:
+
+| Option | Meaning |
+|---|---|
+| `--install` | Install the package into the selected Python environment. This is the default. |
+| `--wheel` | Build a wheel into `./dist` or `--wheel-dir`. |
+| `--python PATH` | Python executable to use. Use your target virtual environment's Python when building wheels. |
+| `--cuda-root PATH` | CUDA Toolkit root, for example `/usr/local/cuda-13.2`. |
+| `--wheel-dir PATH` | Output directory for built wheels. |
+
+#### Windows
+
+Use `build-windows.ps1` from PowerShell. The script imports the Visual Studio
+2022 `vcvars64.bat` environment when it can find it, then sets the CUDA and
+CMake generator variables for the build.
+
+```powershell
+# Install into the active Python environment
+powershell -ExecutionPolicy Bypass -File .\build-windows.ps1
+
+# Build a wheel into .\dist
+powershell -ExecutionPolicy Bypass -File .\build-windows.ps1 -Mode wheel
+
+# Build a wheel for a specific Python venv and CUDA Toolkit
+powershell -ExecutionPolicy Bypass -File .\build-windows.ps1 `
+  -Mode wheel `
+  -Python "C:\path\to\.venv\Scripts\python.exe" `
+  -CudaPath "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2"
+```
+
+Useful parameters:
+
+| Parameter | Meaning |
+|---|---|
+| `-Mode install` | Install the package into the selected Python environment. This is the default. |
+| `-Mode wheel` | Build a wheel into `.\dist` or `-WheelDir`. |
+| `-Python PATH` | Python executable to use. Use the target virtual environment's Python so the wheel tag matches that environment, for example `cp313`. |
+| `-CudaPath PATH` | CUDA Toolkit root. If omitted, the script checks `CUDA_PATH`, `CUDA_HOME`, then common CUDA 13.x install paths. |
+| `-WheelDir PATH` | Output directory for built wheels. |
+| `-NoVcVars` | Skip importing `vcvars64.bat` and use the current shell environment. |
+
+Both platform scripts pass the current CMake options:
+
+```text
+BUILD_PYTHON=ON
+BUILD_GPUFL_EXAMPLE=OFF
+BUILD_TESTING=OFF
+PYBIND11_FINDPYTHON=ON
+GPUFL_ENABLE_NVIDIA=ON
+GPUFL_ENABLE_AMD=OFF
+CUDAToolkit_ROOT=<selected CUDA Toolkit>
+CMAKE_CUDA_COMPILER=<selected nvcc>
+```
+
 ### C++ (CMake FetchContent)
 ```cmake
 cmake_minimum_required(VERSION 3.31)

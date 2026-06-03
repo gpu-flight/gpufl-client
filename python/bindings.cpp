@@ -1,4 +1,5 @@
 #include <stdexcept>
+#include <sstream>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include "gpufl/gpufl.hpp"

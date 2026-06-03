@@ -54,15 +54,16 @@ class CuptiBackend : public IMonitorBackend {
     }
     bool SassMetricsOnlyMode() const {
         if (!IsSassProfilerMode()) return false;
-        // Isolation mode only. By default match main: allow normal CUPTI
-        // activity/callback tracing to coexist with SASS metrics.
+        // Isolation mode: disable CUPTI activity/callback tracing around SASS
+        // metrics while keeping SASS itself enabled.
         return EnvFlagEnabled_("GPUFL_SASS_METRICS_ONLY");
     }
     bool UseSafeSassActivityDefaults() const {
         if (!IsSassProfilerMode()) return false;
         if (SassMetricsOnlyMode()) return true;
         if (EnvFlagEnabled_("GPUFL_SASS_FORCE_SAFE_ACTIVITY")) return true;
-        return false;
+        if (EnvFlagEnabled_("GPUFL_SASS_ALLOW_FULL_ACTIVITY")) return false;
+        return true;
     }
     bool AllowSassKernelActivity() const {
         if (SassMetricsOnlyMode()) return false;
@@ -130,6 +131,10 @@ class CuptiBackend : public IMonitorBackend {
     // to. (ProfilingEngine::Monitor never constructs a CuptiBackend at
     // all, so it doesn't reach this method.)
     bool NeedsCubinCapture() const {
+        if (EnvFlagEnabled_("GPUFL_DISABLE_CUBIN_CAPTURE")) return false;
+        if (IsSassProfilerMode() &&
+            EnvFlagEnabled_("GPUFL_SASS_DISABLE_CUBIN_CAPTURE"))
+            return false;
         return opts_.profiling_engine == ProfilingEngine::PcSampling ||
                opts_.profiling_engine == ProfilingEngine::SassMetrics ||
                opts_.profiling_engine == ProfilingEngine::Deep;
