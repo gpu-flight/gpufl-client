@@ -159,6 +159,7 @@ int runTrace(const TraceArgs& args) {
 
     setEnvOrDie("LD_PRELOAD", ld_preload);
     setEnvOrDie("CUDA_INJECTION64_PATH", inject_lib.string());
+    setEnvOrDie("NVTX_INJECTION64_PATH", inject_lib.string());
     setEnvOrDie(inject::kEnvSentinel, "1");
     setEnvOrDie(inject::kEnvAppName, app_name);
     setEnvOrDie(inject::kEnvLogDir, output_dir.string());

@@ -2,6 +2,7 @@
 
 #include <algorithm>  // std::min(initializer_list) — see occupancy calc below
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>    // strnlen — bounded read in cachedDemangle
 #include <iterator>   // std::begin / std::end on the user_scope C-array
 #include <set>
@@ -283,16 +284,23 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
                 if (i > 0) fullPath += "|";
                 fullPath += stack[i];
             }
-            fullPath += "|";
-            fullPath += meta.name;
             std::snprintf(meta.user_scope, sizeof(meta.user_scope), "%s",
                           fullPath.c_str());
             meta.scope_depth = stack.size();
+        } else if (const char* injectedApp = std::getenv("GPUFL_APP_NAME")) {
+            if (std::getenv("GPUFL_INJECT") && injectedApp[0] != '\0') {
+                std::string processScope = "process:";
+                processScope += injectedApp;
+                std::snprintf(meta.user_scope, sizeof(meta.user_scope), "%s",
+                              processScope.c_str());
+            } else {
+                std::snprintf(meta.user_scope, sizeof(meta.user_scope), "%s",
+                              "global");
+            }
+            meta.scope_depth = 0;
         } else {
-            std::string fullPath = "global|";
-            fullPath += meta.name;
             std::snprintf(meta.user_scope, sizeof(meta.user_scope), "%s",
-                          fullPath.c_str());
+                          "global");
             meta.scope_depth = 0;
         }
 

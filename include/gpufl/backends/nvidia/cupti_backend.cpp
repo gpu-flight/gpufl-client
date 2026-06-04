@@ -4,6 +4,8 @@
 #include <cupti_pcsampling.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cstring>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
@@ -15,14 +17,7 @@
 #include <utility>
 #include <vector>
 
-// Platform-specific includes for runtime NVTX injection path discovery.
-#if defined(_WIN32)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#include <psapi.h>  // EnumProcessModules / GetModuleFileNameA
-#elif defined(__linux__)
+#if defined(__linux__)
 #include <dlfcn.h>
 #endif
 
@@ -290,6 +285,42 @@ inline void PreloadMatchingPerfWorks() {}
 #endif
 }  // namespace
 
+bool CuptiBackend::ShouldEnableNvtxMarkerActivityBeforeEngine_() const {
+    if (!IsSassProfilerMode()) return true;
+    return AllowSassMarkerActivity();
+}
+
+bool CuptiBackend::ShouldEnableNvtxMarkerActivityForSelectedEngine_() const {
+    if (!IsSassProfilerMode()) return true;
+    if (AllowSassMarkerActivity()) return true;
+
+    // Deep is requested as a SASS-capable mode, but its selected engine is
+    // known only after PcSamplingWithSassEngine::start(). If SASS did not arm,
+    // Deep degraded to PC sampling and NVTX markers are safe/useful again.
+    if (opts_.profiling_engine == ProfilingEngine::Deep) {
+        const auto* deep = dynamic_cast<const PcSamplingWithSassEngine*>(engine_.get());
+        return deep && !deep->sassActive();
+    }
+
+    return false;
+}
+
+void CuptiBackend::EnableNvtxMarkerActivity_(const char* phase) {
+    const CUptiResult res = cuptiActivityEnable(CUPTI_ACTIVITY_KIND_MARKER);
+    if (res == CUPTI_SUCCESS) {
+        GFL_LOG_DEBUG("[CuptiBackend] NVTX MARKER activity enabled (", phase, ")");
+    } else {
+        LogCuptiIfUnexpected("CuptiBackend", "cuptiActivityEnable(MARKER)", res);
+    }
+}
+
+void CuptiBackend::LogNvtxMarkerActivityDisabled_(const char* phase) {
+    GFL_LOG_DEBUG(
+        "[CuptiBackend] NVTX MARKER activity disabled (", phase,
+        ") because SASS metrics are selected. Set "
+        "GPUFL_SASS_ALLOW_MARKER_ACTIVITY=1 to test SASS + NVTX markers.");
+}
+
 void CuptiBackend::initialize(const MonitorOptions& opts) {
     opts_ = opts;
     profiling_request_ = MakeProfilingRequest(opts_);
@@ -497,19 +528,17 @@ void CuptiBackend::start() {
     // RangeProfiler, Trace — no longer emit records nothing reads, and
     // PcSampling stops enabling them when it falls back to the new SamplingAPI
     // on CUDA 13.x.
-    // MARKER records capture NVTX push/pop ranges. We enable this
-    // unconditionally because:
-    //   - GFL_SCOPE itself now emits NVTX ranges (see gpufl.cpp)
-    //   - PyTorch / cuDNN / cuBLAS / NCCL emit NVTX automatically
-    //   - The cost is ~zero when no NVTX traffic exists
-    // Paired START/END records are merged into NvtxMarkerEvent below
-    // in BufferCompleted.
-    if (AllowSassMarkerActivity()) {
-        CUPTI_CHECK(cuptiActivityEnable(CUPTI_ACTIVITY_KIND_MARKER));
+    // MARKER records capture NVTX push/pop ranges. NVTX is an annotation
+    // layer for trace-style views (scope/kernel/memory/sync correlation), so
+    // enable it by default for non-SASS engines. SASS metrics are the one
+    // exception: keep MARKER off by default to avoid reintroducing the CUPTI
+    // activity/SASS stability problems we guarded elsewhere. Deep is resolved
+    // again after engine start, when we know whether it actually selected
+    // SASS or fell back to PC sampling.
+    if (ShouldEnableNvtxMarkerActivityBeforeEngine_()) {
+        EnableNvtxMarkerActivity_("pre-engine");
     } else {
-        GFL_LOG_DEBUG(
-            "[CuptiBackend] MARKER activity disabled in SASS profiler mode. "
-            "Set GPUFL_SASS_ALLOW_MARKER_ACTIVITY=1 to test it.");
+        LogNvtxMarkerActivityDisabled_("pre-engine");
     }
 
     // SYNCHRONIZATION records capture every cudaStreamSynchronize /
@@ -640,124 +669,6 @@ void CuptiBackend::start() {
         }
     }
 
-    // NVTX v3 injection — register CUPTI as the NVTX provider.
-    //
-    // NVTX v3 (header-only since CUDA 11, mandatory in CUDA 13) works via
-    // a lazy injection mechanism: on the *first* nvtxRangePushA/Pop call, it
-    // reads the NVTX_INJECTION64_PATH environment variable, loads that DLL,
-    // and calls its "InitializeInjectionNvtx2" export. CUPTI exports this
-    // function, so pointing the env var at the already-loaded CUPTI DLL
-    // makes every subsequent NVTX call route through CUPTI and produce
-    // CUPTI_ACTIVITY_KIND_MARKER records.
-    //
-    // If NVTX_INJECTION64_PATH is not set, nvtxRangePushA is a silent no-op
-    // (all calls go to the null provider) and no MARKER records are ever
-    // produced, regardless of cuptiActivityEnable(MARKER) being called.
-    //
-    // We discover the CUPTI DLL path at runtime from the address of a CUPTI
-    // function that is already loaded in this process — robust to non-standard
-    // install locations and doesn't require CUDA_PATH to be set.
-    // We only set the env var if it hasn't been set externally, so a user who
-    // wants to use a custom injection library can still do so.
-#if GPUFL_HAS_NVTX
-    if (!getenv("NVTX_INJECTION64_PATH")) {
-        // Discover the CUPTI DLL path by finding the loaded module that:
-        //   (a) exports "InitializeInjectionNvtx2" (the symbol NVTX v3 calls)
-        //   (b) is the same CUPTI we linked against — i.e., it lives under
-        //       the CUDA toolkit (CUDA_PATH), NOT under a framework bundle.
-        //
-        // Context: PyTorch ships its own cupti64_*.dll under lib/. If we
-        // blindly pick the first module that exports InitializeInjectionNvtx2
-        // we may get PyTorch's CUPTI, which has a different subscriber context
-        // than the CUDA toolkit CUPTI our backend already runs under.
-        // Using the wrong CUPTI as the NVTX injection DLL causes CUPTI to
-        // deliver NVTX marker records to the wrong subscriber (silent loss),
-        // and in some cases causes a crash at the CUDA runtime boundary due
-        // to two CUPTI instances both intercepting the same operations.
-        //
-        // Strategy: two-pass scan.
-        //   Pass 0: prefer the module whose path begins with CUDA_PATH.
-        //   Pass 1: accept any module that exports InitializeInjectionNvtx2
-        //           (fallback for systems where CUDA_PATH is not set).
-#if defined(_WIN32)
-        const char* cudaPath = getenv("CUDA_PATH");
-        HMODULE hMods[512];
-        DWORD cbNeeded = 0;
-        HANDLE hProcess = GetCurrentProcess();
-        if (EnumProcessModules(hProcess, hMods, sizeof(hMods), &cbNeeded)) {
-            DWORD count = cbNeeded / sizeof(HMODULE);
-            if (count > 512) count = 512;
-
-            char chosen[MAX_PATH] = {};
-            for (DWORD pass = 0; pass < 2 && chosen[0] == '\0'; ++pass) {
-                for (DWORD i = 0; i < count; ++i) {
-                    if (!GetProcAddress(hMods[i], "InitializeInjectionNvtx2"))
-                        continue;
-                    char modPath[MAX_PATH] = {};
-                    DWORD len = GetModuleFileNameA(hMods[i], modPath, MAX_PATH);
-                    if (len == 0 || len >= MAX_PATH) continue;
-
-                    if (pass == 0 && cudaPath) {
-                        // Accept only if under the CUDA toolkit path
-                        if (_strnicmp(modPath, cudaPath, strlen(cudaPath)) == 0) {
-                            strncpy_s(chosen, modPath, MAX_PATH - 1);
-                            break;
-                        }
-                    } else if (pass == 1) {
-                        // Fallback: take the first we can find
-                        strncpy_s(chosen, modPath, MAX_PATH - 1);
-                        break;
-                    }
-                }
-            }
-            if (chosen[0]) {
-                _putenv_s("NVTX_INJECTION64_PATH", chosen);
-                GFL_LOG_DEBUG("[CuptiBackend] NVTX injection path: ", chosen);
-            }
-        }
-#elif defined(__linux__)
-        // On Linux, libcupti.so is loaded once. dlsym(RTLD_DEFAULT, ...) finds
-        // whichever .so was loaded first; prefer CUDA_PATH if set.
-        const char* cudaPath = getenv("CUDA_PATH");
-        void* sym = nullptr;
-
-        if (cudaPath) {
-            // Build the expected libcupti.so path under CUDA_PATH
-            std::string soPath = std::string(cudaPath) + "/extras/CUPTI/lib64/libcupti.so";
-            void* hCupti = dlopen(soPath.c_str(), RTLD_NOLOAD | RTLD_LAZY);
-            if (!hCupti) {
-                soPath = std::string(cudaPath) + "/lib64/libcupti.so";
-                hCupti = dlopen(soPath.c_str(), RTLD_NOLOAD | RTLD_LAZY);
-            }
-            if (hCupti) {
-                sym = dlsym(hCupti, "InitializeInjectionNvtx2");
-                if (sym) {
-                    Dl_info info{};
-                    if (dladdr(sym, &info) && info.dli_fname && info.dli_fname[0]) {
-                        setenv("NVTX_INJECTION64_PATH", info.dli_fname, 0);
-                        GFL_LOG_DEBUG("[CuptiBackend] NVTX injection path: ",
-                                      info.dli_fname);
-                    }
-                }
-                dlclose(hCupti);
-            }
-        }
-        if (!sym) {
-            // Fallback: find any loaded .so that exports the symbol
-            sym = dlsym(RTLD_DEFAULT, "InitializeInjectionNvtx2");
-            if (sym) {
-                Dl_info info{};
-                if (dladdr(sym, &info) && info.dli_fname && info.dli_fname[0]) {
-                    setenv("NVTX_INJECTION64_PATH", info.dli_fname, 0);
-                    GFL_LOG_DEBUG("[CuptiBackend] NVTX injection path: ",
-                                  info.dli_fname);
-                }
-            }
-        }
-#endif
-    }
-#endif  // GPUFL_HAS_NVTX
-
     // Enable activity kinds required by registered handlers (always on)
     {
         std::set<CUpti_ActivityKind> kinds;
@@ -791,6 +702,16 @@ void CuptiBackend::start() {
                 for (auto k : h->requiredActivityKinds()) kinds.insert(k);
         }
         for (auto k : kinds) cuptiActivityEnable(k);
+    }
+
+    // Re-resolve NVTX marker policy after engine start. This is primarily for
+    // Deep: the request is SASS-capable, but the selected path may be PC
+    // sampling if SASS declined/fell back. Engines may also reset activity
+    // subscriptions during start(), so re-enable MARKER here when selected.
+    if (ShouldEnableNvtxMarkerActivityForSelectedEngine_()) {
+        EnableNvtxMarkerActivity_("post-engine-selected");
+    } else {
+        LogNvtxMarkerActivityDisabled_("post-engine-selected");
     }
 
     // also re-enable EXTERNAL_CORRELATION + RUNTIME after engine

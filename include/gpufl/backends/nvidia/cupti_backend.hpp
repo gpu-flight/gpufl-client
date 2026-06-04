@@ -140,6 +140,11 @@ class CuptiBackend : public IMonitorBackend {
     }
 
    private:
+    bool ShouldEnableNvtxMarkerActivityBeforeEngine_() const;
+    bool ShouldEnableNvtxMarkerActivityForSelectedEngine_() const;
+    static void EnableNvtxMarkerActivity_(const char* phase);
+    static void LogNvtxMarkerActivityDisabled_(const char* phase);
+
     friend class ResourceHandler;
     friend class KernelLaunchHandler;
     friend class MemTransferHandler;

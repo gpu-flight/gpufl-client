@@ -285,6 +285,13 @@ class Monitor {
     static void PushScopeRow(const ScopeBatchRow& row);
 
     /**
+     *  Push a raw activity record into the monitor ring buffer.
+     * Used by low-level injection callbacks that already have a complete
+     * ActivityRecord and should use the normal collector serialization path.
+     */
+    static void PushActivityRecord(const ActivityRecord& rec);
+
+    /**
      * @brief Bulk-push profile samples (SASS metric rows, etc.) directly
      * into the profile batch buffer.
      *

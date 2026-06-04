@@ -603,15 +603,16 @@ void shutdown() {
     g_nvtx_available.store(false, std::memory_order_release);
 #endif
 
-    Monitor::Stop();
-    Monitor::Shutdown();
     Runtime* rt = runtime();
     if (!rt) return;
 
-    // Hard teardown — zero any remaining activation count and join the
-    // worker thread. shutdown() short-circuits even if scopes leaked or
-    // systemStart/stop were unbalanced, so this is the safety net.
+    // Stop the system sampler before CUPTI/backend teardown. The sampler can
+    // be inside NVML while shutdown begins, especially in injection mode where
+    // process exit races with late CUDA initialization. Joining it first keeps
+    // backend shutdown from overlapping with telemetry collection.
     rt->sampler.shutdown();
+
+    Monitor::Shutdown();
 
     if (g_opts.continuous_system_sampling && rt->collector) {
         SystemStopEvent e;

@@ -605,6 +605,10 @@ void Monitor::EnqueueCubinForDisassembly(uint64_t crc, const uint8_t* data,
     g_dictManager.enqueueDisassembly(crc, data, size);
 }
 
+void Monitor::PushActivityRecord(const ActivityRecord& rec) {
+    g_monitorBuffer.Push(rec);
+}
+
 void Monitor::PushScopeRow(const ScopeBatchRow& row) {
     if (row.event_type == 0) {  // begin: update active scope for PC sample association
         g_activeScopeNameId.store(row.name_id, std::memory_order_relaxed);

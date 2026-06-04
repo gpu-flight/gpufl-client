@@ -565,6 +565,12 @@ if(UNIX AND NOT APPLE AND BUILD_GPUFL_INJECT)
         include/gpufl/inject/inject_entry.cpp
     )
     target_link_libraries(gpufl_inject PRIVATE gpufl::gpufl)
+    if(CUDAToolkit_INCLUDE_DIRS)
+        target_include_directories(gpufl_inject PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+    endif()
+    if(NVTX3_INCLUDE_DIR)
+        target_include_directories(gpufl_inject PRIVATE ${NVTX3_INCLUDE_DIR})
+    endif()
     set_target_properties(gpufl_inject PROPERTIES
         OUTPUT_NAME gpufl_inject
         # Hide internal symbols; only the extern "C" InitializeInjection
