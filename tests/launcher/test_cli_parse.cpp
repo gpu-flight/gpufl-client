@@ -73,20 +73,53 @@ TEST(CliParseTrace, ProfileValid) {
     EXPECT_EQ(r.args->profile, "light");
 }
 
+TEST(CliParseTrace, ProfileMonitoringOnly) {
+    auto r = parseTraceArgs(argsFor({"--profile=monitoring-only", "--", "./bin"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    EXPECT_EQ(r.args->profile, "monitoring-only");
+}
+
 TEST(CliParseTrace, ProfileInvalid) {
     auto r = parseTraceArgs(argsFor({"--profile=galactic", "--", "./bin"}));
     EXPECT_FALSE(r.args.has_value());
     EXPECT_NE(r.error.find("invalid --profile"), std::string::npos);
 }
 
-TEST(CliParseTrace, EngineValid) {
-    auto r = parseTraceArgs(argsFor({"--engine=pc-sampling-with-sass", "--", "./bin"}));
+TEST(CliParseTrace, UploadFlag) {
+    auto r = parseTraceArgs(argsFor({"--upload", "--", "./bin"}));
     ASSERT_TRUE(r.args.has_value()) << r.error;
-    EXPECT_EQ(r.args->engine, "pc-sampling-with-sass");
+    EXPECT_TRUE(r.args->upload);
+}
+
+TEST(CliParseTrace, UploadDefaultsFalse) {
+    auto r = parseTraceArgs(argsFor({"--", "./bin"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    EXPECT_FALSE(r.args->upload);
+}
+
+TEST(CliParseTrace, EngineValid) {
+    auto r = parseTraceArgs(argsFor({"--engine=Deep", "--", "./bin"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    EXPECT_EQ(r.args->engine, "Deep");
+}
+
+TEST(CliParseTrace, EngineValidMonitor) {
+    auto r = parseTraceArgs(argsFor({"--engine", "Monitor", "--", "./bin"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    EXPECT_EQ(r.args->engine, "Monitor");
 }
 
 TEST(CliParseTrace, EngineInvalid) {
     auto r = parseTraceArgs(argsFor({"--engine=hyperdrive", "--", "./bin"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("invalid --engine"), std::string::npos);
+}
+
+TEST(CliParseTrace, EngineLegacyKebabRejected) {
+    // The pre-refactor kebab vocab ("pc-sampling", "pc-sampling-with-sass",
+    // "none") is no longer accepted; the CLI now speaks the canonical
+    // ladder names that gpufl::init() parses for GPUFL_PROFILING_ENGINE.
+    auto r = parseTraceArgs(argsFor({"--engine=pc-sampling", "--", "./bin"}));
     EXPECT_FALSE(r.args.has_value());
     EXPECT_NE(r.error.find("invalid --engine"), std::string::npos);
 }
@@ -133,6 +166,85 @@ TEST(CliParseTrace, FlagsAfterDashDashTreatedAsCommandArgs) {
     ASSERT_TRUE(r.args.has_value()) << r.error;
     EXPECT_EQ(r.args->command.size(), 2u);
     EXPECT_EQ(r.args->command[1], "--verbose");
+}
+
+// ── gpufl upload ────────────────────────────────────────────────────────
+
+TEST(CliParseUpload, BasicLogPath) {
+    auto r = parseUploadArgs(argsFor({"/tmp/run"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    EXPECT_EQ(r.args->log_path, "/tmp/run");
+    EXPECT_EQ(r.args->timeout_s, 300);
+    EXPECT_EQ(r.args->retries, 1);
+    EXPECT_FALSE(r.args->quiet);
+    EXPECT_FALSE(r.args->all_sessions);
+    EXPECT_FALSE(r.args->force);
+}
+
+TEST(CliParseUpload, AllFlags) {
+    auto r = parseUploadArgs(argsFor({
+        "--backend-url=https://api.example.com", "--api-key", "gpfl_k",
+        "--api-path=/proxy/api", "--timeout=600", "--retries=3",
+        "--quiet", "--all-sessions", "--force", "/tmp/run"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    EXPECT_EQ(r.args->log_path, "/tmp/run");
+    EXPECT_EQ(r.args->backend_url, "https://api.example.com");
+    EXPECT_EQ(r.args->api_key, "gpfl_k");
+    EXPECT_EQ(r.args->api_path, "/proxy/api");
+    EXPECT_EQ(r.args->timeout_s, 600);
+    EXPECT_EQ(r.args->retries, 3);
+    EXPECT_TRUE(r.args->quiet);
+    EXPECT_TRUE(r.args->all_sessions);
+    EXPECT_TRUE(r.args->force);
+}
+
+TEST(CliParseUpload, SpaceFormValue) {
+    auto r = parseUploadArgs(argsFor({"--backend-url", "https://x", "/tmp/run"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    EXPECT_EQ(r.args->backend_url, "https://x");
+    EXPECT_EQ(r.args->log_path, "/tmp/run");
+}
+
+TEST(CliParseUpload, MissingLogPath) {
+    auto r = parseUploadArgs(argsFor({"--force"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("LOG_PATH"), std::string::npos);
+}
+
+TEST(CliParseUpload, SessionIdAndAllSessionsMutuallyExclusive) {
+    auto r = parseUploadArgs(argsFor({"--session-id=abc", "--all-sessions", "/tmp/run"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("mutually exclusive"), std::string::npos);
+}
+
+TEST(CliParseUpload, InvalidTimeout) {
+    auto r = parseUploadArgs(argsFor({"--timeout=abc", "/tmp/run"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("invalid --timeout"), std::string::npos);
+}
+
+TEST(CliParseUpload, NegativeRetriesRejected) {
+    auto r = parseUploadArgs(argsFor({"--retries=-5", "/tmp/run"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("invalid --retries"), std::string::npos);
+}
+
+TEST(CliParseUpload, ExtraPositionalRejected) {
+    auto r = parseUploadArgs(argsFor({"/tmp/a", "/tmp/b"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("extra argument"), std::string::npos);
+}
+
+TEST(CliParseUpload, UnknownFlag) {
+    auto r = parseUploadArgs(argsFor({"--definitely-not-a-flag", "/tmp/run"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("unknown flag"), std::string::npos);
+}
+
+TEST(CliParseUpload, HelpFlag) {
+    auto r = parseUploadArgs(argsFor({"--help"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_EQ(r.error, "__help__");
 }
 
 TEST(CliParseTopLevel, NoArgsShowsHelp) {

@@ -167,6 +167,22 @@ int runTrace(const TraceArgs& args) {
         setEnvOrDie(inject::kEnvProfilingEngine, args.engine);
     }
 
+    // --upload: fail fast here (before we exec the target) if the creds
+    // the inject lib's post-run uploadLogs() will need aren't in the
+    // environment. Better a clear usage error now than a buried warning
+    // after a long run finishes.
+    if (args.upload) {
+        const char* api_key     = std::getenv("GPUFL_API_KEY");
+        const char* backend_url = std::getenv("GPUFL_BACKEND_URL");
+        if (!api_key || !*api_key || !backend_url || !*backend_url) {
+            std::fprintf(stderr,
+                "gpufl trace --upload: GPUFL_API_KEY and GPUFL_BACKEND_URL "
+                "must both be set in the environment to upload.\n");
+            return 2;
+        }
+        setEnvOrDie(inject::kEnvUpload, "1");
+    }
+
     if (!args.quiet) {
         std::fprintf(stderr, "[gpufl] capturing → %s\n",
                      output_dir.string().c_str());

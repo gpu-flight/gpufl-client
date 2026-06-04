@@ -28,26 +28,23 @@
 #include <unistd.h>
 
 #include "gpufl/gpufl.hpp"
-#include "gpufl/core/monitor.hpp"  // ProfilingEngine enum
+#include "gpufl/upload/upload_logs.hpp"  // gpufl::uploadLogs for --upload
 
 namespace {
 
 std::once_flag g_init_once;
 std::atomic<bool> g_init_ok{false};
 
+// Captured during init for the atexit upload path (--upload). g_log_path
+// mirrors InitOptions.log_path; both are read only in shutdownAndSignal,
+// which runs after doInjectInit completed under g_init_once.
+std::string g_log_path;
+std::atomic<bool> g_do_upload{false};
+
 // Non-empty env value, or std::nullopt if unset / empty.
 const char* envOrNull(const char* name) {
     const char* v = std::getenv(name);
     return (v && *v) ? v : nullptr;
-}
-
-gpufl::ProfilingEngine parseEngine(const std::string& s,
-                                   gpufl::ProfilingEngine fallback) {
-    if (s == "pc-sampling")           return gpufl::ProfilingEngine::PcSampling;
-    if (s == "sass-metrics")          return gpufl::ProfilingEngine::SassMetrics;
-    if (s == "pc-sampling-with-sass") return gpufl::ProfilingEngine::PcSamplingWithSass;
-    if (s == "none")                  return gpufl::ProfilingEngine::None;
-    return fallback;
 }
 
 void writeCompletionByteIfRequested() {
@@ -65,6 +62,22 @@ void writeCompletionByteIfRequested() {
 void shutdownAndSignal() {
     if (g_init_ok.load(std::memory_order_acquire)) {
         gpufl::shutdown();
+
+        // --upload: ship the just-written NDJSON to the backend. This is
+        // the forward path (gpufl::uploadLogs), not the deprecated
+        // opts.remote_upload shim. All network I/O happens here, after
+        // shutdown() flushed the logs and the GPU workload is done, so it
+        // can never affect the target's exit code or perf. Best-effort:
+        // any failure is reported via gpufl's own debug log, never raised.
+        if (g_do_upload.load(std::memory_order_relaxed) && !g_log_path.empty()) {
+            gpufl::UploadOptions uopts;
+            uopts.log_path = g_log_path;
+            if (const char* v = envOrNull("GPUFL_BACKEND_URL")) uopts.backend_url = v;
+            if (const char* v = envOrNull("GPUFL_API_KEY"))     uopts.api_key = v;
+            if (const char* v = envOrNull("GPUFL_API_PATH"))    uopts.api_path = v;
+            uopts.report_progress = false;  // don't pollute the target's stderr
+            (void)gpufl::uploadLogs(uopts);
+        }
     }
     writeCompletionByteIfRequested();
 }
@@ -81,10 +94,11 @@ void doInjectInit() {
     if (const char* p = envOrNull(gpufl::inject::kEnvProfile)) {
         if (std::strcmp(p, gpufl::inject::kProfileLight) == 0) {
             opts = gpufl::light_mode_default_options();
+        } else if (std::strcmp(p, gpufl::inject::kProfileMonitoringOnly) == 0) {
+            opts = gpufl::monitoring_mode_default_options();
         } else {
-            // "comprehensive" (default) and "monitoring-only" both
-            // start from the comprehensive baseline; finer-grained
-            // monitoring-only tuning lands in Phase 4.
+            // "comprehensive" (default) — full injection capture (Deep
+            // engine + most observability flags on).
             opts = gpufl::injection_mode_default_options();
         }
     } else {
@@ -104,13 +118,16 @@ void doInjectInit() {
         // the launcher's chosen dir.
         opts.log_path = std::string(v) + "/app.log";
     }
-    if (const char* v = envOrNull(gpufl::inject::kEnvProfilingEngine)) {
-        opts.profiling_engine = parseEngine(v, opts.profiling_engine);
-    }
+    // gpufl::init() reads the rest of the GPUFL_* env vars itself,
+    // including GPUFL_PROFILING_ENGINE — it is the single string->enum
+    // engine parser (see gpufl.cpp). It also reads backend_url, api_key,
+    // api_path, config_name. No need to plumb any of them through here.
 
-    // gpufl::init() reads the rest of the GPUFL_* env vars itself
-    // (backend_url, api_key, api_path, remote_upload, config_name).
-    // No need to plumb them through here.
+    // Capture what the atexit upload path needs (see shutdownAndSignal).
+    g_log_path = opts.log_path;
+    if (const char* u = envOrNull(gpufl::inject::kEnvUpload)) {
+        g_do_upload.store(std::strcmp(u, "1") == 0, std::memory_order_relaxed);
+    }
 
     if (gpufl::init(opts)) {
         g_init_ok.store(true, std::memory_order_release);

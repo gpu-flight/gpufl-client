@@ -23,10 +23,20 @@ constexpr const char* kEnvLogDir = "GPUFL_LOG_DIR";
 // Maps to one of the `*_default_options()` factories in gpufl.hpp.
 constexpr const char* kEnvProfile = "GPUFL_INJECT_PROFILE";
 
-// Override the profiling engine. Values: "pc-sampling" |
-// "sass-metrics" | "pc-sampling-with-sass" | "none". Empty = use
-// the profile's default engine.
+// Override the profiling engine. The launcher validates the value and
+// forwards it verbatim; gpufl::init() is the single parser for this var
+// (see gpufl.cpp), so the inject lib does NOT parse it. Canonical values:
+// "Monitor" | "Trace" | "PcSampling" | "SassMetrics" | "PmSampling" |
+// "RangeProfiler" | "Deep". Empty = use the profile's default engine.
 constexpr const char* kEnvProfilingEngine = "GPUFL_PROFILING_ENGINE";
+
+// Opt-in: when "1", the inject lib runs gpufl::uploadLogs() right after
+// gpufl::shutdown() returns (and before signalling completion), shipping
+// the session's NDJSON to the backend. Creds come from the standard
+// GPUFL_API_KEY / GPUFL_BACKEND_URL / GPUFL_API_PATH env vars (the same
+// ones gpufl::init() reads). Set by the launcher's `--upload` flag, which
+// pre-checks that the key + url are present before exec.
+constexpr const char* kEnvUpload = "GPUFL_INJECT_UPLOAD";
 
 // Phase 2: write end of an anonymous pipe inherited via fork. Inject
 // lib writes a single byte after gpufl::shutdown() returns so the

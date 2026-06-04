@@ -276,7 +276,8 @@ void shutdown();
 
 // Comprehensive-profile defaults for "injection" capture mode (the
 // libgpufl_inject.so launcher path). Flips most observability flags on
-// and selects PcSamplingWithSass for the richest per-instruction view.
+// and selects the Deep engine (PcSampling + SassMetrics in one run) for
+// the richest per-instruction view.
 // Documented overhead: ~5–15% wall time on heavy CUDA workloads.
 //
 // The launcher's `--profile` flag picks between this and
@@ -285,8 +286,7 @@ void shutdown();
 inline InitOptions injection_mode_default_options() {
     InitOptions opts;
     opts.app_name                    = "gpufl-trace";
-    opts.sampling_auto_start         = true;
-    opts.enable_kernel_details       = true;
+    opts.continuous_system_sampling  = true;
     opts.enable_stack_trace          = true;
     opts.enable_source_collection    = true;
     opts.enable_synchronization      = true;
@@ -294,7 +294,7 @@ inline InitOptions injection_mode_default_options() {
     opts.enable_cuda_graphs_tracking = true;
     opts.enable_external_correlation = true;
     opts.flush_logs_always           = false;
-    opts.profiling_engine            = ProfilingEngine::PcSamplingWithSass;
+    opts.profiling_engine            = ProfilingEngine::Deep;
     opts.system_sample_rate_ms       = 100;
     opts.kernel_sample_rate_ms       = 1000;
     opts.remote_upload               = false;
@@ -312,6 +312,30 @@ inline InitOptions light_mode_default_options() {
     opts.profiling_engine            = ProfilingEngine::PcSampling;
     opts.system_sample_rate_ms       = 500;
     opts.kernel_sample_rate_ms       = 5000;
+    return opts;
+}
+
+// Monitoring-only injection profile: GPU/host health telemetry with NO
+// CUPTI kernel capture at all (ProfilingEngine::Monitor) — no activity
+// trace, no PC sampling, no SASS. Immune to every CUPTI kernel-path
+// failure mode and the lowest overhead of the three presets. The
+// "just watch my GPU while this runs" mode for long runs / fleet
+// monitoring. Continuous system sampling is on so telemetry flows for
+// the whole process lifetime regardless of scopes.
+inline InitOptions monitoring_mode_default_options() {
+    InitOptions opts;
+    opts.app_name                    = "gpufl-trace";
+    opts.continuous_system_sampling  = true;
+    opts.enable_stack_trace          = false;
+    opts.enable_source_collection    = false;
+    opts.enable_synchronization      = false;
+    opts.enable_memory_tracking      = false;
+    opts.enable_cuda_graphs_tracking = false;
+    opts.enable_external_correlation = false;
+    opts.flush_logs_always           = false;
+    opts.profiling_engine            = ProfilingEngine::Monitor;
+    opts.system_sample_rate_ms       = 250;
+    opts.remote_upload               = false;
     return opts;
 }
 

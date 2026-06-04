@@ -290,7 +290,8 @@ if not result.success:
 
 ### CLI — `gpufl upload`
 
-For post-mortem recovery or one-off ad-hoc shipping:
+`upload` is a subcommand of the native `gpufl` binary (the same tool as
+`gpufl trace`). For post-mortem recovery or one-off ad-hoc shipping:
 
 ```bash
 gpufl upload ./logs \
@@ -306,6 +307,18 @@ gpufl upload ./logs --all-sessions --backend-url ... --api-key ...
 # Re-upload after the cursor marked it done
 gpufl upload ./logs --force --backend-url ... --api-key ...
 ```
+
+> The native `gpufl` binary is **Linux-only**. On Windows/macOS (or any
+> machine without the binary), the same uploader is available cross-platform
+> through the Python package:
+>
+> ```bash
+> python -m gpufl.cli upload ./logs --backend-url ... --api-key ...
+> ```
+>
+> Up to v1.1.0rc2 this shipped as a `gpufl` pip console-script; it was
+> consolidated into the native binary so a single command owns the `gpufl`
+> name. The in-process `gpufl.upload_logs()` API is unchanged.
 
 Env vars `GPUFL_BACKEND_URL` / `GPUFL_API_KEY` are accepted in place of
 the flags.

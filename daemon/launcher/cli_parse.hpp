@@ -16,13 +16,32 @@ struct TraceArgs {
     std::string engine;                 // --engine; empty = profile default
     bool verbose = false;               // -v
     bool quiet = false;                 // -q
+    bool upload = false;                // --upload: ship trace to backend post-run
     std::vector<std::string> command;   // tokens after `--`
+};
+
+// Parsed `gpufl upload` invocation. Mirrors the flag surface of the
+// (now-retired) Python `gpufl.cli` uploader; runUpload() in
+// upload_command.cpp resolves creds from env when a flag is omitted and
+// calls gpufl::uploadLogs().
+struct UploadArgs {
+    std::string log_path;           // positional: session log-path prefix
+    std::string backend_url;        // --backend-url (else env GPUFL_BACKEND_URL)
+    std::string api_key;            // --api-key (else env GPUFL_API_KEY)
+    std::string api_path;           // --api-path; empty resolves to /api/v1
+    int timeout_s = 300;            // --timeout (seconds); total wall budget
+    int retries = 1;                // --retries per failing POST
+    bool quiet = false;             // --quiet: suppress progress lines
+    std::string session_id;         // --session-id (mutually excl. with --all-sessions)
+    bool all_sessions = false;      // --all-sessions
+    bool force = false;             // --force: re-upload despite cursor
 };
 
 enum class Subcommand {
     Help,        // `gpufl --help` / `gpufl` with no args
     Version,     // `gpufl version` / `gpufl -V`
     Trace,       // `gpufl trace [opts] -- <command>...`
+    Upload,      // `gpufl upload <log_path> [opts]`
     Unknown,
 };
 
@@ -43,8 +62,21 @@ struct TraceParseResult {
 
 TraceParseResult parseTraceArgs(const std::vector<std::string>& argv);
 
-// Help text printed for `gpufl --help` and `gpufl trace --help`.
+// Parses the args passed to `gpufl upload`. On success returns the
+// populated UploadArgs. On failure (missing log_path, bad flag,
+// mutually-exclusive selection) returns the error message. error ==
+// "__help__" signals the caller to print uploadHelp().
+struct UploadParseResult {
+    std::optional<UploadArgs> args;
+    std::string error;
+};
+
+UploadParseResult parseUploadArgs(const std::vector<std::string>& argv);
+
+// Help text printed for `gpufl --help`, `gpufl trace --help`,
+// and `gpufl upload --help`.
 const char* topLevelHelp();
 const char* traceHelp();
+const char* uploadHelp();
 
 }  // namespace gpufl::launcher

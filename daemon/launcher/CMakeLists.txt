@@ -13,6 +13,7 @@ add_executable(gpufl_launcher
     main.cpp
     cli_parse.cpp
     trace_command.cpp
+    upload_command.cpp
 )
 
 set_target_properties(gpufl_launcher PROPERTIES OUTPUT_NAME gpufl)
