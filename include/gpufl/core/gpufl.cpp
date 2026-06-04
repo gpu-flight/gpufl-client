@@ -606,13 +606,16 @@ void shutdown() {
     Runtime* rt = runtime();
     if (!rt) return;
 
+    GFL_LOG_DEBUG("Shutdown: begin -> sampler.shutdown()");
     // Stop the system sampler before CUPTI/backend teardown. The sampler can
     // be inside NVML while shutdown begins, especially in injection mode where
     // process exit races with late CUDA initialization. Joining it first keeps
     // backend shutdown from overlapping with telemetry collection.
     rt->sampler.shutdown();
+    GFL_LOG_DEBUG("Shutdown: sampler stopped -> Monitor::Shutdown()");
 
     Monitor::Shutdown();
+    GFL_LOG_DEBUG("Shutdown: Monitor::Shutdown() returned -> finalize logs");
 
     if (g_opts.continuous_system_sampling && rt->collector) {
         SystemStopEvent e;
@@ -633,7 +636,9 @@ void shutdown() {
     se.ts_ns = detail::GetTimestampNs();
     rt->logger->write(model::ShutdownEventModel(se));
 
+    GFL_LOG_DEBUG("Shutdown: writing events done -> logger->close()");
     rt->logger->close();
+    GFL_LOG_DEBUG("Shutdown: logger->close() returned");
 
     // remote_upload deprecation shim — auto-call uploadLogs() at the
     // end of shutdown() so pure-C++ callers who set the legacy flag

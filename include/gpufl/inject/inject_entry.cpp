@@ -25,13 +25,26 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
-#include <dlfcn.h>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
 #include <vector>
-#include <unistd.h>
+
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#  define GPUFL_INJECT_EXPORT __declspec(dllexport)
+#else
+#  include <dlfcn.h>
+#  include <unistd.h>
+#  define GPUFL_INJECT_EXPORT __attribute__((visibility("default")))
+#endif
 
 #ifndef NVTX_NO_IMPL
 #define NVTX_NO_IMPL
@@ -41,7 +54,9 @@
 #include "gpufl/gpufl.hpp"
 #include "gpufl/core/activity_record.hpp"
 #include "gpufl/core/common.hpp"
+#include "gpufl/core/debug_logger.hpp"  // GFL_LOG_DEBUG (teardown tracing)
 #include "gpufl/core/monitor.hpp"
+#include "gpufl/core/teardown_flag.hpp"  // setProcessExitTeardown (Windows)
 #include "gpufl/upload/upload_logs.hpp"  // gpufl::uploadLogs for --upload
 
 namespace {
@@ -153,6 +168,7 @@ void sleepMs(int milliseconds) {
 }
 
 void writeCompletionByteIfRequested() {
+#ifndef _WIN32
     const char* fd_str = envOrNull(gpufl::inject::kEnvCompletionFd);
     if (!fd_str) return;
     int fd = std::atoi(fd_str);
@@ -162,6 +178,8 @@ void writeCompletionByteIfRequested() {
     ssize_t n = ::write(fd, &ok, 1);
     (void)n;
     ::close(fd);
+#endif
+    // Windows: the launcher does not wire a completion fd (Phase 2 stub).
 }
 
 void shutdownAndSignal() {
@@ -171,10 +189,22 @@ void shutdownAndSignal() {
         return;
     }
 
+    GFL_LOG_DEBUG("inject: shutdownAndSignal begin");
+#ifdef _WIN32
+    // At Windows process exit the CUDA context is being torn down by cudart;
+    // tell the backend to skip the driver-teardown calls (cudaDeviceSynchronize
+    // / cuptiActivityFlushAll / nvmlShutdown) that would deadlock. See
+    // gpufl/core/teardown_flag.hpp. NOT set on Linux (no race) nor by the
+    // embedded SDK's mid-process shutdown (context alive, flush needed).
+    gpufl::detail::setProcessExitTeardown(true);
+#endif
     if (g_init_ok.load(std::memory_order_acquire)) {
         sleepMs(envIntOrDefault("GPUFL_INJECT_SHUTDOWN_DELAY_MS", 0));
+        GFL_LOG_DEBUG("inject: endProcessScope()");
         endProcessScope();
+        GFL_LOG_DEBUG("inject: gpufl::shutdown()");
         gpufl::shutdown();
+        GFL_LOG_DEBUG("inject: gpufl::shutdown() returned");
 
         // --upload: ship the just-written NDJSON to the backend. This is
         // the forward path (gpufl::uploadLogs), not the deprecated
@@ -205,6 +235,10 @@ void waitForDeferredInit() {
     }
 }
 
+#ifndef _WIN32
+// Boundary waits exist only to back the launch/sync interpose wrappers,
+// which are LD_PRELOAD-only (Linux). On Windows there is no interpose, so
+// these are compiled out to avoid unused-function diagnostics.
 void waitForDeferredInitForMs(const int wait_ms) {
     if (wait_ms <= 0) return;
     if (g_deferred_init_started.load(std::memory_order_acquire) &&
@@ -224,6 +258,7 @@ void waitAtCudaSyncBoundary() {
 void waitAtCudaLaunchBoundary() {
     waitForDeferredInitForMs(envIntOrDefault("GPUFL_INJECT_LAUNCH_WAIT_MS", 15000));
 }
+#endif  // !_WIN32
 
 
 struct NvtxDomainStorage {
@@ -471,7 +506,7 @@ void startDeferredInjectInit() {
 extern "C" {
 
 
-__attribute__((visibility("default"))) int InitializeInjectionNvtx2(
+GPUFL_INJECT_EXPORT int InitializeInjectionNvtx2(
     const NvtxGetExportTableFunc_t getExportTable) {
     const NvtxFunctionTable core = nvtxFunctionTable(getExportTable, NVTX_CB_MODULE_CORE);
     const NvtxFunctionTable core2 = nvtxFunctionTable(getExportTable, NVTX_CB_MODULE_CORE2);
@@ -519,11 +554,15 @@ __attribute__((visibility("default"))) int InitializeInjectionNvtx2(
 // workloads where the first CUDA call happens deep in third-party
 // code we want to catch the lead-up to, and where the toolchain has
 // been verified to tolerate pre-cuInit subscribe.
+#ifndef _WIN32
 [[gnu::constructor]] static void gpuflInjectCtor() {
     const char* opt_in = std::getenv("GPUFL_INJECT_USE_CONSTRUCTOR");
     if (!opt_in || std::strcmp(opt_in, "1") != 0) return;
     std::call_once(g_init_once, doInjectInit);
 }
+#endif  // !_WIN32 — pre-cuInit constructor path is Linux-only; on Windows
+        // it would run under the loader lock, so we rely on the
+        // InitializeInjection ABI path (driver-invoked, lock-safe) instead.
 
 
 // Second-chance entry: NVIDIA's CUDA_INJECTION64_PATH ABI. libcuda
@@ -534,13 +573,31 @@ __attribute__((visibility("default"))) int InitializeInjectionNvtx2(
 // Idempotent with the constructor via the once_flag, so whichever
 // fires first wins; the other is a no-op.
 //
-// Default visibility so the symbol survives the SO's CXX_VISIBILITY_PRESET=hidden.
-__attribute__((visibility("default")))
+// Exported so the driver resolves it: visibility("default") on Linux to
+// survive the SO's hidden preset; __declspec(dllexport) on Windows.
+GPUFL_INJECT_EXPORT
 int InitializeInjection(void* /*funcTable*/) {
+#ifdef _WIN32
+    // Windows has no LD_PRELOAD interpose to serialize the target's first
+    // kernel launch behind init (that's the Linux path's safety net). A
+    // deferred (background-thread) init therefore runs CONCURRENTLY with the
+    // app's CUDA work and its context teardown, and CUPTI/NVML setup deadlocks
+    // against the driver lock (observed: init thread wedges, process becomes
+    // unkillable). The driver calls InitializeInjection before the app's first
+    // kernel, so initialize SYNCHRONOUSLY here — the standard CUPTI/Nsight
+    // injection pattern — so init fully completes before any kernel runs.
+    std::call_once(g_init_once, doInjectInit);
+#else
     startDeferredInjectInit();
+#endif
     return 0;
 }
 
+#ifndef _WIN32
+// Launch/sync symbol interposition (wait-for-init + forward) is Linux/glibc
+// only: it relies on LD_PRELOAD shadowing libcudart's symbols. Windows has
+// no preload interposition, so these wrappers don't exist there — Windows
+// injection relies solely on the CUDA injection ABI (InitializeInjection).
 struct GpuflDim3 {
     unsigned int x;
     unsigned int y;
@@ -555,11 +612,19 @@ using CuLaunchKernelFn = int (*)(void*, unsigned int, unsigned int, unsigned int
                                  unsigned int, unsigned int, unsigned int,
                                  unsigned int, void*, void**, void**);
 
+// The launch/sync symbols below are interposed via LD_PRELOAD: our
+// definition shadows libcudart's, and we forward to the real one via
+// dlsym(RTLD_NEXT). The resolved pointer is cached in a function-local
+// `static` (thread-safe magic-static init) so the link-map walk runs
+// ONCE per symbol, not on every kernel launch — a PyTorch hot loop does
+// tens of thousands of launches/sec, where a per-call dlsym is real
+// overhead. RTLD_NEXT resolution order is fixed for the process lifetime,
+// so the cache is always valid.
 __attribute__((visibility("default")))
 int __cudaLaunchKernel(const void* func, const GpuflDim3 gridDim, const GpuflDim3 blockDim,
                        void** args, const std::size_t sharedMem, void* stream) {
     waitAtCudaLaunchBoundary();
-    auto* fn = reinterpret_cast<CudaLaunchKernelFn>(dlsym(RTLD_NEXT, "__cudaLaunchKernel"));
+    static auto* fn = reinterpret_cast<CudaLaunchKernelFn>(dlsym(RTLD_NEXT, "__cudaLaunchKernel"));
     return fn ? fn(func, gridDim, blockDim, args, sharedMem, stream) : 0;
 }
 
@@ -568,14 +633,14 @@ int cudaLaunchKernel(const void* func, const GpuflDim3 gridDim, GpuflDim3 blockD
                      void** args,
     const std::size_t sharedMem, void* stream) {
     waitAtCudaLaunchBoundary();
-    auto* fn = reinterpret_cast<CudaLaunchKernelFn>(dlsym(RTLD_NEXT, "cudaLaunchKernel"));
+    static auto* fn = reinterpret_cast<CudaLaunchKernelFn>(dlsym(RTLD_NEXT, "cudaLaunchKernel"));
     return fn ? fn(func, gridDim, blockDim, args, sharedMem, stream) : 0;
 }
 
 __attribute__((visibility("default")))
 int cudaLaunchKernelExC(const void* config, const void* func, void** args) {
     waitAtCudaLaunchBoundary();
-    auto* fn = reinterpret_cast<CudaLaunchKernelExCFn>(dlsym(RTLD_NEXT, "cudaLaunchKernelExC"));
+    static auto* fn = reinterpret_cast<CudaLaunchKernelExCFn>(dlsym(RTLD_NEXT, "cudaLaunchKernelExC"));
     return fn ? fn(config, func, args) : 0;
 }
 
@@ -586,7 +651,7 @@ int cuLaunchKernel(void* f, const unsigned int gridDimX, const unsigned int grid
     const unsigned int sharedMemBytes, void* hStream,
                    void** kernelParams, void** extra) {
     waitAtCudaLaunchBoundary();
-    auto* fn = reinterpret_cast<CuLaunchKernelFn>(dlsym(RTLD_NEXT, "cuLaunchKernel"));
+    static auto* fn = reinterpret_cast<CuLaunchKernelFn>(dlsym(RTLD_NEXT, "cuLaunchKernel"));
     return fn ? fn(f, gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY,
                    blockDimZ, sharedMemBytes, hStream, kernelParams, extra)
               : 0;
@@ -595,22 +660,23 @@ int cuLaunchKernel(void* f, const unsigned int gridDimX, const unsigned int grid
 __attribute__((visibility("default")))
 int cudaDeviceSynchronize() {
     waitAtCudaSyncBoundary();
-    auto* fn = reinterpret_cast<CudaSync0Fn>(dlsym(RTLD_NEXT, "cudaDeviceSynchronize"));
+    static auto* fn = reinterpret_cast<CudaSync0Fn>(dlsym(RTLD_NEXT, "cudaDeviceSynchronize"));
     return fn ? fn() : 0;
 }
 
 __attribute__((visibility("default")))
 int cuCtxSynchronize() {
     waitAtCudaSyncBoundary();
-    auto* fn = reinterpret_cast<CudaSync0Fn>(dlsym(RTLD_NEXT, "cuCtxSynchronize"));
+    static auto* fn = reinterpret_cast<CudaSync0Fn>(dlsym(RTLD_NEXT, "cuCtxSynchronize"));
     return fn ? fn() : 0;
 }
 
 __attribute__((visibility("default")))
 int cudaStreamSynchronize(void* stream) {
     waitAtCudaSyncBoundary();
-    auto* fn = reinterpret_cast<CudaStreamSyncFn>(dlsym(RTLD_NEXT, "cudaStreamSynchronize"));
+    static auto* fn = reinterpret_cast<CudaStreamSyncFn>(dlsym(RTLD_NEXT, "cudaStreamSynchronize"));
     return fn ? fn(stream) : 0;
 }
+#endif  // !_WIN32
 
 }  // extern "C"

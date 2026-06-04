@@ -551,16 +551,16 @@ target_compile_definitions(gpufl PUBLIC
 )
 
 # -----------------------
-# libgpufl_inject.so — injection-mode shared library (Linux only).
+# gpufl_inject — injection-mode shared library (Linux .so + Windows .dll).
 #
-# Loaded into a target process by `gpufl trace` via LD_PRELOAD +
-# CUDA_INJECTION64_PATH. A constructor and the NVIDIA-defined
-# InitializeInjection ABI both route through std::call_once into
-# gpufl::init() with injection_mode_default_options() (or the light
-# preset), with env-var overrides applied. See
-# include/gpufl/inject/inject_entry.cpp for the design notes.
+# Loaded into a target process by `gpufl trace`: on Linux via LD_PRELOAD +
+# CUDA_INJECTION64_PATH; on Windows via CUDA_INJECTION64_PATH only (no
+# preload). The NVIDIA-defined InitializeInjection ABI (and, on Linux, an
+# opt-in constructor) routes through std::call_once into gpufl::init() with
+# injection_mode_default_options() (or the light/monitoring preset), with
+# env-var overrides applied. See include/gpufl/inject/inject_entry.cpp.
 # -----------------------
-if(UNIX AND NOT APPLE AND BUILD_GPUFL_INJECT)
+if(BUILD_GPUFL_INJECT AND ((UNIX AND NOT APPLE) OR WIN32))
     add_library(gpufl_inject SHARED
         include/gpufl/inject/inject_entry.cpp
     )
@@ -571,18 +571,26 @@ if(UNIX AND NOT APPLE AND BUILD_GPUFL_INJECT)
     if(NVTX3_INCLUDE_DIR)
         target_include_directories(gpufl_inject PRIVATE ${NVTX3_INCLUDE_DIR})
     endif()
-    set_target_properties(gpufl_inject PROPERTIES
-        OUTPUT_NAME gpufl_inject
-        # Hide internal symbols; only the extern "C" InitializeInjection
-        # entry point is marked visibility("default") in the source.
-        # The .init_array constructor is invoked by ld.so directly and
-        # doesn't need to be a visible symbol.
-        CXX_VISIBILITY_PRESET hidden
-        VISIBILITY_INLINES_HIDDEN ON
-    )
-    install(TARGETS gpufl_inject
-        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    )
+    set_target_properties(gpufl_inject PROPERTIES OUTPUT_NAME gpufl_inject)
+    if(UNIX AND NOT APPLE)
+        set_target_properties(gpufl_inject PROPERTIES
+            # Hide internal symbols; only the extern "C" InitializeInjection
+            # entry point is marked visibility("default") in the source.
+            # The .init_array constructor is invoked by ld.so directly and
+            # doesn't need to be a visible symbol.
+            CXX_VISIBILITY_PRESET hidden
+            VISIBILITY_INLINES_HIDDEN ON
+        )
+        install(TARGETS gpufl_inject
+            LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        )
+    else()
+        # Windows: exports come from __declspec(dllexport) in the source;
+        # the DLL lives beside the launcher exe (RUNTIME), not in lib/.
+        install(TARGETS gpufl_inject
+            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        )
+    endif()
 endif()
 
 # ---------------------------------------------------------------------------

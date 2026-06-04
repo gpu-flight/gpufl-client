@@ -23,6 +23,7 @@
 
 #include "gpufl/backends/nvidia/cuda_collector.hpp"
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
+#include "gpufl/core/teardown_flag.hpp"
 #include "gpufl/backends/nvidia/engine/pc_sampling_engine.hpp"
 #include "gpufl/backends/nvidia/engine/pc_sampling_with_sass_engine.hpp"
 #include "gpufl/backends/nvidia/engine/pm_sampling_engine.hpp"
@@ -462,9 +463,15 @@ void CuptiBackend::shutdown() {
     // single process (run_benchmark.py).
     cuptiActivityDisable(CUPTI_ACTIVITY_KIND_SOURCE_LOCATOR);
     cuptiActivityDisable(CUPTI_ACTIVITY_KIND_FUNCTION);
-    cudaDeviceSynchronize();
-    LogCuptiIfUnexpected("shutdown", "cuptiActivityFlushAll(final)",
-                         cuptiActivityFlushAll(1));
+    if (detail::isProcessExitTeardown()) {
+        // Windows injection at-exit: skip sync + final flush against the dying
+        // context (they deadlock). See CuptiBackend::stop() / teardown_flag.hpp.
+        GFL_LOG_DEBUG("CuptiBackend::shutdown: skip sync+flush (process-exit teardown)");
+    } else {
+        cudaDeviceSynchronize();
+        LogCuptiIfUnexpected("shutdown", "cuptiActivityFlushAll(final)",
+                             cuptiActivityFlushAll(1));
+    }
     EmitCaptureCapabilities_();
     if (engine_) engine_.reset();
 
@@ -1102,9 +1109,20 @@ void CuptiBackend::stop() {
     // emits its end record; flush then blocks until every BufferCompleted
     // callback has returned. With kinds disabled above, no new records
     // can sneak into the queue during this window.
-    cudaDeviceSynchronize();
-    LogCuptiIfUnexpected("Perfworks", "cuptiActivityFlushAll",
-                         cuptiActivityFlushAll(1));
+    if (gpufl::detail::isProcessExitTeardown()) {
+        // Windows injection at-exit: the CUDA context is being destroyed by
+        // cudart (its atexit runs before ours), so cudaDeviceSynchronize() and
+        // cuptiActivityFlushAll(1) deadlock against the dying driver (the
+        // process becomes unkillable). Skip both — activity records delivered
+        // during the run via BufferCompleted are already drained; only the
+        // final partial buffer is dropped. See gpufl/core/teardown_flag.hpp.
+        GFL_LOG_DEBUG("CuptiBackend::stop: skip sync+flush (process-exit teardown)");
+    } else {
+        GFL_LOG_DEBUG("CuptiBackend::stop: cudaDeviceSynchronize() + flush");
+        cudaDeviceSynchronize();
+        LogCuptiIfUnexpected("Perfworks", "cuptiActivityFlushAll",
+                             cuptiActivityFlushAll(1));
+    }
     FlushPendingKernels();
     {
         std::lock_guard lk(g_extCorrMu);
@@ -1125,6 +1143,51 @@ void CuptiBackend::RegisterHandler(
     if (!handler) return;
     std::lock_guard lk(handler_mu_);
     handlers_.push_back(handler);
+}
+
+void CuptiBackend::FlushOnContextDestroy() {
+    if (!initialized_) return;
+
+    // Skip when a profiling engine is active (PC sampling / SASS / Deep). While
+    // the SamplingAPI is armed, cuptiActivityFlushAll returns zero kernel records
+    // and can permanently kill the subscriber callback (driver 590+) — the same
+    // reason stop() disables the engine BEFORE flushing. We can't safely stop the
+    // engine from inside a context-destroy callback, so for engine modes we leave
+    // the flush to the normal stop()/shutdown() path. This context-destroy flush
+    // is only for the engine-less Trace/Monitor configuration (where it recovers
+    // kernel rows for contexts destroyed mid-process).
+    if (engine_) return;
+
+    // Re-entrancy / concurrency guard. cuptiActivityFlushAll(1) below invokes
+    // BufferCompleted synchronously on this same thread; never let any nested
+    // resource callback recurse back into another flush.
+    bool expected = false;
+    if (!context_destroy_flushing_.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel)) {
+        return;
+    }
+
+    // This fires from the CUPTI_CBID_RESOURCE_CONTEXT_DESTROY_STARTING callback:
+    // the context is STILL ALIVE (the driver hasn't begun destroying it yet),
+    // so cuptiActivityFlushAll is safe here and drains every completed + partial
+    // activity buffer. BufferCompleted pushes the drained rows into the monitor
+    // buffer for the collector to write out. This matters for contexts destroyed
+    // MID-PROCESS (an explicit cudaDeviceReset/cuCtxDestroy, or multi-context
+    // apps), where our at-exit shutdown() skips cuptiActivityFlushAll (it would
+    // deadlock against a dying context; see teardown_flag.hpp). It does NOT fire
+    // on Windows process exit — cudart leaves context teardown to driver
+    // DLL-detach there, so no callback arrives; the final kernel records on
+    // Windows-exit are recovered by Monitor::Shutdown's post-join drain instead.
+    //
+    // No cudaDeviceSynchronize(): re-entering cudart mid-teardown is exactly the
+    // hazard we're avoiding. A force-flush (argument 1) is sufficient.
+    GFL_LOG_DEBUG(
+        "CuptiBackend::FlushOnContextDestroy: flushing activity before context "
+        "teardown (context still alive)");
+    LogCuptiIfUnexpected("ContextDestroy", "cuptiActivityFlushAll",
+                         cuptiActivityFlushAll(1));
+
+    context_destroy_flushing_.store(false, std::memory_order_release);
 }
 
 void CuptiBackend::FlushPendingKernels() {
