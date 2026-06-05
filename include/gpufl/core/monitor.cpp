@@ -220,6 +220,17 @@ static void flushBatches(Logger& logger, const std::string& session_id) {
 // field the join and the synthetic-kernel path need, so no parallel struct.
 static std::unordered_map<uint64_t, ActivityRecord> g_launchMetaByCorr;
 
+// Worker-local sync-stack join map (Step 4c). The corr->stack join that ran
+// under CuptiBackend::sync_meta_mu_ in BufferCompleted now happens here on the
+// single collector thread, lock-free. Populated by SYNC_META records (sync
+// API_ENTER), consumed + erased when the matching SYNCHRONIZATION activity
+// record is processed. Only the stack_id is carried/joined — the old SyncMeta
+// also held an api_enter_ns that nothing downstream ever read, so it's dropped.
+// No synthetic drain: sync activity records are 1:1 with the API call, and
+// orphans (e.g. sub-100ns syncs filtered in BufferCompleted) are simply dropped,
+// same as before; the map is reset per session in Monitor::Initialize.
+static std::unordered_map<uint64_t, size_t> g_syncStackByCorr;
+
 // Join launch-callback metadata (scope path, stack id, API timestamps, const-
 // bank size) from the worker-local meta map onto an activity record, then erase
 // the entry. The activity record supplies everything else (kernel timing / dims
@@ -401,6 +412,13 @@ static bool collectorProcessNext() {
                 it != g_launchMetaByCorr.end()) {
                 it->second.api_exit_ns = rec.api_exit_ns;
             }
+            return true;
+        }
+        if (rec.type == TraceType::SYNC_META) {
+            // Stash the sync call stack until its SYNCHRONIZATION activity
+            // record arrives (Step 4c). Last-write-wins on corr collision (sync
+            // corrs are unique per call, so collisions don't occur in practice).
+            g_syncStackByCorr[rec.corr_id] = rec.stack_id;
             return true;
         }
 
@@ -603,6 +621,16 @@ static bool collectorProcessNext() {
             // hot loops with identical stacks ship the string exactly
             // once via dictionary_update — ~14× wire compression on
             // the canonical "sync inside a loop" workload.
+            //
+            // Join the API_ENTER call stack here (Step 4c) — moved off the
+            // BufferCompleted thread / sync_meta_mu_ onto this single consumer.
+            // 1:1 with the API call, so erase on join. Best-effort: a missing
+            // SYNC_META (dropped to ring backpressure) leaves stack_id 0.
+            if (auto it = g_syncStackByCorr.find(rec.corr_id);
+                it != g_syncStackByCorr.end()) {
+                rec.stack_id = it->second;
+                g_syncStackByCorr.erase(it);
+            }
             SynchronizationEventBatchRow row;
             row.start_ns    = rec.cpu_start_ns;
             row.duration_ns = duration_ns;
@@ -671,6 +699,7 @@ void Monitor::Initialize(const MonitorOptions& opts) {
     // Worker-local launch-meta join map (Step 4b-2): drop any entries a prior
     // session left behind so corr ids can't collide across init/shutdown cycles.
     g_launchMetaByCorr.clear();
+    g_syncStackByCorr.clear();  // Step 4c: same cross-session hygiene for syncs.
     g_kernelBatchId  = 0;
     g_memcpyBatchId  = 0;
     g_scopeBatch.clear();

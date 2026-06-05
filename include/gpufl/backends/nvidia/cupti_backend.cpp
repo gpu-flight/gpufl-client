@@ -1543,23 +1543,11 @@ void CUPTIAPI CuptiBackend::BufferCompleted(CUcontext context,
                         out.sync_type     = static_cast<uint8_t>(s->type);
                         out.sync_event_id = s->cudaEventId;
                         out.context_id    = s->contextId;
-                        // Join the user call stack captured by
-                        // SynchronizationHandler on API_ENTER. Erasing
-                        // after lookup keeps sync_meta_by_corr_ bounded
-                        // — sync activity records are 1:1 with the
-                        // API call, unlike kernel correlations that
-                        // can span multiple activity records.
-                        // (BufferCompleted is a static method, so we
-                        // access non-static state through the backend
-                        // pointer captured at line 851.)
-                        {
-                            std::lock_guard lk(backend->sync_meta_mu_);
-                            auto smIt = backend->sync_meta_by_corr_.find(s->correlationId);
-                            if (smIt != backend->sync_meta_by_corr_.end()) {
-                                out.stack_id = smIt->second.stack_id;
-                                backend->sync_meta_by_corr_.erase(smIt);
-                            }
-                        }
+                        // The user call stack captured by SynchronizationHandler
+                        // at API_ENTER is joined on the collector thread now
+                        // (g_syncStackByCorr in monitor.cpp, keyed by corr_id) —
+                        // no sync_meta_mu_ here. out.stack_id stays 0; the
+                        // collector fills it. (Step 4c.)
                         g_monitorBuffer.Push(out);
                     }
                     // (EXTERNAL_CORRELATION handled in pass 1 above —

@@ -109,5 +109,12 @@ enum class TraceType : uint8_t {
     //   collector sets api_exit_ns on the matching g_launchMetaByCorr entry.
     //   Fields used on ActivityRecord: corr_id, api_exit_ns.
     KERNEL_API_EXIT,
+    // SYNC_META: pushed by SynchronizationHandler on API_ENTER (Step 4c). Carries
+    //   the user call stack for a CUDA sync API so the collector can join it onto
+    //   the matching SYNCHRONIZATION activity record by corr_id (the join used to
+    //   run under CuptiBackend::sync_meta_mu_ in BufferCompleted). The collector
+    //   stores corr_id->stack_id in g_syncStackByCorr and never emits this record.
+    //   Fields used on ActivityRecord: corr_id, stack_id.
+    SYNC_META,
 };
 }

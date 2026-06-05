@@ -22,15 +22,15 @@ namespace gpufl {
  *   activity-join split, same StackRegistry interning, same
  *   {@code enable_stack_trace} opt-in. Only the CBID set differs.
  *
- * Storage:
- *   The captured stack_id (interned via StackRegistry) is stashed
- *   into CuptiBackend's `sync_meta_by_corr_` map under its own mutex
- *   (independent of the kernel-launch metadata map), and read out by
- *   the SYNCHRONIZATION branch of cupti_backend.cpp's BufferCompleted
- *   activity processor — which copies it into ActivityRecord.stack_id
- *   on its way to the monitor ring buffer. CollectorLoop later
- *   resolves the stack_id back into a real string via
- *   StackRegistry::get() and emits it as SynchronizationEvent.stack_trace.
+ * Storage (Step 4c):
+ *   The captured stack_id (interned via StackRegistry) is pushed as a
+ *   SYNC_META record to the lock-free monitor ring — NO mutex. The
+ *   collector thread stashes it in its worker-local g_syncStackByCorr
+ *   map and joins it onto the matching SYNCHRONIZATION activity record
+ *   (translated inline in cupti_backend.cpp's BufferCompleted) by
+ *   correlationId, then resolves the stack_id back into a real string
+ *   via StackRegistry::get() and emits it as
+ *   SynchronizationEvent.stack_trace.
  *
  * Activity records:
  *   This handler does NOT own a handleActivityRecord() implementation —

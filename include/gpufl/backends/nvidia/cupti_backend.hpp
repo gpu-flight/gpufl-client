@@ -188,23 +188,12 @@ class CuptiBackend : public IMonitorBackend {
     DeviceFacts device_facts_;
     ResolvedProfilingPlan resolved_plan_;
 
-    // NOTE (Step 4b-2): the launch-meta join map + its mutex are GONE. The
-    // corr->meta join (kernel AND memcpy/memset) now runs lock-free on the
-    // single collector thread (g_launchMetaByCorr / joinLaunchMeta in
-    // monitor.cpp); the launch callbacks push KERNEL_LAUNCH_META /
-    // KERNEL_API_EXIT records to the ring instead of locking meta_mu_.
-
-    // Sync metadata captured by SynchronizationHandler on API_ENTER and
-    // joined to the SYNCHRONIZATION activity record by correlationId in
-    // BufferCompleted. Still mutex-guarded (the kernel/mem join went lock-free
-    // in 4b-2; this sync join follows in 4c — same pattern: push SYNC_META to
-    // the ring and join on the collector thread, then this mutex too is gone).
-    struct SyncMeta {
-        size_t stack_id = 0;
-        int64_t api_enter_ns = 0;
-    };
-    std::mutex sync_meta_mu_;
-    std::unordered_map<uint64_t, SyncMeta> sync_meta_by_corr_;
+    // NOTE (Steps 4b-2 + 4c): the launch-meta AND sync-meta join maps + their
+    // mutexes are GONE. All corr-keyed joins (kernel, memcpy/memset, and sync)
+    // now run lock-free on the single collector thread (g_launchMetaByCorr /
+    // g_syncStackByCorr in monitor.cpp); the callbacks push KERNEL_LAUNCH_META /
+    // KERNEL_API_EXIT / SYNC_META records to the ring instead of taking a lock.
+    // The CUPTI launch + sync callbacks are now zero-lock.
 
     // Per-session clock anchor mapping CUPTI activity timestamps
     // (cuptiGetTimestamp domain) to wall-clock ns. Captured fresh in start()
