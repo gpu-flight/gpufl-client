@@ -454,7 +454,6 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
     out.dyn_shared = k->dynamicSharedMemory;
     out.static_shared = k->staticSharedMemory;
     out.num_regs = k->registersPerThread;
-    out.has_details = false;
 
     // Phase 1a: always-on fields from CUpti_ActivityKernel11
     out.local_mem_total = k->localMemoryTotal;
@@ -499,15 +498,86 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
         }
     }
 
+    out.corr_id = k->correlationId;
+
+    // Launch dims + occupancy come straight from the activity record:
+    // CUpti_ActivityKernel11 carries the ACTUAL launched grid/block/regs/
+    // shared-mem, so they're computed with NO lock and for every kernel —
+    // independent of whether the launch-callback metadata is present. (Step 4b)
+    out.has_details = true;
+    out.grid_x = k->gridX;
+    out.grid_y = k->gridY;
+    out.grid_z = k->gridZ;
+    out.block_x = k->blockX;
+    out.block_y = k->blockY;
+    out.block_z = k->blockZ;
+    out.local_bytes = static_cast<int>(k->localMemoryPerThread);
+    {
+        // Per-resource occupancy from launch config + SM properties.
+        SmProps props = GetSMProps(out.device_id);
+        int threadsPerBlock = out.block_x * out.block_y * out.block_z;
+        int warpsPerBlock =
+            (threadsPerBlock + props.warpSize - 1) / props.warpSize;
+        int maxWarpsPerSM = props.maxThreadsPerSM / props.warpSize;
+        int warpBlocks =
+            (warpsPerBlock > 0) ? (maxWarpsPerSM / warpsPerBlock) : 0;
+        int blockBlocks = props.maxBlocksPerSM;
+        // Registers are allocated per-warp in multiples of 256 on sm_6x+.
+        constexpr int kRegAllocGranularity = 256;
+        int regsPerWarp = (warpsPerBlock > 0 && out.num_regs > 0)
+                              ? (((out.num_regs * props.warpSize) +
+                                  kRegAllocGranularity - 1) /
+                                 kRegAllocGranularity) *
+                                    kRegAllocGranularity
+                              : 0;
+        int regsPerBlock = regsPerWarp * warpsPerBlock;
+        int regBlocks =
+            regsPerBlock > 0 ? props.regsPerSM / regsPerBlock : warpBlocks;
+        int smemPerBlock = out.static_shared + out.dyn_shared;
+        int smemBlocks = (smemPerBlock > 0)
+                             ? (props.sharedMemPerSM / smemPerBlock)
+                             : warpBlocks;
+        out.max_active_blocks =
+            std::min({warpBlocks, regBlocks, blockBlocks, smemBlocks});
+        auto toOcc = [&](const int blocks) -> float {
+            return maxWarpsPerSM > 0 && warpsPerBlock > 0
+                       ? std::min(1.0f, static_cast<float>(blocks *
+                                                           warpsPerBlock) /
+                                            maxWarpsPerSM)
+                       : 0.0f;
+        };
+        out.warp_occupancy = toOcc(warpBlocks);
+        out.reg_occupancy = toOcc(regBlocks);
+        out.smem_occupancy = toOcc(smemBlocks);
+        out.block_occupancy = toOcc(blockBlocks);
+        out.occupancy = toOcc(out.max_active_blocks);
+        struct {
+            float occ;
+            const char* name;
+        } limiters[] = {
+            {out.warp_occupancy, "warps"},
+            {out.reg_occupancy, "registers"},
+            {out.smem_occupancy, "shared_mem"},
+            {out.block_occupancy, "blocks"},
+        };
+        auto limiting = "warps";
+        float minOcc = out.warp_occupancy;
+        for (auto& [occ, name] : limiters) {
+            if (occ < minOcc) {
+                minOcc = occ;
+                limiting = name;
+            }
+        }
+        std::snprintf(out.limiting_resource, sizeof(out.limiting_resource),
+                      "%s", limiting);
+    }
+
+    // Join the launch-callback metadata: scope path, stack id, API timestamps,
+    // and const-bank size (the only fields NOT in the activity record). The
+    // critical section is just find + copy + erase. (Step 4b-2 moves this join
+    // onto the collector thread to drop meta_mu_ from the callback entirely.)
     {
         const uint64_t corr = k->correlationId;
-        out.corr_id = corr;
-
-        // Copy the launch metadata out under the lock, then release it
-        // immediately. The occupancy math below touches no shared state, so
-        // holding meta_mu_ across it (previously ~80 lines incl. GetSMProps +
-        // snprintf) needlessly blocked the app launch threads writing new
-        // metadata. Keep the critical section to find + copy + erase.
         LaunchMeta meta;
         bool found = false;
         {
@@ -516,13 +586,9 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
                 it != backend_->meta_by_corr_.end()) {
                 meta = it->second;
                 found = true;
-                // Always erase after processing — launches without grid/block
-                // metadata used to leave stale entries that FlushPendingKernels
-                // then resurrected as synthetic duplicates at session stop().
                 backend_->meta_by_corr_.erase(it);
             }
         }
-
         if (found) {
             out.scope_depth = meta.scope_depth;
             out.stack_id = meta.stack_id;
@@ -530,88 +596,7 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
                       std::begin(out.user_scope));
             out.api_start_ns = meta.api_enter_ns;
             out.api_exit_ns = meta.api_exit_ns;
-            if (meta.has_details) {
-                out.has_details = true;
-                out.grid_x = meta.grid_x;
-                out.grid_y = meta.grid_y;
-                out.grid_z = meta.grid_z;
-                out.block_x = meta.block_x;
-                out.block_y = meta.block_y;
-                out.block_z = meta.block_z;
-                out.local_bytes = static_cast<int>(k->localMemoryPerThread);
-                out.const_bytes = meta.const_bytes;
-
-                // Compute per-resource occupancy from activity record data
-                // (registers, shared memory) and SM properties.
-                SmProps props = GetSMProps(out.device_id);
-                int threadsPerBlock = out.block_x * out.block_y * out.block_z;
-                int warpsPerBlock =
-                    (threadsPerBlock + props.warpSize - 1) / props.warpSize;
-                int maxWarpsPerSM = props.maxThreadsPerSM / props.warpSize;
-
-                // Warp limit
-                int warpBlocks =
-                    (warpsPerBlock > 0) ? (maxWarpsPerSM / warpsPerBlock) : 0;
-
-                // Hardware block count limit
-                int blockBlocks = props.maxBlocksPerSM;
-
-                // Register limit — registers are allocated per-warp in
-                // multiples of 256 on modern NVIDIA architectures (sm_6x+).
-                constexpr int kRegAllocGranularity = 256;
-                int regsPerWarp = (warpsPerBlock > 0 && out.num_regs > 0)
-                                      ? (((out.num_regs * props.warpSize) +
-                                          kRegAllocGranularity - 1) /
-                                         kRegAllocGranularity) *
-                                            kRegAllocGranularity
-                                      : 0;
-                int regsPerBlock = regsPerWarp * warpsPerBlock;
-                int regBlocks = regsPerBlock > 0
-                                    ? props.regsPerSM / regsPerBlock
-                                    : warpBlocks;
-
-                // Shared memory limit
-                int smemPerBlock = out.static_shared + out.dyn_shared;
-                int smemBlocks =
-                    (smemPerBlock > 0) ? (props.sharedMemPerSM / smemPerBlock)
-                                       : warpBlocks;
-
-                out.max_active_blocks =
-                    std::min({warpBlocks, regBlocks, blockBlocks, smemBlocks});
-
-                auto toOcc = [&](const int blocks) -> float {
-                    return maxWarpsPerSM > 0 && warpsPerBlock > 0
-                               ? std::min(1.0f, static_cast<float>(
-                                                    blocks * warpsPerBlock) /
-                                                    maxWarpsPerSM)
-                               : 0.0f;
-                };
-                out.warp_occupancy = toOcc(warpBlocks);
-                out.reg_occupancy = toOcc(regBlocks);
-                out.smem_occupancy = toOcc(smemBlocks);
-                out.block_occupancy = toOcc(blockBlocks);
-                out.occupancy = toOcc(out.max_active_blocks);
-
-                struct {
-                    float occ;
-                    const char* name;
-                } limiters[] = {
-                    {out.warp_occupancy, "warps"},
-                    {out.reg_occupancy, "registers"},
-                    {out.smem_occupancy, "shared_mem"},
-                    {out.block_occupancy, "blocks"},
-                };
-                auto limiting = "warps";
-                float minOcc = out.warp_occupancy;
-                for (auto& [occ, name] : limiters) {
-                    if (occ < minOcc) {
-                        minOcc = occ;
-                        limiting = name;
-                    }
-                }
-                std::snprintf(out.limiting_resource,
-                              sizeof(out.limiting_resource), "%s", limiting);
-            }
+            out.const_bytes = meta.const_bytes;
         }
     }
 
