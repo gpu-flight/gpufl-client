@@ -91,47 +91,41 @@ bool CopyReadableCString(const char* src, std::string* out) {
 #endif
 }
 
+// Precompute the SIMPLIFIED occupancy carried on a synthetic kernel's launch-
+// meta record. Only grid/block + dynamic shared memory are known at launch time
+// (per-thread registers and static shared memory live on the activity record,
+// which by definition never arrives for a synthetic kernel), so occupancy is
+// bounded by warps + blocks only — byte-for-byte the math the old
+// CuptiBackend::FlushPendingKernels ran at stop(). Runs here on the launch
+// callback (the nvidia layer, where GetSMProps lives) so the core collector TU
+// can stay free of CUDA headers; drainSyntheticKernels in monitor.cpp just
+// copies these fields. Only called in synthetic-kernel modes (see
+// CuptiBackend::WillEmitSyntheticKernels), so normal/Deep launches pay nothing.
+void ComputeSyntheticOccupancy(ActivityRecord& rec, uint32_t device_id) {
+    SmProps props = GetSMProps(static_cast<int>(device_id));
+    int threadsPerBlock = rec.block_x * rec.block_y * rec.block_z;
+    int warpsPerBlock = (threadsPerBlock + props.warpSize - 1) / props.warpSize;
+    int maxWarpsPerSM = props.maxThreadsPerSM / props.warpSize;
+    int warpBlocks = (warpsPerBlock > 0) ? (maxWarpsPerSM / warpsPerBlock) : 0;
+    int blockBlocks = props.maxBlocksPerSM;
+    rec.max_active_blocks = std::min(warpBlocks, blockBlocks);
+    auto toOcc = [&](int blocks) -> float {
+        return (maxWarpsPerSM > 0 && warpsPerBlock > 0)
+                   ? std::min(1.0f, static_cast<float>(blocks * warpsPerBlock) /
+                                        maxWarpsPerSM)
+                   : 0.0f;
+    };
+    rec.warp_occupancy = toOcc(warpBlocks);
+    rec.block_occupancy = toOcc(blockBlocks);
+    rec.occupancy = rec.warp_occupancy;
+    std::snprintf(rec.limiting_resource, sizeof(rec.limiting_resource), "%s",
+                  "warps");
+}
+
 }  // namespace
 
 KernelLaunchHandler::KernelLaunchHandler(CuptiBackend* backend)
     : backend_(backend) {}
-
-const std::string& KernelLaunchHandler::cachedDemangle(const char* mangled) {
-    static const std::string kFallback = "kernel_launch";
-    if (!mangled) return kFallback;
-
-    // Defensive bounded read. On CUDA 13.1 + PyTorch autograd's backward
-    // worker threads, a SEGV was observed deep inside cachedDemangle on
-    // an RTX 3090 — no DemangleName frame on the stack, which means the
-    // implicit `std::string(mangled)` construction in find()/emplace()
-    // crashed. That can happen if `cbInfo->symbolName` (or the activity
-    // record's `name` field) points to a buffer that isn't reliably
-    // null-terminated under some CUPTI codepath. strnlen short-circuits
-    // at kMaxNameLen so a non-null-terminated pointer reads at most one
-    // page of bogus memory instead of running off the end of mapping —
-    // and if it never finds a terminator we fall back to a known-safe
-    // string rather than letting std::string crash. PyTorch's longest
-    // mangled cuBLAS / cutlass names top out around 350 chars in
-    // practice; 4 KiB gives generous headroom.
-    constexpr size_t kMaxNameLen = 4096;
-    if (const size_t len = strnlen(mangled, kMaxNameLen);
-        len == 0 || len == kMaxNameLen) return kFallback;
-
-    std::lock_guard lk(demangle_mu_);
-    if (const auto it = demangle_cache_.find(mangled); it != demangle_cache_.end()) return it->second;
-    // Try-catch around the insert as belt-and-suspenders. If DemangleName
-    // itself throws (it shouldn't — abi::__cxa_demangle returns a status
-    // code and we check it — but defensive on platforms with unusual
-    // allocator behavior), we return the fallback rather than letting
-    // the exception unwind across a CUPTI callback boundary, which is
-    // undefined behavior in CUPTI's callback contract.
-    try {
-        auto [inserted, _] = demangle_cache_.emplace(mangled, DemangleName(mangled));
-        return inserted->second;
-    } catch (...) {
-        return kFallback;
-    }
-}
 
 std::vector<std::pair<CUpti_CallbackDomain, CUpti_CallbackId>>
 KernelLaunchHandler::requiredCallbacks() const {
@@ -276,33 +270,48 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
 
     if (cbInfo->callbackSite == CUPTI_API_ENTER) {
         backend_->NoteKernelLaunchForCleanupFlush();
-        LaunchMeta meta{};
-        meta.api_enter_ns = detail::GetTimestampNs();
+
+        // Build a KERNEL_LAUNCH_META record and push it to the lock-free ring
+        // (Step 4b-2). The corr->meta join that used to run here under meta_mu_
+        // now happens on the single collector thread (joinLaunchMeta in
+        // monitor.cpp) — this callback takes NO lock. Push is heap-free: the
+        // ring slot is preallocated and Push copies the POD into it.
+        ActivityRecord metaRec{};
+        metaRec.type = TraceType::KERNEL_LAUNCH_META;
+        metaRec.corr_id = cbInfo->correlationId;
+        // device_id is consumed only by the synthetic-kernel path (real kernels
+        // take k->deviceId from the activity record); matches the old
+        // FlushPendingKernels `out.device_id = device_id_`.
+        metaRec.device_id = backend_->device_id_;
+        metaRec.api_start_ns = detail::GetTimestampNs();  // API_ENTER ns
 
         // Prefer cbInfo->symbolName so callback-only SASS safe mode can still
         // group kernels by real symbol. CUDA 13.1 sometimes puts invalid tagged
         // values in symbolName, so never dereference it directly; copy through
         // process_vm_readv first and fall back to the stable API function name
         // (cudaLaunchKernel / cuLaunchKernelEx) if the probe fails.
+        // Store the RAW name; demangling is deferred to the collector thread
+        // (DemangleKernelNameCached in monitor.cpp). %.*s bounds the source
+        // read so a non-null-terminated CUPTI name pointer can't overrun.
         std::string copiedSymbol;
         if (CopyReadableCString(cbInfo->symbolName, &copiedSymbol)) {
-            const std::string demangledName = DemangleName(copiedSymbol.c_str());
-            std::snprintf(meta.name, sizeof(meta.name), "%s",
-                          demangledName.c_str());
+            std::snprintf(metaRec.name, sizeof(metaRec.name), "%.*s",
+                          static_cast<int>(sizeof(metaRec.name) - 1),
+                          copiedSymbol.c_str());
         } else {
-            const char* nm = cbInfo->functionName;
-            const std::string& demangledName = cachedDemangle(nm);
-            std::snprintf(meta.name, sizeof(meta.name), "%s",
-                          demangledName.c_str());
+            const char* nm = cbInfo->functionName ? cbInfo->functionName : "";
+            std::snprintf(metaRec.name, sizeof(metaRec.name), "%.*s",
+                          static_cast<int>(sizeof(metaRec.name) - 1), nm);
         }
 
         if (backend_->GetOptions().enable_stack_trace) {
-            const std::string trace = core::GetCallStack(2);
-            const std::string cleanTrace = detail::SanitizeStackTrace(trace);
-            meta.stack_id =
-                StackRegistry::instance().getOrRegister(cleanTrace);
+            // Capture raw return addresses only (cheap); symbol resolution is
+            // deferred to the collector thread via StackRegistry::get(),
+            // keeping dbghelp/SymFromAddr off this per-launch CUPTI callback.
+            metaRec.stack_id = StackRegistry::instance().getOrRegister(
+                core::CaptureCallStackRaw(2));
         } else {
-            meta.stack_id = 0;
+            metaRec.stack_id = 0;
         }
 
         auto& stack = getThreadScopeStack();
@@ -312,39 +321,39 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
                 if (i > 0) fullPath += "|";
                 fullPath += stack[i];
             }
-            std::snprintf(meta.user_scope, sizeof(meta.user_scope), "%s",
+            std::snprintf(metaRec.user_scope, sizeof(metaRec.user_scope), "%s",
                           fullPath.c_str());
-            meta.scope_depth = stack.size();
+            metaRec.scope_depth = stack.size();
         } else if (const char* injectedApp = std::getenv("GPUFL_APP_NAME")) {
             if (std::getenv("GPUFL_INJECT") && injectedApp[0] != '\0') {
                 std::string processScope = "process:";
                 processScope += injectedApp;
-                std::snprintf(meta.user_scope, sizeof(meta.user_scope), "%s",
-                              processScope.c_str());
+                std::snprintf(metaRec.user_scope, sizeof(metaRec.user_scope),
+                              "%s", processScope.c_str());
             } else {
-                std::snprintf(meta.user_scope, sizeof(meta.user_scope), "%s",
-                              "global");
+                std::snprintf(metaRec.user_scope, sizeof(metaRec.user_scope),
+                              "%s", "global");
             }
-            meta.scope_depth = 0;
+            metaRec.scope_depth = 0;
         } else {
-            std::snprintf(meta.user_scope, sizeof(meta.user_scope), "%s",
+            std::snprintf(metaRec.user_scope, sizeof(metaRec.user_scope), "%s",
                           "global");
-            meta.scope_depth = 0;
+            metaRec.scope_depth = 0;
         }
 
-        auto setLaunchDims = [&meta](const unsigned int gx,
-                                     const unsigned int gy,
+        auto setLaunchDims = [&metaRec](const unsigned int gx,
+                                        const unsigned int gy,
                     const unsigned int gz, const unsigned int bx,
                     const unsigned int by, const unsigned int bz,
-                                     size_t dyn_smem) {
-            meta.has_details = true;
-            meta.grid_x = static_cast<int>(gx);
-            meta.grid_y = static_cast<int>(gy);
-            meta.grid_z = static_cast<int>(gz);
-            meta.block_x = static_cast<int>(bx);
-            meta.block_y = static_cast<int>(by);
-            meta.block_z = static_cast<int>(bz);
-            meta.dyn_shared = static_cast<int>(dyn_smem);
+                                        size_t dyn_smem) {
+            metaRec.has_details = true;
+            metaRec.grid_x = static_cast<int>(gx);
+            metaRec.grid_y = static_cast<int>(gy);
+            metaRec.grid_z = static_cast<int>(gz);
+            metaRec.block_x = static_cast<int>(bx);
+            metaRec.block_y = static_cast<int>(by);
+            metaRec.block_z = static_cast<int>(bz);
+            metaRec.dyn_shared = static_cast<int>(dyn_smem);
         };
 
         if (cbInfo->functionParams != nullptr) {
@@ -401,42 +410,35 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
 #endif
         }
 
-        // Store metadata — emit later from scope stop (PC Sampling path)
-        // or handleActivityRecord (normal path). Runtime and driver launch
-        // callbacks can share one correlation id, so keep the richest metadata
-        // and avoid duplicate diagnostic lines for the same logical launch.
-        bool shouldLogLaunch = false;
-        {
-            std::lock_guard lk(backend_->meta_mu_);
-            auto it = backend_->meta_by_corr_.find(cbInfo->correlationId);
-            if (it == backend_->meta_by_corr_.end()) {
-                backend_->meta_by_corr_.emplace(cbInfo->correlationId, meta);
-                shouldLogLaunch = true;
-            } else if (it->second.has_details && !meta.has_details) {
-                GFL_LOG_DEBUG(
-                    "[DEBUG-CALLBACK] Skipping overwrite of rich metadata "
-                    "for CorrID ",
-                    cbInfo->correlationId, " by Driver API.");
-            } else if (!it->second.has_details && meta.has_details) {
-                it->second = meta;
-                shouldLogLaunch = true;
-            }
+        // Synthetic-kernel modes (PC Sampling / SASS safe): no CUPTI activity
+        // record will arrive, so precompute the simplified occupancy now — the
+        // only place with the nvidia SM properties — and carry it on the meta
+        // record for drainSyntheticKernels to copy. Skipped in normal / Deep
+        // mode (the activity record supplies full occupancy), keeping this
+        // callback thin. NOTE: a rare leftover meta orphaned at stop() in normal
+        // mode (its activity record dropped/in-flight) now ships occupancy 0
+        // instead of the old simplified value — acceptable for a degraded
+        // best-effort row whose duration is already a host-dispatch estimate.
+        if (metaRec.has_details && backend_->WillEmitSyntheticKernels()) {
+            ComputeSyntheticOccupancy(metaRec, metaRec.device_id);
         }
+
+        g_monitorBuffer.Push(metaRec);
+
         // Diagnostic: confirm every logical kernel launch fires this callback.
-        // If "GPU Time by Scope" shows only N kernels but this logs M>N,
-        // the loss is downstream (activity records / FlushPendingKernels).
-        if (shouldLogLaunch) {
-            GFL_LOG_DEBUG("[KernelLaunchHandler] API_ENTER corr=",
-                          cbInfo->correlationId, " name=", meta.name,
-                          " scope=", meta.user_scope);
-        }
+        // Runtime+driver share a corr so this can log twice per launch; the
+        // collector's keep-first merge dedups the actual join.
+        GFL_LOG_DEBUG("[KernelLaunchHandler] API_ENTER corr=", metaRec.corr_id,
+                      " name=", metaRec.name, " scope=", metaRec.user_scope);
     } else if (cbInfo->callbackSite == CUPTI_API_EXIT) {
-        const int64_t exitNs = detail::GetTimestampNs();
-        std::lock_guard lk(backend_->meta_mu_);
-        auto it = backend_->meta_by_corr_.find(cbInfo->correlationId);
-        if (it != backend_->meta_by_corr_.end()) {
-            it->second.api_exit_ns = exitNs;
-        }
+        // Push the API-exit timestamp as its own record; the collector patches
+        // it onto the matching launch meta. Same thread as API_ENTER, so it
+        // enters the ring after the ENTER record (FIFO by push order).
+        ActivityRecord exitRec{};
+        exitRec.type = TraceType::KERNEL_API_EXIT;
+        exitRec.corr_id = cbInfo->correlationId;
+        exitRec.api_exit_ns = detail::GetTimestampNs();
+        g_monitorBuffer.Push(exitRec);
     }
 }
 
@@ -478,14 +480,16 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
     out.device_id = k->deviceId;
     out.stream = static_cast<StreamHandle>(k->streamId);
     out.type = TraceType::KERNEL;
-    const std::string& demangledKernelName = cachedDemangle(k->name);
-    std::snprintf(out.name, sizeof(out.name), "%s", demangledKernelName.c_str());
+    // Store the RAW (mangled) name; demangle is deferred to the collector
+    // thread. %.*s bounds the source read against a non-terminated name.
+    std::snprintf(out.name, sizeof(out.name), "%.*s",
+                  static_cast<int>(sizeof(out.name) - 1),
+                  k->name ? k->name : "");
     out.cpu_start_ns = baseCpuNs + static_cast<int64_t>(k->start - baseCuptiTs);
     out.duration_ns = static_cast<int64_t>(k->end - k->start);
     out.dyn_shared = k->dynamicSharedMemory;
     out.static_shared = k->staticSharedMemory;
     out.num_regs = k->registersPerThread;
-    out.has_details = false;
 
     // Phase 1a: always-on fields from CUpti_ActivityKernel11
     out.local_mem_total = k->localMemoryTotal;
@@ -530,115 +534,86 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
         }
     }
 
+    out.corr_id = k->correlationId;
+
+    // Launch dims + occupancy come straight from the activity record:
+    // CUpti_ActivityKernel11 carries the ACTUAL launched grid/block/regs/
+    // shared-mem, so they're computed with NO lock and for every kernel —
+    // independent of whether the launch-callback metadata is present. (Step 4b)
+    out.has_details = true;
+    out.grid_x = k->gridX;
+    out.grid_y = k->gridY;
+    out.grid_z = k->gridZ;
+    out.block_x = k->blockX;
+    out.block_y = k->blockY;
+    out.block_z = k->blockZ;
+    out.local_bytes = static_cast<int>(k->localMemoryPerThread);
     {
-        const uint64_t corr = k->correlationId;
-        out.corr_id = corr;
-        std::lock_guard lk(backend_->meta_mu_);
-        if (auto it = backend_->meta_by_corr_.find(corr);
-            it != backend_->meta_by_corr_.end()) {
-            const LaunchMeta& m = it->second;
-            out.scope_depth = m.scope_depth;
-            out.stack_id = m.stack_id;
-            std::copy(std::begin(m.user_scope), std::end(m.user_scope),
-                      std::begin(out.user_scope));
-            out.api_start_ns = m.api_enter_ns;
-            out.api_exit_ns = m.api_exit_ns;
-            // Snapshot `has_details` before the erase below — we still need
-            // it to decide whether to compute occupancy. Erasing first
-            // would invalidate `m` (dangling reference).
-            const bool hadDetails = m.has_details;
-            if (hadDetails) {
-                out.has_details = true;
-                out.grid_x = m.grid_x;
-                out.grid_y = m.grid_y;
-                out.grid_z = m.grid_z;
-                out.block_x = m.block_x;
-                out.block_y = m.block_y;
-                out.block_z = m.block_z;
-                out.local_bytes = static_cast<int>(k->localMemoryPerThread);
-                out.const_bytes = m.const_bytes;
-
-                // Compute per-resource occupancy from activity record data
-                // (registers, shared memory) and SM properties.
-                SmProps props = GetSMProps(out.device_id);
-                int threadsPerBlock = out.block_x * out.block_y * out.block_z;
-                int warpsPerBlock =
-                    (threadsPerBlock + props.warpSize - 1) / props.warpSize;
-                int maxWarpsPerSM = props.maxThreadsPerSM / props.warpSize;
-
-                // Warp limit
-                int warpBlocks =
-                    (warpsPerBlock > 0) ? (maxWarpsPerSM / warpsPerBlock) : 0;
-
-                // Hardware block count limit
-                int blockBlocks = props.maxBlocksPerSM;
-
-                // Register limit — registers are allocated per-warp in
-                // multiples of 256 on modern NVIDIA architectures (sm_6x+).
-                constexpr int kRegAllocGranularity = 256;
-                int regsPerWarp = (warpsPerBlock > 0 && out.num_regs > 0)
-                                      ? (((out.num_regs * props.warpSize) +
-                                          kRegAllocGranularity - 1) /
-                                         kRegAllocGranularity) *
-                                            kRegAllocGranularity
-                                      : 0;
-                int regsPerBlock = regsPerWarp * warpsPerBlock;
-                int regBlocks = regsPerBlock > 0
-                                    ? props.regsPerSM / regsPerBlock
-                                    : warpBlocks;
-
-                // Shared memory limit
-                int smemPerBlock = out.static_shared + out.dyn_shared;
-                int smemBlocks =
-                    (smemPerBlock > 0) ? (props.sharedMemPerSM / smemPerBlock)
-                                       : warpBlocks;
-
-                out.max_active_blocks =
-                    std::min({warpBlocks, regBlocks, blockBlocks, smemBlocks});
-
-                auto toOcc = [&](const int blocks) -> float {
-                    return maxWarpsPerSM > 0 && warpsPerBlock > 0
-                               ? std::min(1.0f, static_cast<float>(
-                                                    blocks * warpsPerBlock) /
-                                                    maxWarpsPerSM)
-                               : 0.0f;
-                };
-                out.warp_occupancy = toOcc(warpBlocks);
-                out.reg_occupancy = toOcc(regBlocks);
-                out.smem_occupancy = toOcc(smemBlocks);
-                out.block_occupancy = toOcc(blockBlocks);
-                out.occupancy = toOcc(out.max_active_blocks);
-
-                struct {
-                    float occ;
-                    const char* name;
-                } limiters[] = {
-                    {out.warp_occupancy, "warps"},
-                    {out.reg_occupancy, "registers"},
-                    {out.smem_occupancy, "shared_mem"},
-                    {out.block_occupancy, "blocks"},
-                };
-                auto limiting = "warps";
-                float minOcc = out.warp_occupancy;
-                for (auto& [occ, name] : limiters) {
-                    if (occ < minOcc) {
-                        minOcc = occ;
-                        limiting = name;
-                    }
-                }
-                std::snprintf(out.limiting_resource,
-                              sizeof(out.limiting_resource), "%s", limiting);
+        // Per-resource occupancy from launch config + SM properties.
+        SmProps props = GetSMProps(out.device_id);
+        int threadsPerBlock = out.block_x * out.block_y * out.block_z;
+        int warpsPerBlock =
+            (threadsPerBlock + props.warpSize - 1) / props.warpSize;
+        int maxWarpsPerSM = props.maxThreadsPerSM / props.warpSize;
+        int warpBlocks =
+            (warpsPerBlock > 0) ? (maxWarpsPerSM / warpsPerBlock) : 0;
+        int blockBlocks = props.maxBlocksPerSM;
+        // Registers are allocated per-warp in multiples of 256 on sm_6x+.
+        constexpr int kRegAllocGranularity = 256;
+        int regsPerWarp = (warpsPerBlock > 0 && out.num_regs > 0)
+                              ? (((out.num_regs * props.warpSize) +
+                                  kRegAllocGranularity - 1) /
+                                 kRegAllocGranularity) *
+                                    kRegAllocGranularity
+                              : 0;
+        int regsPerBlock = regsPerWarp * warpsPerBlock;
+        int regBlocks =
+            regsPerBlock > 0 ? props.regsPerSM / regsPerBlock : warpBlocks;
+        int smemPerBlock = out.static_shared + out.dyn_shared;
+        int smemBlocks = (smemPerBlock > 0)
+                             ? (props.sharedMemPerSM / smemPerBlock)
+                             : warpBlocks;
+        out.max_active_blocks =
+            std::min({warpBlocks, regBlocks, blockBlocks, smemBlocks});
+        auto toOcc = [&](const int blocks) -> float {
+            return maxWarpsPerSM > 0 && warpsPerBlock > 0
+                       ? std::min(1.0f, static_cast<float>(blocks *
+                                                           warpsPerBlock) /
+                                            maxWarpsPerSM)
+                       : 0.0f;
+        };
+        out.warp_occupancy = toOcc(warpBlocks);
+        out.reg_occupancy = toOcc(regBlocks);
+        out.smem_occupancy = toOcc(smemBlocks);
+        out.block_occupancy = toOcc(blockBlocks);
+        out.occupancy = toOcc(out.max_active_blocks);
+        struct {
+            float occ;
+            const char* name;
+        } limiters[] = {
+            {out.warp_occupancy, "warps"},
+            {out.reg_occupancy, "registers"},
+            {out.smem_occupancy, "shared_mem"},
+            {out.block_occupancy, "blocks"},
+        };
+        auto limiting = "warps";
+        float minOcc = out.warp_occupancy;
+        for (auto& [occ, name] : limiters) {
+            if (occ < minOcc) {
+                minOcc = occ;
+                limiting = name;
             }
-            // Always erase after processing — previously this was nested
-            // inside `if (hadDetails)`, so launches without grid/block
-            // metadata left stale entries in meta_by_corr_. At session
-            // stop() FlushPendingKernels would then emit synthetic
-            // duplicates for kernels that already had real activity
-            // records emitted here. Move erase out of the conditional.
-            backend_->meta_by_corr_.erase(it);
         }
+        std::snprintf(out.limiting_resource, sizeof(out.limiting_resource),
+                      "%s", limiting);
     }
 
+    // Launch-callback metadata (scope path, stack id, API timestamps, const-
+    // bank size — the only fields NOT in the activity record) is joined on the
+    // collector thread now (joinLaunchMeta in monitor.cpp), keyed by corr_id.
+    // This callback takes NO meta_mu_ — it pushes the raw activity record and
+    // returns. (Step 4b-2: the join moved off the CUPTI threads to drop the
+    // mutex; the matching KERNEL_LAUNCH_META was pushed by handle() at ENTER.)
     g_monitorBuffer.Push(out);
     backend_->kernel_activity_emitted_.fetch_add(1, std::memory_order_relaxed);
     return true;

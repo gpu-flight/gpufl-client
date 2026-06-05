@@ -55,6 +55,17 @@ class CuptiBackend : public IMonitorBackend {
     bool AllowSassKernelActivity() const {
         return resolved_plan_.allow_sass_kernel_activity;
     }
+    // True when CUPTI kernel ACTIVITY records won't be collected, so every
+    // launch must be reported from its callback as a synthetic kernel (PC
+    // Sampling, or SASS profiler safe mode without GPUFL_SASS_ALLOW_KERNEL_
+    // ACTIVITY). Mirrors KernelLaunchHandler::requiredActivityKinds() returning
+    // {}. In these modes the launch callback precomputes the simplified kernel
+    // occupancy (the activity record that would otherwise carry it never
+    // arrives); see KernelLaunchHandler::handle + drainSyntheticKernels.
+    bool WillEmitSyntheticKernels() const {
+        return opts_.profiling_engine == ProfilingEngine::PcSampling ||
+               !AllowSassKernelActivity();
+    }
     bool AllowSassMarkerActivity() const {
         return resolved_plan_.allow_sass_marker_activity;
     }
@@ -99,11 +110,6 @@ class CuptiBackend : public IMonitorBackend {
 
     bool IsActive() const { return active_.load(); }
     const MonitorOptions& GetOptions() const { return opts_; }
-
-    // Flush any pending kernel metadata as synthetic activity records.
-    // Called from scope stop after cudaDeviceSynchronize() so durations
-    // reflect actual GPU execution time.
-    void FlushPendingKernels();
 
     // Drain CUPTI activity buffers from the CUPTI_CBID_RESOURCE_CONTEXT_
     // DESTROY_STARTING callback — i.e. while the context is still alive, just
@@ -182,20 +188,24 @@ class CuptiBackend : public IMonitorBackend {
     DeviceFacts device_facts_;
     ResolvedProfilingPlan resolved_plan_;
 
-    std::mutex meta_mu_;
-    std::unordered_map<uint64_t, LaunchMeta> meta_by_corr_;
+    // NOTE (Steps 4b-2 + 4c): the launch-meta AND sync-meta join maps + their
+    // mutexes are GONE. All corr-keyed joins (kernel, memcpy/memset, and sync)
+    // now run lock-free on the single collector thread (g_launchMetaByCorr /
+    // g_syncStackByCorr in monitor.cpp); the callbacks push KERNEL_LAUNCH_META /
+    // KERNEL_API_EXIT / SYNC_META records to the ring instead of taking a lock.
+    // The CUPTI launch + sync callbacks are now zero-lock.
 
-    // Sync metadata captured by SynchronizationHandler on API_ENTER and
-    // joined to the SYNCHRONIZATION activity record by correlationId in
-    // BufferCompleted. Separate mutex from meta_mu_ so sync API_ENTER
-    // doesn't contend with kernel-launch metadata writes during bursty
-    // workloads (PyTorch eager mode interleaves both heavily).
-    struct SyncMeta {
-        size_t stack_id = 0;
-        int64_t api_enter_ns = 0;
-    };
-    std::mutex sync_meta_mu_;
-    std::unordered_map<uint64_t, SyncMeta> sync_meta_by_corr_;
+    // Per-session clock anchor mapping CUPTI activity timestamps
+    // (cuptiGetTimestamp domain) to wall-clock ns. Captured fresh in start()
+    // so re-init sessions re-anchor — the previous function-static anchor in
+    // BufferCompleted persisted process-wide and skewed timestamps across
+    // init/shutdown cycles. Written once in start() before any activity record
+    // can arrive; read on the (serial) BufferCompleted thread.
+    int64_t base_cpu_ns_ = 0;
+    uint64_t base_cupti_ts_ = 0;
+    int64_t toWallNs(uint64_t cuptiTs) const {
+        return base_cpu_ns_ + static_cast<int64_t>(cuptiTs - base_cupti_ts_);
+    }
 
     std::string cached_device_name_ = "Unknown Device";
     CUcontext ctx_ = nullptr;
@@ -207,8 +217,15 @@ class CuptiBackend : public IMonitorBackend {
     std::unordered_map<uint64_t, CubinInfo> cubin_by_crc_;
     std::unordered_set<const void*> seen_cubin_ptrs_;
 
+    // Registered once in initialize() via RegisterHandler — BEFORE the CUPTI
+    // subscriber + activity callbacks are enabled — and never modified for the
+    // rest of the backend's lifetime (a fresh CuptiBackend is created per
+    // session; see Monitor::Shutdown's adapter.reset() + Initialize). It is
+    // therefore IMMUTABLE while any callback can run, so GflCallback /
+    // BufferCompleted (and start()/stop()) read it lock-free — no handler_mu_,
+    // and the per-callback vector copy is gone (zero-alloc dispatch). Do NOT
+    // call RegisterHandler after initialize() has enabled callbacks.
     std::vector<std::shared_ptr<ICuptiHandler>> handlers_;
-    std::mutex handler_mu_;
 
     std::atomic<uint64_t> last_kernel_end_ts_{0};
     std::atomic<uint64_t> kernel_activity_seen_{0};

@@ -11,7 +11,11 @@ namespace gpufl {
 
 struct ActivityRecord {
     uint32_t device_id = 0;
-    char name[128]{};
+    // Holds the RAW (mangled) kernel name on the producer side; the collector
+    // thread demangles it (Step 4a). Sized to fit long templated CUDA/cutlass
+    // mangled names without truncation (truncating a mangled name breaks
+    // demangling). Non-kernel records store their already-final name here.
+    char name[256]{};
     TraceType type = TraceType::KERNEL;
     StreamHandle stream = 0;
     int64_t cpu_start_ns = 0;

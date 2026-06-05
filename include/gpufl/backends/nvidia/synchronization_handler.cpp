@@ -1,7 +1,10 @@
 #include "gpufl/backends/nvidia/synchronization_handler.hpp"
 
+#include "gpufl/core/activity_record.hpp"
 #include "gpufl/core/common.hpp"   // detail::GetTimestampNs, detail::SanitizeStackTrace
 #include "gpufl/core/debug_logger.hpp"
+#include "gpufl/core/monitor.hpp"  // g_monitorBuffer
+#include "gpufl/core/ring_buffer.hpp"
 #include "gpufl/core/stack_registry.hpp"
 #include "gpufl/core/stack_trace.hpp"
 
@@ -114,43 +117,43 @@ void SynchronizationHandler::handle(CUpti_CallbackDomain /*domain*/,
 
     if (cbInfo->callbackSite == CUPTI_API_ENTER) {
         // Capture the user's call stack now — by the time the matching
-        // SYNCHRONIZATION activity record arrives on the buffer-flush
-        // thread, this thread's stack is long gone.
-        CuptiBackend::SyncMeta meta{};
-        meta.api_enter_ns = detail::GetTimestampNs();
-
+        // SYNCHRONIZATION activity record arrives on the buffer-flush thread,
+        // this thread's stack is long gone — and push it as a SYNC_META record
+        // to the lock-free ring (Step 4c). The corr->stack join moved to the
+        // single collector thread (g_syncStackByCorr in monitor.cpp), so this
+        // callback takes NO sync_meta_mu_. (The old SyncMeta also held an
+        // api_enter_ns that nothing downstream read; dropped.)
+        ActivityRecord metaRec{};
+        metaRec.type = TraceType::SYNC_META;
+        metaRec.corr_id = cbInfo->correlationId;
         if (backend_->GetOptions().enable_stack_trace) {
-            const std::string trace = gpufl::core::GetCallStack(2);
-            const std::string cleanTrace = detail::SanitizeStackTrace(trace);
-            meta.stack_id =
-                gpufl::StackRegistry::instance().getOrRegister(cleanTrace);
+            // Raw addresses only; symbolization deferred to the collector
+            // thread (StackRegistry::get()) — off this per-call CUPTI callback.
+            metaRec.stack_id = gpufl::StackRegistry::instance().getOrRegister(
+                gpufl::core::CaptureCallStackRaw(2));
         } else {
-            meta.stack_id = 0;
+            metaRec.stack_id = 0;
         }
-
-        {
-            std::lock_guard<std::mutex> lk(backend_->sync_meta_mu_);
-            backend_->sync_meta_by_corr_[cbInfo->correlationId] = meta;
-        }
+        g_monitorBuffer.Push(metaRec);
         GFL_LOG_DEBUG("[SynchronizationHandler] API_ENTER corr=",
-                      cbInfo->correlationId, " stack_id=", meta.stack_id,
+                      cbInfo->correlationId, " stack_id=", metaRec.stack_id,
                       " cbid=", cbid);
     }
-    // Unlike kernels we don't need an API_EXIT recorder — sync wall
-    // time is measured by CUPTI directly on the SYNCHRONIZATION
-    // activity record (start/end fields), not derived from API
-    // enter/exit timestamps. We still capture API_ENTER only because
-    // that's where we have the user's stack.
+    // Unlike kernels we don't need an API_EXIT recorder — sync wall time is
+    // measured by CUPTI directly on the SYNCHRONIZATION activity record
+    // (start/end fields), not derived from API enter/exit timestamps. We still
+    // capture API_ENTER only because that's where we have the user's stack.
 }
 
 bool SynchronizationHandler::handleActivityRecord(
         const CUpti_Activity* /*record*/, int64_t /*baseCpuNs*/,
         uint64_t /*baseCuptiTs*/) {
-    // Sync activity records are processed inline in cupti_backend.cpp's
-    // BufferCompleted (where the stack_id lookup against
-    // sync_meta_by_corr_ also lives). Returning false here means the
-    // dispatcher keeps walking the handler list and lets the inline
-    // path handle the record.
+    // Sync activity records are still translated inline in cupti_backend.cpp's
+    // BufferCompleted (timing/type/stream → ActivityRecord, sub-100ns filter),
+    // which pushes the RAW record to the ring; the stack_id join now happens on
+    // the collector thread (g_syncStackByCorr in monitor.cpp, Step 4c).
+    // Returning false here means the dispatcher keeps walking the handler list
+    // and lets that inline path handle the record.
     return false;
 }
 

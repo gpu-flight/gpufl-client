@@ -413,12 +413,10 @@ void CuptiBackend::initialize(const MonitorOptions& opts) {
 
     std::set<CUpti_CallbackDomain> domains;
     std::set<std::pair<CUpti_CallbackDomain, CUpti_CallbackId>> callbacks;
-    {
-        std::lock_guard<std::mutex> lk(handler_mu_);
-        for (const auto& h : handlers_) {
-            for (auto d : h->requiredDomains()) domains.insert(d);
-            for (auto cb : h->requiredCallbacks()) callbacks.insert(cb);
-        }
+    // handlers_ just registered above on this thread; read lock-free.
+    for (const auto& h : handlers_) {
+        for (auto d : h->requiredDomains()) domains.insert(d);
+        for (auto cb : h->requiredCallbacks()) callbacks.insert(cb);
     }
     for (auto d : domains) CUPTI_CHECK(cuptiEnableDomain(1, subscriber_, d));
     for (auto& [domain, cbid] : callbacks)
@@ -494,6 +492,37 @@ void CuptiBackend::start() {
     source_locator_seen_.store(0, std::memory_order_relaxed);
     function_record_seen_.store(0, std::memory_order_relaxed);
     capture_capabilities_emitted_.store(false, std::memory_order_relaxed);
+
+    // Reset the BufferCompleted companion maps for a clean per-session slate
+    // (Step 5). These persist across BufferCompleted calls *within* a session
+    // but were never cleared *between* sessions — across an init/shutdown cycle
+    // CUPTI reuses sourceLocator / function / marker ids, so a stale entry from
+    // a prior session could mis-attribute a PC sample or NVTX range. Safe to do
+    // here: start() runs before any activity kind is enabled below, so no
+    // BufferCompleted can be in flight yet (the mutexes are belt-and-suspenders).
+    // g_extCorrMap is also cleared at stop(); clearing here too makes the slate
+    // robust no matter how the previous session ended.
+    {
+        std::lock_guard lk(g_sourceLocatorMu);
+        g_sourceLocatorMap.clear();
+        g_functionNameMap.clear();
+    }
+    {
+        std::lock_guard lk(g_nvtxMu);
+        g_nvtxOpen.clear();
+    }
+    {
+        std::lock_guard lk(g_extCorrMu);
+        g_extCorrMap.clear();
+    }
+
+    // Capture the per-session CUPTI->wall clock anchor before enabling any
+    // activity kind, so every activity record converts against a consistent,
+    // per-session-fresh base. Replaces the old function-static anchor in
+    // BufferCompleted (which leaked across init/shutdown cycles).
+    base_cpu_ns_ = detail::GetTimestampNs();
+    base_cupti_ts_ = 0;
+    cuptiGetTimestamp(&base_cupti_ts_);
 
     // Resolve CUDA context/device before asking handlers for activity kinds.
     // SASS safe-mode policy is device dependent, and the policy log should
@@ -676,14 +705,12 @@ void CuptiBackend::start() {
         }
     }
 
-    // Enable activity kinds required by registered handlers (always on)
+    // Enable activity kinds required by registered handlers (always on).
+    // handlers_ is immutable after initialize() → read lock-free.
     {
         std::set<CUpti_ActivityKind> kinds;
-        {
-            std::lock_guard<std::mutex> lk(handler_mu_);
-            for (const auto& h : handlers_)
-                for (auto k : h->requiredActivityKinds()) kinds.insert(k);
-        }
+        for (const auto& h : handlers_)
+            for (auto k : h->requiredActivityKinds()) kinds.insert(k);
         for (auto k : kinds) CUPTI_CHECK(cuptiActivityEnable(k));
     }
 
@@ -703,11 +730,8 @@ void CuptiBackend::start() {
     // kernel activity records are produced regardless of engine type.
     {
         std::set<CUpti_ActivityKind> kinds;
-        {
-            std::lock_guard lk(handler_mu_);
-            for (const auto& h : handlers_)
-                for (auto k : h->requiredActivityKinds()) kinds.insert(k);
-        }
+        for (const auto& h : handlers_)
+            for (auto k : h->requiredActivityKinds()) kinds.insert(k);
         for (auto k : kinds) cuptiActivityEnable(k);
     }
 
@@ -1079,11 +1103,8 @@ void CuptiBackend::stop() {
     // below. So we don't lose any data by disabling first.
     {
         std::set<CUpti_ActivityKind> kinds;
-        {
-            std::lock_guard lk(handler_mu_);
-            for (const auto& h : handlers_)
-                for (auto k : h->requiredActivityKinds()) kinds.insert(k);
-        }
+        for (const auto& h : handlers_)
+            for (auto k : h->requiredActivityKinds()) kinds.insert(k);
         for (auto k : kinds) cuptiActivityDisable(k);
     }
 
@@ -1123,7 +1144,13 @@ void CuptiBackend::stop() {
         LogCuptiIfUnexpected("Perfworks", "cuptiActivityFlushAll",
                              cuptiActivityFlushAll(1));
     }
-    FlushPendingKernels();
+    // Synthetic kernels (launches CUPTI delivered no activity record for) are
+    // now flushed by the collector thread from its worker-local meta map once
+    // the ring is fully drained (drainSyntheticKernels in monitor.cpp, invoked
+    // at CollectorLoop teardown + Monitor::Shutdown's post-join drain) — see
+    // Step 4b-2. This used to call FlushPendingKernels() here on the stop
+    // thread. The summary counters below therefore now reflect real activity
+    // records only; synthetic rows are counted/emitted later by the collector.
     {
         std::lock_guard lk(g_extCorrMu);
         g_extCorrMap.clear();
@@ -1141,7 +1168,8 @@ void CuptiBackend::stop() {
 void CuptiBackend::RegisterHandler(
     const std::shared_ptr<ICuptiHandler>& handler) {
     if (!handler) return;
-    std::lock_guard lk(handler_mu_);
+    // No lock: called only from initialize() before CUPTI callbacks are enabled
+    // (single-threaded setup). handlers_ is immutable once callbacks can fire.
     handlers_.push_back(handler);
 }
 
@@ -1190,107 +1218,6 @@ void CuptiBackend::FlushOnContextDestroy() {
     context_destroy_flushing_.store(false, std::memory_order_release);
 }
 
-void CuptiBackend::FlushPendingKernels() {
-    const int64_t flushNs = detail::GetTimestampNs();
-    std::unordered_map<uint64_t, LaunchMeta> pending;
-    {
-        std::lock_guard lk(meta_mu_);
-        pending = std::move(meta_by_corr_);
-    }
-    GFL_LOG_DEBUG("[FlushPendingKernels] draining ", pending.size(),
-                  " synthetic kernel(s) at flushNs=", flushNs);
-
-    // Build an order-by-api-enter index so we can approximate per-kernel
-    // GPU time as the interval between this kernel's dispatch and the
-    // next kernel's dispatch (or the scope flush time for the last one).
-    //
-    // CUPTI did NOT deliver activity records for these kernels (common on
-    // Blackwell with PC Sampling SamplingAPI: PC Sampling captures the
-    // kernel stream, so KERNEL activity kinds stay dormant). Without GPU
-    // timestamps we fall back to host-side dispatch intervals — an
-    // imperfect proxy that nonetheless reflects the actual sequential
-    // execution pattern for typical single-stream workloads and is
-    // strictly better than reporting 0.
-    std::vector<uint64_t> orderedCorr;
-    orderedCorr.reserve(pending.size());
-    for (const auto& [corr, _] : pending) orderedCorr.push_back(corr);
-    std::sort(orderedCorr.begin(), orderedCorr.end(),
-              [&](uint64_t a, uint64_t b) {
-                  return pending[a].api_enter_ns < pending[b].api_enter_ns;
-              });
-
-    for (size_t i = 0; i < orderedCorr.size(); ++i) {
-        const uint64_t corr = orderedCorr[i];
-        auto& m = pending[corr];
-        ActivityRecord out{};
-        out.device_id = device_id_;
-        out.stream = 0;
-        out.type = TraceType::KERNEL;
-        std::snprintf(out.name, sizeof(out.name), "%s", m.name);
-        out.cpu_start_ns = m.api_enter_ns;
-
-        // Synthetic duration: interval until the next kernel's dispatch
-        // (they run sequentially on the default stream of single-stream
-        // workloads, so one's completion roughly aligns with the next
-        // one's dispatch return) — or flushNs for the last kernel
-        // (it completed between its dispatch and our post-sync flush).
-        const int64_t nextEnterNs = (i + 1 < orderedCorr.size())
-            ? pending[orderedCorr[i + 1]].api_enter_ns
-            : flushNs;
-        int64_t synthDur = nextEnterNs - m.api_enter_ns;
-        if (synthDur < 0) synthDur = 0;  // clock skew guard
-        out.duration_ns = synthDur;
-        out.corr_id = static_cast<unsigned>(corr);
-        out.api_start_ns = m.api_enter_ns;
-        out.api_exit_ns = m.api_exit_ns > 0 ? m.api_exit_ns : flushNs;
-        out.scope_depth = m.scope_depth;
-        out.stack_id = m.stack_id;
-        std::copy(std::begin(m.user_scope), std::end(m.user_scope),
-                  std::begin(out.user_scope));
-        if (m.has_details) {
-            out.has_details = true;
-            out.grid_x = m.grid_x;
-            out.grid_y = m.grid_y;
-            out.grid_z = m.grid_z;
-            out.block_x = m.block_x;
-            out.block_y = m.block_y;
-            out.block_z = m.block_z;
-            out.dyn_shared = m.dyn_shared;
-
-            SmProps props = GetSMProps(out.device_id);
-            int threadsPerBlock =
-                out.block_x * out.block_y * out.block_z;
-            int warpsPerBlock =
-                (threadsPerBlock + props.warpSize - 1) / props.warpSize;
-            int maxWarpsPerSM = props.maxThreadsPerSM / props.warpSize;
-            int warpBlocks = (warpsPerBlock > 0)
-                                 ? (maxWarpsPerSM / warpsPerBlock) : 0;
-            int blockBlocks = props.maxBlocksPerSM;
-            out.max_active_blocks = std::min(warpBlocks, blockBlocks);
-            auto toOcc = [&](int blocks) -> float {
-                return (maxWarpsPerSM > 0 && warpsPerBlock > 0)
-                           ? std::min(1.0f,
-                                      static_cast<float>(
-                                          blocks * warpsPerBlock) /
-                                          maxWarpsPerSM)
-                           : 0.0f;
-            };
-            out.warp_occupancy = toOcc(warpBlocks);
-            out.block_occupancy = toOcc(blockBlocks);
-            out.occupancy = out.warp_occupancy;
-            std::snprintf(out.limiting_resource,
-                          sizeof(out.limiting_resource), "%s", "warps");
-        }
-        GFL_LOG_DEBUG("[FlushPendingKernels] synth corr=", corr,
-                      " name=", out.name,
-                      " scope=", out.user_scope,
-                      " dur=", out.duration_ns, "ns");
-        g_monitorBuffer.Push(out);
-        kernel_activity_seen_.fetch_add(1, std::memory_order_relaxed);
-        kernel_activity_emitted_.fetch_add(1, std::memory_order_relaxed);
-    }
-}
-
 // ---- Static callbacks ------------------------------------------------------
 
 void CUPTIAPI CuptiBackend::BufferRequested(uint8_t** buffer, size_t* size,
@@ -1312,15 +1239,18 @@ void CUPTIAPI CuptiBackend::BufferCompleted(CUcontext context,
         return;
     }
 
-    static int64_t baseCpuNs = detail::GetTimestampNs();
-    static uint64_t baseCuptiTs = 0;
-    if (baseCuptiTs == 0) cuptiGetTimestamp(&baseCuptiTs);
-
-    std::vector<std::shared_ptr<ICuptiHandler>> handlers;
-    {
-        std::lock_guard lk(backend->handler_mu_);
-        handlers = backend->handlers_;
+    // Per-session clock anchor, captured in start(). Defensive lazy-init in
+    // case an activity record somehow arrives before start() set it.
+    if (backend->base_cupti_ts_ == 0) {
+        backend->base_cpu_ns_ = detail::GetTimestampNs();
+        cuptiGetTimestamp(&backend->base_cupti_ts_);
     }
+    const int64_t baseCpuNs = backend->base_cpu_ns_;
+    const uint64_t baseCuptiTs = backend->base_cupti_ts_;
+
+    // handlers_ is immutable after initialize() (see its declaration) — iterate
+    // it directly: no handler_mu_, no per-buffer vector copy.
+    const auto& handlers = backend->handlers_;
 
     if (validSize > 0) {
         // ----------------------------------------------------------------
@@ -1625,23 +1555,11 @@ void CUPTIAPI CuptiBackend::BufferCompleted(CUcontext context,
                         out.sync_type     = static_cast<uint8_t>(s->type);
                         out.sync_event_id = s->cudaEventId;
                         out.context_id    = s->contextId;
-                        // Join the user call stack captured by
-                        // SynchronizationHandler on API_ENTER. Erasing
-                        // after lookup keeps sync_meta_by_corr_ bounded
-                        // — sync activity records are 1:1 with the
-                        // API call, unlike kernel correlations that
-                        // can span multiple activity records.
-                        // (BufferCompleted is a static method, so we
-                        // access non-static state through the backend
-                        // pointer captured at line 851.)
-                        {
-                            std::lock_guard lk(backend->sync_meta_mu_);
-                            auto smIt = backend->sync_meta_by_corr_.find(s->correlationId);
-                            if (smIt != backend->sync_meta_by_corr_.end()) {
-                                out.stack_id = smIt->second.stack_id;
-                                backend->sync_meta_by_corr_.erase(smIt);
-                            }
-                        }
+                        // The user call stack captured by SynchronizationHandler
+                        // at API_ENTER is joined on the collector thread now
+                        // (g_syncStackByCorr in monitor.cpp, keyed by corr_id) —
+                        // no sync_meta_mu_ here. out.stack_id stays 0; the
+                        // collector fills it. (Step 4c.)
                         g_monitorBuffer.Push(out);
                     }
                     // (EXTERNAL_CORRELATION handled in pass 1 above —
@@ -1669,11 +1587,9 @@ void CuptiBackend::GflCallback(void* userdata, CUpti_CallbackDomain domain,
     auto* backend = static_cast<CuptiBackend*>(userdata);
     if (!backend) return;
 
-    std::vector<std::shared_ptr<ICuptiHandler>> handlers;
-    {
-        std::lock_guard<std::mutex> lk(backend->handler_mu_);
-        handlers = backend->handlers_;
-    }
+    // handlers_ is immutable after initialize() (see its declaration) — iterate
+    // it directly on this per-callback hot path: no handler_mu_, no copy/alloc.
+    const auto& handlers = backend->handlers_;
 
     bool apiHandled = false;
 

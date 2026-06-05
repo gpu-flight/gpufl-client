@@ -85,5 +85,36 @@ enum class TraceType : uint8_t {
     //   graph_id      — unique id of the graph (so repeated launches
     //                   of the same compiled graph share an id)
     GRAPH_LAUNCH,
+    // ── Internal-only collector control records (Step 4b-2) ──────────────
+    // These NEVER reach a wire Model — the collector consumes them to maintain
+    // its launch-meta join map and emits nothing. Appended at the END so every
+    // existing TraceType ordinal is unchanged (the enum is routed in-process
+    // only; the NDJSON wire format keys off Model type strings, not this enum).
+    //
+    // Carry the corr->meta join — which used to run under CuptiBackend::meta_mu_
+    // on the CUPTI callback + BufferCompleted threads — from those threads to
+    // the single collector thread, where the join becomes lock-free.
+    //
+    // KERNEL_LAUNCH_META: pushed by KernelLaunchHandler / MemTransferHandler on
+    //   API_ENTER. The collector stores it in g_launchMetaByCorr keyed by
+    //   corr_id; the matching KERNEL / MEMCPY / MEMSET activity record later
+    //   joins scope path, stack id, and API timestamps from it. Entries with no
+    //   activity record by shutdown become synthetic kernels (drainSynthetic
+    //   Kernels). Fields used on ActivityRecord: corr_id, name (raw), device_id,
+    //   api_start_ns (= API_ENTER ns), user_scope, scope_depth, stack_id, plus
+    //   has_details + grid/block/dyn_shared and the precomputed simplified
+    //   occupancy (synthetic-kernel modes only).
+    KERNEL_LAUNCH_META,
+    // KERNEL_API_EXIT: pushed on API_EXIT by the same two handlers. The
+    //   collector sets api_exit_ns on the matching g_launchMetaByCorr entry.
+    //   Fields used on ActivityRecord: corr_id, api_exit_ns.
+    KERNEL_API_EXIT,
+    // SYNC_META: pushed by SynchronizationHandler on API_ENTER (Step 4c). Carries
+    //   the user call stack for a CUDA sync API so the collector can join it onto
+    //   the matching SYNCHRONIZATION activity record by corr_id (the join used to
+    //   run under CuptiBackend::sync_meta_mu_ in BufferCompleted). The collector
+    //   stores corr_id->stack_id in g_syncStackByCorr and never emits this record.
+    //   Fields used on ActivityRecord: corr_id, stack_id.
+    SYNC_META,
 };
 }

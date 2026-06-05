@@ -77,6 +77,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -127,6 +128,16 @@ static KernelFn kDistinctKernels[] = {
 };
 static constexpr int kNumDistinctKernels =
     sizeof(kDistinctKernels) / sizeof(kDistinctKernels[0]);
+
+// Experiment knob: when set (via the `serialize` flag), every launcher thread
+// takes this global mutex around its kernel <<<>>> launch, so only one thread
+// is inside the driver's launch enqueue at a time. Tests the "SASS Safe-Lock"
+// mitigation: if the hang is concurrent cuLaunchKernel threads tangling the
+// driver launch rwlock, serializing the host-side enqueue should break it
+// (GPU execution still overlaps — only the dispatch is serialized). Set in
+// main() before any launcher thread is spawned, then read-only.
+static std::mutex g_launchSerializeMu;
+static bool g_serializeLaunches = false;
 
 // ── CLI parsing helpers ─────────────────────────────────────────────────────
 
@@ -203,7 +214,15 @@ static void launcherThread(int threadId, int steps,
             // Offset by threadId so threads hit *different* distinct symbols
             // first → maximal distinct-first-launch concurrency.
             int idx = (k + threadId) % kNumDistinctKernels;
-            kDistinctKernels[idx]<<<grid, block, 0, stream>>>(d_buf, n);
+            if (g_serializeLaunches) {
+                // SASS Safe-Lock: only one thread in the driver launch enqueue
+                // at a time. The lock spans just the host-side dispatch; the
+                // kernel still executes async on the stream after we release.
+                std::lock_guard<std::mutex> lk(g_launchSerializeMu);
+                kDistinctKernels[idx]<<<grid, block, 0, stream>>>(d_buf, n);
+            } else {
+                kDistinctKernels[idx]<<<grid, block, 0, stream>>>(d_buf, n);
+            }
         }
         // Periodic sync mimics a training step boundary and forces the
         // activity/callback path to flush under contention.
@@ -220,6 +239,14 @@ int main(int argc, char** argv) {
     const int steps      = intArg(argc, argv, "steps", 40);
     const int timeoutSec = intArg(argc, argv, "timeout", 60);
     const bool useScope  = !hasFlag(argc, argv, "noscope");
+    // Experiment knob: serially first-launch every distinct kernel inside the
+    // SASS-armed scope BEFORE releasing the concurrent threads. Tests the
+    // hypothesis that the hang is CUPTI's lazy SASS patching of modules loaded
+    // after arm — done serially (no concurrency) it should patch each module
+    // without the launch-rwlock ↔ CUPTI-lock AB-BA.
+    const bool prewarm   = hasFlag(argc, argv, "prewarm");
+    // SASS Safe-Lock experiment: serialize host-side kernel-launch enqueue.
+    g_serializeLaunches  = hasFlag(argc, argv, "serialize");
     const gpufl::ProfilingEngine engine = engineArg(argc, argv);
 
     const char* fullActivity = std::getenv("GPUFL_SASS_ALLOW_FULL_ACTIVITY");
@@ -233,6 +260,8 @@ int main(int argc, char** argv) {
               << "  steps/thread    : " << steps << "\n"
               << "  distinct kernels: " << kNumDistinctKernels << "\n"
               << "  scope-wrapped   : " << (useScope ? "yes" : "no (control)") << "\n"
+              << "  prewarm modules : " << (prewarm ? "yes (serial first-launch before concurrency)" : "no") << "\n"
+              << "  serialize launch: " << (g_serializeLaunches ? "yes (global launch mutex — SASS Safe-Lock)" : "no") << "\n"
               << "  CUPTI activity  : "
               << (unsafeMode ? "FULL (GPUFL_SASS_ALLOW_FULL_ACTIVITY=1 — UNSAFE, may hang)"
                             : "safe (default defense)")
@@ -298,6 +327,28 @@ int main(int argc, char** argv) {
     launchers.reserve(numThreads);
 
     auto runWorkload = [&]() {
+        if (prewarm) {
+            // Serially first-launch every distinct kernel BEFORE releasing the
+            // concurrent threads. Runs inside the SASS-armed scope, so if the
+            // deadlock is CUPTI lazily patching modules loaded after arm, this
+            // patches each module one-at-a-time (no concurrency → no AB-BA),
+            // leaving the concurrent loop below to only re-launch already-
+            // patched modules.
+            std::cout << "[prewarm] serially launching " << kNumDistinctKernels
+                      << " distinct kernels before concurrency...\n" << std::flush;
+            const int n = 1 << 18;
+            float* d = nullptr;
+            if (cudaMalloc(&d, n * sizeof(float)) == cudaSuccess) {
+                cudaMemset(d, 0, n * sizeof(float));
+                const dim3 block(256), grid((n + block.x - 1) / block.x);
+                for (int k = 0; k < kNumDistinctKernels; ++k) {
+                    kDistinctKernels[k]<<<grid, block>>>(d, n);
+                    cudaDeviceSynchronize();  // one module patched at a time
+                }
+                cudaFree(d);
+            }
+            std::cout << "[prewarm] done — modules patched serially.\n" << std::flush;
+        }
         for (int t = 0; t < numThreads; ++t)
             launchers.emplace_back(launcherThread, t, steps, std::ref(go),
                                    std::ref(liveCount));
