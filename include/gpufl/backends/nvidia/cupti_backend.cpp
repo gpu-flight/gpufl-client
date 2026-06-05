@@ -495,6 +495,29 @@ void CuptiBackend::start() {
     function_record_seen_.store(0, std::memory_order_relaxed);
     capture_capabilities_emitted_.store(false, std::memory_order_relaxed);
 
+    // Reset the BufferCompleted companion maps for a clean per-session slate
+    // (Step 5). These persist across BufferCompleted calls *within* a session
+    // but were never cleared *between* sessions — across an init/shutdown cycle
+    // CUPTI reuses sourceLocator / function / marker ids, so a stale entry from
+    // a prior session could mis-attribute a PC sample or NVTX range. Safe to do
+    // here: start() runs before any activity kind is enabled below, so no
+    // BufferCompleted can be in flight yet (the mutexes are belt-and-suspenders).
+    // g_extCorrMap is also cleared at stop(); clearing here too makes the slate
+    // robust no matter how the previous session ended.
+    {
+        std::lock_guard lk(g_sourceLocatorMu);
+        g_sourceLocatorMap.clear();
+        g_functionNameMap.clear();
+    }
+    {
+        std::lock_guard lk(g_nvtxMu);
+        g_nvtxOpen.clear();
+    }
+    {
+        std::lock_guard lk(g_extCorrMu);
+        g_extCorrMap.clear();
+    }
+
     // Capture the per-session CUPTI->wall clock anchor before enabling any
     // activity kind, so every activity record converts against a consistent,
     // per-session-fresh base. Replaces the old function-static anchor in
