@@ -55,6 +55,17 @@ class CuptiBackend : public IMonitorBackend {
     bool AllowSassKernelActivity() const {
         return resolved_plan_.allow_sass_kernel_activity;
     }
+    // True when CUPTI kernel ACTIVITY records won't be collected, so every
+    // launch must be reported from its callback as a synthetic kernel (PC
+    // Sampling, or SASS profiler safe mode without GPUFL_SASS_ALLOW_KERNEL_
+    // ACTIVITY). Mirrors KernelLaunchHandler::requiredActivityKinds() returning
+    // {}. In these modes the launch callback precomputes the simplified kernel
+    // occupancy (the activity record that would otherwise carry it never
+    // arrives); see KernelLaunchHandler::handle + drainSyntheticKernels.
+    bool WillEmitSyntheticKernels() const {
+        return opts_.profiling_engine == ProfilingEngine::PcSampling ||
+               !AllowSassKernelActivity();
+    }
     bool AllowSassMarkerActivity() const {
         return resolved_plan_.allow_sass_marker_activity;
     }
@@ -99,11 +110,6 @@ class CuptiBackend : public IMonitorBackend {
 
     bool IsActive() const { return active_.load(); }
     const MonitorOptions& GetOptions() const { return opts_; }
-
-    // Flush any pending kernel metadata as synthetic activity records.
-    // Called from scope stop after cudaDeviceSynchronize() so durations
-    // reflect actual GPU execution time.
-    void FlushPendingKernels();
 
     // Drain CUPTI activity buffers from the CUPTI_CBID_RESOURCE_CONTEXT_
     // DESTROY_STARTING callback — i.e. while the context is still alive, just
@@ -182,14 +188,17 @@ class CuptiBackend : public IMonitorBackend {
     DeviceFacts device_facts_;
     ResolvedProfilingPlan resolved_plan_;
 
-    std::mutex meta_mu_;
-    std::unordered_map<uint64_t, LaunchMeta> meta_by_corr_;
+    // NOTE (Step 4b-2): the launch-meta join map + its mutex are GONE. The
+    // corr->meta join (kernel AND memcpy/memset) now runs lock-free on the
+    // single collector thread (g_launchMetaByCorr / joinLaunchMeta in
+    // monitor.cpp); the launch callbacks push KERNEL_LAUNCH_META /
+    // KERNEL_API_EXIT records to the ring instead of locking meta_mu_.
 
     // Sync metadata captured by SynchronizationHandler on API_ENTER and
     // joined to the SYNCHRONIZATION activity record by correlationId in
-    // BufferCompleted. Separate mutex from meta_mu_ so sync API_ENTER
-    // doesn't contend with kernel-launch metadata writes during bursty
-    // workloads (PyTorch eager mode interleaves both heavily).
+    // BufferCompleted. Still mutex-guarded (the kernel/mem join went lock-free
+    // in 4b-2; this sync join follows in 4c — same pattern: push SYNC_META to
+    // the ring and join on the collector thread, then this mutex too is gone).
     struct SyncMeta {
         size_t stack_id = 0;
         int64_t api_enter_ns = 0;

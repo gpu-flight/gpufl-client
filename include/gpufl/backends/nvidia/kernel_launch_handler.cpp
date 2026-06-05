@@ -91,6 +91,37 @@ bool CopyReadableCString(const char* src, std::string* out) {
 #endif
 }
 
+// Precompute the SIMPLIFIED occupancy carried on a synthetic kernel's launch-
+// meta record. Only grid/block + dynamic shared memory are known at launch time
+// (per-thread registers and static shared memory live on the activity record,
+// which by definition never arrives for a synthetic kernel), so occupancy is
+// bounded by warps + blocks only — byte-for-byte the math the old
+// CuptiBackend::FlushPendingKernels ran at stop(). Runs here on the launch
+// callback (the nvidia layer, where GetSMProps lives) so the core collector TU
+// can stay free of CUDA headers; drainSyntheticKernels in monitor.cpp just
+// copies these fields. Only called in synthetic-kernel modes (see
+// CuptiBackend::WillEmitSyntheticKernels), so normal/Deep launches pay nothing.
+void ComputeSyntheticOccupancy(ActivityRecord& rec, uint32_t device_id) {
+    SmProps props = GetSMProps(static_cast<int>(device_id));
+    int threadsPerBlock = rec.block_x * rec.block_y * rec.block_z;
+    int warpsPerBlock = (threadsPerBlock + props.warpSize - 1) / props.warpSize;
+    int maxWarpsPerSM = props.maxThreadsPerSM / props.warpSize;
+    int warpBlocks = (warpsPerBlock > 0) ? (maxWarpsPerSM / warpsPerBlock) : 0;
+    int blockBlocks = props.maxBlocksPerSM;
+    rec.max_active_blocks = std::min(warpBlocks, blockBlocks);
+    auto toOcc = [&](int blocks) -> float {
+        return (maxWarpsPerSM > 0 && warpsPerBlock > 0)
+                   ? std::min(1.0f, static_cast<float>(blocks * warpsPerBlock) /
+                                        maxWarpsPerSM)
+                   : 0.0f;
+    };
+    rec.warp_occupancy = toOcc(warpBlocks);
+    rec.block_occupancy = toOcc(blockBlocks);
+    rec.occupancy = rec.warp_occupancy;
+    std::snprintf(rec.limiting_resource, sizeof(rec.limiting_resource), "%s",
+                  "warps");
+}
+
 }  // namespace
 
 KernelLaunchHandler::KernelLaunchHandler(CuptiBackend* backend)
@@ -239,8 +270,20 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
 
     if (cbInfo->callbackSite == CUPTI_API_ENTER) {
         backend_->NoteKernelLaunchForCleanupFlush();
-        LaunchMeta meta{};
-        meta.api_enter_ns = detail::GetTimestampNs();
+
+        // Build a KERNEL_LAUNCH_META record and push it to the lock-free ring
+        // (Step 4b-2). The corr->meta join that used to run here under meta_mu_
+        // now happens on the single collector thread (joinLaunchMeta in
+        // monitor.cpp) — this callback takes NO lock. Push is heap-free: the
+        // ring slot is preallocated and Push copies the POD into it.
+        ActivityRecord metaRec{};
+        metaRec.type = TraceType::KERNEL_LAUNCH_META;
+        metaRec.corr_id = cbInfo->correlationId;
+        // device_id is consumed only by the synthetic-kernel path (real kernels
+        // take k->deviceId from the activity record); matches the old
+        // FlushPendingKernels `out.device_id = device_id_`.
+        metaRec.device_id = backend_->device_id_;
+        metaRec.api_start_ns = detail::GetTimestampNs();  // API_ENTER ns
 
         // Prefer cbInfo->symbolName so callback-only SASS safe mode can still
         // group kernels by real symbol. CUDA 13.1 sometimes puts invalid tagged
@@ -252,23 +295,23 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
         // read so a non-null-terminated CUPTI name pointer can't overrun.
         std::string copiedSymbol;
         if (CopyReadableCString(cbInfo->symbolName, &copiedSymbol)) {
-            std::snprintf(meta.name, sizeof(meta.name), "%.*s",
-                          static_cast<int>(sizeof(meta.name) - 1),
+            std::snprintf(metaRec.name, sizeof(metaRec.name), "%.*s",
+                          static_cast<int>(sizeof(metaRec.name) - 1),
                           copiedSymbol.c_str());
         } else {
             const char* nm = cbInfo->functionName ? cbInfo->functionName : "";
-            std::snprintf(meta.name, sizeof(meta.name), "%.*s",
-                          static_cast<int>(sizeof(meta.name) - 1), nm);
+            std::snprintf(metaRec.name, sizeof(metaRec.name), "%.*s",
+                          static_cast<int>(sizeof(metaRec.name) - 1), nm);
         }
 
         if (backend_->GetOptions().enable_stack_trace) {
             // Capture raw return addresses only (cheap); symbol resolution is
             // deferred to the collector thread via StackRegistry::get(),
             // keeping dbghelp/SymFromAddr off this per-launch CUPTI callback.
-            meta.stack_id = StackRegistry::instance().getOrRegister(
+            metaRec.stack_id = StackRegistry::instance().getOrRegister(
                 core::CaptureCallStackRaw(2));
         } else {
-            meta.stack_id = 0;
+            metaRec.stack_id = 0;
         }
 
         auto& stack = getThreadScopeStack();
@@ -278,39 +321,39 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
                 if (i > 0) fullPath += "|";
                 fullPath += stack[i];
             }
-            std::snprintf(meta.user_scope, sizeof(meta.user_scope), "%s",
+            std::snprintf(metaRec.user_scope, sizeof(metaRec.user_scope), "%s",
                           fullPath.c_str());
-            meta.scope_depth = stack.size();
+            metaRec.scope_depth = stack.size();
         } else if (const char* injectedApp = std::getenv("GPUFL_APP_NAME")) {
             if (std::getenv("GPUFL_INJECT") && injectedApp[0] != '\0') {
                 std::string processScope = "process:";
                 processScope += injectedApp;
-                std::snprintf(meta.user_scope, sizeof(meta.user_scope), "%s",
-                              processScope.c_str());
+                std::snprintf(metaRec.user_scope, sizeof(metaRec.user_scope),
+                              "%s", processScope.c_str());
             } else {
-                std::snprintf(meta.user_scope, sizeof(meta.user_scope), "%s",
-                              "global");
+                std::snprintf(metaRec.user_scope, sizeof(metaRec.user_scope),
+                              "%s", "global");
             }
-            meta.scope_depth = 0;
+            metaRec.scope_depth = 0;
         } else {
-            std::snprintf(meta.user_scope, sizeof(meta.user_scope), "%s",
+            std::snprintf(metaRec.user_scope, sizeof(metaRec.user_scope), "%s",
                           "global");
-            meta.scope_depth = 0;
+            metaRec.scope_depth = 0;
         }
 
-        auto setLaunchDims = [&meta](const unsigned int gx,
-                                     const unsigned int gy,
+        auto setLaunchDims = [&metaRec](const unsigned int gx,
+                                        const unsigned int gy,
                     const unsigned int gz, const unsigned int bx,
                     const unsigned int by, const unsigned int bz,
-                                     size_t dyn_smem) {
-            meta.has_details = true;
-            meta.grid_x = static_cast<int>(gx);
-            meta.grid_y = static_cast<int>(gy);
-            meta.grid_z = static_cast<int>(gz);
-            meta.block_x = static_cast<int>(bx);
-            meta.block_y = static_cast<int>(by);
-            meta.block_z = static_cast<int>(bz);
-            meta.dyn_shared = static_cast<int>(dyn_smem);
+                                        size_t dyn_smem) {
+            metaRec.has_details = true;
+            metaRec.grid_x = static_cast<int>(gx);
+            metaRec.grid_y = static_cast<int>(gy);
+            metaRec.grid_z = static_cast<int>(gz);
+            metaRec.block_x = static_cast<int>(bx);
+            metaRec.block_y = static_cast<int>(by);
+            metaRec.block_z = static_cast<int>(bz);
+            metaRec.dyn_shared = static_cast<int>(dyn_smem);
         };
 
         if (cbInfo->functionParams != nullptr) {
@@ -367,42 +410,35 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
 #endif
         }
 
-        // Store metadata — emit later from scope stop (PC Sampling path)
-        // or handleActivityRecord (normal path). Runtime and driver launch
-        // callbacks can share one correlation id, so keep the richest metadata
-        // and avoid duplicate diagnostic lines for the same logical launch.
-        bool shouldLogLaunch = false;
-        {
-            std::lock_guard lk(backend_->meta_mu_);
-            auto it = backend_->meta_by_corr_.find(cbInfo->correlationId);
-            if (it == backend_->meta_by_corr_.end()) {
-                backend_->meta_by_corr_.emplace(cbInfo->correlationId, meta);
-                shouldLogLaunch = true;
-            } else if (it->second.has_details && !meta.has_details) {
-                GFL_LOG_DEBUG(
-                    "[DEBUG-CALLBACK] Skipping overwrite of rich metadata "
-                    "for CorrID ",
-                    cbInfo->correlationId, " by Driver API.");
-            } else if (!it->second.has_details && meta.has_details) {
-                it->second = meta;
-                shouldLogLaunch = true;
-            }
+        // Synthetic-kernel modes (PC Sampling / SASS safe): no CUPTI activity
+        // record will arrive, so precompute the simplified occupancy now — the
+        // only place with the nvidia SM properties — and carry it on the meta
+        // record for drainSyntheticKernels to copy. Skipped in normal / Deep
+        // mode (the activity record supplies full occupancy), keeping this
+        // callback thin. NOTE: a rare leftover meta orphaned at stop() in normal
+        // mode (its activity record dropped/in-flight) now ships occupancy 0
+        // instead of the old simplified value — acceptable for a degraded
+        // best-effort row whose duration is already a host-dispatch estimate.
+        if (metaRec.has_details && backend_->WillEmitSyntheticKernels()) {
+            ComputeSyntheticOccupancy(metaRec, metaRec.device_id);
         }
+
+        g_monitorBuffer.Push(metaRec);
+
         // Diagnostic: confirm every logical kernel launch fires this callback.
-        // If "GPU Time by Scope" shows only N kernels but this logs M>N,
-        // the loss is downstream (activity records / FlushPendingKernels).
-        if (shouldLogLaunch) {
-            GFL_LOG_DEBUG("[KernelLaunchHandler] API_ENTER corr=",
-                          cbInfo->correlationId, " name=", meta.name,
-                          " scope=", meta.user_scope);
-        }
+        // Runtime+driver share a corr so this can log twice per launch; the
+        // collector's keep-first merge dedups the actual join.
+        GFL_LOG_DEBUG("[KernelLaunchHandler] API_ENTER corr=", metaRec.corr_id,
+                      " name=", metaRec.name, " scope=", metaRec.user_scope);
     } else if (cbInfo->callbackSite == CUPTI_API_EXIT) {
-        const int64_t exitNs = detail::GetTimestampNs();
-        std::lock_guard lk(backend_->meta_mu_);
-        auto it = backend_->meta_by_corr_.find(cbInfo->correlationId);
-        if (it != backend_->meta_by_corr_.end()) {
-            it->second.api_exit_ns = exitNs;
-        }
+        // Push the API-exit timestamp as its own record; the collector patches
+        // it onto the matching launch meta. Same thread as API_ENTER, so it
+        // enters the ring after the ENTER record (FIFO by push order).
+        ActivityRecord exitRec{};
+        exitRec.type = TraceType::KERNEL_API_EXIT;
+        exitRec.corr_id = cbInfo->correlationId;
+        exitRec.api_exit_ns = detail::GetTimestampNs();
+        g_monitorBuffer.Push(exitRec);
     }
 }
 
@@ -572,34 +608,12 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
                       "%s", limiting);
     }
 
-    // Join the launch-callback metadata: scope path, stack id, API timestamps,
-    // and const-bank size (the only fields NOT in the activity record). The
-    // critical section is just find + copy + erase. (Step 4b-2 moves this join
-    // onto the collector thread to drop meta_mu_ from the callback entirely.)
-    {
-        const uint64_t corr = k->correlationId;
-        LaunchMeta meta;
-        bool found = false;
-        {
-            std::lock_guard lk(backend_->meta_mu_);
-            if (auto it = backend_->meta_by_corr_.find(corr);
-                it != backend_->meta_by_corr_.end()) {
-                meta = it->second;
-                found = true;
-                backend_->meta_by_corr_.erase(it);
-            }
-        }
-        if (found) {
-            out.scope_depth = meta.scope_depth;
-            out.stack_id = meta.stack_id;
-            std::copy(std::begin(meta.user_scope), std::end(meta.user_scope),
-                      std::begin(out.user_scope));
-            out.api_start_ns = meta.api_enter_ns;
-            out.api_exit_ns = meta.api_exit_ns;
-            out.const_bytes = meta.const_bytes;
-        }
-    }
-
+    // Launch-callback metadata (scope path, stack id, API timestamps, const-
+    // bank size — the only fields NOT in the activity record) is joined on the
+    // collector thread now (joinLaunchMeta in monitor.cpp), keyed by corr_id.
+    // This callback takes NO meta_mu_ — it pushes the raw activity record and
+    // returns. (Step 4b-2: the join moved off the CUPTI threads to drop the
+    // mutex; the matching KERNEL_LAUNCH_META was pushed by handle() at ENTER.)
     g_monitorBuffer.Push(out);
     backend_->kernel_activity_emitted_.fetch_add(1, std::memory_order_relaxed);
     return true;

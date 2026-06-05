@@ -1131,7 +1131,13 @@ void CuptiBackend::stop() {
         LogCuptiIfUnexpected("Perfworks", "cuptiActivityFlushAll",
                              cuptiActivityFlushAll(1));
     }
-    FlushPendingKernels();
+    // Synthetic kernels (launches CUPTI delivered no activity record for) are
+    // now flushed by the collector thread from its worker-local meta map once
+    // the ring is fully drained (drainSyntheticKernels in monitor.cpp, invoked
+    // at CollectorLoop teardown + Monitor::Shutdown's post-join drain) — see
+    // Step 4b-2. This used to call FlushPendingKernels() here on the stop
+    // thread. The summary counters below therefore now reflect real activity
+    // records only; synthetic rows are counted/emitted later by the collector.
     {
         std::lock_guard lk(g_extCorrMu);
         g_extCorrMap.clear();
@@ -1196,107 +1202,6 @@ void CuptiBackend::FlushOnContextDestroy() {
                          cuptiActivityFlushAll(1));
 
     context_destroy_flushing_.store(false, std::memory_order_release);
-}
-
-void CuptiBackend::FlushPendingKernels() {
-    const int64_t flushNs = detail::GetTimestampNs();
-    std::unordered_map<uint64_t, LaunchMeta> pending;
-    {
-        std::lock_guard lk(meta_mu_);
-        pending = std::move(meta_by_corr_);
-    }
-    GFL_LOG_DEBUG("[FlushPendingKernels] draining ", pending.size(),
-                  " synthetic kernel(s) at flushNs=", flushNs);
-
-    // Build an order-by-api-enter index so we can approximate per-kernel
-    // GPU time as the interval between this kernel's dispatch and the
-    // next kernel's dispatch (or the scope flush time for the last one).
-    //
-    // CUPTI did NOT deliver activity records for these kernels (common on
-    // Blackwell with PC Sampling SamplingAPI: PC Sampling captures the
-    // kernel stream, so KERNEL activity kinds stay dormant). Without GPU
-    // timestamps we fall back to host-side dispatch intervals — an
-    // imperfect proxy that nonetheless reflects the actual sequential
-    // execution pattern for typical single-stream workloads and is
-    // strictly better than reporting 0.
-    std::vector<uint64_t> orderedCorr;
-    orderedCorr.reserve(pending.size());
-    for (const auto& [corr, _] : pending) orderedCorr.push_back(corr);
-    std::sort(orderedCorr.begin(), orderedCorr.end(),
-              [&](uint64_t a, uint64_t b) {
-                  return pending[a].api_enter_ns < pending[b].api_enter_ns;
-              });
-
-    for (size_t i = 0; i < orderedCorr.size(); ++i) {
-        const uint64_t corr = orderedCorr[i];
-        auto& m = pending[corr];
-        ActivityRecord out{};
-        out.device_id = device_id_;
-        out.stream = 0;
-        out.type = TraceType::KERNEL;
-        std::snprintf(out.name, sizeof(out.name), "%s", m.name);
-        out.cpu_start_ns = m.api_enter_ns;
-
-        // Synthetic duration: interval until the next kernel's dispatch
-        // (they run sequentially on the default stream of single-stream
-        // workloads, so one's completion roughly aligns with the next
-        // one's dispatch return) — or flushNs for the last kernel
-        // (it completed between its dispatch and our post-sync flush).
-        const int64_t nextEnterNs = (i + 1 < orderedCorr.size())
-            ? pending[orderedCorr[i + 1]].api_enter_ns
-            : flushNs;
-        int64_t synthDur = nextEnterNs - m.api_enter_ns;
-        if (synthDur < 0) synthDur = 0;  // clock skew guard
-        out.duration_ns = synthDur;
-        out.corr_id = static_cast<unsigned>(corr);
-        out.api_start_ns = m.api_enter_ns;
-        out.api_exit_ns = m.api_exit_ns > 0 ? m.api_exit_ns : flushNs;
-        out.scope_depth = m.scope_depth;
-        out.stack_id = m.stack_id;
-        std::copy(std::begin(m.user_scope), std::end(m.user_scope),
-                  std::begin(out.user_scope));
-        if (m.has_details) {
-            out.has_details = true;
-            out.grid_x = m.grid_x;
-            out.grid_y = m.grid_y;
-            out.grid_z = m.grid_z;
-            out.block_x = m.block_x;
-            out.block_y = m.block_y;
-            out.block_z = m.block_z;
-            out.dyn_shared = m.dyn_shared;
-
-            SmProps props = GetSMProps(out.device_id);
-            int threadsPerBlock =
-                out.block_x * out.block_y * out.block_z;
-            int warpsPerBlock =
-                (threadsPerBlock + props.warpSize - 1) / props.warpSize;
-            int maxWarpsPerSM = props.maxThreadsPerSM / props.warpSize;
-            int warpBlocks = (warpsPerBlock > 0)
-                                 ? (maxWarpsPerSM / warpsPerBlock) : 0;
-            int blockBlocks = props.maxBlocksPerSM;
-            out.max_active_blocks = std::min(warpBlocks, blockBlocks);
-            auto toOcc = [&](int blocks) -> float {
-                return (maxWarpsPerSM > 0 && warpsPerBlock > 0)
-                           ? std::min(1.0f,
-                                      static_cast<float>(
-                                          blocks * warpsPerBlock) /
-                                          maxWarpsPerSM)
-                           : 0.0f;
-            };
-            out.warp_occupancy = toOcc(warpBlocks);
-            out.block_occupancy = toOcc(blockBlocks);
-            out.occupancy = out.warp_occupancy;
-            std::snprintf(out.limiting_resource,
-                          sizeof(out.limiting_resource), "%s", "warps");
-        }
-        GFL_LOG_DEBUG("[FlushPendingKernels] synth corr=", corr,
-                      " name=", out.name,
-                      " scope=", out.user_scope,
-                      " dur=", out.duration_ns, "ns");
-        g_monitorBuffer.Push(out);
-        kernel_activity_seen_.fetch_add(1, std::memory_order_relaxed);
-        kernel_activity_emitted_.fetch_add(1, std::memory_order_relaxed);
-    }
 }
 
 // ---- Static callbacks ------------------------------------------------------
