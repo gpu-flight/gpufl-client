@@ -77,6 +77,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -127,6 +128,16 @@ static KernelFn kDistinctKernels[] = {
 };
 static constexpr int kNumDistinctKernels =
     sizeof(kDistinctKernels) / sizeof(kDistinctKernels[0]);
+
+// Experiment knob: when set (via the `serialize` flag), every launcher thread
+// takes this global mutex around its kernel <<<>>> launch, so only one thread
+// is inside the driver's launch enqueue at a time. Tests the "SASS Safe-Lock"
+// mitigation: if the hang is concurrent cuLaunchKernel threads tangling the
+// driver launch rwlock, serializing the host-side enqueue should break it
+// (GPU execution still overlaps — only the dispatch is serialized). Set in
+// main() before any launcher thread is spawned, then read-only.
+static std::mutex g_launchSerializeMu;
+static bool g_serializeLaunches = false;
 
 // ── CLI parsing helpers ─────────────────────────────────────────────────────
 
@@ -203,7 +214,15 @@ static void launcherThread(int threadId, int steps,
             // Offset by threadId so threads hit *different* distinct symbols
             // first → maximal distinct-first-launch concurrency.
             int idx = (k + threadId) % kNumDistinctKernels;
-            kDistinctKernels[idx]<<<grid, block, 0, stream>>>(d_buf, n);
+            if (g_serializeLaunches) {
+                // SASS Safe-Lock: only one thread in the driver launch enqueue
+                // at a time. The lock spans just the host-side dispatch; the
+                // kernel still executes async on the stream after we release.
+                std::lock_guard<std::mutex> lk(g_launchSerializeMu);
+                kDistinctKernels[idx]<<<grid, block, 0, stream>>>(d_buf, n);
+            } else {
+                kDistinctKernels[idx]<<<grid, block, 0, stream>>>(d_buf, n);
+            }
         }
         // Periodic sync mimics a training step boundary and forces the
         // activity/callback path to flush under contention.
@@ -226,6 +245,8 @@ int main(int argc, char** argv) {
     // after arm — done serially (no concurrency) it should patch each module
     // without the launch-rwlock ↔ CUPTI-lock AB-BA.
     const bool prewarm   = hasFlag(argc, argv, "prewarm");
+    // SASS Safe-Lock experiment: serialize host-side kernel-launch enqueue.
+    g_serializeLaunches  = hasFlag(argc, argv, "serialize");
     const gpufl::ProfilingEngine engine = engineArg(argc, argv);
 
     const char* fullActivity = std::getenv("GPUFL_SASS_ALLOW_FULL_ACTIVITY");
@@ -240,6 +261,7 @@ int main(int argc, char** argv) {
               << "  distinct kernels: " << kNumDistinctKernels << "\n"
               << "  scope-wrapped   : " << (useScope ? "yes" : "no (control)") << "\n"
               << "  prewarm modules : " << (prewarm ? "yes (serial first-launch before concurrency)" : "no") << "\n"
+              << "  serialize launch: " << (g_serializeLaunches ? "yes (global launch mutex — SASS Safe-Lock)" : "no") << "\n"
               << "  CUPTI activity  : "
               << (unsafeMode ? "FULL (GPUFL_SASS_ALLOW_FULL_ACTIVITY=1 — UNSAFE, may hang)"
                             : "safe (default defense)")
