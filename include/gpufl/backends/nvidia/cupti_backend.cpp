@@ -413,12 +413,10 @@ void CuptiBackend::initialize(const MonitorOptions& opts) {
 
     std::set<CUpti_CallbackDomain> domains;
     std::set<std::pair<CUpti_CallbackDomain, CUpti_CallbackId>> callbacks;
-    {
-        std::lock_guard<std::mutex> lk(handler_mu_);
-        for (const auto& h : handlers_) {
-            for (auto d : h->requiredDomains()) domains.insert(d);
-            for (auto cb : h->requiredCallbacks()) callbacks.insert(cb);
-        }
+    // handlers_ just registered above on this thread; read lock-free.
+    for (const auto& h : handlers_) {
+        for (auto d : h->requiredDomains()) domains.insert(d);
+        for (auto cb : h->requiredCallbacks()) callbacks.insert(cb);
     }
     for (auto d : domains) CUPTI_CHECK(cuptiEnableDomain(1, subscriber_, d));
     for (auto& [domain, cbid] : callbacks)
@@ -707,14 +705,12 @@ void CuptiBackend::start() {
         }
     }
 
-    // Enable activity kinds required by registered handlers (always on)
+    // Enable activity kinds required by registered handlers (always on).
+    // handlers_ is immutable after initialize() → read lock-free.
     {
         std::set<CUpti_ActivityKind> kinds;
-        {
-            std::lock_guard<std::mutex> lk(handler_mu_);
-            for (const auto& h : handlers_)
-                for (auto k : h->requiredActivityKinds()) kinds.insert(k);
-        }
+        for (const auto& h : handlers_)
+            for (auto k : h->requiredActivityKinds()) kinds.insert(k);
         for (auto k : kinds) CUPTI_CHECK(cuptiActivityEnable(k));
     }
 
@@ -734,11 +730,8 @@ void CuptiBackend::start() {
     // kernel activity records are produced regardless of engine type.
     {
         std::set<CUpti_ActivityKind> kinds;
-        {
-            std::lock_guard lk(handler_mu_);
-            for (const auto& h : handlers_)
-                for (auto k : h->requiredActivityKinds()) kinds.insert(k);
-        }
+        for (const auto& h : handlers_)
+            for (auto k : h->requiredActivityKinds()) kinds.insert(k);
         for (auto k : kinds) cuptiActivityEnable(k);
     }
 
@@ -1110,11 +1103,8 @@ void CuptiBackend::stop() {
     // below. So we don't lose any data by disabling first.
     {
         std::set<CUpti_ActivityKind> kinds;
-        {
-            std::lock_guard lk(handler_mu_);
-            for (const auto& h : handlers_)
-                for (auto k : h->requiredActivityKinds()) kinds.insert(k);
-        }
+        for (const auto& h : handlers_)
+            for (auto k : h->requiredActivityKinds()) kinds.insert(k);
         for (auto k : kinds) cuptiActivityDisable(k);
     }
 
@@ -1178,7 +1168,8 @@ void CuptiBackend::stop() {
 void CuptiBackend::RegisterHandler(
     const std::shared_ptr<ICuptiHandler>& handler) {
     if (!handler) return;
-    std::lock_guard lk(handler_mu_);
+    // No lock: called only from initialize() before CUPTI callbacks are enabled
+    // (single-threaded setup). handlers_ is immutable once callbacks can fire.
     handlers_.push_back(handler);
 }
 
@@ -1257,11 +1248,9 @@ void CUPTIAPI CuptiBackend::BufferCompleted(CUcontext context,
     const int64_t baseCpuNs = backend->base_cpu_ns_;
     const uint64_t baseCuptiTs = backend->base_cupti_ts_;
 
-    std::vector<std::shared_ptr<ICuptiHandler>> handlers;
-    {
-        std::lock_guard lk(backend->handler_mu_);
-        handlers = backend->handlers_;
-    }
+    // handlers_ is immutable after initialize() (see its declaration) — iterate
+    // it directly: no handler_mu_, no per-buffer vector copy.
+    const auto& handlers = backend->handlers_;
 
     if (validSize > 0) {
         // ----------------------------------------------------------------
@@ -1598,11 +1587,9 @@ void CuptiBackend::GflCallback(void* userdata, CUpti_CallbackDomain domain,
     auto* backend = static_cast<CuptiBackend*>(userdata);
     if (!backend) return;
 
-    std::vector<std::shared_ptr<ICuptiHandler>> handlers;
-    {
-        std::lock_guard<std::mutex> lk(backend->handler_mu_);
-        handlers = backend->handlers_;
-    }
+    // handlers_ is immutable after initialize() (see its declaration) — iterate
+    // it directly on this per-callback hot path: no handler_mu_, no copy/alloc.
+    const auto& handlers = backend->handlers_;
 
     bool apiHandled = false;
 

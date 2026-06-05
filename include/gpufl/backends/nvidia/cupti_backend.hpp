@@ -217,8 +217,15 @@ class CuptiBackend : public IMonitorBackend {
     std::unordered_map<uint64_t, CubinInfo> cubin_by_crc_;
     std::unordered_set<const void*> seen_cubin_ptrs_;
 
+    // Registered once in initialize() via RegisterHandler — BEFORE the CUPTI
+    // subscriber + activity callbacks are enabled — and never modified for the
+    // rest of the backend's lifetime (a fresh CuptiBackend is created per
+    // session; see Monitor::Shutdown's adapter.reset() + Initialize). It is
+    // therefore IMMUTABLE while any callback can run, so GflCallback /
+    // BufferCompleted (and start()/stop()) read it lock-free — no handler_mu_,
+    // and the per-callback vector copy is gone (zero-alloc dispatch). Do NOT
+    // call RegisterHandler after initialize() has enabled callbacks.
     std::vector<std::shared_ptr<ICuptiHandler>> handlers_;
-    std::mutex handler_mu_;
 
     std::atomic<uint64_t> last_kernel_end_ts_{0};
     std::atomic<uint64_t> kernel_activity_seen_{0};
