@@ -1,5 +1,6 @@
 #include "gpufl/core/monitor.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstring>
@@ -204,6 +205,167 @@ static void flushBatches(Logger& logger, const std::string& session_id) {
     }
 }
 
+// Worker-local launch-meta join map (Step 4b-2). The corr->meta join that ran
+// under CuptiBackend::meta_mu_ on the CUPTI callback + BufferCompleted threads
+// now happens here, on the single collector thread, so NO lock is needed (same
+// threading model as g_kernelNameDemangleCache: written only by the collector,
+// and by the main thread AFTER the collector is joined at shutdown — never
+// concurrently). Keyed by CUPTI correlationId. Populated by KERNEL_LAUNCH_META
+// records (API_ENTER), api_exit_ns patched by KERNEL_API_EXIT records
+// (API_EXIT), consumed + erased when the matching KERNEL / MEMCPY / MEMSET
+// activity record is processed. Entries still present at shutdown are launches
+// CUPTI never delivered an activity record for; drainSyntheticKernels() flushes
+// them as synthetic kernels (replacing CuptiBackend::FlushPendingKernels).
+// Stores the whole KERNEL_LAUNCH_META ActivityRecord — it already carries every
+// field the join and the synthetic-kernel path need, so no parallel struct.
+static std::unordered_map<uint64_t, ActivityRecord> g_launchMetaByCorr;
+
+// Join launch-callback metadata (scope path, stack id, API timestamps, const-
+// bank size) from the worker-local meta map onto an activity record, then erase
+// the entry. The activity record supplies everything else (kernel timing / dims
+// / occupancy from CUpti_ActivityKernel11; bytes / kind for mem ops). Best-
+// effort: if no meta arrived for this corr the record is left untouched — same
+// as the old meta_mu_ join missing (e.g. the API_ENTER push lost to ring
+// backpressure, or an activity record that arrived before its launch callback).
+static void joinLaunchMeta(ActivityRecord& rec) {
+    auto it = g_launchMetaByCorr.find(rec.corr_id);
+    if (it == g_launchMetaByCorr.end()) return;
+    const ActivityRecord& m = it->second;
+    rec.scope_depth  = m.scope_depth;
+    rec.stack_id     = m.stack_id;
+    std::memcpy(rec.user_scope, m.user_scope, sizeof(rec.user_scope));
+    rec.api_start_ns = m.api_start_ns;
+    rec.api_exit_ns  = m.api_exit_ns;
+    rec.const_bytes  = m.const_bytes;
+    g_launchMetaByCorr.erase(it);
+}
+
+// Emit one fully-joined KERNEL record: intern the (demangled) name, push the
+// kernel batch row, and — when detailed — the deferred detail row; flush if the
+// batch filled. Extracted from collectorProcessNext's KERNEL branch (Step 4b-2)
+// so drainSyntheticKernels can reuse the exact same emission path. `rec` must
+// already carry the joined scope/stack metadata and resolved `stack_trace`.
+static void emitKernelRecord(const ActivityRecord& rec,
+                             const std::string& stack_trace, Runtime* rt) {
+    // Demangle on the collector thread (Step 4a) — rec.name holds the RAW
+    // mangled name pushed by the CUPTI callback/activity path.
+    const uint32_t kernel_id =
+        g_dictManager.internKernel(DemangleKernelNameCached(rec.name).c_str());
+
+    KernelBatchRow row;
+    row.start_ns    = rec.cpu_start_ns;
+    row.kernel_id   = kernel_id;
+    row.stream_id   = static_cast<uint32_t>(rec.stream);
+    row.duration_ns = rec.duration_ns;
+    row.corr_id     = rec.corr_id;
+    row.dyn_shared  = rec.dyn_shared;
+    row.num_regs    = rec.num_regs;
+    row.has_details = rec.has_details ? 1 : 0;
+    // Pre-stamped by KernelLaunchHandler; both fields are 0 when no framework
+    // was tracking this launch.
+    row.external_kind = rec.external_kind;
+    row.external_id   = rec.external_id;
+    g_kernelBatch.push(row);
+
+    if (rec.has_details) {
+        KernelDetailRow detail;
+        detail.corr_id    = rec.corr_id;
+        detail.session_id = rt->session_id;
+        detail.pid        = detail::GetPid();
+        detail.app        = rt->app_name;
+        detail.grid_x = rec.grid_x; detail.grid_y = rec.grid_y;
+        detail.grid_z = rec.grid_z;
+        detail.block_x = rec.block_x; detail.block_y = rec.block_y;
+        detail.block_z = rec.block_z;
+        detail.static_shared         = rec.static_shared;
+        detail.local_bytes           = rec.local_bytes;
+        detail.const_bytes           = rec.const_bytes;
+        detail.occupancy             = rec.occupancy;
+        detail.reg_occupancy         = rec.reg_occupancy;
+        detail.smem_occupancy        = rec.smem_occupancy;
+        detail.warp_occupancy        = rec.warp_occupancy;
+        detail.block_occupancy       = rec.block_occupancy;
+        std::memcpy(detail.limiting_resource, rec.limiting_resource,
+                    sizeof(detail.limiting_resource));
+        detail.max_active_blocks      = rec.max_active_blocks;
+        detail.local_mem_total        = rec.local_mem_total;
+        detail.local_mem_per_thread   = rec.local_mem_per_thread;
+        detail.cache_config_requested = rec.cache_config_requested;
+        detail.cache_config_executed  = rec.cache_config_executed;
+        detail.shared_mem_executed    = rec.shared_mem_executed;
+        detail.user_scope  = rec.user_scope;
+        detail.stack_trace = stack_trace;
+        // Defer: written after the kernel batch by flushBatches().
+        g_pendingDetails.push_back(std::move(detail));
+    }
+
+    if (g_kernelBatch.needsFlush()) {
+        flushBatches(*rt->logger, rt->session_id);
+    }
+}
+
+// Flush launch metas that never got a CUPTI activity record as synthetic
+// kernels (Step 4b-2 — replaces CuptiBackend::FlushPendingKernels). Runs on the
+// collector thread AFTER the ring is fully drained, so g_launchMetaByCorr holds
+// exactly the orphaned launches (every kernel with an activity record has
+// already joined + erased its entry). Common in PC Sampling / SASS safe modes,
+// where CONCURRENT_KERNEL activity is off and launch callbacks are the only
+// kernel source; empty (no-op) in normal Trace/Deep mode.
+//
+// CUPTI gave us no GPU timestamps for these, so duration is approximated as the
+// gap to the next launch's dispatch (kernels run sequentially on the default
+// stream of single-stream workloads) — or `flushNs` for the last one. The
+// simplified occupancy was precomputed on the launch callback (it has the
+// nvidia-only SM properties this core TU must not reach for); we just carry it.
+// Idempotent: clears the map, so the second call from Monitor::Shutdown's
+// post-join drain is a no-op.
+static void drainSyntheticKernels(Runtime* rt) {
+    if (g_launchMetaByCorr.empty()) return;
+    if (!(rt && rt->logger)) return;
+    const int64_t flushNs = detail::GetTimestampNs();
+
+    std::vector<uint64_t> orderedCorr;
+    orderedCorr.reserve(g_launchMetaByCorr.size());
+    for (const auto& [corr, _] : g_launchMetaByCorr) orderedCorr.push_back(corr);
+    std::sort(orderedCorr.begin(), orderedCorr.end(),
+              [&](uint64_t a, uint64_t b) {
+                  return g_launchMetaByCorr[a].api_start_ns <
+                         g_launchMetaByCorr[b].api_start_ns;
+              });
+
+    GFL_LOG_DEBUG("[drainSyntheticKernels] draining ", orderedCorr.size(),
+                  " synthetic kernel(s) at flushNs=", flushNs);
+
+    for (size_t i = 0; i < orderedCorr.size(); ++i) {
+        const uint64_t corr = orderedCorr[i];
+        // Copy the stored meta: it already carries name, device_id, scope,
+        // stack, has_details, grid/block/dyn_shared and the precomputed
+        // simplified occupancy. We only override the synthetic-specific fields.
+        ActivityRecord out = g_launchMetaByCorr[corr];
+        out.type = TraceType::KERNEL;
+        out.stream = 0;
+        out.cpu_start_ns = out.api_start_ns;  // API_ENTER ns
+        const int64_t nextEnterNs =
+            (i + 1 < orderedCorr.size())
+                ? g_launchMetaByCorr[orderedCorr[i + 1]].api_start_ns
+                : flushNs;
+        int64_t synthDur = nextEnterNs - out.api_start_ns;
+        if (synthDur < 0) synthDur = 0;  // clock skew guard
+        out.duration_ns = synthDur;
+        out.corr_id = static_cast<unsigned>(corr);
+        if (out.api_exit_ns <= 0) out.api_exit_ns = flushNs;
+
+        const std::string stack_trace =
+            (out.stack_id != 0) ? StackRegistry::instance().get(out.stack_id)
+                                : "";
+        GFL_LOG_DEBUG("[drainSyntheticKernels] synth corr=", corr,
+                      " name=", out.name, " scope=", out.user_scope,
+                      " dur=", out.duration_ns, "ns");
+        emitKernelRecord(out, stack_trace, rt);
+    }
+    g_launchMetaByCorr.clear();
+}
+
 // Consume + route ONE record from the ring buffer; returns false when empty.
 // File-scope (was a lambda inside CollectorLoop) so Monitor::Shutdown can
 // re-drain on the MAIN thread after joining the collector. On Windows
@@ -214,6 +376,34 @@ static bool collectorProcessNext() {
         ActivityRecord rec{};
         if (!g_monitorBuffer.Consume(rec)) return false;
 
+        // Launch-meta control records (Step 4b-2): collector-thread-only join-
+        // map maintenance, never emitted. Handled before the runtime/logger
+        // check — they carry no output, only the join state that later KERNEL /
+        // MEMCPY / MEMSET activity records read.
+        if (rec.type == TraceType::KERNEL_LAUNCH_META) {
+            // Merge into the worker-local join map. Keep-first-unless-upgrade: a
+            // single logical launch fires BOTH runtime and driver callbacks with
+            // the SAME corr; the first (runtime) wins unless it lacked grid/block
+            // details and a later record supplies them. Mirrors the merge the old
+            // KernelLaunchHandler::handle did under meta_mu_. (MemTransferHandler
+            // metas always have has_details=false, so duplicate-corr mem callbacks
+            // resolve to the first/runtime one — its user-facing scope label.)
+            auto it = g_launchMetaByCorr.find(rec.corr_id);
+            if (it == g_launchMetaByCorr.end()) {
+                g_launchMetaByCorr.emplace(rec.corr_id, rec);
+            } else if (!it->second.has_details && rec.has_details) {
+                it->second = rec;
+            }
+            return true;
+        }
+        if (rec.type == TraceType::KERNEL_API_EXIT) {
+            if (auto it = g_launchMetaByCorr.find(rec.corr_id);
+                it != g_launchMetaByCorr.end()) {
+                it->second.api_exit_ns = rec.api_exit_ns;
+            }
+            return true;
+        }
+
         const int64_t duration_ns = rec.duration_ns;
         Runtime* rt = runtime();
         if (!(rt && rt->logger)) {
@@ -223,6 +413,12 @@ static bool collectorProcessNext() {
         }
         if (rec.type == TraceType::KERNEL || rec.type == TraceType::MEMCPY ||
             rec.type == TraceType::MEMSET) {
+            // Join launch-callback metadata recorded at API_ENTER (Step 4b-2).
+            // Before the cutover the producing handler did this under meta_mu_;
+            // now the raw activity record arrives with empty scope/stack and we
+            // fill it here from the worker-local map (lock-free — single
+            // consumer). No-op while the map is empty (scaffolding / cache miss).
+            joinLaunchMeta(rec);
             const std::string stack_trace =
                 (rec.stack_id != 0) ? StackRegistry::instance().get(rec.stack_id)
                                     : "";
@@ -230,61 +426,7 @@ static bool collectorProcessNext() {
                 g_adapter ? g_adapter->platformName() : "unknown";
 
             if (rec.type == TraceType::KERNEL) {
-                // Demangle on the collector thread (Step 4a) — rec.name holds
-                // the RAW mangled name pushed by the CUPTI callback/activity path.
-                const uint32_t kernel_id = g_dictManager.internKernel(
-                    DemangleKernelNameCached(rec.name).c_str());
-
-                KernelBatchRow row;
-                row.start_ns    = rec.cpu_start_ns;
-                row.kernel_id   = kernel_id;
-                row.stream_id   = static_cast<uint32_t>(rec.stream);
-                row.duration_ns = duration_ns;
-                row.corr_id     = rec.corr_id;
-                row.dyn_shared  = rec.dyn_shared;
-                row.num_regs    = rec.num_regs;
-                row.has_details = rec.has_details ? 1 : 0;
-                // Pre-stamped by KernelLaunchHandler; both fields are
-                // 0 when no framework was tracking this launch.
-                row.external_kind = rec.external_kind;
-                row.external_id   = rec.external_id;
-                g_kernelBatch.push(row);
-
-                if (rec.has_details) {
-                    KernelDetailRow detail;
-                    detail.corr_id    = rec.corr_id;
-                    detail.session_id = rt->session_id;
-                    detail.pid        = detail::GetPid();
-                    detail.app        = rt->app_name;
-                    detail.grid_x = rec.grid_x; detail.grid_y = rec.grid_y;
-                    detail.grid_z = rec.grid_z;
-                    detail.block_x = rec.block_x; detail.block_y = rec.block_y;
-                    detail.block_z = rec.block_z;
-                    detail.static_shared         = rec.static_shared;
-                    detail.local_bytes           = rec.local_bytes;
-                    detail.const_bytes           = rec.const_bytes;
-                    detail.occupancy             = rec.occupancy;
-                    detail.reg_occupancy         = rec.reg_occupancy;
-                    detail.smem_occupancy        = rec.smem_occupancy;
-                    detail.warp_occupancy        = rec.warp_occupancy;
-                    detail.block_occupancy       = rec.block_occupancy;
-                    std::memcpy(detail.limiting_resource, rec.limiting_resource,
-                                sizeof(detail.limiting_resource));
-                    detail.max_active_blocks      = rec.max_active_blocks;
-                    detail.local_mem_total        = rec.local_mem_total;
-                    detail.local_mem_per_thread   = rec.local_mem_per_thread;
-                    detail.cache_config_requested = rec.cache_config_requested;
-                    detail.cache_config_executed  = rec.cache_config_executed;
-                    detail.shared_mem_executed    = rec.shared_mem_executed;
-                    detail.user_scope  = rec.user_scope;
-                    detail.stack_trace = stack_trace;
-                    // Defer: written after the kernel batch by flushBatches().
-                    g_pendingDetails.push_back(std::move(detail));
-                }
-
-                if (g_kernelBatch.needsFlush()) {
-                    flushBatches(*rt->logger, rt->session_id);
-                }
+                emitKernelRecord(rec, stack_trace, rt);
 
             } else if (rec.type == TraceType::MEMCPY) {
                 MemcpyBatchRow row;
@@ -508,8 +650,11 @@ void CollectorLoop() {
     while (collectorProcessNext()) { ++drained; }
     GFL_LOG_DEBUG("[CollectorLoop] drain-remaining consumed=", drained);
 
-    // Final flush of any partially-filled batches
+    // Final flush of any partially-filled batches. drainSyntheticKernels runs
+    // FIRST (ring now empty → the meta map holds only orphaned launches) so the
+    // synthetic kernel rows it emits are included in this last flush.
     if (Runtime* rt = runtime(); rt && rt->logger) {
+        drainSyntheticKernels(rt);
         flushBatches(*rt->logger, rt->session_id);
     }
     GFL_LOG_DEBUG("[CollectorLoop] END");
@@ -523,6 +668,9 @@ void Monitor::Initialize(const MonitorOptions& opts) {
     g_dictManager.enable_source_collection = opts.enable_source_collection;
     g_kernelBatch.clear();
     g_memcpyBatch.clear();
+    // Worker-local launch-meta join map (Step 4b-2): drop any entries a prior
+    // session left behind so corr ids can't collide across init/shutdown cycles.
+    g_launchMetaByCorr.clear();
     g_kernelBatchId  = 0;
     g_memcpyBatchId  = 0;
     g_scopeBatch.clear();
@@ -583,6 +731,10 @@ void Monitor::Shutdown() {
         int drained = 0;
         while (collectorProcessNext()) { ++drained; }
         if (Runtime* rt = runtime(); rt && rt->logger) {
+            // Emit any launch metas the collector's own drain didn't reach
+            // (Windows process-exit can tear the collector down early). No-op
+            // when CollectorLoop already drained them — the map is cleared.
+            drainSyntheticKernels(rt);
             flushBatches(*rt->logger, rt->session_id);
         }
         GFL_LOG_DEBUG("Monitor::Shutdown: post-join drained=", drained);
