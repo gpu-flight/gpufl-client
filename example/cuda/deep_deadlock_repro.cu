@@ -220,6 +220,12 @@ int main(int argc, char** argv) {
     const int steps      = intArg(argc, argv, "steps", 40);
     const int timeoutSec = intArg(argc, argv, "timeout", 60);
     const bool useScope  = !hasFlag(argc, argv, "noscope");
+    // Experiment knob: serially first-launch every distinct kernel inside the
+    // SASS-armed scope BEFORE releasing the concurrent threads. Tests the
+    // hypothesis that the hang is CUPTI's lazy SASS patching of modules loaded
+    // after arm — done serially (no concurrency) it should patch each module
+    // without the launch-rwlock ↔ CUPTI-lock AB-BA.
+    const bool prewarm   = hasFlag(argc, argv, "prewarm");
     const gpufl::ProfilingEngine engine = engineArg(argc, argv);
 
     const char* fullActivity = std::getenv("GPUFL_SASS_ALLOW_FULL_ACTIVITY");
@@ -233,6 +239,7 @@ int main(int argc, char** argv) {
               << "  steps/thread    : " << steps << "\n"
               << "  distinct kernels: " << kNumDistinctKernels << "\n"
               << "  scope-wrapped   : " << (useScope ? "yes" : "no (control)") << "\n"
+              << "  prewarm modules : " << (prewarm ? "yes (serial first-launch before concurrency)" : "no") << "\n"
               << "  CUPTI activity  : "
               << (unsafeMode ? "FULL (GPUFL_SASS_ALLOW_FULL_ACTIVITY=1 — UNSAFE, may hang)"
                             : "safe (default defense)")
@@ -298,6 +305,28 @@ int main(int argc, char** argv) {
     launchers.reserve(numThreads);
 
     auto runWorkload = [&]() {
+        if (prewarm) {
+            // Serially first-launch every distinct kernel BEFORE releasing the
+            // concurrent threads. Runs inside the SASS-armed scope, so if the
+            // deadlock is CUPTI lazily patching modules loaded after arm, this
+            // patches each module one-at-a-time (no concurrency → no AB-BA),
+            // leaving the concurrent loop below to only re-launch already-
+            // patched modules.
+            std::cout << "[prewarm] serially launching " << kNumDistinctKernels
+                      << " distinct kernels before concurrency...\n" << std::flush;
+            const int n = 1 << 18;
+            float* d = nullptr;
+            if (cudaMalloc(&d, n * sizeof(float)) == cudaSuccess) {
+                cudaMemset(d, 0, n * sizeof(float));
+                const dim3 block(256), grid((n + block.x - 1) / block.x);
+                for (int k = 0; k < kNumDistinctKernels; ++k) {
+                    kDistinctKernels[k]<<<grid, block>>>(d, n);
+                    cudaDeviceSynchronize();  // one module patched at a time
+                }
+                cudaFree(d);
+            }
+            std::cout << "[prewarm] done — modules patched serially.\n" << std::flush;
+        }
         for (int t = 0; t < numThreads; ++t)
             launchers.emplace_back(launcherThread, t, steps, std::ref(go),
                                    std::ref(liveCount));
