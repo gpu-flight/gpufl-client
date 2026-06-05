@@ -10,6 +10,17 @@
 #if defined(__linux__)
 #include <sys/uio.h>
 #include <unistd.h>
+#elif defined(_WIN32)
+// ReadProcessMemory / GetCurrentProcess for the Windows symbolName probe below.
+// Define NOMINMAX first — this TU uses std::min and windows.h's min/max macros
+// would otherwise shadow it.
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #endif
 
 #include "gpufl/backends/nvidia/cuda_feature_guards.hpp"
@@ -54,6 +65,23 @@ bool CopyReadableCString(const char* src, std::string* out) {
     const size_t len = static_cast<const char*>(nul) - buf;
     if (len == 0) return false;
 
+    out->assign(buf, len);
+    return true;
+#elif defined(_WIN32)
+    constexpr size_t kMaxNameLen = 4096;
+    char buf[kMaxNameLen] = {};
+    SIZE_T nread = 0;
+    // Windows analog of the Linux process_vm_readv probe: read our OWN process
+    // memory so an invalid/tagged symbolName pointer (CUDA can hand these back)
+    // fails cleanly instead of crashing on a direct dereference. A partial copy
+    // at a page boundary returns FALSE/ERROR_PARTIAL_COPY but still fills `buf`
+    // up to `nread`; kernel symbols are short, so the NUL is usually in there.
+    ReadProcessMemory(GetCurrentProcess(), src, buf, sizeof(buf), &nread);
+    if (nread == 0) return false;
+    const void* nul = std::memchr(buf, '\0', static_cast<size_t>(nread));
+    if (!nul) return false;
+    const size_t len = static_cast<const char*>(nul) - buf;
+    if (len == 0) return false;
     out->assign(buf, len);
     return true;
 #else
@@ -230,7 +258,7 @@ bool KernelLaunchHandler::shouldHandle(const CUpti_CallbackDomain domain,
     static const std::set<std::pair<CUpti_CallbackDomain, CUpti_CallbackId>>
         kHandled = [this] {
             const auto cbs = requiredCallbacks();
-            return std::set<std::pair<CUpti_CallbackDomain, CUpti_CallbackId>>(
+            return std::set(
                 cbs.begin(), cbs.end());
         }();
     return kHandled.count({domain, cbid}) != 0;
