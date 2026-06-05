@@ -35,12 +35,30 @@ ResourceHandler::requiredCallbacks() const {
     return {
         {CUPTI_CB_DOMAIN_RESOURCE, CUPTI_CBID_RESOURCE_MODULE_LOADED},
         {CUPTI_CB_DOMAIN_RESOURCE, CUPTI_CBID_RESOURCE_MODULE_PROFILED},
+        // Drain activity buffers while the context is still alive, just before
+        // the driver tears it down — for contexts destroyed mid-process (an
+        // explicit cudaDeviceReset/cuCtxDestroy, or multi-context apps), where
+        // the at-exit flush is skipped to avoid a driver deadlock (see
+        // CuptiBackend::FlushOnContextDestroy). This does NOT fire on Windows
+        // process exit (cudart leaves context teardown to driver DLL-detach);
+        // those records are recovered by Monitor::Shutdown's post-join drain.
+        // NOTE: cuptiEnableDomain(RESOURCE) already enables every RESOURCE
+        // callback, so this entry is belt-and-suspenders / documentation.
+        {CUPTI_CB_DOMAIN_RESOURCE, CUPTI_CBID_RESOURCE_CONTEXT_DESTROY_STARTING},
     };
 }
 
 void ResourceHandler::handle(CUpti_CallbackDomain domain, CUpti_CallbackId cbid,
                              const void *cbdata) {
     auto resourceData = static_cast<const CUpti_ResourceData *>(cbdata);
+
+    // Context is about to be destroyed — flush activity NOW, synchronously,
+    // while it's still valid. Returning from this callback lets the driver
+    // proceed with teardown, so the flush must complete before we return.
+    if (cbid == CUPTI_CBID_RESOURCE_CONTEXT_DESTROY_STARTING) {
+        if (backend_) backend_->FlushOnContextDestroy();
+        return;
+    }
 
     if (cbid == CUPTI_CBID_RESOURCE_MODULE_LOADED ||
         cbid == CUPTI_CBID_RESOURCE_MODULE_PROFILED) {

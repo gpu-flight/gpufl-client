@@ -104,6 +104,20 @@ class CuptiBackend : public IMonitorBackend {
     // Called from scope stop after cudaDeviceSynchronize() so durations
     // reflect actual GPU execution time.
     void FlushPendingKernels();
+
+    // Drain CUPTI activity buffers from the CUPTI_CBID_RESOURCE_CONTEXT_
+    // DESTROY_STARTING callback — i.e. while the context is still alive, just
+    // before the driver tears it down. Complementary safety net for contexts
+    // destroyed mid-process (an explicit cudaDeviceReset()/cuCtxDestroy, or
+    // multi-context apps): our at-exit shutdown() skips cuptiActivityFlushAll
+    // (it would deadlock against a dying context, see teardown_flag.hpp), so a
+    // flush here captures that context's records first. NOTE: on Windows
+    // process exit cudart does NOT proactively destroy the context (it's left
+    // to driver DLL-detach), so this callback does NOT fire there — the final
+    // kernel records on Windows-exit are instead recovered by Monitor::Shutdown's
+    // post-join drain (see monitor.cpp). Invoked synchronously by ResourceHandler.
+    void FlushOnContextDestroy();
+
     CUpti_SubscriberHandle GetSubscriber() const { return subscriber_; }
 
     void EmitCaptureCapabilities_() const;
@@ -140,6 +154,11 @@ class CuptiBackend : public IMonitorBackend {
     }
 
    private:
+    bool ShouldEnableNvtxMarkerActivityBeforeEngine_() const;
+    bool ShouldEnableNvtxMarkerActivityForSelectedEngine_() const;
+    static void EnableNvtxMarkerActivity_(const char* phase);
+    static void LogNvtxMarkerActivityDisabled_(const char* phase);
+
     friend class ResourceHandler;
     friend class KernelLaunchHandler;
     friend class MemTransferHandler;
@@ -200,6 +219,10 @@ class CuptiBackend : public IMonitorBackend {
     std::atomic<uint64_t> source_locator_seen_{0};
     std::atomic<uint64_t> function_record_seen_{0};
     std::atomic<int64_t> last_cleanup_flush_ns_{0};
+    // Re-entrancy guard for FlushOnContextDestroy(): cuptiActivityFlushAll
+    // drives BufferCompleted on the calling thread, so this prevents a nested
+    // context-destroy callback from recursing into another flush.
+    std::atomic<bool> context_destroy_flushing_{false};
     mutable std::atomic<bool> capture_capabilities_emitted_{false};
     uint32_t device_id_ = 0;
     std::string chip_name_;

@@ -39,8 +39,8 @@ def run_benchmark():
               f"after shutdown.")
     else:
         print("[GPUFL] Upload OFF (set GPUFL_API_KEY to enable). Local "
-              "files only — run `gpufl upload <log_path>` later if you "
-              "want to ship them.")
+              "files only — run `python -m gpufl.cli upload <log_path>` "
+              "(or the `gpufl upload` binary on Linux) later to ship them.")
 
     gfl.init(
         app_name="Numba_App",

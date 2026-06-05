@@ -26,12 +26,16 @@ classifiers = [
 Homepage = "https://github.com/gpufl/gpufl-client"
 Issues = "https://github.com/gpufl/gpufl-client/issues"
 
-# `gpufl` console script — entry point for the CLI defined in
-# python/gpufl/cli.py. Today's only subcommand is `gpufl upload <log_path>`
-# for ad-hoc / post-mortem deferred uploads. Production fleet sync still
-# routes through gpufl-agent (the JVM service).
-[project.scripts]
-gpufl = "gpufl.cli:main"
+# NOTE: the `gpufl` console-script was retired in favor of the single
+# native `gpufl` binary (the launcher — `gpufl trace` / `gpufl upload` /
+# `gpufl version`). Shipping both meant two different programs competing
+# for the `gpufl` name on PATH; the native binary now owns it.
+#
+# The Python uploader is unchanged and still available cross-platform as
+#     python -m gpufl.cli upload <log_path> [--backend-url … --api-key …]
+# and the in-process API `gpufl.upload_logs(...)` is unaffected. With no
+# [project.scripts] entry, `pip install gpufl` no longer creates a `gpufl`
+# command (avoiding the collision with the binary).
 
 [project.optional-dependencies]
 # PyTorch integration — first-class. Uses TorchDispatchMode (stable

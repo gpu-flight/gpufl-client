@@ -1,11 +1,15 @@
-"""gpufl CLI — entry point for `gpufl upload <logdir>` and related tools.
+"""gpufl Python uploader — `python -m gpufl.cli upload <logdir>`.
 
-Installed via [project.scripts] in pyproject.toml as `gpufl`. Today the
-only subcommand is `upload` (ad-hoc / post-mortem deferred upload of an
-existing log directory). Production fleet sync should still use
-`gpufl-agent` — the JVM service is the recommended path for clusters.
+NOTE: this is no longer installed as the `gpufl` console-script. The single
+native `gpufl` binary (the launcher) now owns that name and provides
+`gpufl upload` directly, so there's only one `gpufl` command. This module
+stays as the **cross-platform** Python uploader — handy on Windows/macOS
+where the Linux launcher binary isn't available — and is a thin wrapper
+over the same `gpufl.upload_logs()` API. Invoke it explicitly:
 
-Run `gpufl --help` for usage.
+    python -m gpufl.cli upload <logdir> [--backend-url … --api-key …]
+
+Production fleet sync should still use `gpufl-agent` (the JVM service).
 """
 from __future__ import annotations
 
@@ -89,8 +93,10 @@ def _cmd_upload(args: argparse.Namespace) -> int:
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="gpufl",
-        description="GPUFlight client utilities.",
+        prog="python -m gpufl.cli",
+        description=("GPUFlight Python uploader. The `gpufl` command itself "
+                     "is now the native binary (`gpufl upload`); this is the "
+                     "cross-platform Python equivalent."),
     )
     sub = p.add_subparsers(dest="command", required=True)
 

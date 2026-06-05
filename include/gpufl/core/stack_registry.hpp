@@ -8,8 +8,19 @@ namespace gpufl {
 class StackRegistry {
    public:
     static StackRegistry& instance() {
-        static StackRegistry inst;
-        return inst;
+        // Leaky singleton: heap-allocated and intentionally never destroyed.
+        //
+        // A function-local `static StackRegistry inst;` registers its destructor
+        // via atexit at FIRST USE. On Windows, first use happens during the run
+        // — AFTER the injection library registered its own shutdown atexit at
+        // init. atexit runs LIFO, so the registry would be destroyed BEFORE
+        // gpufl::shutdown()'s teardown drain runs, and get()/getOrRegister()
+        // would then touch a destroyed unordered_map (access violation —
+        // observed as the Windows trace teardown crash that dropped all kernel
+        // rows). Leaking the object keeps it valid for the whole process
+        // lifetime; the OS reclaims the memory at exit regardless.
+        static StackRegistry* inst = new StackRegistry();
+        return *inst;
     }
 
     size_t getOrRegister(const std::string& stackTrace) {

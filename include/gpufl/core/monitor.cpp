@@ -187,15 +187,23 @@ static void flushBatches(Logger& logger, const std::string& session_id) {
     }
 }
 
-void CollectorLoop() {
-    auto processNext = []() -> bool {
+// Consume + route ONE record from the ring buffer; returns false when empty.
+// File-scope (was a lambda inside CollectorLoop) so Monitor::Shutdown can
+// re-drain on the MAIN thread after joining the collector. On Windows
+// process-exit the collector thread can be torn down before it runs its own
+// post-loop drain, stranding records (e.g. the synthetic kernels pushed by
+// CuptiBackend::stop()) in the ring buffer. The post-join drain recovers them.
+static bool collectorProcessNext() {
         ActivityRecord rec{};
         if (!g_monitorBuffer.Consume(rec)) return false;
 
         const int64_t duration_ns = rec.duration_ns;
         Runtime* rt = runtime();
-        if (!(rt && rt->logger)) return true;
-
+        if (!(rt && rt->logger)) {
+            GFL_LOG_DEBUG("[CollectorLoop] DROP rec type=", (int)rec.type,
+                          " — runtime/logger null");
+            return true;
+        }
         if (rec.type == TraceType::KERNEL || rec.type == TraceType::MEMCPY ||
             rec.type == TraceType::MEMSET) {
             const std::string stack_trace =
@@ -451,10 +459,12 @@ void CollectorLoop() {
         }
 
         return true;
-    };
+}
 
+void CollectorLoop() {
+    GFL_LOG_DEBUG("[CollectorLoop] START");
     while (g_collectorRunning.load()) {
-        if (!processNext()) {
+        if (!collectorProcessNext()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
@@ -471,14 +481,18 @@ void CollectorLoop() {
         }
     }
 
+    GFL_LOG_DEBUG("[CollectorLoop] while EXIT, running=",
+                  g_collectorRunning.load());
     // Drain remaining ring buffer entries
-    while (processNext()) {
-    }
+    int drained = 0;
+    while (collectorProcessNext()) { ++drained; }
+    GFL_LOG_DEBUG("[CollectorLoop] drain-remaining consumed=", drained);
 
     // Final flush of any partially-filled batches
     if (Runtime* rt = runtime(); rt && rt->logger) {
         flushBatches(*rt->logger, rt->session_id);
     }
+    GFL_LOG_DEBUG("[CollectorLoop] END");
 }
 
 void Monitor::Initialize(const MonitorOptions& opts) {
@@ -528,12 +542,35 @@ void Monitor::Shutdown() {
     //
     // Keeping the collector alive until after backend shutdown ensures every
     // final activity/profiling record lands in the ring buffer and is consumed.
+    GFL_LOG_DEBUG("Monitor::Shutdown: adapter->stop()");
     if (g_adapter) g_adapter->stop();
+    GFL_LOG_DEBUG("Monitor::Shutdown: adapter->shutdown()");
     if (g_adapter) g_adapter->shutdown();
 
+    GFL_LOG_DEBUG("Monitor::Shutdown: join collector thread");
     g_collectorRunning.store(false);
     if (g_collectorThread.joinable()) g_collectorThread.join();
+
+    // Belt-and-suspenders post-join drain. On Windows process-exit the collector
+    // thread can be torn down before running its own post-loop drain, stranding
+    // late records — notably the synthetic kernels CuptiBackend::stop() pushes
+    // during adapter->stop() above — in the ring buffer. Re-drain here on the
+    // MAIN thread: it's guaranteed alive, the collector is joined (so we are the
+    // sole consumer), and g_adapter + the logger are still valid (reset below).
+    // No-op on Linux, where the collector already drained everything itself.
+    GFL_LOG_DEBUG("Monitor::Shutdown: collector joined -> post-join drain");
+    {
+        int drained = 0;
+        while (collectorProcessNext()) { ++drained; }
+        if (Runtime* rt = runtime(); rt && rt->logger) {
+            flushBatches(*rt->logger, rt->session_id);
+        }
+        GFL_LOG_DEBUG("Monitor::Shutdown: post-join drained=", drained);
+    }
+
+    GFL_LOG_DEBUG("Monitor::Shutdown: adapter.reset()");
     g_adapter.reset();
+    GFL_LOG_DEBUG("Monitor::Shutdown: done");
 }
 
 void Monitor::Start() {
@@ -603,6 +640,10 @@ uint32_t Monitor::InternScopeName(const std::string& name) {
 void Monitor::EnqueueCubinForDisassembly(uint64_t crc, const uint8_t* data,
                                          size_t size) {
     g_dictManager.enqueueDisassembly(crc, data, size);
+}
+
+void Monitor::PushActivityRecord(const ActivityRecord& rec) {
+    g_monitorBuffer.Push(rec);
 }
 
 void Monitor::PushScopeRow(const ScopeBatchRow& row) {

@@ -12,11 +12,13 @@
 namespace gpufl {
 
 SmProps GetSMProps(int deviceId) {
-    static std::mutex mu;
-    static std::unordered_map<int, SmProps> cache;
+    // Process-lifetime caches avoid teardown-order races with CUPTI/injection
+    // shutdown paths that can still query device properties during atexit.
+    static auto* mu = new std::mutex;
+    static auto* cache = new std::unordered_map<int, SmProps>;
 
-    std::lock_guard lock(mu);
-    if (cache.find(deviceId) == cache.end()) {
+    std::lock_guard lock(*mu);
+    if (cache->find(deviceId) == cache->end()) {
         cudaDeviceProp prop{};
         SmProps props{};
         if (cudaGetDeviceProperties(&prop, deviceId) == cudaSuccess) {
@@ -34,9 +36,9 @@ SmProps GetSMProps(int deviceId) {
             props.sharedMemPerSM = 49152;
             props.maxBlocksPerSM = 32;
         }
-        cache[deviceId] = props;
+        (*cache)[deviceId] = props;
     }
-    return cache[deviceId];
+    return (*cache)[deviceId];
 }
 
 int GetMaxThreadsPerSM(const int deviceId) {
@@ -44,12 +46,13 @@ int GetMaxThreadsPerSM(const int deviceId) {
 }
 
 ComputeCapability GetComputeCapability(int deviceId) {
-    static std::mutex mu;
-    static std::unordered_map<int, ComputeCapability> cache;
+    // Same process-lifetime cache rationale as GetSMProps.
+    static auto* mu = new std::mutex;
+    static auto* cache = new std::unordered_map<int, ComputeCapability>;
 
-    std::lock_guard lock(mu);
-    auto it = cache.find(deviceId);
-    if (it != cache.end()) return it->second;
+    std::lock_guard lock(*mu);
+    auto it = cache->find(deviceId);
+    if (it != cache->end()) return it->second;
 
     ComputeCapability cc{};
     cudaDeviceProp prop{};
@@ -57,7 +60,7 @@ ComputeCapability GetComputeCapability(int deviceId) {
         cc.major = prop.major;
         cc.minor = prop.minor;
     }
-    cache[deviceId] = cc;
+    (*cache)[deviceId] = cc;
     return cc;
 }
 

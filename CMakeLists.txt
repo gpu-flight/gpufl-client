@@ -32,6 +32,16 @@ option(GPUFL_ENABLE_AMD_ROCPROFILER "Enable AMD rocprofiler-sdk tracing backend 
 
 option(BUILD_GPUFL_EXAMPLE "Build gpufl example application" ON)
 option(BUILD_GPUFL_MONITOR "Build gpufl-monitor standalone daemon" ON)
+# Injection-mode launcher + shared library — Linux + NVIDIA only for v1.
+# Disabled by default off-Linux because LD_PRELOAD / __attribute__((constructor))
+# / fork+execvp don't apply there.
+if(UNIX AND NOT APPLE)
+    option(BUILD_GPUFL_LAUNCHER "Build gpufl launcher binary (gpufl trace)" ON)
+    option(BUILD_GPUFL_INJECT   "Build libgpufl_inject.so shared library" ON)
+else()
+    option(BUILD_GPUFL_LAUNCHER "Build gpufl launcher binary (gpufl trace)" OFF)
+    option(BUILD_GPUFL_INJECT   "Build libgpufl_inject.so shared library" OFF)
+endif()
 option(BUILD_PYTHON "Build Python bindings" OFF)
 option(BUILD_TESTING "Build the testing tree." ON)
 
@@ -539,6 +549,49 @@ target_compile_definitions(gpufl PUBLIC
     GPUFL_HAS_ROCPROFILER_SDK=${GPUFL_HAS_ROCPROFILER_SDK}
 )
 
+# -----------------------
+# gpufl_inject — injection-mode shared library (Linux .so + Windows .dll).
+#
+# Loaded into a target process by `gpufl trace`: on Linux via LD_PRELOAD +
+# CUDA_INJECTION64_PATH; on Windows via CUDA_INJECTION64_PATH only (no
+# preload). The NVIDIA-defined InitializeInjection ABI (and, on Linux, an
+# opt-in constructor) routes through std::call_once into gpufl::init() with
+# injection_mode_default_options() (or the light/monitoring preset), with
+# env-var overrides applied. See include/gpufl/inject/inject_entry.cpp.
+# -----------------------
+if(BUILD_GPUFL_INJECT AND ((UNIX AND NOT APPLE) OR WIN32))
+    add_library(gpufl_inject SHARED
+        include/gpufl/inject/inject_entry.cpp
+    )
+    target_link_libraries(gpufl_inject PRIVATE gpufl::gpufl)
+    if(CUDAToolkit_INCLUDE_DIRS)
+        target_include_directories(gpufl_inject PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+    endif()
+    if(NVTX3_INCLUDE_DIR)
+        target_include_directories(gpufl_inject PRIVATE ${NVTX3_INCLUDE_DIR})
+    endif()
+    set_target_properties(gpufl_inject PROPERTIES OUTPUT_NAME gpufl_inject)
+    if(UNIX AND NOT APPLE)
+        set_target_properties(gpufl_inject PROPERTIES
+            # Hide internal symbols; only the extern "C" InitializeInjection
+            # entry point is marked visibility("default") in the source.
+            # The .init_array constructor is invoked by ld.so directly and
+            # doesn't need to be a visible symbol.
+            CXX_VISIBILITY_PRESET hidden
+            VISIBILITY_INLINES_HIDDEN ON
+        )
+        install(TARGETS gpufl_inject
+            LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        )
+    else()
+        # Windows: exports come from __declspec(dllexport) in the source;
+        # the DLL lives beside the launcher exe (RUNTIME), not in lib/.
+        install(TARGETS gpufl_inject
+            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        )
+    endif()
+endif()
+
 # ---------------------------------------------------------------------------
 # gpufl_copy_runtime_dlls(<target>)
 #
@@ -594,6 +647,10 @@ endif()
 
 if(BUILD_GPUFL_MONITOR AND CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
     add_subdirectory(daemon/monitor)
+endif()
+
+if(BUILD_GPUFL_LAUNCHER AND CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+    add_subdirectory(daemon/launcher)
 endif()
 
 if(BUILD_PYTHON)

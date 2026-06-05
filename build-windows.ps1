@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("install", "wheel")]
+    [ValidateSet("install", "wheel", "trace")]
     [string]$Mode = "install",
 
     [string]$Python = $env:PYTHON,
@@ -100,6 +100,45 @@ Write-Host "  cuda path: $CudaPath"
 if ($Mode -eq "wheel") {
     New-Item -ItemType Directory -Force -Path $WheelDir | Out-Null
     & $Python -m pip wheel $RootDir -w $WheelDir --no-deps -v @commonConfig
+} elseif ($Mode -eq "trace") {
+    # Native injection-mode tooling: the `gpufl` launcher (gpufl trace/upload/
+    # version) + gpufl_inject.dll. These are NOT part of the Python wheel — a
+    # plain CMake build into build-windows\. CUDAToolkit_ROOT is pinned to the
+    # same $CudaPath used everywhere here, so the inject DLL links and the
+    # copied cupti64*.dll come from ONE toolkit (avoids the version skew that
+    # otherwise breaks the DLL load at injection time).
+    $buildDir = Join-Path $RootDir "build-windows"
+    $traceConfig = @(
+        "-DGPUFL_ENABLE_NVIDIA=ON",
+        "-DGPUFL_ENABLE_AMD=OFF",
+        "-DBUILD_PYTHON=OFF",
+        "-DBUILD_TESTING=OFF",
+        "-DBUILD_GPUFL_EXAMPLE=OFF",
+        "-DBUILD_GPUFL_LAUNCHER=ON",
+        "-DBUILD_GPUFL_INJECT=ON",
+        "-DCUDAToolkit_ROOT=$CudaPath",
+        "-DCMAKE_CUDA_COMPILER=$env:CUDACXX"
+    )
+    # cmake + FetchContent (git) write normal progress to stderr (e.g.
+    # "Cloning into 'zlib-src'..."). Under the script's ErrorActionPreference
+    # = "Stop" those stderr lines become terminating errors and abort the
+    # build, so relax it for the native cmake calls and gate on $LASTEXITCODE.
+    $ErrorActionPreference = "Continue"
+    # Uses the VS generator/platform/toolset from the env vars set above.
+    cmake -S $RootDir -B $buildDir @traceConfig
+    if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
+    # Building gpufl_launcher also builds gpufl_inject (dependency), colocates
+    # the DLL next to gpufl.exe, and copies cupti64*/nvperf_* beside it.
+    cmake --build $buildDir --config Release --target gpufl_launcher -j
+    if ($LASTEXITCODE -ne 0) { throw "CMake build failed" }
+    $ErrorActionPreference = "Stop"
+    $exe = Join-Path $buildDir "daemon\launcher\Release\gpufl.exe"
+    Write-Host ""
+    Write-Host "Built native trace tooling:"
+    Write-Host "  launcher:    $exe"
+    Write-Host "  (gpufl_inject.dll + cupti64*/nvperf_* are colocated next to it)"
+    Write-Host ""
+    Write-Host "Run:  & `"$exe`" trace --engine Trace -- <python.exe> <script.py>"
 } else {
     & $Python -m pip install $RootDir -v @commonConfig
 }

@@ -9,6 +9,7 @@
 #include <sstream>
 
 #include "gpufl/core/debug_logger.hpp"
+#include "gpufl/core/teardown_flag.hpp"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -62,7 +63,14 @@ NvmlCollector::~NvmlCollector() {
     cleanupPdh_();
 #endif
     if (initialized_) {
-        nvmlShutdown();
+        // Skip nvmlShutdown() during Windows injection process-exit teardown:
+        // the driver is being torn down and nvmlShutdown() deadlocks against
+        // it (process becomes unkillable). The OS reclaims the NVML handle at
+        // exit anyway. Normal (Linux, or embedded-SDK mid-process) shutdown
+        // still calls it. See gpufl/core/teardown_flag.hpp.
+        if (!gpufl::detail::isProcessExitTeardown()) {
+            nvmlShutdown();
+        }
         initialized_ = false;
     }
 }

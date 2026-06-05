@@ -32,6 +32,25 @@ break is a compile error.
 See [docs/getting-started/sending-data.md](docs/getting-started/sending-data.md)
 for the full migration guide.
 
+#### `gpufl` Python console-script removed — `upload` folded into the native binary
+
+The pip-installed `gpufl` console-script (shipped in `1.1.0rc1`/`rc2`,
+whose only subcommand was `gpufl upload`) has been removed. The new
+native `gpufl` binary — the injection-mode launcher — now provides
+`upload` directly alongside `trace` and `version`, so a single command
+owns the `gpufl` name instead of a pip script and a binary fighting over
+it on `PATH`.
+
+| Surface | Before (1.1.0rc1/rc2) | New (1.1.0+) |
+|---|---|---|
+| `gpufl upload <dir> …` (pip console-script) | Python `gpufl.cli:main` | Native binary subcommand — **same flags, same 0/1/2 exit codes** |
+| Cross-platform / no native binary | (only path) | `python -m gpufl.cli upload <dir> …` — unchanged behavior |
+| In-process API `gpufl.upload_logs(...)` | — | unchanged |
+
+Migration: on Linux with the binary installed, `gpufl upload …` works as
+before. Elsewhere, switch scripts from `gpufl upload …` to
+`python -m gpufl.cli upload …`.
+
 ### Deprecations (scheduled for v1.2 removal)
 
 | Field / kwarg | Status in v1.1 | What to use instead |
@@ -80,8 +99,10 @@ with gpufl.session(app_name="train",
 
 #### `gpufl upload` CLI
 
-Post-mortem / ad-hoc shipping tool. Registered via
-`[project.scripts]` in `pyproject.toml`:
+Post-mortem / ad-hoc shipping tool. A subcommand of the native `gpufl`
+binary (see the Breaking changes note above — it was briefly a pip
+console-script during `rc1`/`rc2` before being folded into the binary).
+The cross-platform Python equivalent is `python -m gpufl.cli upload`:
 
 ```bash
 gpufl upload /tmp/runs/train --backend-url ... --api-key ...
