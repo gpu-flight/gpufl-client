@@ -495,6 +495,14 @@ void CuptiBackend::start() {
     function_record_seen_.store(0, std::memory_order_relaxed);
     capture_capabilities_emitted_.store(false, std::memory_order_relaxed);
 
+    // Capture the per-session CUPTI->wall clock anchor before enabling any
+    // activity kind, so every activity record converts against a consistent,
+    // per-session-fresh base. Replaces the old function-static anchor in
+    // BufferCompleted (which leaked across init/shutdown cycles).
+    base_cpu_ns_ = detail::GetTimestampNs();
+    base_cupti_ts_ = 0;
+    cuptiGetTimestamp(&base_cupti_ts_);
+
     // Resolve CUDA context/device before asking handlers for activity kinds.
     // SASS safe-mode policy is device dependent, and the policy log should
     // report the real SM version. Querying requiredActivityKinds() before this
@@ -1312,9 +1320,14 @@ void CUPTIAPI CuptiBackend::BufferCompleted(CUcontext context,
         return;
     }
 
-    static int64_t baseCpuNs = detail::GetTimestampNs();
-    static uint64_t baseCuptiTs = 0;
-    if (baseCuptiTs == 0) cuptiGetTimestamp(&baseCuptiTs);
+    // Per-session clock anchor, captured in start(). Defensive lazy-init in
+    // case an activity record somehow arrives before start() set it.
+    if (backend->base_cupti_ts_ == 0) {
+        backend->base_cpu_ns_ = detail::GetTimestampNs();
+        cuptiGetTimestamp(&backend->base_cupti_ts_);
+    }
+    const int64_t baseCpuNs = backend->base_cpu_ns_;
+    const uint64_t baseCuptiTs = backend->base_cupti_ts_;
 
     std::vector<std::shared_ptr<ICuptiHandler>> handlers;
     {

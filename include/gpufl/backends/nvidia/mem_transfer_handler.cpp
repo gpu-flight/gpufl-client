@@ -189,10 +189,10 @@ void MemTransferHandler::handle(CUpti_CallbackDomain domain,
         std::snprintf(meta.name, sizeof(meta.name), "%s", nm);
 
         if (backend_->GetOptions().enable_stack_trace) {
-            const std::string trace = gpufl::core::GetCallStack(2);
-            const std::string cleanTrace = detail::SanitizeStackTrace(trace);
-            meta.stack_id =
-                gpufl::StackRegistry::instance().getOrRegister(cleanTrace);
+            // Raw addresses only; symbolization deferred to the collector
+            // thread (StackRegistry::get()) — off this per-call CUPTI callback.
+            meta.stack_id = gpufl::StackRegistry::instance().getOrRegister(
+                gpufl::core::CaptureCallStackRaw(2));
         } else {
             meta.stack_id = 0;
         }

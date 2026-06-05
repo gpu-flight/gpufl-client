@@ -197,6 +197,18 @@ class CuptiBackend : public IMonitorBackend {
     std::mutex sync_meta_mu_;
     std::unordered_map<uint64_t, SyncMeta> sync_meta_by_corr_;
 
+    // Per-session clock anchor mapping CUPTI activity timestamps
+    // (cuptiGetTimestamp domain) to wall-clock ns. Captured fresh in start()
+    // so re-init sessions re-anchor — the previous function-static anchor in
+    // BufferCompleted persisted process-wide and skewed timestamps across
+    // init/shutdown cycles. Written once in start() before any activity record
+    // can arrive; read on the (serial) BufferCompleted thread.
+    int64_t base_cpu_ns_ = 0;
+    uint64_t base_cupti_ts_ = 0;
+    int64_t toWallNs(uint64_t cuptiTs) const {
+        return base_cpu_ns_ + static_cast<int64_t>(cuptiTs - base_cupti_ts_);
+    }
+
     std::string cached_device_name_ = "Unknown Device";
     CUcontext ctx_ = nullptr;
 

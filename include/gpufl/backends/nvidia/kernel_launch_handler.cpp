@@ -297,10 +297,11 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
         }
 
         if (backend_->GetOptions().enable_stack_trace) {
-            const std::string trace = core::GetCallStack(2);
-            const std::string cleanTrace = detail::SanitizeStackTrace(trace);
-            meta.stack_id =
-                StackRegistry::instance().getOrRegister(cleanTrace);
+            // Capture raw return addresses only (cheap); symbol resolution is
+            // deferred to the collector thread via StackRegistry::get(),
+            // keeping dbghelp/SymFromAddr off this per-launch CUPTI callback.
+            meta.stack_id = StackRegistry::instance().getOrRegister(
+                core::CaptureCallStackRaw(2));
         } else {
             meta.stack_id = 0;
         }
@@ -533,30 +534,44 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
     {
         const uint64_t corr = k->correlationId;
         out.corr_id = corr;
-        std::lock_guard lk(backend_->meta_mu_);
-        if (auto it = backend_->meta_by_corr_.find(corr);
-            it != backend_->meta_by_corr_.end()) {
-            const LaunchMeta& m = it->second;
-            out.scope_depth = m.scope_depth;
-            out.stack_id = m.stack_id;
-            std::copy(std::begin(m.user_scope), std::end(m.user_scope),
+
+        // Copy the launch metadata out under the lock, then release it
+        // immediately. The occupancy math below touches no shared state, so
+        // holding meta_mu_ across it (previously ~80 lines incl. GetSMProps +
+        // snprintf) needlessly blocked the app launch threads writing new
+        // metadata. Keep the critical section to find + copy + erase.
+        LaunchMeta meta;
+        bool found = false;
+        {
+            std::lock_guard lk(backend_->meta_mu_);
+            if (auto it = backend_->meta_by_corr_.find(corr);
+                it != backend_->meta_by_corr_.end()) {
+                meta = it->second;
+                found = true;
+                // Always erase after processing — launches without grid/block
+                // metadata used to leave stale entries that FlushPendingKernels
+                // then resurrected as synthetic duplicates at session stop().
+                backend_->meta_by_corr_.erase(it);
+            }
+        }
+
+        if (found) {
+            out.scope_depth = meta.scope_depth;
+            out.stack_id = meta.stack_id;
+            std::copy(std::begin(meta.user_scope), std::end(meta.user_scope),
                       std::begin(out.user_scope));
-            out.api_start_ns = m.api_enter_ns;
-            out.api_exit_ns = m.api_exit_ns;
-            // Snapshot `has_details` before the erase below — we still need
-            // it to decide whether to compute occupancy. Erasing first
-            // would invalidate `m` (dangling reference).
-            const bool hadDetails = m.has_details;
-            if (hadDetails) {
+            out.api_start_ns = meta.api_enter_ns;
+            out.api_exit_ns = meta.api_exit_ns;
+            if (meta.has_details) {
                 out.has_details = true;
-                out.grid_x = m.grid_x;
-                out.grid_y = m.grid_y;
-                out.grid_z = m.grid_z;
-                out.block_x = m.block_x;
-                out.block_y = m.block_y;
-                out.block_z = m.block_z;
+                out.grid_x = meta.grid_x;
+                out.grid_y = meta.grid_y;
+                out.grid_z = meta.grid_z;
+                out.block_x = meta.block_x;
+                out.block_y = meta.block_y;
+                out.block_z = meta.block_z;
                 out.local_bytes = static_cast<int>(k->localMemoryPerThread);
-                out.const_bytes = m.const_bytes;
+                out.const_bytes = meta.const_bytes;
 
                 // Compute per-resource occupancy from activity record data
                 // (registers, shared memory) and SM properties.
@@ -629,13 +644,6 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
                 std::snprintf(out.limiting_resource,
                               sizeof(out.limiting_resource), "%s", limiting);
             }
-            // Always erase after processing — previously this was nested
-            // inside `if (hadDetails)`, so launches without grid/block
-            // metadata left stale entries in meta_by_corr_. At session
-            // stop() FlushPendingKernels would then emit synthetic
-            // duplicates for kernels that already had real activity
-            // records emitted here. Move erase out of the conditional.
-            backend_->meta_by_corr_.erase(it);
         }
     }
 
