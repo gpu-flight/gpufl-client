@@ -15,6 +15,7 @@
 #include <windows.h>
 #include <pdh.h>
 #include <pdhmsg.h>
+#include <cwchar>  // wcsstr — PDH engine-instance name filtering
 #pragma comment(lib, "pdh.lib")
 #endif
 
@@ -56,11 +57,17 @@ NvmlCollector::NvmlCollector() {
 #ifdef _WIN32
     initPdh_();
 #endif
+#if defined(_WIN32) && GPUFL_HAS_NVAPI
+    initNvapi_();
+#endif
 }
 
 NvmlCollector::~NvmlCollector() {
 #ifdef _WIN32
     cleanupPdh_();
+#endif
+#if defined(_WIN32) && GPUFL_HAS_NVAPI
+    cleanupNvapi_();
 #endif
     if (initialized_) {
         // Skip nvmlShutdown() during Windows injection process-exit teardown:
@@ -117,10 +124,25 @@ std::vector<gpufl::DeviceSample> NvmlCollector::sampleAll() {
             s.gpu_util = static_cast<int>(util.gpu);
             s.mem_util = static_cast<int>(util.memory);
         }
+#if defined(_WIN32) && GPUFL_HAS_NVAPI
+        // On Windows WDDM, NVML's util rates read 0% for CUDA workloads (both
+        // gpu and memory). NVAPI's dynamic-pstates GPU/FB domains report
+        // correctly on WDDM — and FB (memory-controller) util has no PDH
+        // equivalent, so NVAPI is the only source for mem_util here. Only
+        // backfill fields NVML left at 0, so correct TCC/datacenter values
+        // (where NVML works) stay intact.
+        if ((s.gpu_util == 0 || s.mem_util == 0) && nvapi_available_) {
+            unsigned int nvapiGpu = 0, nvapiMem = 0;
+            if (sampleUtilNvapi_(s.pci_bus_id, nvapiGpu, nvapiMem)) {
+                if (s.gpu_util == 0) s.gpu_util = nvapiGpu;
+                if (s.mem_util == 0) s.mem_util = nvapiMem;
+            }
+        }
+#endif
 #ifdef _WIN32
-        // On Windows WDDM, NVML returns 0% for CUDA compute workloads.
-        // Fall back to the Windows PDH performance counter for GPU engine
-        // utilization which reports correctly on WDDM.
+        // Last-resort gpu_util fallback: the Windows PDH GPU-engine counter
+        // (reports correctly on WDDM). There is no PDH path for mem_util — no
+        // such counter exists on Windows.
         if (s.gpu_util == 0 && pdh_available_) {
             s.gpu_util = sampleGpuUtilPdh_();
         }
@@ -319,8 +341,9 @@ unsigned int NvmlCollector::sampleGpuUtilPdh_() {
 
     if (PdhCollectQueryData(query) != ERROR_SUCCESS) return 0;
 
-    // The wildcard counter returns multiple instances (one per GPU engine).
-    // Sum the 3D/Compute engine utilization across all instances.
+    // The wildcard counter returns one instance per (process, GPU engine).
+    // We take the max utilization across the 3D/Compute engine instances
+    // (the per-instance engine-type filtering happens in the loop below).
     DWORD bufSize = 0, itemCount = 0;
     PDH_STATUS st = PdhGetFormattedCounterArrayW(
         counter, PDH_FMT_DOUBLE, &bufSize, &itemCount, nullptr);
@@ -334,15 +357,91 @@ unsigned int NvmlCollector::sampleGpuUtilPdh_() {
 
     double maxUtil = 0.0;
     for (DWORD i = 0; i < itemCount; ++i) {
-        if (items[i].FmtValue.CStatus == PDH_CSTATUS_VALID_DATA) {
-            if (items[i].FmtValue.doubleValue > maxUtil)
-                maxUtil = items[i].FmtValue.doubleValue;
-        }
+        if (items[i].FmtValue.CStatus != PDH_CSTATUS_VALID_DATA) continue;
+        // Count only the 3D/Compute engines — CUDA runs there. Skipping the
+        // Copy/Video/Encode/Decode instances stops background video playback
+        // from inflating gpu_util. Instance names look like
+        // "pid_1234_..._engtype_3D" / "..._engtype_Compute".
+        const wchar_t* name = items[i].szName;
+        if (!name ||
+            (!wcsstr(name, L"engtype_3D") && !wcsstr(name, L"engtype_Compute")))
+            continue;
+        if (items[i].FmtValue.doubleValue > maxUtil)
+            maxUtil = items[i].FmtValue.doubleValue;
     }
 
     // PDH returns 0-100 as double; clamp and convert.
     if (maxUtil > 100.0) maxUtil = 100.0;
     return static_cast<unsigned int>(maxUtil);
+}
+#endif
+
+#if defined(_WIN32) && GPUFL_HAS_NVAPI
+void NvmlCollector::initNvapi_() {
+    if (NvAPI_Initialize() != NVAPI_OK) return;
+
+    NvPhysicalGpuHandle handles[NVAPI_MAX_PHYSICAL_GPUS] = {};
+    NvU32 count = 0;
+    if (NvAPI_EnumPhysicalGPUs(handles, &count) != NVAPI_OK) {
+        NvAPI_Unload();
+        return;
+    }
+    // Map each physical GPU by PCI bus id so we can line NVAPI handles up with
+    // NVML's DeviceSample.pci_bus_id (NVAPI enum order != NVML index order).
+    for (NvU32 i = 0; i < count; ++i) {
+        NvU32 busId = 0;
+        if (NvAPI_GPU_GetBusId(handles[i], &busId) == NVAPI_OK)
+            nvapi_by_bus_[static_cast<unsigned int>(busId)] = handles[i];
+    }
+    nvapi_available_ = !nvapi_by_bus_.empty();
+    if (nvapi_available_)
+        GFL_LOG_DEBUG("[NVML] NVAPI dynamic-pstates utilization initialized");
+    else
+        NvAPI_Unload();
+}
+
+void NvmlCollector::cleanupNvapi_() {
+    if (!nvapi_available_) return;
+    nvapi_by_bus_.clear();
+    nvapi_available_ = false;
+    // Mirror the nvmlShutdown teardown guard: during Windows injection
+    // process-exit the driver is being torn down and NvAPI_Unload can hang;
+    // the OS reclaims everything at exit anyway. See teardown_flag.hpp.
+    if (!gpufl::detail::isProcessExitTeardown()) {
+        NvAPI_Unload();
+    }
+}
+
+bool NvmlCollector::sampleUtilNvapi_(int pciBus, unsigned int& gpu,
+                                     unsigned int& mem) {
+    if (!nvapi_available_) return false;
+    auto it = nvapi_by_bus_.find(static_cast<unsigned int>(pciBus));
+    if (it == nvapi_by_bus_.end()) return false;
+
+    NV_GPU_DYNAMIC_PSTATES_INFO_EX info{};
+    info.version = NV_GPU_DYNAMIC_PSTATES_INFO_EX_VER;
+    if (NvAPI_GPU_GetDynamicPstatesInfoEx(it->second, &info) != NVAPI_OK)
+        return false;
+
+    // NVAPI's public header doesn't define named domain constants; the
+    // utilization[] array is indexed by domain in a fixed order (see the
+    // NvAPI_GPU_GetDynamicPstatesInfoEx docs in nvapi.h): 0=GPU (graphics
+    // engine), 1=FB (frame buffer = graphics-memory bandwidth), 2=VID, 3=BUS.
+    constexpr int kDomainGpu = 0;
+    constexpr int kDomainFb  = 1;
+
+    bool any = false;
+    const auto& g = info.utilization[kDomainGpu];
+    const auto& f = info.utilization[kDomainFb];
+    if (g.bIsPresent) {
+        gpu = g.percentage > 100u ? 100u : g.percentage;
+        any = true;
+    }
+    if (f.bIsPresent) {  // FB = frame buffer = graphics-memory bandwidth util
+        mem = f.percentage > 100u ? 100u : f.percentage;
+        any = true;
+    }
+    return any;
 }
 #endif
 

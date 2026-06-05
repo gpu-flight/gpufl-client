@@ -119,6 +119,7 @@ target_sources(gpufl PRIVATE
 
 set(GPUFL_HAS_CUDA 0)
 set(GPUFL_HAS_NVML 0)
+set(GPUFL_HAS_NVAPI 0)
 set(GPUFL_HAS_ROCM 0)
 set(GPUFL_HAS_ROCM_SMI 0)
 set(GPUFL_HAS_HIP 0)
@@ -433,6 +434,59 @@ if(GPUFL_ENABLE_NVIDIA)
         target_link_libraries(gpufl PRIVATE dbghelp pdh psapi)
     endif()
 
+    # NVAPI capability (Windows only): the FB (frame-buffer) domain of
+    # NvAPI_GPU_GetDynamicPstatesInfoEx gives GPU memory-controller utilization
+    # on WDDM (consumer/GeForce), where NVML's util rates read 0% and PDH has no
+    # memory-utilization counter at all. The GPU domain also backstops gpu_util.
+    # NVAPI is open source under the MIT license (github.com/NVIDIA/nvapi), so by
+    # default we pull it via FetchContent (no binaries committed to this repo),
+    # pinned to a commit. A local copy (-DNVAPI_ROOT=... or a third_party/nvapi
+    # checkout) takes precedence for offline builds. See third_party/nvapi/README.md.
+    if(WIN32 AND GPUFL_HAS_NVML)
+        # 1) Prefer a local copy (offline / pinned snapshot) if present.
+        find_path(NVAPI_INCLUDE_DIR NAMES nvapi.h
+            HINTS "${NVAPI_ROOT}" "$ENV{NVAPI_ROOT}"
+                  "${CMAKE_SOURCE_DIR}/third_party/nvapi")
+        find_library(NVAPI_LIBRARY NAMES nvapi64 nvapi
+            HINTS "${NVAPI_ROOT}" "$ENV{NVAPI_ROOT}"
+                  "${CMAKE_SOURCE_DIR}/third_party/nvapi"
+            PATH_SUFFIXES amd64 x64 lib/x64)
+
+        # 2) Otherwise fetch the MIT-licensed open-source SDK (headers + the
+        #    prebuilt amd64/nvapi64.lib stub) into build/_deps. Pinned by SHA —
+        #    the repo publishes no tags.
+        if(NOT (NVAPI_INCLUDE_DIR AND NVAPI_LIBRARY))
+            include(FetchContent)
+            FetchContent_Declare(nvapi
+                GIT_REPOSITORY https://github.com/NVIDIA/nvapi.git
+                GIT_TAG        9b181ea572f680327fe01a14a0f1f41c78034104)  # R595, no tags -> pin SHA
+            # The repo ships no CMakeLists, so download only (no add_subdirectory).
+            # CMP0169 (CMake>=3.30) deprecates bare FetchContent_Populate; OLD
+            # keeps the download-only form usable.
+            if(POLICY CMP0169)
+                cmake_policy(SET CMP0169 OLD)
+            endif()
+            FetchContent_GetProperties(nvapi)
+            if(NOT nvapi_POPULATED)
+                FetchContent_Populate(nvapi)
+            endif()
+            find_path(NVAPI_INCLUDE_DIR NAMES nvapi.h HINTS "${nvapi_SOURCE_DIR}")
+            find_library(NVAPI_LIBRARY NAMES nvapi64 nvapi
+                HINTS "${nvapi_SOURCE_DIR}" PATH_SUFFIXES amd64 x64)
+        endif()
+
+        if(NVAPI_INCLUDE_DIR AND NVAPI_LIBRARY)
+            set(GPUFL_HAS_NVAPI 1)
+            target_include_directories(gpufl PRIVATE ${NVAPI_INCLUDE_DIR})
+            target_link_libraries(gpufl PRIVATE ${NVAPI_LIBRARY})
+            message(STATUS "Found NVAPI: ${NVAPI_LIBRARY} (mem_util/gpu_util on WDDM enabled)")
+        else()
+            message(STATUS
+                "NVAPI unavailable - GPUFL_HAS_NVAPI=0. mem_util will read 0 on "
+                "Windows WDDM (consumer GPUs). See third_party/nvapi/README.md.")
+        endif()
+    endif()
+
     #
     # Only compile NVML collector if NVML is actually available
     #
@@ -541,6 +595,7 @@ endif()
 target_compile_definitions(gpufl PUBLIC
     GPUFL_HAS_CUDA=${GPUFL_HAS_CUDA}
     GPUFL_HAS_NVML=${GPUFL_HAS_NVML}
+    GPUFL_HAS_NVAPI=${GPUFL_HAS_NVAPI}
     GPUFL_HAS_CUPTI=${GPUFL_HAS_CUPTI}
     GPUFL_HAS_PERFWORKS=${GPUFL_HAS_PERFWORKS}
     GPUFL_HAS_ROCM=${GPUFL_HAS_ROCM}
