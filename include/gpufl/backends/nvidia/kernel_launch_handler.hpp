@@ -26,10 +26,9 @@ class KernelLaunchHandler : public ICuptiHandler {
 
    private:
     CuptiBackend* backend_;
-    // Cache for demangled kernel names — avoids re-demangling on every launch
-    std::mutex demangle_mu_;
-    std::unordered_map<std::string, std::string> demangle_cache_;
-    const std::string& cachedDemangle(const char* mangled);
+    // NOTE: kernel-name demangling moved OFF the callback path (Step 4a). The
+    // collector thread demangles raw names (DemangleKernelNameCached in
+    // monitor.cpp); there is no per-callback demangle mutex anymore.
 };
 
 }  // namespace gpufl

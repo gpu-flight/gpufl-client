@@ -25,6 +25,7 @@
 #include "gpufl/core/ring_buffer.hpp"
 #include "gpufl/core/runtime.hpp"
 #include "gpufl/core/stack_registry.hpp"
+#include "gpufl/core/stack_trace.hpp"
 
 namespace gpufl {
 
@@ -43,6 +44,22 @@ static BatchBuffer<KernelBatchRow>  g_kernelBatch;
 static BatchBuffer<MemcpyBatchRow>  g_memcpyBatch;
 static uint64_t g_kernelBatchId = 0;
 static uint64_t g_memcpyBatchId = 0;
+
+// Worker-local kernel-name demangle cache (Step 4a). Demangling moved off the
+// CUPTI callback/activity threads to here. collectorProcessNext runs only on
+// the collector thread (and on the main thread AFTER the collector is joined
+// at shutdown), never concurrently — so no lock is needed (the old
+// callback-side cache used demangle_mu_).
+static std::unordered_map<std::string, std::string> g_kernelNameDemangleCache;
+static const std::string& DemangleKernelNameCached(const char* raw) {
+    static const std::string kFallback = "kernel_launch";
+    if (!raw || raw[0] == '\0') return kFallback;
+    auto it = g_kernelNameDemangleCache.find(raw);
+    if (it != g_kernelNameDemangleCache.end()) return it->second;
+    auto [ins, _] =
+        g_kernelNameDemangleCache.emplace(raw, gpufl::core::DemangleName(raw));
+    return ins->second;
+}
 // Deferred kernel detail rows — written after the kernel batch so the
 // backend's UPDATE (match by corr_id) always finds the INSERT first.
 static std::vector<KernelDetailRow> g_pendingDetails;
@@ -213,7 +230,10 @@ static bool collectorProcessNext() {
                 g_adapter ? g_adapter->platformName() : "unknown";
 
             if (rec.type == TraceType::KERNEL) {
-                const uint32_t kernel_id = g_dictManager.internKernel(rec.name);
+                // Demangle on the collector thread (Step 4a) — rec.name holds
+                // the RAW mangled name pushed by the CUPTI callback/activity path.
+                const uint32_t kernel_id = g_dictManager.internKernel(
+                    DemangleKernelNameCached(rec.name).c_str());
 
                 KernelBatchRow row;
                 row.start_ns    = rec.cpu_start_ns;

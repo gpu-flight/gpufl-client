@@ -78,7 +78,7 @@ struct LaunchMeta {
         num_regs = 0;
     float occupancy = 0.0f;
     int max_active_blocks = 0;
-    char name[128]{};
+    char name[256]{};  // RAW (mangled) name; demangled on the collector thread
     char user_scope[256]{};
     int scope_depth{};
     size_t stack_id{};
