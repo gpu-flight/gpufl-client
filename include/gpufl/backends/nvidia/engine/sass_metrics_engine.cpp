@@ -1,5 +1,7 @@
 #include "gpufl/backends/nvidia/engine/sass_metrics_engine.hpp"
 
+#include "gpufl/core/env_vars.hpp"
+
 #include <cupti.h>
 #include <cupti_pcsampling.h>
 #include <cupti_profiler_target.h>
@@ -137,7 +139,7 @@ bool CcMatchesToken(const ComputeCapability& cc, const char* begin,
 // over-exclude when the capability query failed).
 bool ArchExcludedForSass(const ComputeCapability& cc) {
     if (!cc.valid()) return false;
-    const char* env = std::getenv("GPUFL_SASS_EXCLUDE_ARCHS");
+    const char* env = std::getenv(gpufl::env::kSassExcludeArchs);
     const char* list = env ? env : kDefaultSassExcludeArchs;
     if (!list || !*list) return false;
 
@@ -160,14 +162,14 @@ bool ShouldUseLazyPatching() {
     // Isolation test: keep main-like SASS start timing and kernel activity, but
     // switch lazy patching off by default to test whether eager patching causes
     // the all-zero SASS counter behavior.
-    return EnvFlagEnabled("GPUFL_SASS_LAZY_PATCHING");
+    return EnvFlagEnabled(gpufl::env::kSassLazyPatching);
 }
 
 bool ShouldDeferScopeFlush() {
     // Diagnostic mode: keep SASS armed across scope boundaries and flush only
     // at session stop/shutdown. This separates "SASS + activity" issues from
     // "disable/flush raced a concurrent framework launch" issues.
-    return EnvFlagEnabled("GPUFL_SASS_DEFER_SCOPE_FLUSH");
+    return EnvFlagEnabled(gpufl::env::kSassDeferScopeFlush);
 }
 }  // namespace
 

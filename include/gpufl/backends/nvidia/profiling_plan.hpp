@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "gpufl/core/env_vars.hpp"
 #include "gpufl/core/monitor.hpp"
 
 namespace gpufl {
@@ -46,21 +47,21 @@ struct EnvOverrides {
 
     static EnvOverrides FromProcess() {
         EnvOverrides env;
-        env.sass_metrics_only = Enabled("GPUFL_SASS_METRICS_ONLY");
-        env.sass_force_safe_activity = Enabled("GPUFL_SASS_FORCE_SAFE_ACTIVITY");
-        env.sass_allow_full_activity = Enabled("GPUFL_SASS_ALLOW_FULL_ACTIVITY");
-        env.sass_allow_kernel_activity = Enabled("GPUFL_SASS_ALLOW_KERNEL_ACTIVITY");
-        env.sass_allow_marker_activity = Enabled("GPUFL_SASS_ALLOW_MARKER_ACTIVITY");
+        env.sass_metrics_only = Enabled(gpufl::env::kSassMetricsOnly);
+        env.sass_force_safe_activity = Enabled(gpufl::env::kSassForceSafeActivity);
+        env.sass_allow_full_activity = Enabled(gpufl::env::kSassAllowFullActivity);
+        env.sass_allow_kernel_activity = Enabled(gpufl::env::kSassAllowKernelActivity);
+        env.sass_allow_marker_activity = Enabled(gpufl::env::kSassAllowMarkerActivity);
         env.sass_allow_mem_transfer_activity =
-            Enabled("GPUFL_SASS_ALLOW_MEM_TRANSFER_ACTIVITY");
-        env.sass_allow_memory2_activity = Enabled("GPUFL_SASS_ALLOW_MEMORY2_ACTIVITY");
-        env.sass_allow_memory_activity = Enabled("GPUFL_SASS_ALLOW_MEMORY_ACTIVITY");
-        env.sass_allow_sync_activity = Enabled("GPUFL_SASS_ALLOW_SYNC_ACTIVITY");
-        env.sass_allow_graph_activity = Enabled("GPUFL_SASS_ALLOW_GRAPH_ACTIVITY");
+            Enabled(gpufl::env::kSassAllowMemTransferActivity);
+        env.sass_allow_memory2_activity = Enabled(gpufl::env::kSassAllowMemory2Activity);
+        env.sass_allow_memory_activity = Enabled(gpufl::env::kSassAllowMemoryActivity);
+        env.sass_allow_sync_activity = Enabled(gpufl::env::kSassAllowSyncActivity);
+        env.sass_allow_graph_activity = Enabled(gpufl::env::kSassAllowGraphActivity);
         env.sass_allow_external_correlation =
-            Enabled("GPUFL_SASS_ALLOW_EXTERNAL_CORRELATION");
-        env.disable_cubin_capture = Enabled("GPUFL_DISABLE_CUBIN_CAPTURE");
-        env.sass_disable_cubin_capture = Enabled("GPUFL_SASS_DISABLE_CUBIN_CAPTURE");
+            Enabled(gpufl::env::kSassAllowExternalCorrelation);
+        env.disable_cubin_capture = Enabled(gpufl::env::kDisableCubinCapture);
+        env.sass_disable_cubin_capture = Enabled(gpufl::env::kSassDisableCubinCapture);
         return env;
     }
 };

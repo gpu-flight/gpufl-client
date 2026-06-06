@@ -35,7 +35,7 @@
 #include <string>
 #include <vector>
 
-#include "gpufl/inject/inject_entry.hpp"
+#include "gpufl/core/env_vars.hpp"
 
 namespace fs = std::filesystem;
 
@@ -260,31 +260,31 @@ int runTrace(const TraceArgs& args) {
     // These (and the shared log dir) are set once and inherited by every
     // child; each pass's process writes under its OWN session-id subdir, so
     // the uploader discovers N sessions grouped by analysis_id.
-    setEnvOrDie("CUDA_INJECTION64_PATH", inject_lib.string());
-    setEnvOrDie("NVTX_INJECTION64_PATH", inject_lib.string());
-    setEnvOrDie(inject::kEnvSentinel, "1");
-    setEnvOrDie(inject::kEnvAppName, app_name);
-    setEnvOrDie(inject::kEnvLogDir, output_dir.string());
-    setEnvOrDie(inject::kEnvProfile, args.profile);
+    setEnvOrDie(gpufl::env::kCudaInjection64Path, inject_lib.string());
+    setEnvOrDie(gpufl::env::kNvtxInjection64Path, inject_lib.string());
+    setEnvOrDie(gpufl::env::kInject, "1");
+    setEnvOrDie(gpufl::env::kAppName, app_name);
+    setEnvOrDie(gpufl::env::kLogDir, output_dir.string());
+    setEnvOrDie(gpufl::env::kInjectProfile, args.profile);
 
     // --upload: fail fast before launch if creds the inject DLL's post-run
     // uploadLogs() will need aren't in the environment. Each pass uploads its
     // own session; the backend groups them by analysis_id.
     if (args.upload) {
-        const char* api_key     = std::getenv("GPUFL_API_KEY");
-        const char* backend_url = std::getenv("GPUFL_BACKEND_URL");
+        const char* api_key     = std::getenv(gpufl::env::kApiKey);
+        const char* backend_url = std::getenv(gpufl::env::kBackendUrl);
         if (!api_key || !*api_key || !backend_url || !*backend_url) {
             std::fprintf(stderr,
                 "gpufl trace --upload: GPUFL_API_KEY and GPUFL_BACKEND_URL "
                 "must both be set in the environment to upload.\n");
             return 2;
         }
-        setEnvOrDie(inject::kEnvUpload, "1");
+        setEnvOrDie(gpufl::env::kInjectUpload, "1");
     }
 
     if (multipass) {
-        setEnvOrDie(inject::kEnvAnalysisId, analysis_id);
-        setEnvOrDie(inject::kEnvPassCount, std::to_string(plan.size()));
+        setEnvOrDie(gpufl::env::kAnalysisId, analysis_id);
+        setEnvOrDie(gpufl::env::kPassCount, std::to_string(plan.size()));
     }
 
     if (!args.quiet) {
@@ -312,10 +312,10 @@ int runTrace(const TraceArgs& args) {
         // Per-pass engine. An empty engine (legacy single pass with no
         // --engine) leaves GPUFL_PROFILING_ENGINE as the user/profile set it.
         if (!engine.empty()) {
-            setEnvOrDie(inject::kEnvProfilingEngine, engine);
+            setEnvOrDie(gpufl::env::kProfilingEngine, engine);
         }
         if (multipass) {
-            setEnvOrDie(inject::kEnvPassIndex, std::to_string(i));
+            setEnvOrDie(gpufl::env::kPassIndex, std::to_string(i));
         }
 
         const std::string what =

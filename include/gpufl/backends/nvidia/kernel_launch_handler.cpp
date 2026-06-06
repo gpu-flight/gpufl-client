@@ -1,5 +1,7 @@
 #include "gpufl/backends/nvidia/kernel_launch_handler.hpp"
 
+#include "gpufl/core/env_vars.hpp"
+
 #include <algorithm>  // std::min(initializer_list) — see occupancy calc below
 #include <cstdio>
 #include <cstdlib>
@@ -324,8 +326,8 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
             std::snprintf(metaRec.user_scope, sizeof(metaRec.user_scope), "%s",
                           fullPath.c_str());
             metaRec.scope_depth = stack.size();
-        } else if (const char* injectedApp = std::getenv("GPUFL_APP_NAME")) {
-            if (std::getenv("GPUFL_INJECT") && injectedApp[0] != '\0') {
+        } else if (const char* injectedApp = std::getenv(gpufl::env::kAppName)) {
+            if (std::getenv(gpufl::env::kInject) && injectedApp[0] != '\0') {
                 std::string processScope = "process:";
                 processScope += injectedApp;
                 std::snprintf(metaRec.user_scope, sizeof(metaRec.user_scope),

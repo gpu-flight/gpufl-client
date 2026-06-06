@@ -1,5 +1,7 @@
 #include "gpufl/backends/nvidia/engine/pc_sampling_with_sass_engine.hpp"
 
+#include "gpufl/core/env_vars.hpp"
+
 #include <cupti.h>
 
 #include <cstdlib>
@@ -34,7 +36,7 @@ namespace {
 // PC sampling is always the fallback, so a Deep session is never unsafe.
 bool ShouldAttemptSassInDeep() {
     // Manual escape hatch: force PC-sampling-only regardless of hardware.
-    if (const char* e = std::getenv("GPUFL_DEEP_PC_ONLY");
+    if (const char* e = std::getenv(gpufl::env::kDeepPcOnly);
         e && e[0] != '\0' && e[0] != '0') {
         return false;
     }
@@ -101,7 +103,7 @@ void PcSamplingWithSassEngine::start() {
         // there's nothing to disable (avoids the unsafe disable-PC-while-
         // Profiler-API-active teardown).
         bool tryBoth = false;
-        if (const char* e = std::getenv("GPUFL_DEEP_TRY_BOTH"))
+        if (const char* e = std::getenv(gpufl::env::kDeepTryBoth))
             tryBoth = (e[0] != '\0' && e[0] != '0');
 
         if (tryBoth && pc_) {

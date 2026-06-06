@@ -11,6 +11,7 @@
 #endif
 
 #include "gpufl/gpufl.hpp"
+#include "gpufl/core/env_vars.hpp"
 
 namespace {
 
@@ -72,11 +73,11 @@ int main() {
         return 1;
     }
 
-    const std::string appName = getenv_or("GPUFL_MONITOR_APP", "gpufl-monitor");
+    const std::string appName = getenv_or(gpufl::env::kMonitorApp, "gpufl-monitor");
     const std::string logPath =
-        getenv_or("GPUFL_MONITOR_LOG_DIR", "/var/gpufl/monitor/session");
+        getenv_or(gpufl::env::kMonitorLogDir, "/var/gpufl/monitor/session");
     const int intervalMs =
-        std::stoi(getenv_or("GPUFL_MONITOR_INTERVAL_MS", "5000"));
+        std::stoi(getenv_or(gpufl::env::kMonitorIntervalMs, "5000"));
 
     std::cout << "Starting GPUFL monitor with app name: " << appName
               << ", log path: " << logPath << ", interval: " << intervalMs

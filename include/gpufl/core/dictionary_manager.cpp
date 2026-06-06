@@ -1,5 +1,7 @@
 #include "gpufl/core/dictionary_manager.hpp"
 
+#include "gpufl/core/env_vars.hpp"
+
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -273,7 +275,7 @@ void DictionaryManager::flushDisassembly(Logger& logger,
             // when both the executable path and arguments contain spaces
             // (e.g., "C:\Program Files\...").
             char cmd[640];
-            const char* cudaPath = std::getenv("CUDA_PATH");
+            const char* cudaPath = std::getenv(gpufl::env::kCudaPath);
             if (cudaPath && cudaPath[0]) {
                 std::snprintf(cmd, sizeof(cmd),
                               "\"\"%s\\bin\\nvdisasm.exe\" --print-code \"%s\"\"",
