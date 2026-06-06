@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <stack>
 #include <thread>
@@ -22,6 +23,7 @@
 #include "gpufl/core/model/synchronization_event_model.hpp"
 #include "gpufl/core/model/memory_alloc_event_model.hpp"
 #include "gpufl/core/model/graph_launch_event_model.hpp"
+#include "gpufl/core/model/lifecycle_model.hpp"
 #include "gpufl/core/monitor_adapter.hpp"
 #include "gpufl/core/ring_buffer.hpp"
 #include "gpufl/core/runtime.hpp"
@@ -238,6 +240,49 @@ static void flushBatches(Logger& logger, const std::string& session_id) {
 // field the join and the synthetic-kernel path need, so no parallel struct.
 static std::unordered_map<uint64_t, ActivityRecord> g_launchMetaByCorr;
 
+// ── Execution Signature (P2 multi-pass determinism guard) ──────────────────
+// Per-scope multiset of (mangled kernel name + launch dims) -> launch count,
+// built from the KERNEL_LAUNCH_META records below (which fire in EVERY engine
+// mode, so every isolated pass — even SASS, where kernel-activity is off — has
+// the full launch inventory). Collector-thread-only: accumulated as launch
+// metas are consumed from the ring and emitted at session end after the
+// collector joins — same single-consumer contract as g_launchMetaByCorr, no
+// lock. std::map keeps keys sorted so the hash is order-independent (the
+// MULTISET property: benign async launch reordering must not change it). Scope
+// key = full user_scope path ("" = global); perf-scope reconciliation is the
+// deferred P2 backend scope work.
+static std::map<std::string, std::map<std::string, uint64_t>>
+    g_execSignatureByScope;
+
+// FNV-1a 64-bit over the canonical multiset encoding.
+static uint64_t Fnv1a64(const std::string& s) {
+    uint64_t h = 1469598103934665603ULL;
+    for (const unsigned char c : s) {
+        h ^= c;
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+// Accumulate one kernel launch into its scope's signature multiset. `rec` is a
+// KERNEL_LAUNCH_META carrying final launch dims (has_details). The key uses the
+// MANGLED name — byte-identical across passes, so no demangle is needed for the
+// cross-pass comparison. \x1f separates fields (never appears in names/dims).
+static void accumulateExecSignature(const ActivityRecord& rec) {
+    std::string key = rec.name;
+    key += '\x1f';
+    key += std::to_string(rec.grid_x);  key += ',';
+    key += std::to_string(rec.grid_y);  key += ',';
+    key += std::to_string(rec.grid_z);  key += '\x1f';
+    key += std::to_string(rec.block_x); key += ',';
+    key += std::to_string(rec.block_y); key += ',';
+    key += std::to_string(rec.block_z); key += '\x1f';
+    key += std::to_string(rec.dyn_shared);
+    const std::string scope =
+        (rec.user_scope[0] != '\0') ? rec.user_scope : std::string();
+    ++g_execSignatureByScope[scope][key];
+}
+
 // Worker-local sync-stack join map (Step 4c). The corr->stack join that ran
 // under CuptiBackend::sync_meta_mu_ in BufferCompleted now happens here on the
 // single collector thread, lock-free. Populated by SYNC_META records (sync
@@ -395,6 +440,40 @@ static void drainSyntheticKernels(Runtime* rt) {
     g_launchMetaByCorr.clear();
 }
 
+// Emit one execution_signature record per scope at session end — runs after the
+// ring is fully drained (every KERNEL_LAUNCH_META accumulated). Called on the
+// collector thread (post-loop) and again from Shutdown's post-join drain;
+// idempotent via clear(). std::map iteration is sorted, so the hash is a stable
+// function of the multiset. See g_execSignatureByScope.
+static void emitExecutionSignatures(Runtime* rt) {
+    if (g_execSignatureByScope.empty()) return;
+    if (!(rt && rt->logger)) return;
+    const int64_t ts = detail::GetTimestampNs();
+    for (const auto& [scope, kernels] : g_execSignatureByScope) {
+        std::string buf;
+        uint64_t launch_count = 0;
+        for (const auto& [k, cnt] : kernels) {  // sorted (std::map) -> stable hash
+            buf += k;
+            buf += '=';
+            buf += std::to_string(cnt);
+            buf += ';';
+            launch_count += cnt;
+        }
+        ExecutionSignatureEvent ev;
+        ev.session_id       = rt->session_id;
+        ev.ts_ns            = ts;
+        ev.scope_name       = scope;
+        ev.signature        = Fnv1a64(buf);
+        ev.launch_count     = launch_count;
+        ev.distinct_kernels = static_cast<uint32_t>(kernels.size());
+        rt->logger->write(model::ExecutionSignatureModel(ev));
+        GFL_LOG_DEBUG("[execSignature] scope='", scope, "' launches=",
+                      launch_count, " distinct=", kernels.size(),
+                      " sig=", ev.signature);
+    }
+    g_execSignatureByScope.clear();
+}
+
 // Consume + route ONE record from the ring buffer; returns false when empty.
 // File-scope (was a lambda inside CollectorLoop) so Monitor::Shutdown can
 // re-drain on the MAIN thread after joining the collector. On Windows
@@ -418,11 +497,21 @@ static bool collectorProcessNext() {
             // metas always have has_details=false, so duplicate-corr mem callbacks
             // resolve to the first/runtime one — its user-facing scope label.)
             auto it = g_launchMetaByCorr.find(rec.corr_id);
+            bool countForSignature = false;
             if (it == g_launchMetaByCorr.end()) {
                 g_launchMetaByCorr.emplace(rec.corr_id, rec);
+                // First record for this launch — count it once for the exec
+                // signature IF it already carries grid/block (a kernel launch).
+                // Dim-less metas (e.g. memcpy) are not kernel launches and are
+                // never counted.
+                countForSignature = rec.has_details;
             } else if (!it->second.has_details && rec.has_details) {
                 it->second = rec;
+                // Details arrived on the launch's 2nd callback (same corr) —
+                // count now; the emplace above skipped it for lack of dims.
+                countForSignature = true;
             }
+            if (countForSignature) accumulateExecSignature(rec);
             return true;
         }
         if (rec.type == TraceType::KERNEL_API_EXIT) {
@@ -703,6 +792,7 @@ void CollectorLoop() {
     // synthetic kernel rows it emits are included in this last flush.
     if (Runtime* rt = runtime(); rt && rt->logger) {
         drainSyntheticKernels(rt);
+        emitExecutionSignatures(rt);
         flushBatches(*rt->logger, rt->session_id);
     }
     GFL_LOG_DEBUG("[CollectorLoop] END");
@@ -720,6 +810,7 @@ void Monitor::Initialize(const MonitorOptions& opts) {
     // session left behind so corr ids can't collide across init/shutdown cycles.
     g_launchMetaByCorr.clear();
     g_syncStackByCorr.clear();  // Step 4c: same cross-session hygiene for syncs.
+    g_execSignatureByScope.clear();  // P2 exec-signature: drop prior session's multiset.
     g_kernelBatchId  = 0;
     g_memcpyBatchId  = 0;
     g_scopeBatch.clear();
@@ -784,6 +875,7 @@ void Monitor::Shutdown() {
             // (Windows process-exit can tear the collector down early). No-op
             // when CollectorLoop already drained them — the map is cleared.
             drainSyntheticKernels(rt);
+            emitExecutionSignatures(rt);
             flushBatches(*rt->logger, rt->session_id);
         }
         GFL_LOG_DEBUG("Monitor::Shutdown: post-join drained=", drained);

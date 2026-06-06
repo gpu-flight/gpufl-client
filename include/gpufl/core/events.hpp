@@ -130,6 +130,26 @@ struct SassConfigEvent {
     std::vector<std::string> skipped_metrics;     // metrics CUPTI rejected for this GPU
 };
 
+// Per-scope Execution Signature (P2 multi-pass determinism guard input).
+// Accumulated from KERNEL_LAUNCH_META — which fires in EVERY engine mode, so
+// every isolated pass (even SASS, where kernel-activity is off) has the full
+// per-launch inventory. `signature` hashes the sorted MULTISET of
+// (mangled kernel name, grid, block, dyn_smem) -> launch count within the scope
+// (mangled is intentional: byte-identical across passes, so no demangle is
+// needed here). The backend compares this fingerprint per scope across the
+// passes of one analysis: equal => the launch pattern is deterministic and SASS
+// metrics from one pass may be merged onto another pass's timing for that
+// scope; different (e.g. cuDNN autotune changed grid/block/count) => abort the
+// SASS merge for that scope. Emitted once per scope at session end.
+struct ExecutionSignatureEvent {
+    std::string session_id;
+    int64_t     ts_ns = 0;
+    std::string scope_name;        // full user-scope path; "" = global / no scope
+    uint64_t    signature = 0;     // FNV-1a 64 over the sorted launch multiset
+    uint64_t    launch_count = 0;  // total kernel launches attributed to the scope
+    uint32_t    distinct_kernels = 0;  // distinct (name,grid,block,smem) keys
+};
+
 struct CaptureCapability {
     std::string feature;
     bool requested = false;

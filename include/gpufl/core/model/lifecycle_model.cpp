@@ -81,6 +81,22 @@ std::string SassConfigModel::buildJson() const {
     return oss.str();
 }
 
+std::string ExecutionSignatureModel::buildJson() const {
+    std::ostringstream oss;
+    oss << "{\"version\":1,\"type\":\"execution_signature\""
+        << ",\"session_id\":\"" << jsonEscape(e_.session_id) << "\""
+        << ",\"ts_ns\":"        << e_.ts_ns
+        << ",\"scope_name\":\"" << jsonEscape(e_.scope_name) << "\""
+        // signature is a full-width uint64 hash — emit as a STRING so a JSON
+        // number consumer (JS doubles lose precision above 2^53) can't corrupt
+        // it. The backend parses it back to an unsigned 64-bit value.
+        << ",\"signature\":\""  << e_.signature << "\""
+        << ",\"launch_count\":" << e_.launch_count
+        << ",\"distinct_kernels\":" << e_.distinct_kernels
+        << "}";
+    return oss.str();
+}
+
 std::string CaptureCapabilitiesModel::buildJson() const {
     std::ostringstream oss;
     oss << "{\"version\":1,\"type\":\"capture_capabilities\""

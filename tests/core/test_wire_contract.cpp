@@ -204,6 +204,44 @@ TEST(WireContract, SassConfigShape) {
     EXPECT_TRUE(JsonContains(json, "\"skipped_metrics\":[\"dram__bytes\"]"));
 }
 
+// ── execution_signature (P2 multi-pass determinism guard) ──────────────────
+//
+// One per scope per pass; the backend compares the `signature` per scope across
+// the passes of an analysis to decide whether SASS metrics may be merged onto
+// another pass's timing. `signature` is a full-width uint64 hash emitted as a
+// STRING so JSON number precision (JS doubles lose >2^53) can't corrupt it.
+TEST(WireContract, ExecutionSignatureShape) {
+    gpufl::ExecutionSignatureEvent e;
+    e.session_id = "sess-1";
+    e.ts_ns = 1234;
+    e.scope_name = "train_epoch";
+    e.signature = 12345678901234567890ULL;  // > 2^53 — must round-trip as a string
+    e.launch_count = 9002;
+    e.distinct_kernels = 27;
+
+    const std::string json = gpufl::model::ExecutionSignatureModel(e).buildJson();
+
+    EXPECT_TRUE(JsonContains(json, "\"version\":1"));
+    EXPECT_TRUE(JsonContains(json, "\"type\":\"execution_signature\""));
+    EXPECT_TRUE(JsonContains(json, "\"session_id\":\"sess-1\""));
+    EXPECT_TRUE(JsonContains(json, "\"scope_name\":\"train_epoch\""));
+    EXPECT_TRUE(JsonContains(json, "\"signature\":\"12345678901234567890\""))
+        << "uint64 signature must serialize as a quoted string: " << json;
+    EXPECT_TRUE(JsonContains(json, "\"launch_count\":9002"));
+    EXPECT_TRUE(JsonContains(json, "\"distinct_kernels\":27"));
+}
+
+TEST(WireContract, ExecutionSignatureEscapesScopeName) {
+    gpufl::ExecutionSignatureEvent e;
+    e.session_id = "sess-1";
+    e.ts_ns = 1;
+    e.scope_name = "a\"b";  // embedded quote must be JSON-escaped
+    e.signature = 0;
+    const std::string json = gpufl::model::ExecutionSignatureModel(e).buildJson();
+    EXPECT_TRUE(JsonContains(json, "\"scope_name\":\"a\\\"b\""))
+        << "scope_name must be JSON-escaped: " << json;
+}
+
 // ── kernel_event_batch ────────────────────────────────────────────────────
 //
 // The columnar batch records are the heart of the wire contract: the
