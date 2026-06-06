@@ -88,6 +88,27 @@ std::string makeSessionId() {
     return os.str();
 }
 
+// 128-bit UUID-shaped id shared by all passes of one multi-pass analysis.
+// Opaque to the backend (it only groups by string equality); makeSessionId's
+// 32 bits is fine for a local dir name but too narrow to group analyses on the
+// backend, so use full-width randomness here. (Mirrors the Linux launcher.)
+std::string makeAnalysisId() {
+    static std::mt19937_64 rng{
+        static_cast<uint64_t>(
+            std::chrono::steady_clock::now().time_since_epoch().count()) ^
+        0x9e3779b97f4a7c15ULL};
+    const uint64_t a = rng();
+    const uint64_t b = rng();
+    char buf[40];
+    std::snprintf(buf, sizeof(buf), "%08x-%04x-%04x-%04x-%012llx",
+                  static_cast<unsigned>(a >> 32),
+                  static_cast<unsigned>((a >> 16) & 0xffff),
+                  static_cast<unsigned>(a & 0xffff),
+                  static_cast<unsigned>((b >> 48) & 0xffff),
+                  static_cast<unsigned long long>(b & 0xffffffffffffULL));
+    return buf;
+}
+
 std::string makeTimestamp() {
     const auto t = std::time(nullptr);
     std::tm tm{};
@@ -192,9 +213,19 @@ int runTrace(const TraceArgs& args) {
         return 3;
     }
 
-    const std::string session_id = makeSessionId();
+    // Resolve the multi-pass plan (explicit --passes, --engine Deep expanded,
+    // or a single pass) — the shared source of truth lives in cli_parse.
+    const std::vector<std::string> plan = resolvePassPlan(args);
+    const bool multipass = plan.size() > 1;
+
+    // One analysis_id shared by every pass lets the backend stitch the isolated
+    // passes into a single kernel view. Single-pass runs get none and keep the
+    // legacy {ts}_{sid} dir name.
+    const std::string analysis_id = multipass ? makeAnalysisId() : std::string();
+    const std::string dir_tag = multipass ? analysis_id : makeSessionId();
+
     const fs::path output_dir = args.output_dir.empty()
-                              ? defaultOutputDir(session_id)
+                              ? defaultOutputDir(dir_tag)
                               : fs::path(args.output_dir);
 
     std::error_code ec;
@@ -226,18 +257,19 @@ int runTrace(const TraceArgs& args) {
 
     // No LD_PRELOAD on Windows — the driver loads the DLL via the injection
     // path. We still set both CUDA + NVTX injection vars to the same DLL.
+    // These (and the shared log dir) are set once and inherited by every
+    // child; each pass's process writes under its OWN session-id subdir, so
+    // the uploader discovers N sessions grouped by analysis_id.
     setEnvOrDie("CUDA_INJECTION64_PATH", inject_lib.string());
     setEnvOrDie("NVTX_INJECTION64_PATH", inject_lib.string());
     setEnvOrDie(inject::kEnvSentinel, "1");
     setEnvOrDie(inject::kEnvAppName, app_name);
     setEnvOrDie(inject::kEnvLogDir, output_dir.string());
     setEnvOrDie(inject::kEnvProfile, args.profile);
-    if (!args.engine.empty()) {
-        setEnvOrDie(inject::kEnvProfilingEngine, args.engine);
-    }
 
     // --upload: fail fast before launch if creds the inject DLL's post-run
-    // uploadLogs() will need aren't in the environment.
+    // uploadLogs() will need aren't in the environment. Each pass uploads its
+    // own session; the backend groups them by analysis_id.
     if (args.upload) {
         const char* api_key     = std::getenv("GPUFL_API_KEY");
         const char* backend_url = std::getenv("GPUFL_BACKEND_URL");
@@ -250,8 +282,19 @@ int runTrace(const TraceArgs& args) {
         setEnvOrDie(inject::kEnvUpload, "1");
     }
 
+    if (multipass) {
+        setEnvOrDie(inject::kEnvAnalysisId, analysis_id);
+        setEnvOrDie(inject::kEnvPassCount, std::to_string(plan.size()));
+    }
+
     if (!args.quiet) {
         std::fprintf(stderr, "[gpufl] capturing -> %s\n", output_dir.string().c_str());
+        if (multipass) {
+            std::fprintf(stderr, "[gpufl] multi-pass analysis %s - %zu passes:",
+                         analysis_id.c_str(), plan.size());
+            for (const auto& e : plan) std::fprintf(stderr, " %s", e.c_str());
+            std::fputc('\n', stderr);
+        }
         if (args.verbose) {
             std::fprintf(stderr, "[gpufl] inject dll: %s\n", inject_lib.string().c_str());
             std::fprintf(stderr, "[gpufl] app_name: %s\n", app_name.c_str());
@@ -259,52 +302,93 @@ int runTrace(const TraceArgs& args) {
         }
     }
 
-    // CreateProcessW wants a mutable command-line buffer. lpApplicationName
-    // = null so the program is resolved from the command line (incl. PATH),
-    // mirroring execvp's PATH search.
-    std::wstring cmdline = widen(buildCommandLine(args.command));
-    std::vector<wchar_t> cmdbuf(cmdline.begin(), cmdline.end());
-    cmdbuf.push_back(L'\0');
+    // ── Run the workload once per pass. A failing pass does NOT abort the
+    //    rest (a partial analysis still captures the passes that worked); the
+    //    first non-zero pass becomes the launcher's exit code. ──
+    int overall_rc = 0;
+    for (size_t i = 0; i < plan.size(); ++i) {
+        const std::string& engine = plan[i];
 
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
-    PROCESS_INFORMATION pi{};
+        // Per-pass engine. An empty engine (legacy single pass with no
+        // --engine) leaves GPUFL_PROFILING_ENGINE as the user/profile set it.
+        if (!engine.empty()) {
+            setEnvOrDie(inject::kEnvProfilingEngine, engine);
+        }
+        if (multipass) {
+            setEnvOrDie(inject::kEnvPassIndex, std::to_string(i));
+        }
 
-    const auto t_start = std::chrono::steady_clock::now();
+        const std::string what =
+            multipass ? ("pass " + std::to_string(i + 1) + "/" +
+                         std::to_string(plan.size()) + " (" + engine + ")")
+                      : std::string("target");
 
-    // The env we just set via SetEnvironmentVariable is inherited because
-    // lpEnvironment is null (child gets a copy of our environment block).
-    if (!CreateProcessW(/*lpApplicationName=*/nullptr,
-                        cmdbuf.data(),
-                        /*procAttrs=*/nullptr, /*threadAttrs=*/nullptr,
-                        /*inheritHandles=*/TRUE,
-                        /*creationFlags=*/0,
-                        /*lpEnvironment=*/nullptr,
-                        /*lpCurrentDirectory=*/nullptr,
-                        &si, &pi)) {
-        std::fprintf(stderr, "gpufl: cannot launch %s (CreateProcess err=%lu)\n",
-                     args.command.front().c_str(),
-                     static_cast<unsigned long>(GetLastError()));
-        return 2;
+        if (!args.quiet && multipass) {
+            std::fprintf(stderr, "\n[gpufl] -- %s --\n", what.c_str());
+            if (engine == "PcSampling") {
+                std::fprintf(stderr,
+                    "[gpufl] note: PcSampling needs admin / NVIDIA CP \"allow GPU "
+                    "performance counters to all users\"; this pass reports \"needs "
+                    "admin\" and yields no PC data if unprivileged.\n");
+            }
+        }
+
+        // CreateProcessW wants a mutable command-line buffer and may modify it,
+        // so rebuild it per pass. lpApplicationName = null so the program is
+        // resolved from the command line (incl. PATH), mirroring execvp.
+        std::wstring cmdline = widen(buildCommandLine(args.command));
+        std::vector<wchar_t> cmdbuf(cmdline.begin(), cmdline.end());
+        cmdbuf.push_back(L'\0');
+
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        PROCESS_INFORMATION pi{};
+
+        const auto t_start = std::chrono::steady_clock::now();
+
+        // The env we set via SetEnvironmentVariable is inherited because
+        // lpEnvironment is null (child gets a copy of our environment block).
+        if (!CreateProcessW(/*lpApplicationName=*/nullptr,
+                            cmdbuf.data(),
+                            /*procAttrs=*/nullptr, /*threadAttrs=*/nullptr,
+                            /*inheritHandles=*/TRUE,
+                            /*creationFlags=*/0,
+                            /*lpEnvironment=*/nullptr,
+                            /*lpCurrentDirectory=*/nullptr,
+                            &si, &pi)) {
+            std::fprintf(stderr, "gpufl: cannot launch %s (CreateProcess err=%lu)\n",
+                         args.command.front().c_str(),
+                         static_cast<unsigned long>(GetLastError()));
+            return 2;
+        }
+
+        WaitForSingleObject(pi.hProcess, INFINITE);
+
+        DWORD exit_code = 1;
+        GetExitCodeProcess(pi.hProcess, &exit_code);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+
+        const auto t_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - t_start).count();
+
+        if (!args.quiet) {
+            std::fprintf(stderr, "[gpufl] %s exited (rc=%lu) in %.2fs\n",
+                         what.c_str(), static_cast<unsigned long>(exit_code),
+                         t_elapsed / 1000.0);
+        }
+
+        // First failing pass sets the exit code; keep going so later passes
+        // still run and the analysis is as complete as possible.
+        if (exit_code != 0 && overall_rc == 0)
+            overall_rc = static_cast<int>(exit_code);
     }
 
-    WaitForSingleObject(pi.hProcess, INFINITE);
-
-    DWORD exit_code = 1;
-    GetExitCodeProcess(pi.hProcess, &exit_code);
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-
-    const auto t_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                         std::chrono::steady_clock::now() - t_start).count();
-
     if (!args.quiet) {
-        std::fprintf(stderr, "[gpufl] target exited (rc=%lu) in %.2fs\n",
-                     static_cast<unsigned long>(exit_code), t_elapsed / 1000.0);
         std::fprintf(stderr, "[gpufl] inspect: %s\n", output_dir.string().c_str());
     }
 
-    return static_cast<int>(exit_code);
+    return overall_rc;
 }
 
 }  // namespace gpufl::launcher

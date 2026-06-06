@@ -83,6 +83,28 @@ std::string makeSessionId() {
     return os.str();
 }
 
+// 128-bit UUID-shaped id shared by all passes of one multi-pass analysis.
+// Opaque to the backend (it only groups by string equality), so the exact
+// layout doesn't matter — just full-width randomness for collision safety
+// across accounts (makeSessionId's 32 bits is fine for a local dir name but
+// too narrow to group analyses on the backend).
+std::string makeAnalysisId() {
+    static std::mt19937_64 rng{
+        static_cast<uint64_t>(
+            std::chrono::steady_clock::now().time_since_epoch().count()) ^
+        0x9e3779b97f4a7c15ULL};
+    const uint64_t a = rng();
+    const uint64_t b = rng();
+    char buf[40];
+    std::snprintf(buf, sizeof(buf), "%08x-%04x-%04x-%04x-%012llx",
+                  static_cast<unsigned>(a >> 32),
+                  static_cast<unsigned>((a >> 16) & 0xffff),
+                  static_cast<unsigned>(a & 0xffff),
+                  static_cast<unsigned>((b >> 48) & 0xffff),
+                  static_cast<unsigned long long>(b & 0xffffffffffffULL));
+    return buf;
+}
+
 std::string makeTimestamp() {
     auto t = std::time(nullptr);
     std::tm tm{};
@@ -133,9 +155,19 @@ int runTrace(const TraceArgs& args) {
         return 3;
     }
 
-    const std::string session_id = makeSessionId();
+    // Resolve the multi-pass plan (explicit --passes, --engine Deep expanded,
+    // or a single pass) — the shared source of truth lives in cli_parse.
+    const std::vector<std::string> plan = resolvePassPlan(args);
+    const bool multipass = plan.size() > 1;
+
+    // One analysis_id shared by every pass lets the backend stitch the isolated
+    // passes into a single kernel view. Single-pass runs get none and keep the
+    // legacy {ts}_{sid} dir name.
+    const std::string analysis_id = multipass ? makeAnalysisId() : std::string();
+    const std::string dir_tag = multipass ? analysis_id : makeSessionId();
+
     const fs::path output_dir = args.output_dir.empty()
-                              ? defaultOutputDir(session_id)
+                              ? defaultOutputDir(dir_tag)
                               : fs::path(args.output_dir);
 
     std::error_code ec;
@@ -150,8 +182,11 @@ int runTrace(const TraceArgs& args) {
                                ? baseName(args.command.front())
                                : args.name;
 
-    // LD_PRELOAD respects ":"-separated existing values; preserve any
-    // the user already set so we don't break their setup.
+    // ── Env shared by every pass: set once, inherited by each child. The log
+    //    dir is shared too — each pass's process writes under its OWN
+    //    session-id subdir (Logger's <dir>/<session_id>/ layout), so the
+    //    uploader discovers N sessions and the backend groups them by
+    //    analysis_id. LD_PRELOAD keeps any value the user already set. ──
     std::string ld_preload = inject_lib.string();
     if (const char* prev = std::getenv("LD_PRELOAD"); prev && *prev) {
         ld_preload = std::string(prev) + ":" + ld_preload;
@@ -164,14 +199,10 @@ int runTrace(const TraceArgs& args) {
     setEnvOrDie(inject::kEnvAppName, app_name);
     setEnvOrDie(inject::kEnvLogDir, output_dir.string());
     setEnvOrDie(inject::kEnvProfile, args.profile);
-    if (!args.engine.empty()) {
-        setEnvOrDie(inject::kEnvProfilingEngine, args.engine);
-    }
 
-    // --upload: fail fast here (before we exec the target) if the creds
-    // the inject lib's post-run uploadLogs() will need aren't in the
-    // environment. Better a clear usage error now than a buried warning
-    // after a long run finishes.
+    // --upload: fail fast here (before we exec) if the creds the inject lib's
+    // post-run uploadLogs() will need aren't in the environment. Each pass
+    // uploads its own session; the backend groups them by analysis_id.
     if (args.upload) {
         const char* api_key     = std::getenv("GPUFL_API_KEY");
         const char* backend_url = std::getenv("GPUFL_BACKEND_URL");
@@ -184,9 +215,20 @@ int runTrace(const TraceArgs& args) {
         setEnvOrDie(inject::kEnvUpload, "1");
     }
 
+    if (multipass) {
+        setEnvOrDie(inject::kEnvAnalysisId, analysis_id);
+        setEnvOrDie(inject::kEnvPassCount, std::to_string(plan.size()));
+    }
+
     if (!args.quiet) {
         std::fprintf(stderr, "[gpufl] capturing → %s\n",
                      output_dir.string().c_str());
+        if (multipass) {
+            std::fprintf(stderr, "[gpufl] multi-pass analysis %s — %zu passes:",
+                         analysis_id.c_str(), plan.size());
+            for (const auto& e : plan) std::fprintf(stderr, " %s", e.c_str());
+            std::fputc('\n', stderr);
+        }
         if (args.verbose) {
             std::fprintf(stderr, "[gpufl] inject lib: %s\n",
                          inject_lib.string().c_str());
@@ -195,54 +237,95 @@ int runTrace(const TraceArgs& args) {
         }
     }
 
-    const auto t_start = std::chrono::steady_clock::now();
+    // ── Run the workload once per pass. A failing pass does NOT abort the
+    //    rest (a partial analysis still captures the passes that worked); the
+    //    first non-zero pass becomes the launcher's exit code. ──
+    int overall_rc = 0;
+    for (size_t i = 0; i < plan.size(); ++i) {
+        const std::string& engine = plan[i];
 
-    pid_t pid = ::fork();
-    if (pid < 0) {
-        std::fprintf(stderr, "gpufl: fork failed: %s\n", std::strerror(errno));
-        return 2;
-    }
-    if (pid == 0) {
-        // Child: execvp the target. The env we just set is inherited.
-        std::vector<char*> argv;
-        argv.reserve(args.command.size() + 1);
-        for (auto& s : args.command) argv.push_back(const_cast<char*>(s.c_str()));
-        argv.push_back(nullptr);
-        ::execvp(args.command.front().c_str(), argv.data());
-        // execvp only returns on failure.
-        std::fprintf(stderr, "gpufl: cannot exec %s: %s\n",
-                     args.command.front().c_str(), std::strerror(errno));
-        std::_Exit(127);
-    }
+        // Per-pass engine. An empty engine (legacy single pass with no
+        // --engine) leaves GPUFL_PROFILING_ENGINE as the user/profile set it.
+        if (!engine.empty()) {
+            setEnvOrDie(inject::kEnvProfilingEngine, engine);
+        }
+        if (multipass) {
+            setEnvOrDie(inject::kEnvPassIndex, std::to_string(i));
+        }
 
-    int status = 0;
-    while (::waitpid(pid, &status, 0) < 0) {
-        if (errno == EINTR) continue;
-        std::fprintf(stderr, "gpufl: waitpid failed: %s\n", std::strerror(errno));
-        return 2;
-    }
+        const std::string what =
+            multipass ? ("pass " + std::to_string(i + 1) + "/" +
+                         std::to_string(plan.size()) + " (" + engine + ")")
+                      : std::string("target");
 
-    const auto t_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                         std::chrono::steady_clock::now() - t_start)
-                         .count();
+        if (!args.quiet && multipass) {
+            std::fprintf(stderr, "\n[gpufl] ── %s ──\n", what.c_str());
+            if (engine == "PcSampling") {
+                std::fprintf(stderr,
+                    "[gpufl] note: PcSampling needs admin / NVIDIA CP \"allow GPU "
+                    "performance counters to all users\"; this pass reports \"needs "
+                    "admin\" and yields no PC data if unprivileged.\n");
+            }
+        }
+
+        const auto t_start = std::chrono::steady_clock::now();
+
+        pid_t pid = ::fork();
+        if (pid < 0) {
+            std::fprintf(stderr, "gpufl: fork failed: %s\n", std::strerror(errno));
+            return 2;
+        }
+        if (pid == 0) {
+            // Child: execvp the target. The env we just set is inherited.
+            std::vector<char*> argv;
+            argv.reserve(args.command.size() + 1);
+            for (auto& s : args.command) argv.push_back(const_cast<char*>(s.c_str()));
+            argv.push_back(nullptr);
+            ::execvp(args.command.front().c_str(), argv.data());
+            // execvp only returns on failure.
+            std::fprintf(stderr, "gpufl: cannot exec %s: %s\n",
+                         args.command.front().c_str(), std::strerror(errno));
+            std::_Exit(127);
+        }
+
+        int status = 0;
+        while (::waitpid(pid, &status, 0) < 0) {
+            if (errno == EINTR) continue;
+            std::fprintf(stderr, "gpufl: waitpid failed: %s\n", std::strerror(errno));
+            return 2;
+        }
+
+        const auto t_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - t_start)
+                             .count();
+
+        int rc;
+        if (WIFEXITED(status)) {
+            rc = WEXITSTATUS(status);
+            if (!args.quiet) {
+                std::fprintf(stderr, "[gpufl] %s exited (rc=%d) in %.2fs\n",
+                             what.c_str(), rc, t_elapsed / 1000.0);
+            }
+        } else if (WIFSIGNALED(status)) {
+            rc = 128 + WTERMSIG(status);
+            if (!args.quiet) {
+                std::fprintf(stderr, "[gpufl] %s killed by signal %d in %.2fs\n",
+                             what.c_str(), WTERMSIG(status), t_elapsed / 1000.0);
+            }
+        } else {
+            rc = 1;
+        }
+
+        // First failing pass sets the exit code; keep going so later passes
+        // still run and the analysis is as complete as possible.
+        if (rc != 0 && overall_rc == 0) overall_rc = rc;
+    }
 
     if (!args.quiet) {
-        if (WIFEXITED(status)) {
-            std::fprintf(stderr,
-                         "[gpufl] target exited (rc=%d) in %.2fs\n",
-                         WEXITSTATUS(status), t_elapsed / 1000.0);
-        } else if (WIFSIGNALED(status)) {
-            std::fprintf(stderr,
-                         "[gpufl] target killed by signal %d in %.2fs\n",
-                         WTERMSIG(status), t_elapsed / 1000.0);
-        }
-        std::fprintf(stderr,
-                     "[gpufl] inspect: %s\n", output_dir.string().c_str());
+        std::fprintf(stderr, "[gpufl] inspect: %s\n", output_dir.string().c_str());
     }
 
-    if (WIFEXITED(status)) return WEXITSTATUS(status);
-    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
-    return 1;
+    return overall_rc;
 }
 
 }  // namespace gpufl::launcher

@@ -20,6 +20,28 @@ FlagBreak splitFlag(const std::string& tok) {
     return {tok.substr(0, eq), tok.substr(eq + 1)};
 }
 
+// Canonical engine names accepted by --engine and by each --passes token.
+// Must match the set gpufl::init() parses for GPUFL_PROFILING_ENGINE (see
+// gpufl.cpp). The launcher only validates + forwards verbatim; init() is the
+// single string→enum parser, so this is the one launcher-side copy to keep in
+// sync with the ProfilingEngine ladder.
+constexpr const char* kEngines[] = {
+    "Monitor", "Trace", "PcSampling", "SassMetrics",
+    "PmSampling", "RangeProfiler", "Deep"};
+bool isValidEngine(const std::string& e) {
+    for (auto* k : kEngines) if (e == k) return true;
+    return false;
+}
+
+// Trim ASCII spaces/tabs from both ends — lets `--passes Trace, SassMetrics`
+// (with spaces after commas) parse the same as the no-space form.
+std::string trim(const std::string& s) {
+    const auto b = s.find_first_not_of(" \t");
+    if (b == std::string::npos) return "";
+    const auto e = s.find_last_not_of(" \t");
+    return s.substr(b, e - b + 1);
+}
+
 }  // namespace
 
 const char* topLevelHelp() {
@@ -52,6 +74,15 @@ const char* traceHelp() {
         "        --engine <ENG>      Override profiling engine. One of:\n"
         "                            Monitor | Trace | PcSampling | SassMetrics |\n"
         "                            PmSampling | RangeProfiler | Deep\n"
+        "                            (Deep = the default multi-pass plan: Trace,\n"
+        "                            PcSampling, SassMetrics run as isolated passes\n"
+        "                            and merged by the backend.)\n"
+        "        --passes <LIST>     Multi-pass run: comma-separated engines, one\n"
+        "                            isolated pass each, merged by the backend.\n"
+        "                            e.g. Trace,PcSampling,SassMetrics. Mutually\n"
+        "                            exclusive with --engine. (PcSampling needs\n"
+        "                            admin / GPU perf-counter access; that pass is\n"
+        "                            reported + skipped if unprivileged.)\n"
         "    -q, --quiet             Suppress launcher chatter (errors still printed)\n"
         "    -v, --verbose           Verbose launcher logging\n"
         "        --upload            After the run, upload the trace to the\n"
@@ -62,7 +93,9 @@ const char* traceHelp() {
         "EXAMPLES:\n"
         "    gpufl trace -- python train.py\n"
         "    gpufl trace --name=quantize -- ./inference_server\n"
-        "    gpufl trace --profile=light -- python long_train.py\n";
+        "    gpufl trace --profile=light -- python long_train.py\n"
+        "    gpufl trace --engine Deep -- python train.py        # multi-pass\n"
+        "    gpufl trace --passes Trace,SassMetrics -- ./app     # custom plan\n";
 }
 
 ParsedTopLevel parseTopLevel(int argc, char** argv) {
@@ -137,21 +170,40 @@ TraceParseResult parseTraceArgs(const std::vector<std::string>& argv) {
         } else if (key == "--engine") {
             auto err = take_value(out.engine);
             if (!err.empty()) return {std::nullopt, err};
-            // Must match the canonical engine names gpufl::init() accepts
-            // for GPUFL_PROFILING_ENGINE (see gpufl.cpp). The launcher only
-            // validates here and forwards the string verbatim; init() is the
-            // single string->enum parser, so this list is the one place to
-            // keep in sync with the ProfilingEngine ladder.
-            static const char* kEngines[] = {
-                "Monitor", "Trace", "PcSampling", "SassMetrics",
-                "PmSampling", "RangeProfiler", "Deep"};
-            bool ok = false;
-            for (auto* e : kEngines) if (out.engine == e) { ok = true; break; }
-            if (!ok) {
+            if (!isValidEngine(out.engine)) {
                 return {std::nullopt,
                         "invalid --engine value: " + out.engine +
                         " (expected: Monitor | Trace | PcSampling | SassMetrics | "
                         "PmSampling | RangeProfiler | Deep)"};
+            }
+        } else if (key == "--passes") {
+            std::string v;
+            auto err = take_value(v);
+            if (!err.empty()) return {std::nullopt, err};
+            // Comma-separated engine list → one isolated pass each. Every token
+            // must be a canonical engine name (same set as --engine).
+            out.passes.clear();
+            size_t start = 0;
+            while (true) {
+                const size_t comma = v.find(',', start);
+                const std::string item = trim(v.substr(
+                    start,
+                    comma == std::string::npos ? std::string::npos : comma - start));
+                if (!item.empty()) {
+                    if (!isValidEngine(item)) {
+                        return {std::nullopt,
+                                "invalid --passes engine: " + item +
+                                " (expected a comma-separated list of: Monitor | "
+                                "Trace | PcSampling | SassMetrics | PmSampling | "
+                                "RangeProfiler | Deep)"};
+                    }
+                    out.passes.push_back(item);
+                }
+                if (comma == std::string::npos) break;
+                start = comma + 1;
+            }
+            if (out.passes.empty()) {
+                return {std::nullopt, "--passes requires at least one engine"};
             }
         } else {
             // A non-flag token before `--` is almost certainly the
@@ -162,6 +214,12 @@ TraceParseResult parseTraceArgs(const std::vector<std::string>& argv) {
             }
             return {std::nullopt, "unknown flag: " + key};
         }
+    }
+    if (!out.passes.empty() && !out.engine.empty()) {
+        return {std::nullopt,
+                "--engine and --passes are mutually exclusive (use --passes to "
+                "list engines for a multi-pass run, or --engine for one engine "
+                "— --engine Deep expands to the default multi-pass plan)"};
     }
     if (!seen_dash_dash) {
         return {std::nullopt, "missing `--` separator before command"};
@@ -282,6 +340,23 @@ UploadParseResult parseUploadArgs(const std::vector<std::string>& argv) {
         return {std::nullopt, "--session-id and --all-sessions are mutually exclusive"};
     }
     return {out, ""};
+}
+
+std::vector<std::string> resolvePassPlan(const TraceArgs& args) {
+    // 1. Explicit plan wins.
+    if (!args.passes.empty()) return args.passes;
+    // 2. Deep at the launcher = the multi-pass orchestrator: each engine runs
+    //    in its OWN process/pass (isolated), which dodges the SASS +
+    //    kernel-activity deadlock by construction; the backend stitches the
+    //    passes back into one kernel view. (The library / Python Deep engine
+    //    is unchanged — still the single-process PcSamplingWithSass composite;
+    //    only the launcher expands Deep here.)
+    if (args.engine == "Deep") {
+        return {"Trace", "PcSampling", "SassMetrics"};
+    }
+    // 3. Single pass — the explicit engine, or "" = the profile's default
+    //    engine. This is the legacy single-pass path, unchanged.
+    return {args.engine};
 }
 
 }  // namespace gpufl::launcher
