@@ -61,6 +61,24 @@ static const std::string& DemangleKernelNameCached(const char* raw) {
         g_kernelNameDemangleCache.emplace(raw, gpufl::core::DemangleName(raw));
     return ins->second;
 }
+
+// Collector-thread cache for demangling the "name@source" function keys that
+// PC sampling interns. The PC_SAMPLE branch in collectorProcessNext runs only
+// on the collector thread (and on the main thread after the collector joins at
+// shutdown) — the same single-consumer contract as g_kernelNameDemangleCache,
+// so no lock. CUPTI hands PC/SASS function names MANGLED; demangling here gives
+// every engine ONE canonical kernel identity (matching Trace's already-
+// demangled kernel_dict) that the backend multi-pass merge can join on. NOTE:
+// SASS interns on the USER thread (PushProfileSamples) and uses its OWN burst-
+// local cache so this map stays single-threaded — do not share it from there.
+static std::unordered_map<std::string, std::string> g_functionKeyDemangleCache;
+static const std::string& DemangleFunctionKeyCached(const std::string& key) {
+    auto it = g_functionKeyDemangleCache.find(key);
+    if (it != g_functionKeyDemangleCache.end()) return it->second;
+    auto [ins, _] = g_functionKeyDemangleCache.emplace(
+        key, gpufl::core::DemangleFunctionKey(key));
+    return ins->second;
+}
 // Deferred kernel detail rows — written after the kernel batch so the
 // backend's UPDATE (match by corr_id) always finds the INSERT first.
 static std::vector<KernelDetailRow> g_pendingDetails;
@@ -516,10 +534,12 @@ static bool collectorProcessNext() {
                 kind = 1;  // "sass_metric"
             }
 
+            // Demangle the name part so PC sampling's function identity matches
+            // Trace's already-demangled kernel_dict for the cross-pass merge.
             const std::string func_key =
                 std::string(rec.function_name) + "@" + rec.source_file;
             const uint32_t function_id =
-                g_dictManager.internFunction(func_key);
+                g_dictManager.internFunction(DemangleFunctionKeyCached(func_key));
             // For PC sampling rows metric_name is empty; use reason_name so the
             // stall reason string is interned into metric_dict and reachable via
             // metric_id on the backend.  For SASS rows metric_name is always set.
@@ -884,12 +904,27 @@ void Monitor::PushProfileSamples(
     // takes g_scopeBatchMu (via lock_guard, not recursive), so re-entry
     // would deadlock.  CollectorLoop's 250 ms periodic drain handles flush.
     std::lock_guard lk(g_scopeBatchMu);
+    // Burst-local demangle cache (this runs on the USER thread). CUPTI hands
+    // SASS function names MANGLED; demangling makes SASS's function identity
+    // match Trace's already-demangled kernel_dict for the cross-pass merge.
+    // Local (not the collector-thread g_functionKeyDemangleCache) so the maps
+    // stay single-threaded and race-free; a burst shares few unique keys across
+    // its per-(pc_offset,metric) rows, so one map per drain dedups cheaply.
+    std::unordered_map<std::string, std::string> demangle_cache;
+    auto demangledKey =
+        [&demangle_cache](const std::string& key) -> const std::string& {
+        auto it = demangle_cache.find(key);
+        if (it != demangle_cache.end()) return it->second;
+        return demangle_cache
+            .emplace(key, gpufl::core::DemangleFunctionKey(key))
+            .first->second;
+    };
     for (const auto& s : samples) {
         ProfileSampleBatchRow row;
         row.ts_ns          = s.ts_ns;
         row.corr_id        = s.corr_id;
         row.device_id      = s.device_id;
-        row.function_id    = g_dictManager.internFunction(s.function_key);
+        row.function_id    = g_dictManager.internFunction(demangledKey(s.function_key));
         row.pc_offset      = s.pc_offset;
         row.metric_id      = g_dictManager.internMetric(s.metric_name);
         row.metric_value   = s.metric_value;

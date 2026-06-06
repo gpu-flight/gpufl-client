@@ -48,4 +48,20 @@ std::string GetCallStack(int skipFrames = 1);
  * demangling fails or the input is not a mangled symbol.
  */
 std::string DemangleName(const char* mangled);
+
+/**
+ * Demangle the kernel-name portion of a "name@source_file" function key.
+ *
+ * SASS and PC-sampling intern their per-symbol identity as
+ * `function_name + "@" + source_file`, where `function_name` arrives
+ * MANGLED from CUPTI (e.g. "_Z18distinct_kernel_26Pfi@/path/foo.cu").
+ * Trace's kernel_dict names are already demangled (DemangleName on the
+ * activity-record path), so without demangling here the very same kernel
+ * carries two different identity strings across passes and the backend
+ * multi-pass merge can never join them. Splits at the FIRST '@' (Itanium /
+ * MSVC mangled names contain none), demangles the left part via
+ * DemangleName, and re-appends the "@source_file" tail verbatim. A key with
+ * no '@' is demangled whole.
+ */
+std::string DemangleFunctionKey(const std::string& function_key);
 }  // namespace gpufl::core
