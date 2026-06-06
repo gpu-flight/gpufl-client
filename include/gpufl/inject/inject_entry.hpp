@@ -30,6 +30,19 @@ constexpr const char* kEnvProfile = "GPUFL_INJECT_PROFILE";
 // "RangeProfiler" | "Deep". Empty = use the profile's default engine.
 constexpr const char* kEnvProfilingEngine = "GPUFL_PROFILING_ENGINE";
 
+// Multi-pass profiling grouping (P1). The launcher's multi-pass driver runs
+// the SAME workload once per pass (one isolated CUPTI engine each) and tags
+// every child with these so the backend can stitch the passes into a single
+// "analysis". gpufl::init() reads them straight from the env (it is the single
+// parser, like kEnvProfilingEngine) into the job_start event. Unset on an
+// ordinary single-pass `gpufl trace` run.
+//   kEnvAnalysisId : stable id shared by all passes of one analysis.
+//   kEnvPassIndex  : this pass's 0-based position within the analysis.
+//   kEnvPassCount  : total passes planned (backend detects a missing pass).
+constexpr const char* kEnvAnalysisId = "GPUFL_ANALYSIS_ID";
+constexpr const char* kEnvPassIndex  = "GPUFL_PASS_INDEX";
+constexpr const char* kEnvPassCount  = "GPUFL_PASS_COUNT";
+
 // Opt-in: when "1", the inject lib runs gpufl::uploadLogs() right after
 // gpufl::shutdown() returns (and before signalling completion), shipping
 // the session's NDJSON to the backend. Creds come from the standard

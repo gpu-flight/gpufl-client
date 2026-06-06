@@ -118,6 +118,54 @@ TEST(WireContract, JobStartEmitsNvidiaNoneSentinel) {
         << "explicit-None sessions must emit profiling_engine: nvidia.none: " << json;
 }
 
+// ── job_start multi-pass grouping (P1) ─────────────────────────────────────
+//
+// analysis_id / pass_index / pass_count are emitted together, and ONLY when
+// analysis_id is set (a multi-pass run). They are additive optional fields on
+// the non-columnar job_start record, so they do NOT bump kWireVersion — the
+// backend ignores unknown fields until the P2 merge consumes them.
+TEST(WireContract, JobStartEmitsMultiPassGroupingWhenSet) {
+    gpufl::InitEvent e;
+    e.pid = 7;
+    e.app = "mp_app";
+    e.session_id = "sess-mp";
+    e.ts_ns = 1;
+    e.session_kind = "trace";
+    e.profiling_engine = "nvidia.sass_metrics";
+    e.analysis_id = "ana-123";
+    e.pass_index = 2;
+    e.pass_count = 3;
+
+    const std::string json = gpufl::model::InitEventModel(e).buildJson();
+
+    EXPECT_TRUE(JsonContains(json, "\"analysis_id\":\"ana-123\""));
+    EXPECT_TRUE(JsonContains(json, "\"pass_index\":2"));
+    EXPECT_TRUE(JsonContains(json, "\"pass_count\":3"));
+}
+
+// A single-pass run leaves analysis_id empty; all three fields must be omitted
+// so the job_start wire is byte-identical to pre-P1 (and pass_index==0 is never
+// confused with "unset").
+TEST(WireContract, JobStartOmitsMultiPassGroupingWhenUnset) {
+    gpufl::InitEvent e;
+    e.pid = 7;
+    e.app = "sp_app";
+    e.session_id = "sess-sp";
+    e.ts_ns = 1;
+    e.session_kind = "trace";
+    e.profiling_engine = "nvidia.trace";
+    // analysis_id intentionally left empty → ordinary single-pass run.
+
+    const std::string json = gpufl::model::InitEventModel(e).buildJson();
+
+    EXPECT_EQ(json.find("\"analysis_id\""), std::string::npos)
+        << "analysis_id must be omitted for single-pass runs: " << json;
+    EXPECT_EQ(json.find("\"pass_index\""), std::string::npos)
+        << "pass_index must be omitted when analysis_id is unset: " << json;
+    EXPECT_EQ(json.find("\"pass_count\""), std::string::npos)
+        << "pass_count must be omitted when analysis_id is unset: " << json;
+}
+
 // ── shutdown ──────────────────────────────────────────────────────────────
 TEST(WireContract, ShutdownShape) {
     gpufl::ShutdownEvent e;

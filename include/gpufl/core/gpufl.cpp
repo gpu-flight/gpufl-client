@@ -504,6 +504,24 @@ bool init(const InitOptions& opts) {
     ie.session_kind = ProfilingEngineSessionKind(mOpts.profiling_engine);
     ie.profiling_engine = ProfilingEngineWireName(mOpts.profiling_engine);
 
+    // Multi-pass grouping (P1): the launcher's multi-pass driver tags each
+    // child with GPUFL_ANALYSIS_ID + its 0-based GPUFL_PASS_INDEX and the
+    // GPUFL_PASS_COUNT total so the backend can stitch the isolated passes
+    // into one analysis. Read straight from the env here (same pattern as the
+    // GPUFL_PROFILING_ENGINE override above). Absent → an ordinary single-pass
+    // run: analysis_id stays empty and the three fields are omitted from
+    // job_start (see InitEventModel), keeping single runs wire-identical.
+    if (const char* envAnalysis = std::getenv("GPUFL_ANALYSIS_ID");
+        envAnalysis && *envAnalysis) {
+        ie.analysis_id = envAnalysis;
+        if (const char* envIdx = std::getenv("GPUFL_PASS_INDEX"))
+            ie.pass_index = std::atoi(envIdx);
+        if (const char* envCnt = std::getenv("GPUFL_PASS_COUNT"))
+            ie.pass_count = std::atoi(envCnt);
+        GFL_LOG_DEBUG("Multi-pass: analysis_id=", ie.analysis_id,
+                      " pass ", ie.pass_index, "/", ie.pass_count);
+    }
+
     rt_ptr->logger->write(model::InitEventModel(ie));
 
     // Configure the sampler with collectors / interval. This does NOT

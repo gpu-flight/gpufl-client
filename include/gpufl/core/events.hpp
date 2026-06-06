@@ -95,6 +95,24 @@ struct InitEvent {
     // lives next to the InitEvent build site (gpufl.cpp).
     std::string session_kind;
     std::string profiling_engine;
+    // Multi-pass profiling grouping (P1 of the multi-pass workstream).
+    // A single "analysis" = N separately-launched passes (one CUPTI engine
+    // each, isolated to dodge the SASS/kernel-activity deadlock + cross-
+    // perturbation) that the backend stitches back into one kernel view.
+    // The launcher's multi-pass driver sets GPUFL_ANALYSIS_ID/PASS_INDEX/
+    // PASS_COUNT in each child; gpufl::init() reads them into these fields.
+    //   analysis_id : stable id shared by every pass of one analysis
+    //                 (empty for an ordinary single-pass run — then
+    //                 pass_index/pass_count are NOT emitted).
+    //   pass_index  : 0-based position of this pass within the analysis.
+    //   pass_count  : total passes planned for the analysis (lets the
+    //                 backend detect a missing/failed pass).
+    // All three are emitted to job_start only when analysis_id is non-empty,
+    // so single runs are byte-identical to pre-P1 (and pass_index==0 is
+    // never ambiguous with "unset").
+    std::string analysis_id;
+    int pass_index = 0;
+    int pass_count = 0;
 };
 
 struct ShutdownEvent {

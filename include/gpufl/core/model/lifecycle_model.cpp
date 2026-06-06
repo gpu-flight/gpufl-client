@@ -38,6 +38,15 @@ std::string InitEventModel::buildJson() const {
         oss << ",\"profiling_engine\":\"" << jsonEscape(e_.profiling_engine) << "\"";
     }
 
+    // Multi-pass grouping — emitted together, only for multi-pass runs.
+    // A single-pass run leaves analysis_id empty and the job_start wire is
+    // byte-identical to pre-P1 (so pass_index==0 is never confused with unset).
+    if (!e_.analysis_id.empty()) {
+        oss << ",\"analysis_id\":\"" << jsonEscape(e_.analysis_id) << "\""
+            << ",\"pass_index\":" << e_.pass_index
+            << ",\"pass_count\":" << e_.pass_count;
+    }
+
     oss << "}";
     return oss.str();
 }
