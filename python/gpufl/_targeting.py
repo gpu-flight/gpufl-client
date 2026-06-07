@@ -1,4 +1,4 @@
-"""Targeted multi-pass profiling for long embedded jobs (P3).
+"""Targeted multi-pass profiling for long embedded jobs.
 
 A multi-day training job can't be re-run end-to-end per engine, and CUPTI
 runs only ONE profiling engine per process (re-init is unsupported). So a

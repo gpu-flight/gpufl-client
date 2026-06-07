@@ -548,7 +548,7 @@ def init(*args, backend_url=None, api_key=None, remote_upload=None,
             stacklevel=2)
         kwargs['continuous_system_sampling'] = kwargs.pop('sampling_auto_start')
 
-    # ── Multi-pass analysis grouping (embedded / P3 targeting) ──────────
+    # ── Multi-pass analysis grouping ──────────
     # Let an embedded job self-tag as one pass of an analysis group without
     # going through the launcher's --passes driver. gpufl::init() reads
     # GPUFL_ANALYSIS_ID / _PASS_INDEX / _PASS_COUNT straight from the
@@ -1110,7 +1110,7 @@ def clean_logs(log_path=None, log_prefix=None, *, dry_run=False):
     return removed
 
 
-# ── Targeting: bounded multi-pass profiling for embedded jobs (P3) ───────────
+# ── Targeting: bounded multi-pass profiling for embedded jobs ───────────
 # Defined in a submodule (keeps __init__ lean); imported here, after Scope /
 # session exist, so `gpufl.targeting(...)` resolves. The submodule lazy-imports
 # Scope/session at call time, so this import is cycle-free.
