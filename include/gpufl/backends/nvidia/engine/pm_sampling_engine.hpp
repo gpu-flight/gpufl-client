@@ -48,6 +48,11 @@ class PmSamplingEngine final : public IProfilingEngine {
 #if GPUFL_HAS_PERFWORKS
     bool InitializePmSampling_();
     bool BuildConfigImage_();
+    // Log the chip's single-pass metric sets (the metric bundles collectible
+    // in one pass) and their metrics. The set names are chip-specific, so
+    // they're queried at runtime. Read-only (chip query, no host object / no
+    // config change); CUPTI 13.2+.
+    void LogSinglePassSets_();
     bool CreateCounterDataImage_();
     void DecodeAndEmit_();
     void DisablePmSampling_();
