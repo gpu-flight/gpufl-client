@@ -55,6 +55,18 @@ class CuptiBackend : public IMonitorBackend {
     bool AllowSassKernelActivity() const {
         return resolved_plan_.allow_sass_kernel_activity;
     }
+    // True when an engine combo (GPUFL_ENGINE_COMBO) is active — the backend
+    // runs a CompositeEngine over an arbitrary engine list instead of a single
+    // engine. Used to measure the compatibility matrix and back the redefined
+    // Deep (the maximal validated-compatible set).
+    bool comboActive() const { return !combo_.empty(); }
+    // Single source of truth for "collect CUPTI kernel ACTIVITY records"
+    // (KERNEL + CONCURRENT_KERNEL). For a combo: true iff it includes a
+    // kernel-collecting engine (Trace / PmSampling / RangeProfiler). For a
+    // single engine: preserves prior behavior (Trace/PM/Range on; PcSampling
+    // off; SASS off unless AllowSassKernelActivity). Drives both the handler's
+    // requiredActivityKinds() and the capability report.
+    bool collectsKernelEvents() const;
     // True when CUPTI kernel ACTIVITY records won't be collected, so every
     // launch must be reported from its callback as a synthetic kernel (PC
     // Sampling, or SASS profiler safe mode without GPUFL_SASS_ALLOW_KERNEL_
@@ -187,6 +199,11 @@ class CuptiBackend : public IMonitorBackend {
     ProfilingRequest profiling_request_;
     DeviceFacts device_facts_;
     ResolvedProfilingPlan resolved_plan_;
+
+    // Non-empty when GPUFL_ENGINE_COMBO selected a CompositeEngine: the ordered
+    // list of sub-engines (teardown-safe order — PcSampling last). Empty =
+    // single-engine mode via opts_.profiling_engine.
+    std::vector<ProfilingEngine> combo_;
 
     // NOTE (Steps 4b-2 + 4c): the launch-meta AND sync-meta join maps + their
     // mutexes are GONE. All corr-keyed joins (kernel, memcpy/memset, and sync)

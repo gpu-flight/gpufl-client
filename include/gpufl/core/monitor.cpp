@@ -393,8 +393,25 @@ static void emitKernelRecord(const ActivityRecord& rec,
 // nvidia-only SM properties this core TU must not reach for); we just carry it.
 // Idempotent: clears the map, so the second call from Monitor::Shutdown's
 // post-join drain is a no-op.
+// Set by the active backend at start() — see SetSuppressOrphanSyntheticKernels
+// in monitor.hpp. Engines where kernel-activity is intentionally off (SASS safe
+// mode) set this so we don't emit misleading synthetic kernel rows.
+static bool g_suppressOrphanSyntheticKernels = false;
+void SetSuppressOrphanSyntheticKernels(bool suppress) {
+    g_suppressOrphanSyntheticKernels = suppress;
+}
+
 static void drainSyntheticKernels(Runtime* rt) {
     if (g_launchMetaByCorr.empty()) return;
+    if (g_suppressOrphanSyntheticKernels) {
+        // SASS safe mode: kernel-activity is OFF (it deadlocks), so EVERY launch is
+        // orphaned here. A synthetic row's only "duration" would be the host-dispatch
+        // interval between consecutive launches — meaningless as GPU time — so drop
+        // them rather than emit misleading kernel rows. The Execution Signature was
+        // already accumulated from these metas during processing, so merge is unaffected.
+        g_launchMetaByCorr.clear();
+        return;
+    }
     if (!(rt && rt->logger)) return;
     const int64_t flushNs = detail::GetTimestampNs();
 

@@ -71,6 +71,10 @@ constexpr const char* kInjectInitDelayMs     = "GPUFL_INJECT_INIT_DELAY_MS";
 // parser. Canonical values: Monitor | Trace | PcSampling | SassMetrics |
 // PmSampling | RangeProfiler | Deep.
 constexpr const char* kProfilingEngine    = "GPUFL_PROFILING_ENGINE";
+// Compatibility-matrix testing / generalized composite: run an arbitrary set of
+// engines in ONE process — comma-separated canonical names — overriding the
+// single-engine selection. e.g. GPUFL_ENGINE_COMBO=Trace,PcSampling
+constexpr const char* kEngineCombo        = "GPUFL_ENGINE_COMBO";
 // Opt-in (1/true/yes/on): force CUDA_MODULE_LOADING=EAGER for SASS / Deep.
 constexpr const char* kEagerModuleLoading = "GPUFL_EAGER_MODULE_LOADING";
 

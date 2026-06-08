@@ -24,6 +24,7 @@
 #include "gpufl/backends/nvidia/cuda_collector.hpp"
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
 #include "gpufl/core/teardown_flag.hpp"
+#include "gpufl/backends/nvidia/engine/composite_engine.hpp"
 #include "gpufl/backends/nvidia/engine/pc_sampling_engine.hpp"
 #include "gpufl/backends/nvidia/engine/pc_sampling_with_sass_engine.hpp"
 #include "gpufl/backends/nvidia/engine/pm_sampling_engine.hpp"
@@ -36,6 +37,7 @@
 #include "gpufl/core/activity_record.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
+#include "gpufl/core/env_vars.hpp"
 #include "gpufl/core/logger/logger.hpp"
 #include "gpufl/core/model/lifecycle_model.hpp"
 #include "gpufl/core/runtime.hpp"
@@ -322,6 +324,41 @@ void CuptiBackend::LogNvtxMarkerActivityDisabled_(const char* phase) {
         "GPUFL_SASS_ALLOW_MARKER_ACTIVITY=1 to test SASS + NVTX markers.");
 }
 
+namespace {
+// Parse GPUFL_ENGINE_COMBO (comma-separated canonical engine names) into an
+// engine list. Unknown tokens are logged and skipped; empty/unset => {}.
+std::vector<ProfilingEngine> ParseEngineComboEnv() {
+    std::vector<ProfilingEngine> out;
+    const char* raw = std::getenv(gpufl::env::kEngineCombo);
+    if (!raw || raw[0] == '\0') return out;
+    std::string s(raw);
+    size_t pos = 0;
+    while (pos <= s.size()) {
+        const size_t comma = s.find(',', pos);
+        const size_t end = (comma == std::string::npos) ? s.size() : comma;
+        std::string tok = s.substr(pos, end - pos);
+        const auto b = tok.find_first_not_of(" \t\r\n");
+        const auto e = tok.find_last_not_of(" \t\r\n");
+        if (b != std::string::npos) {
+            tok = tok.substr(b, e - b + 1);
+            if (tok == "Monitor")            out.push_back(ProfilingEngine::Monitor);
+            else if (tok == "Trace")         out.push_back(ProfilingEngine::Trace);
+            else if (tok == "PcSampling")    out.push_back(ProfilingEngine::PcSampling);
+            else if (tok == "SassMetrics")   out.push_back(ProfilingEngine::SassMetrics);
+            else if (tok == "PmSampling")    out.push_back(ProfilingEngine::PmSampling);
+            else if (tok == "RangeProfiler") out.push_back(ProfilingEngine::RangeProfiler);
+            else if (tok == "Deep")          out.push_back(ProfilingEngine::Deep);
+            else
+                GFL_LOG_ERROR("[CuptiBackend] GPUFL_ENGINE_COMBO: unknown engine '",
+                              tok, "' (ignored)");
+        }
+        if (comma == std::string::npos) break;
+        pos = comma + 1;
+    }
+    return out;
+}
+}  // namespace
+
 void CuptiBackend::initialize(const MonitorOptions& opts) {
     opts_ = opts;
     profiling_request_ = MakeProfilingRequest(opts_);
@@ -330,6 +367,60 @@ void CuptiBackend::initialize(const MonitorOptions& opts) {
 
     DebugLogger::setEnabled(opts_.enable_debug_output);
 
+    // GPUFL_ENGINE_COMBO=Trace,PcSampling,... runs an arbitrary engine set in
+    // one process (compatibility-matrix testing + the redefined Deep). When
+    // present it overrides the single-engine selection below. Trace/Monitor in
+    // the list select the activity-record layer (collectsKernelEvents()), not an
+    // engine object; the API engines are built in teardown-safe order
+    // (PcSampling LAST) so SASS/Range disable before the PC Sampling API.
+    combo_ = ParseEngineComboEnv();
+    if (!combo_.empty()) {
+        const auto has = [&](ProfilingEngine e) {
+            return std::find(combo_.begin(), combo_.end(), e) != combo_.end();
+        };
+        // PC / SASS read cubin binaries for source correlation; the single-engine
+        // plan only sets needs_cubin_capture for those engines, so force it on
+        // when the combo includes one (the plan was resolved from a single engine).
+        if (has(ProfilingEngine::PcSampling) || has(ProfilingEngine::SassMetrics)) {
+            resolved_plan_.needs_cubin_capture = true;
+        }
+        // A combo dictates its OWN activity set (collectsKernelEvents() + full
+        // trace activity). The single-engine SASS safe-mode gating
+        // (safe_sass_activity_defaults / sass_metrics_only) only makes sense for
+        // a lone SASS/Deep run; if the base engine happened to be SASS/Deep it
+        // would otherwise suppress Trace's mem/sync/marker/external activity in
+        // the combo. Clear it so a combo's activity is predictable regardless of
+        // the base engine.
+        resolved_plan_.sass_metrics_only = false;
+        resolved_plan_.safe_sass_activity_defaults = false;
+        resolved_plan_.allow_sass_kernel_activity = true;
+        resolved_plan_.allow_sass_marker_activity = true;
+        resolved_plan_.allow_sass_mem_transfer_activity = true;
+        resolved_plan_.allow_sass_memory2_activity = true;
+        resolved_plan_.allow_sass_sync_activity = true;
+        resolved_plan_.allow_sass_graph_activity = true;
+        resolved_plan_.allow_sass_external_correlation = true;
+        std::vector<std::unique_ptr<IProfilingEngine>> subs;
+#if GPUFL_HAS_PERFWORKS
+        if (has(ProfilingEngine::PmSampling))
+            subs.push_back(std::make_unique<PmSamplingEngine>());
+#endif
+        if (has(ProfilingEngine::SassMetrics))
+            subs.push_back(std::make_unique<SassMetricsEngine>());
+#if GPUFL_HAS_PERFWORKS
+        if (has(ProfilingEngine::RangeProfiler))
+            subs.push_back(std::make_unique<RangeProfilerEngine>());
+#endif
+        if (has(ProfilingEngine::PcSampling))
+            subs.push_back(std::make_unique<PcSamplingEngine>());
+
+        if (!subs.empty()) {
+            engine_ = std::make_unique<CompositeEngine>(std::move(subs));
+        }
+        GFL_LOG_DEBUG("[CuptiBackend] Engine: Composite combo (", combo_.size(),
+                      " entries; ", (engine_ ? "API engines armed" : "activity-only"),
+                      ")");
+    } else
     // Create the engine (no CUDA context needed yet)
     switch (opts_.profiling_engine) {
         case ProfilingEngine::PcSampling:
@@ -484,6 +575,19 @@ CUptiResult (*CuptiBackend::get_value())(CUpti_ActivityKind) {
 
 void CuptiBackend::start() {
     if (!initialized_) return;
+    // SASS / PC sampling don't get trustworthy kernel timing: SASS safe mode keeps
+    // kernel-activity OFF (it deadlocks), so its launches would be flushed as
+    // synthetic kernels whose "duration" is just the host-dispatch interval —
+    // meaningless. Suppress that synthetic fallback so these sessions show no
+    // misleading kernel rows. PC additionally enables CONCURRENT_KERNEL in its engine
+    // (pc_sampling_engine.cpp), so if REAL kernel records flow on this GPU they are
+    // joined + emitted normally — suppress only drops the un-joined orphans, never
+    // real rows. So PC shows real kernels when coexistence works, nothing when it
+    // doesn't — never fake. KERNEL_LAUNCH_META still flows for the per-scope
+    // Execution Signature, so a multi-pass merge is unaffected.
+    SetSuppressOrphanSyntheticKernels(
+        opts_.profiling_engine == ProfilingEngine::SassMetrics ||
+        opts_.profiling_engine == ProfilingEngine::PcSampling);
     kernel_activity_seen_.store(0, std::memory_order_relaxed);
     kernel_activity_emitted_.store(0, std::memory_order_relaxed);
     kernel_activity_throttled_.store(0, std::memory_order_relaxed);
@@ -815,6 +919,28 @@ void CuptiBackend::start() {
 }
 
 
+bool CuptiBackend::collectsKernelEvents() const {
+    if (!combo_.empty()) {
+        // Combo: collect kernel activity iff a kernel-collecting engine is in
+        // the set (Trace / PmSampling / RangeProfiler). PC sampling and SASS do
+        // not collect kernel activity on their own.
+        for (const ProfilingEngine e : combo_) {
+            if (e == ProfilingEngine::Trace ||
+                e == ProfilingEngine::PmSampling ||
+                e == ProfilingEngine::RangeProfiler) {
+                return true;
+            }
+        }
+        return false;
+    }
+    // Single engine — preserve prior behavior exactly:
+    //   PcSampling -> off; SASS / Deep -> off unless AllowSassKernelActivity;
+    //   Trace / PmSampling / RangeProfiler -> on.
+    if (opts_.profiling_engine == ProfilingEngine::PcSampling) return false;
+    if (IsSassProfilerMode()) return AllowSassKernelActivity();
+    return true;
+}
+
 void CuptiBackend::EmitCaptureCapabilities_() const {
     const Runtime* rt = runtime();
     if (!(rt && rt->logger)) return;
@@ -825,8 +951,7 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
     const bool sassMode = IsSassProfilerMode();
     const bool pcSamplingMode =
         opts_.profiling_engine == ProfilingEngine::PcSampling;
-    const bool kernelActivity =
-        pcSamplingMode ? false : (!sassMode || AllowSassKernelActivity());
+    const bool kernelActivity = collectsKernelEvents();
     const bool syntheticKernels = !kernelActivity && (sassMode || pcSamplingMode);
     const bool cubinCapture = NeedsCubinCapture();
 
@@ -837,7 +962,27 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
     // Capability emission happens after final engine shutdown so the report can
     // see late-flushed samples. Some engines drop their operational flag during
     // shutdown, so keep a path active if it was requested and produced data.
-    if (opts_.profiling_engine == ProfilingEngine::SassMetrics && engine_) {
+    if (comboActive()) {
+        if (const auto* comp =
+                dynamic_cast<const CompositeEngine*>(engine_.get())) {
+            for (const auto& sub : comp->engines()) {
+                if (!sub) continue;
+                const bool armed = sub->isOperational();
+                const bool produced = sub->producedData();
+                // The compatibility matrix, straight from the run: which
+                // sub-engines armed and which produced data for this combo.
+                GFL_LOG_ERROR("[Composite][matrix] ", sub->name(), " armed=",
+                              armed ? "yes" : "no", " produced=",
+                              produced ? "yes" : "no");
+                if (dynamic_cast<const SassMetricsEngine*>(sub.get()))
+                    sassActive = armed || produced;
+                else if (dynamic_cast<const PcSamplingEngine*>(sub.get()))
+                    pcActive = armed || produced;
+                else if (dynamic_cast<const PmSamplingEngine*>(sub.get()))
+                    pmActive = armed || produced;
+            }
+        }
+    } else if (opts_.profiling_engine == ProfilingEngine::SassMetrics && engine_) {
         sassActive = engine_->isOperational() || engine_->producedData();
     } else if (opts_.profiling_engine == ProfilingEngine::PcSampling && engine_) {
         pcActive = engine_->isOperational() || engine_->producedData();
@@ -873,7 +1018,20 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
     bool sassHasData = false;
     bool pcHasData = false;
     bool pmHasData = false;
-    if (engine_) {
+    if (comboActive()) {
+        if (const auto* comp =
+                dynamic_cast<const CompositeEngine*>(engine_.get())) {
+            for (const auto& sub : comp->engines()) {
+                if (!sub) continue;
+                if (dynamic_cast<const SassMetricsEngine*>(sub.get()))
+                    sassHasData = sub->producedData();
+                else if (dynamic_cast<const PcSamplingEngine*>(sub.get()))
+                    pcHasData = sub->producedData();
+                else if (dynamic_cast<const PmSamplingEngine*>(sub.get()))
+                    pmHasData = sub->producedData();
+            }
+        }
+    } else if (engine_) {
         if (const auto* deep =
                 dynamic_cast<const PcSamplingWithSassEngine*>(engine_.get())) {
             sassHasData = deep->sassProducedData();
@@ -889,7 +1047,9 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
     }
 
     std::string selected = ProfilingEngineWireName(opts_.profiling_engine);
-    if (opts_.profiling_engine == ProfilingEngine::Deep) {
+    if (comboActive()) {
+        selected = "nvidia.composite";
+    } else if (opts_.profiling_engine == ProfilingEngine::Deep) {
         if (sassActive) selected = "nvidia.sass_metrics";
         else if (pcActive) selected = "nvidia.pc_sampling";
         else selected = "nvidia.none";

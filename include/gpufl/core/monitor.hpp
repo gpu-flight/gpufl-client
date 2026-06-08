@@ -207,6 +207,15 @@ struct PmSampleInput {
     double value = 0.0;
 };
 
+// Session-level switch (set by the active backend at start): when true the
+// collector DROPS orphaned launch metas at shutdown instead of emitting them as
+// synthetic kernel rows. Used for engines where kernel-activity is intentionally
+// off and the synthetic host-dispatch durations would mislead — SASS safe mode,
+// where real kernel activity deadlocks (NVIDIA CUPTI/driver bug). The Execution
+// Signature is accumulated separately, so a multi-pass merge is unaffected.
+// Default false: normal / PC modes keep best-effort synthesis.
+void SetSuppressOrphanSyntheticKernels(bool suppress);
+
 /**
  * @brief The central monitoring engine.
  */

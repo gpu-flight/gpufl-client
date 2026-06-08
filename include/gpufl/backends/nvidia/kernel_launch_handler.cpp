@@ -217,21 +217,15 @@ KernelLaunchHandler::requiredCallbacks() const {
 
 std::vector<CUpti_ActivityKind> KernelLaunchHandler::requiredActivityKinds()
     const {
-    if (backend_ && backend_->GetOptions().profiling_engine ==
-                        ProfilingEngine::PcSampling) {
+    // Single source of truth for whether CUPTI kernel ACTIVITY is collected:
+    // CuptiBackend::collectsKernelEvents() (covers single engines AND combos).
+    // When false (PC sampling, or SASS safe mode), launch callbacks provide
+    // synthetic kernel rows instead.
+    if (backend_ && !backend_->collectsKernelEvents()) {
         GFL_LOG_DEBUG(
-            "[KernelLaunchHandler] CUPTI kernel activity disabled in PC "
-            "Sampling mode; launch callbacks will provide synthetic kernel "
+            "[KernelLaunchHandler] CUPTI kernel activity disabled for this "
+            "engine selection; launch callbacks will provide synthetic kernel "
             "rows.");
-        return {};
-    }
-
-    if (backend_ && !backend_->AllowSassKernelActivity()) {
-        GFL_LOG_DEBUG(
-            "[KernelLaunchHandler] CUPTI kernel activity disabled in SASS "
-            "profiler safe mode; launch callbacks will provide synthetic "
-            "kernel rows. Set GPUFL_SASS_ALLOW_KERNEL_ACTIVITY=1 to test "
-            "CONCURRENT_KERNEL explicitly.");
         return {};
     }
 
