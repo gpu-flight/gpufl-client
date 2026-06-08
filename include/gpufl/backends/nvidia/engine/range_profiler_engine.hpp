@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <mutex>
 #include <optional>
 #include <vector>
@@ -29,6 +30,13 @@ class RangeProfilerEngine final : public IProfilingEngine {
     void onPerfScopeStop(const char* name)  override;
 
     std::optional<PerfMetricEvent> takeLastPerfEvent() override;
+    bool isOperational() const override {
+        return operational_.load(std::memory_order_relaxed) ||
+               attempted_.load(std::memory_order_relaxed);
+    }
+    bool producedData() const override {
+        return produced_data_.load(std::memory_order_relaxed);
+    }
 
    private:
 #if GPUFL_HAS_PERFWORKS
@@ -48,6 +56,9 @@ class RangeProfilerEngine final : public IProfilingEngine {
 
     MonitorOptions opts_;
     EngineContext  ctx_;
+    std::atomic<bool> operational_{false};
+    std::atomic<bool> attempted_{false};
+    std::atomic<bool> produced_data_{false};
 };
 
 }  // namespace gpufl

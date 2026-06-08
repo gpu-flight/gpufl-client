@@ -776,8 +776,14 @@ void ScopedMonitor::init_(const ScopeMeta& meta) {
 
     // Scope callbacks are useful for both tracing and profiling backends.
     Monitor::BeginProfilerScope(name_.c_str());
+    // Perf scope (Range Profiler / Perfworks). Also fire it when an engine combo
+    // (GPUFL_ENGINE_COMBO) is active even with a Trace base — otherwise a
+    // Trace+RangeProfiler combo would never trigger Range's perf scope. Harmless
+    // no-op for engines that don't use perf scopes (PC / PM).
+    const char* comboEnv = std::getenv(gpufl::env::kEngineCombo);
+    const bool comboActive = comboEnv && comboEnv[0] != '\0';
     if (g_opts.profiling_engine != ProfilingEngine::Monitor &&
-        g_opts.profiling_engine != ProfilingEngine::Trace) {
+        (g_opts.profiling_engine != ProfilingEngine::Trace || comboActive)) {
         Monitor::BeginPerfScope(name_.c_str());
     }
 
@@ -827,8 +833,10 @@ ScopedMonitor::~ScopedMonitor() {
     Monitor::PushScopeRow(row);
 
     Monitor::EndProfilerScope(name_.c_str());
+    const char* comboEnv = std::getenv(gpufl::env::kEngineCombo);
+    const bool comboActive = comboEnv && comboEnv[0] != '\0';
     if (g_opts.profiling_engine != ProfilingEngine::Monitor &&
-        g_opts.profiling_engine != ProfilingEngine::Trace) {
+        (g_opts.profiling_engine != ProfilingEngine::Trace || comboActive)) {
         Monitor::EndPerfScope(
             name_.c_str());  // triggers EndPerfPassAndDecode first
         if (IMonitorBackend* b = Monitor::GetBackend()) {

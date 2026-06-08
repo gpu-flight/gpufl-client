@@ -39,6 +39,7 @@ bool RangeProfilerEngine::initialize(const MonitorOptions& opts,
 
 void RangeProfilerEngine::start() {
 #if GPUFL_HAS_PERFWORKS
+    attempted_.store(true, std::memory_order_relaxed);
     if (!perf_session_active_) {
         InitPerfworksSession_();
     }
@@ -74,10 +75,12 @@ void RangeProfilerEngine::shutdown() {
         perf_session_active_ = false;
     }
 #endif
+    operational_.store(false, std::memory_order_relaxed);
 }
 
 void RangeProfilerEngine::onPerfScopeStart(const char* name) {
 #if GPUFL_HAS_PERFWORKS
+    attempted_.store(true, std::memory_order_relaxed);
     GFL_LOG_DEBUG("[RangeProfilerEngine] onPerfScopeStart name=",
                   (name ? name : "(null)"), " active=", perf_session_active_);
     if (!perf_session_active_) {
@@ -385,6 +388,7 @@ bool RangeProfilerEngine::InitPerfworksSession_() {
     }
 
     perf_session_active_ = true;
+    operational_.store(true, std::memory_order_relaxed);
     GFL_LOG_DEBUG("[RangeProfilerEngine] Session initialized for chip: ",
                   ctx_.chip_name);
     return true;
@@ -471,6 +475,7 @@ void RangeProfilerEngine::EndPerfPassAndDecode_() {
     if (values.size() > 5 && std::isfinite(values[5]))
         perf_last_event_.tensor_active_pct = values[5];
     perf_has_event_ = true;
+    produced_data_.store(true, std::memory_order_relaxed);
     GFL_LOG_DEBUG("[RangeProfilerEngine] Decoded metrics, perf_has_event_=true");
 }
 

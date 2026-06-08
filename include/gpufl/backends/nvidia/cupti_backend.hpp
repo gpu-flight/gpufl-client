@@ -103,6 +103,9 @@ class CuptiBackend : public IMonitorBackend {
     void NoteMemoryActivityEmitted() {
         memory_activity_emitted_.fetch_add(1, std::memory_order_relaxed);
     }
+    void NoteMemTransferActivityEmitted() {
+        mem_transfer_activity_emitted_.fetch_add(1, std::memory_order_relaxed);
+    }
 
     // Whether the active engine consumes cubin binaries. Cubin capture
     // feeds two consumers, and both want the binary for the SAME three
@@ -248,6 +251,10 @@ class CuptiBackend : public IMonitorBackend {
     std::atomic<uint64_t> kernel_activity_seen_{0};
     std::atomic<uint64_t> kernel_activity_emitted_{0};
     std::atomic<uint64_t> kernel_activity_throttled_{0};
+    std::atomic<uint64_t> mem_transfer_activity_emitted_{0};
+    std::atomic<uint64_t> sync_activity_emitted_{0};
+    std::atomic<uint64_t> nvtx_marker_emitted_{0};
+    std::atomic<uint64_t> graph_activity_emitted_{0};
     std::atomic<uint64_t> memory_activity_emitted_{0};
     std::atomic<uint64_t> external_correlation_seen_{0};
     std::atomic<uint64_t> source_locator_seen_{0};
