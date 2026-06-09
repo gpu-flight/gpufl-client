@@ -223,6 +223,7 @@ except ImportError as e:
         SassMetrics   = "SassMetrics"
         PmSampling    = "PmSampling"
         RangeProfiler = "RangeProfiler"
+        RangeProfilerKernelReplay = "RangeProfilerKernelReplay"
         Deep          = "Deep"
 
     class InitOptions:
@@ -436,7 +437,8 @@ def _apply_eager_module_loading(profiling_engine):
 _original_init = init
 
 def init(*args, backend_url=None, api_key=None, remote_upload=None,
-         enabled=True, **kwargs):
+         enabled=True, analysis_id=None, pass_index=None, pass_count=None,
+         **kwargs):
     """Initialize GPUFlight.
 
     Configuration precedence (low → high). Each layer may override the
@@ -477,6 +479,27 @@ def init(*args, backend_url=None, api_key=None, remote_upload=None,
             ``on``) forces the same behavior regardless of this kwarg —
             that way you can disable gpufl for a one-off run without
             editing code: ``GPUFL_DISABLED=1 python train.py``.
+        analysis_id: Tag this run as one pass of a multi-pass "analysis
+            group" so the backend merges it with its sibling passes. Run
+            the SAME targeted workload once per engine with a shared
+            ``analysis_id`` and a distinct ``pass_index``; the dashboard's
+            Analysis Group view then shows the merged cross-engine result
+            (timing from the Trace pass, stalls from PcSampling, SASS rows
+            from SassMetrics). Sets ``GPUFL_ANALYSIS_ID`` for the C++ core
+            (an explicit value wins over a pre-set env var). None → an
+            ordinary single run that is not grouped.
+
+            Note: CUPTI allows only ONE profiling engine per process, so a
+            multi-engine deep-dive is several runs (one engine each),
+            NOT one process — bound each run to the hot region (e.g. break
+            the loop after a few iterations, or load a checkpoint) so a
+            long job isn't re-run end to end.
+        pass_index: 0-based position of this run within the analysis group.
+            Only meaningful alongside ``analysis_id``. Sets
+            ``GPUFL_PASS_INDEX``.
+        pass_count: Total passes planned for the analysis group (lets the
+            backend flag a missing/failed pass). Only meaningful alongside
+            ``analysis_id``. Sets ``GPUFL_PASS_COUNT``.
         **kwargs: All other InitOptions fields passed to C++ init.
 
     Returns:
@@ -525,6 +548,23 @@ def init(*args, backend_url=None, api_key=None, remote_upload=None,
             DeprecationWarning,
             stacklevel=2)
         kwargs['continuous_system_sampling'] = kwargs.pop('sampling_auto_start')
+
+    # ── Multi-pass analysis grouping ──────────
+    # Let an embedded job self-tag as one pass of an analysis group without
+    # going through the launcher's --passes driver. gpufl::init() reads
+    # GPUFL_ANALYSIS_ID / _PASS_INDEX / _PASS_COUNT straight from the
+    # environment (see include/gpufl/core/gpufl.cpp + env_vars.hpp); writing
+    # them via os.environ here makes them visible to that getenv at C++ init
+    # in this same process. An explicit kwarg overwrites a pre-set env var
+    # (the launcher path), so embedded and launcher use don't both apply.
+    # pass_index/pass_count are only honored by the core when analysis_id is
+    # set, so we gate them the same way.
+    if analysis_id is not None:
+        os.environ['GPUFL_ANALYSIS_ID'] = str(analysis_id)
+        if pass_index is not None:
+            os.environ['GPUFL_PASS_INDEX'] = str(int(pass_index))
+        if pass_count is not None:
+            os.environ['GPUFL_PASS_COUNT'] = str(int(pass_count))
 
     # Resolve env-var fallbacks. Doing this in Python lets explicit
     # kwargs win over env; the C++ layer also does env fallback for
@@ -1071,8 +1111,14 @@ def clean_logs(log_path=None, log_prefix=None, *, dry_run=False):
     return removed
 
 
+# ── Targeting: bounded multi-pass profiling for embedded jobs ───────────
+# Defined in a submodule (keeps __init__ lean); imported here, after Scope /
+# session exist, so `gpufl.targeting(...)` resolves. The submodule lazy-imports
+# Scope/session at call time, so this import is cycle-free.
+from ._targeting import targeting  # noqa: E402
+
 __all__ = [
-    "Scope", "init", "shutdown", "session", "clean_logs",
+    "Scope", "init", "shutdown", "session", "clean_logs", "targeting",
     "system_start", "system_stop",
     "BackendKind", "InitOptions", "ProfilingEngine",
     "upload_logs", "UploadOptions", "UploadResult",

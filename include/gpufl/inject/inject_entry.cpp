@@ -19,6 +19,8 @@
 
 #include "gpufl/inject/inject_entry.hpp"
 
+#include "gpufl/core/env_vars.hpp"
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -96,14 +98,14 @@ uint64_t nextProcessScopeId() {
 }
 
 std::string processScopeName() {
-    if (const char* app = std::getenv(gpufl::inject::kEnvAppName)) {
+    if (const char* app = std::getenv(gpufl::env::kAppName)) {
         if (app[0] != '\0') return std::string("process:") + app;
     }
     return "process:gpufl_injected_target";
 }
 
 bool engineNeedsPerfScope() {
-    const char* engine = std::getenv(gpufl::inject::kEnvProfilingEngine);
+    const char* engine = std::getenv(gpufl::env::kProfilingEngine);
     if (!engine || engine[0] == '\0') return true;
     return std::strcmp(engine, "Monitor") != 0 && std::strcmp(engine, "Trace") != 0;
 }
@@ -169,7 +171,7 @@ void sleepMs(int milliseconds) {
 
 void writeCompletionByteIfRequested() {
 #ifndef _WIN32
-    const char* fd_str = envOrNull(gpufl::inject::kEnvCompletionFd);
+    const char* fd_str = envOrNull(gpufl::env::kInjectCompletionFd);
     if (!fd_str) return;
     int fd = std::atoi(fd_str);
     if (fd <= 0) return;
@@ -199,7 +201,7 @@ void shutdownAndSignal() {
     gpufl::detail::setProcessExitTeardown(true);
 #endif
     if (g_init_ok.load(std::memory_order_acquire)) {
-        sleepMs(envIntOrDefault("GPUFL_INJECT_SHUTDOWN_DELAY_MS", 0));
+        sleepMs(envIntOrDefault(gpufl::env::kInjectShutdownDelayMs, 0));
         GFL_LOG_DEBUG("inject: endProcessScope()");
         endProcessScope();
         GFL_LOG_DEBUG("inject: gpufl::shutdown()");
@@ -215,9 +217,9 @@ void shutdownAndSignal() {
         if (g_do_upload.load(std::memory_order_relaxed) && !g_log_path.empty()) {
             gpufl::UploadOptions uopts;
             uopts.log_path = g_log_path;
-            if (const char* v = envOrNull("GPUFL_BACKEND_URL")) uopts.backend_url = v;
-            if (const char* v = envOrNull("GPUFL_API_KEY"))     uopts.api_key = v;
-            if (const char* v = envOrNull("GPUFL_API_PATH"))    uopts.api_path = v;
+            if (const char* v = envOrNull(gpufl::env::kBackendUrl)) uopts.backend_url = v;
+            if (const char* v = envOrNull(gpufl::env::kApiKey))     uopts.api_key = v;
+            if (const char* v = envOrNull(gpufl::env::kApiPath))    uopts.api_path = v;
             uopts.report_progress = false;  // don't pollute the target's stderr
             (void)gpufl::uploadLogs(uopts);
         }
@@ -252,11 +254,11 @@ void waitForDeferredInitForMs(const int wait_ms) {
 }
 
 void waitAtCudaSyncBoundary() {
-    waitForDeferredInitForMs(envIntOrDefault("GPUFL_INJECT_SYNC_WAIT_MS", 15000));
+    waitForDeferredInitForMs(envIntOrDefault(gpufl::env::kInjectSyncWaitMs, 15000));
 }
 
 void waitAtCudaLaunchBoundary() {
-    waitForDeferredInitForMs(envIntOrDefault("GPUFL_INJECT_LAUNCH_WAIT_MS", 15000));
+    waitForDeferredInitForMs(envIntOrDefault(gpufl::env::kInjectLaunchWaitMs, 15000));
 }
 #endif  // !_WIN32
 
@@ -412,12 +414,12 @@ void doInjectInit() {
     // Sentinel guard — set by the launcher. Without it, treat the
     // preload as accidental (e.g. `LD_PRELOAD=...:libgpufl_inject.so`
     // leaking into a shell) and return silently.
-    const char* sentinel = envOrNull(gpufl::inject::kEnvSentinel);
+    const char* sentinel = envOrNull(gpufl::env::kInject);
     if (!sentinel || std::strcmp(sentinel, "1") != 0) return;
 
     // Pick the profile preset.
     gpufl::InitOptions opts;
-    if (const char* p = envOrNull(gpufl::inject::kEnvProfile)) {
+    if (const char* p = envOrNull(gpufl::env::kInjectProfile)) {
         if (std::strcmp(p, gpufl::inject::kProfileLight) == 0) {
             opts = gpufl::light_mode_default_options();
         } else if (std::strcmp(p, gpufl::inject::kProfileMonitoringOnly) == 0) {
@@ -434,16 +436,22 @@ void doInjectInit() {
     // Layered overrides — env vars beat preset defaults but lose to
     // gpufl::init()'s own remote-config / programmatic tuning that
     // happens downstream of this struct.
-    if (const char* v = envOrNull(gpufl::inject::kEnvAppName)) {
+    if (const char* v = envOrNull(gpufl::env::kAppName)) {
         opts.app_name = v;
     }
-    if (const char* v = envOrNull(gpufl::inject::kEnvLogDir)) {
+    if (const char* v = envOrNull(gpufl::env::kLogDir)) {
         // Init expects a file path; the launcher provides the dir,
         // we tack on app.log so log_rotator's three NDJSON channels
         // (app.device.log / app.scope.log / app.system.log) land in
         // the launcher's chosen dir.
         opts.log_path = std::string(v) + "/app.log";
     }
+#ifdef _WIN32
+    // Windows CUDA injection can leave the process through CRT/driver teardown
+    // paths where the final logger close is not reliable. Keep each NDJSON line
+    // durable even if a clean shutdown/compress step is missed.
+    opts.flush_logs_always = true;
+#endif
     // gpufl::init() reads the rest of the GPUFL_* env vars itself,
     // including GPUFL_PROFILING_ENGINE — it is the single string->enum
     // engine parser (see gpufl.cpp). It also reads backend_url, api_key,
@@ -451,12 +459,12 @@ void doInjectInit() {
 
     // Capture what the atexit upload path needs (see shutdownAndSignal).
     g_log_path = opts.log_path;
-    if (const char* u = envOrNull(gpufl::inject::kEnvUpload)) {
+    if (const char* u = envOrNull(gpufl::env::kInjectUpload)) {
         g_do_upload.store(std::strcmp(u, "1") == 0, std::memory_order_relaxed);
     }
 
     if (gpufl::init(opts)) {
-        if (envIntOrDefault("GPUFL_INJECT_PROCESS_SCOPE", 1) != 0) {
+        if (envIntOrDefault(gpufl::env::kInjectProcessScope, 1) != 0) {
             beginProcessScope();
         }
         g_init_ok.store(true, std::memory_order_release);
@@ -491,7 +499,7 @@ void startDeferredInjectInit() {
         // injection path. CUPTI subscription/activity setup can report
         // success there but later deliver no callbacks. Step out of that
         // callback frame before touching CUPTI.
-        sleepMs(envIntOrDefault("GPUFL_INJECT_INIT_DELAY_MS", 1));
+        sleepMs(envIntOrDefault(gpufl::env::kInjectInitDelayMs, 1));
         try {
             std::call_once(g_init_once, doInjectInit);
         } catch (...) {
@@ -556,7 +564,7 @@ GPUFL_INJECT_EXPORT int InitializeInjectionNvtx2(
 // been verified to tolerate pre-cuInit subscribe.
 #ifndef _WIN32
 [[gnu::constructor]] static void gpuflInjectCtor() {
-    const char* opt_in = std::getenv("GPUFL_INJECT_USE_CONSTRUCTOR");
+    const char* opt_in = std::getenv(gpufl::env::kInjectUseConstructor);
     if (!opt_in || std::strcmp(opt_in, "1") != 0) return;
     std::call_once(g_init_once, doInjectInit);
 }

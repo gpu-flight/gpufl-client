@@ -129,6 +129,7 @@ bool PmSamplingEngine::InitializePmSampling_() {
     }
 
     GFL_LOG_DEBUG("[PmSamplingEngine] chip_name_ = ", ctx_.chip_name);
+    LogSinglePassSets_();
 
     CUpti_Profiler_GetCounterAvailability_Params ca = {
         CUpti_Profiler_GetCounterAvailability_Params_STRUCT_SIZE};
@@ -193,6 +194,87 @@ bool PmSamplingEngine::InitializePmSampling_() {
                   " interval_ns=", setConfig.samplingInterval,
                   " max_samples=", opts_.pm_sampling_max_samples);
     return true;
+}
+
+// List the chip's single-pass metric sets (the metric bundles collectible in one
+// pass, without kernel replay) and their metrics. The set names are chip-specific,
+// so they're queried at runtime. Read-only: chip-name queries, no host object, no
+// config / behavior change. Follows the CUPTI pm_sampling sample. Older CUPTI
+// (< 13.2) lacks the APIs, so this compiles to a no-op there.
+void PmSamplingEngine::LogSinglePassSets_() {
+#ifdef CUpti_Profiler_Host_GetSinglePassSets_Params_STRUCT_SIZE
+    if (ctx_.chip_name.empty()) return;
+
+    // Phase 1: count. Phase 2: fill the set-name list.
+    CUpti_Profiler_Host_GetSinglePassSets_Params sets = {
+        CUpti_Profiler_Host_GetSinglePassSets_Params_STRUCT_SIZE};
+    sets.pChipName = ctx_.chip_name.c_str();
+    if (LogCuptiErrorIfFailed(this->name(),
+                              "cuptiProfilerHostGetSinglePassSets(count)",
+                              cuptiProfilerHostGetSinglePassSets(&sets))) {
+        return;
+    }
+    if (sets.numOfSinglePassSets == 0) {
+        GFL_LOG_DEBUG("[PmSamplingEngine] chip ", ctx_.chip_name,
+                      " reports 0 single-pass metric sets");
+        return;
+    }
+    std::vector<const char*> setNames(sets.numOfSinglePassSets, nullptr);
+    sets.ppSinglePassSets = setNames.data();
+    if (LogCuptiErrorIfFailed(this->name(),
+                              "cuptiProfilerHostGetSinglePassSets(data)",
+                              cuptiProfilerHostGetSinglePassSets(&sets))) {
+        return;
+    }
+
+    GFL_LOG_DEBUG("[PmSamplingEngine] chip ", ctx_.chip_name,
+                  " single-pass metric sets: ", setNames.size());
+    for (const char* setName : setNames) {
+        if (!setName) continue;
+
+        // Phase 1: sizes. Phase 2: fill the packed metric-name buffer +
+        // per-metric start indices.
+        CUpti_Profiler_Host_GetMetricsInSinglePassSet_Params count = {
+            CUpti_Profiler_Host_GetMetricsInSinglePassSet_Params_STRUCT_SIZE};
+        count.pChipName = ctx_.chip_name.c_str();
+        count.pSinglePassSetName = setName;
+        if (LogCuptiErrorIfFailed(
+                this->name(),
+                "cuptiProfilerHostGetMetricsInSinglePassSet(count)",
+                cuptiProfilerHostGetMetricsInSinglePassSet(&count))) {
+            continue;
+        }
+        std::vector<uint8_t> buf(count.metricsBufferSize, 0);
+        std::vector<size_t> indices(count.numOfMetricsInSinglePassSet, 0);
+
+        CUpti_Profiler_Host_GetMetricsInSinglePassSet_Params data = {
+            CUpti_Profiler_Host_GetMetricsInSinglePassSet_Params_STRUCT_SIZE};
+        data.pChipName = ctx_.chip_name.c_str();
+        data.pSinglePassSetName = setName;
+        data.numOfMetricsInSinglePassSet = indices.size();
+        data.pMetricsIndicesBuffer = indices.data();
+        data.metricsBufferSize = buf.size();
+        data.pMetricsBuffer = buf.data();
+        if (LogCuptiErrorIfFailed(
+                this->name(),
+                "cuptiProfilerHostGetMetricsInSinglePassSet(data)",
+                cuptiProfilerHostGetMetricsInSinglePassSet(&data))) {
+            continue;
+        }
+
+        std::string joined;
+        for (size_t i = 0; i < indices.size(); ++i) {
+            if (indices[i] >= buf.size()) continue;
+            if (!joined.empty()) joined += ", ";
+            joined += reinterpret_cast<const char*>(&buf[indices[i]]);
+        }
+        GFL_LOG_DEBUG("[PmSamplingEngine]   single-pass set \"", setName,
+                      "\" (", indices.size(), " metrics): ", joined);
+    }
+#else
+    GFL_LOG_DEBUG("[PmSamplingEngine] single-pass-set query unavailable "
+                  "(CUPTI < 13.2)");
+#endif
 }
 
 bool PmSamplingEngine::BuildConfigImage_() {

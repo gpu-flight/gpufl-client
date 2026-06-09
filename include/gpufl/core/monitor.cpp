@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <stack>
 #include <thread>
@@ -22,6 +23,7 @@
 #include "gpufl/core/model/synchronization_event_model.hpp"
 #include "gpufl/core/model/memory_alloc_event_model.hpp"
 #include "gpufl/core/model/graph_launch_event_model.hpp"
+#include "gpufl/core/model/lifecycle_model.hpp"
 #include "gpufl/core/monitor_adapter.hpp"
 #include "gpufl/core/ring_buffer.hpp"
 #include "gpufl/core/runtime.hpp"
@@ -59,6 +61,24 @@ static const std::string& DemangleKernelNameCached(const char* raw) {
     if (it != g_kernelNameDemangleCache.end()) return it->second;
     auto [ins, _] =
         g_kernelNameDemangleCache.emplace(raw, gpufl::core::DemangleName(raw));
+    return ins->second;
+}
+
+// Collector-thread cache for demangling the "name@source" function keys that
+// PC sampling interns. The PC_SAMPLE branch in collectorProcessNext runs only
+// on the collector thread (and on the main thread after the collector joins at
+// shutdown) — the same single-consumer contract as g_kernelNameDemangleCache,
+// so no lock. CUPTI hands PC/SASS function names MANGLED; demangling here gives
+// every engine ONE canonical kernel identity (matching Trace's already-
+// demangled kernel_dict) that the backend multi-pass merge can join on. NOTE:
+// SASS interns on the USER thread (PushProfileSamples) and uses its OWN burst-
+// local cache so this map stays single-threaded — do not share it from there.
+static std::unordered_map<std::string, std::string> g_functionKeyDemangleCache;
+static const std::string& DemangleFunctionKeyCached(const std::string& key) {
+    auto it = g_functionKeyDemangleCache.find(key);
+    if (it != g_functionKeyDemangleCache.end()) return it->second;
+    auto [ins, _] = g_functionKeyDemangleCache.emplace(
+        key, gpufl::core::DemangleFunctionKey(key));
     return ins->second;
 }
 // Deferred kernel detail rows — written after the kernel batch so the
@@ -220,6 +240,49 @@ static void flushBatches(Logger& logger, const std::string& session_id) {
 // field the join and the synthetic-kernel path need, so no parallel struct.
 static std::unordered_map<uint64_t, ActivityRecord> g_launchMetaByCorr;
 
+// ── Execution Signature (P2 multi-pass determinism guard) ──────────────────
+// Per-scope multiset of (mangled kernel name + launch dims) -> launch count,
+// built from the KERNEL_LAUNCH_META records below (which fire in EVERY engine
+// mode, so every isolated pass — even SASS, where kernel-activity is off — has
+// the full launch inventory). Collector-thread-only: accumulated as launch
+// metas are consumed from the ring and emitted at session end after the
+// collector joins — same single-consumer contract as g_launchMetaByCorr, no
+// lock. std::map keeps keys sorted so the hash is order-independent (the
+// MULTISET property: benign async launch reordering must not change it). Scope
+// key = full user_scope path ("" = global); perf-scope reconciliation is the
+// deferred P2 backend scope work.
+static std::map<std::string, std::map<std::string, uint64_t>>
+    g_execSignatureByScope;
+
+// FNV-1a 64-bit over the canonical multiset encoding.
+static uint64_t Fnv1a64(const std::string& s) {
+    uint64_t h = 1469598103934665603ULL;
+    for (const unsigned char c : s) {
+        h ^= c;
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+// Accumulate one kernel launch into its scope's signature multiset. `rec` is a
+// KERNEL_LAUNCH_META carrying final launch dims (has_details). The key uses the
+// MANGLED name — byte-identical across passes, so no demangle is needed for the
+// cross-pass comparison. \x1f separates fields (never appears in names/dims).
+static void accumulateExecSignature(const ActivityRecord& rec) {
+    std::string key = rec.name;
+    key += '\x1f';
+    key += std::to_string(rec.grid_x);  key += ',';
+    key += std::to_string(rec.grid_y);  key += ',';
+    key += std::to_string(rec.grid_z);  key += '\x1f';
+    key += std::to_string(rec.block_x); key += ',';
+    key += std::to_string(rec.block_y); key += ',';
+    key += std::to_string(rec.block_z); key += '\x1f';
+    key += std::to_string(rec.dyn_shared);
+    const std::string scope =
+        (rec.user_scope[0] != '\0') ? rec.user_scope : std::string();
+    ++g_execSignatureByScope[scope][key];
+}
+
 // Worker-local sync-stack join map (Step 4c). The corr->stack join that ran
 // under CuptiBackend::sync_meta_mu_ in BufferCompleted now happens here on the
 // single collector thread, lock-free. Populated by SYNC_META records (sync
@@ -330,8 +393,25 @@ static void emitKernelRecord(const ActivityRecord& rec,
 // nvidia-only SM properties this core TU must not reach for); we just carry it.
 // Idempotent: clears the map, so the second call from Monitor::Shutdown's
 // post-join drain is a no-op.
+// Set by the active backend at start() — see SetSuppressOrphanSyntheticKernels
+// in monitor.hpp. Engines where kernel-activity is intentionally off (SASS safe
+// mode) set this so we don't emit misleading synthetic kernel rows.
+static bool g_suppressOrphanSyntheticKernels = false;
+void SetSuppressOrphanSyntheticKernels(bool suppress) {
+    g_suppressOrphanSyntheticKernels = suppress;
+}
+
 static void drainSyntheticKernels(Runtime* rt) {
     if (g_launchMetaByCorr.empty()) return;
+    if (g_suppressOrphanSyntheticKernels) {
+        // SASS safe mode: kernel-activity is OFF (it deadlocks), so EVERY launch is
+        // orphaned here. A synthetic row's only "duration" would be the host-dispatch
+        // interval between consecutive launches — meaningless as GPU time — so drop
+        // them rather than emit misleading kernel rows. The Execution Signature was
+        // already accumulated from these metas during processing, so merge is unaffected.
+        g_launchMetaByCorr.clear();
+        return;
+    }
     if (!(rt && rt->logger)) return;
     const int64_t flushNs = detail::GetTimestampNs();
 
@@ -377,6 +457,40 @@ static void drainSyntheticKernels(Runtime* rt) {
     g_launchMetaByCorr.clear();
 }
 
+// Emit one execution_signature record per scope at session end — runs after the
+// ring is fully drained (every KERNEL_LAUNCH_META accumulated). Called on the
+// collector thread (post-loop) and again from Shutdown's post-join drain;
+// idempotent via clear(). std::map iteration is sorted, so the hash is a stable
+// function of the multiset. See g_execSignatureByScope.
+static void emitExecutionSignatures(Runtime* rt) {
+    if (g_execSignatureByScope.empty()) return;
+    if (!(rt && rt->logger)) return;
+    const int64_t ts = detail::GetTimestampNs();
+    for (const auto& [scope, kernels] : g_execSignatureByScope) {
+        std::string buf;
+        uint64_t launch_count = 0;
+        for (const auto& [k, cnt] : kernels) {  // sorted (std::map) -> stable hash
+            buf += k;
+            buf += '=';
+            buf += std::to_string(cnt);
+            buf += ';';
+            launch_count += cnt;
+        }
+        ExecutionSignatureEvent ev;
+        ev.session_id       = rt->session_id;
+        ev.ts_ns            = ts;
+        ev.scope_name       = scope;
+        ev.signature        = Fnv1a64(buf);
+        ev.launch_count     = launch_count;
+        ev.distinct_kernels = static_cast<uint32_t>(kernels.size());
+        rt->logger->write(model::ExecutionSignatureModel(ev));
+        GFL_LOG_DEBUG("[execSignature] scope='", scope, "' launches=",
+                      launch_count, " distinct=", kernels.size(),
+                      " sig=", ev.signature);
+    }
+    g_execSignatureByScope.clear();
+}
+
 // Consume + route ONE record from the ring buffer; returns false when empty.
 // File-scope (was a lambda inside CollectorLoop) so Monitor::Shutdown can
 // re-drain on the MAIN thread after joining the collector. On Windows
@@ -400,11 +514,21 @@ static bool collectorProcessNext() {
             // metas always have has_details=false, so duplicate-corr mem callbacks
             // resolve to the first/runtime one — its user-facing scope label.)
             auto it = g_launchMetaByCorr.find(rec.corr_id);
+            bool countForSignature = false;
             if (it == g_launchMetaByCorr.end()) {
                 g_launchMetaByCorr.emplace(rec.corr_id, rec);
+                // First record for this launch — count it once for the exec
+                // signature IF it already carries grid/block (a kernel launch).
+                // Dim-less metas (e.g. memcpy) are not kernel launches and are
+                // never counted.
+                countForSignature = rec.has_details;
             } else if (!it->second.has_details && rec.has_details) {
                 it->second = rec;
+                // Details arrived on the launch's 2nd callback (same corr) —
+                // count now; the emplace above skipped it for lack of dims.
+                countForSignature = true;
             }
+            if (countForSignature) accumulateExecSignature(rec);
             return true;
         }
         if (rec.type == TraceType::KERNEL_API_EXIT) {
@@ -516,10 +640,12 @@ static bool collectorProcessNext() {
                 kind = 1;  // "sass_metric"
             }
 
+            // Demangle the name part so PC sampling's function identity matches
+            // Trace's already-demangled kernel_dict for the cross-pass merge.
             const std::string func_key =
                 std::string(rec.function_name) + "@" + rec.source_file;
             const uint32_t function_id =
-                g_dictManager.internFunction(func_key);
+                g_dictManager.internFunction(DemangleFunctionKeyCached(func_key));
             // For PC sampling rows metric_name is empty; use reason_name so the
             // stall reason string is interned into metric_dict and reachable via
             // metric_id on the backend.  For SASS rows metric_name is always set.
@@ -683,6 +809,7 @@ void CollectorLoop() {
     // synthetic kernel rows it emits are included in this last flush.
     if (Runtime* rt = runtime(); rt && rt->logger) {
         drainSyntheticKernels(rt);
+        emitExecutionSignatures(rt);
         flushBatches(*rt->logger, rt->session_id);
     }
     GFL_LOG_DEBUG("[CollectorLoop] END");
@@ -700,6 +827,7 @@ void Monitor::Initialize(const MonitorOptions& opts) {
     // session left behind so corr ids can't collide across init/shutdown cycles.
     g_launchMetaByCorr.clear();
     g_syncStackByCorr.clear();  // Step 4c: same cross-session hygiene for syncs.
+    g_execSignatureByScope.clear();  // P2 exec-signature: drop prior session's multiset.
     g_kernelBatchId  = 0;
     g_memcpyBatchId  = 0;
     g_scopeBatch.clear();
@@ -764,6 +892,7 @@ void Monitor::Shutdown() {
             // (Windows process-exit can tear the collector down early). No-op
             // when CollectorLoop already drained them — the map is cleared.
             drainSyntheticKernels(rt);
+            emitExecutionSignatures(rt);
             flushBatches(*rt->logger, rt->session_id);
         }
         GFL_LOG_DEBUG("Monitor::Shutdown: post-join drained=", drained);
@@ -884,12 +1013,27 @@ void Monitor::PushProfileSamples(
     // takes g_scopeBatchMu (via lock_guard, not recursive), so re-entry
     // would deadlock.  CollectorLoop's 250 ms periodic drain handles flush.
     std::lock_guard lk(g_scopeBatchMu);
+    // Burst-local demangle cache (this runs on the USER thread). CUPTI hands
+    // SASS function names MANGLED; demangling makes SASS's function identity
+    // match Trace's already-demangled kernel_dict for the cross-pass merge.
+    // Local (not the collector-thread g_functionKeyDemangleCache) so the maps
+    // stay single-threaded and race-free; a burst shares few unique keys across
+    // its per-(pc_offset,metric) rows, so one map per drain dedups cheaply.
+    std::unordered_map<std::string, std::string> demangle_cache;
+    auto demangledKey =
+        [&demangle_cache](const std::string& key) -> const std::string& {
+        auto it = demangle_cache.find(key);
+        if (it != demangle_cache.end()) return it->second;
+        return demangle_cache
+            .emplace(key, gpufl::core::DemangleFunctionKey(key))
+            .first->second;
+    };
     for (const auto& s : samples) {
         ProfileSampleBatchRow row;
         row.ts_ns          = s.ts_ns;
         row.corr_id        = s.corr_id;
         row.device_id      = s.device_id;
-        row.function_id    = g_dictManager.internFunction(s.function_key);
+        row.function_id    = g_dictManager.internFunction(demangledKey(s.function_key));
         row.pc_offset      = s.pc_offset;
         row.metric_id      = g_dictManager.internMetric(s.metric_name);
         row.metric_value   = s.metric_value;

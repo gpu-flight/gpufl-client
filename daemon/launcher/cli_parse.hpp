@@ -14,6 +14,12 @@ struct TraceArgs {
     std::string output_dir;             // --output / -o; default: ~/.gpufl/traces/{ts}_{sid}
     std::string profile = "comprehensive"; // --profile
     std::string engine;                 // --engine; empty = profile default
+    // --passes: explicit multi-pass plan — a comma-separated list of engines,
+    // one isolated pass each (e.g. "Trace,PcSampling,SassMetrics"). Mutually
+    // exclusive with --engine. Empty here means "no explicit plan"; the plan is
+    // then resolved from --engine (Deep expands to the default multi-pass plan)
+    // — see resolvePassPlan().
+    std::vector<std::string> passes;
     bool verbose = false;               // -v
     bool quiet = false;                 // -q
     bool upload = false;                // --upload: ship trace to backend post-run
@@ -61,6 +67,19 @@ struct TraceParseResult {
 };
 
 TraceParseResult parseTraceArgs(const std::vector<std::string>& argv);
+
+// Resolves the ordered multi-pass plan (one isolated CUPTI engine per pass)
+// from parsed trace args. Precedence:
+//   1. explicit --passes list (verbatim);
+//   2. --engine Deep        → the default multi-pass plan
+//                             [Trace, PcSampling, SassMetrics];
+//   3. otherwise            → a single pass = {engine} (engine may be "" =
+//                             use the profile's default engine — the legacy
+//                             single-pass behavior, unchanged).
+// A returned size() > 1 is a multi-pass run (the launcher assigns one
+// analysis_id and labels each pass). This is the single source of truth for
+// the default plan, shared by the Linux and Windows launchers.
+std::vector<std::string> resolvePassPlan(const TraceArgs& args);
 
 // Parses the args passed to `gpufl upload`. On success returns the
 // populated UploadArgs. On failure (missing log_path, bad flag,

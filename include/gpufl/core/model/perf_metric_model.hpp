@@ -13,4 +13,12 @@ private:
     const PerfMetricEvent& e_;
 };
 
+struct KernelPerfMetricModel final : IJsonSerializable {
+    explicit KernelPerfMetricModel(const KernelPerfMetricEvent& e) : e_(e) {}
+    std::string buildJson() const override;
+    Channel channel() const override { return Channel::Device; }
+private:
+    const KernelPerfMetricEvent& e_;
+};
+
 }  // namespace gpufl::model

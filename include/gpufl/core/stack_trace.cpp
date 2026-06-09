@@ -197,3 +197,25 @@ std::string GetCallStack(int skipFrames) {
 }  // namespace gpufl
 
 #endif
+
+// ── Platform-agnostic helpers ──────────────────────────────────────────────
+// Defined once outside the per-OS guards above; they delegate to whichever
+// DemangleName() the active platform branch compiled.
+namespace gpufl {
+namespace core {
+
+std::string DemangleFunctionKey(const std::string& function_key) {
+    const std::string::size_type at = function_key.find('@');
+    if (at == std::string::npos) {
+        // No "@source" tail — demangle the whole key.
+        return DemangleName(function_key.c_str());
+    }
+    // Demangle only the name part; re-attach the "@source_file" tail verbatim
+    // so the (possibly '@'-free but otherwise arbitrary) source path survives
+    // exactly. Mangled names never contain '@', so the first '@' is the split.
+    const std::string name = function_key.substr(0, at);
+    return DemangleName(name.c_str()) + function_key.substr(at);
+}
+
+}  // namespace core
+}  // namespace gpufl

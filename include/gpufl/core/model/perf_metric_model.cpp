@@ -30,4 +30,26 @@ std::string PerfMetricModel::buildJson() const {
     return oss.str();
 }
 
+std::string KernelPerfMetricModel::buildJson() const {
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(4);
+    oss << "{\"type\":\"kernel_perf_metric_event\""
+        << ",\"pid\":"           << e_.pid
+        << ",\"app\":\""         << jsonEscape(e_.app)        << "\""
+        << ",\"session_id\":\""  << jsonEscape(e_.session_id) << "\""
+        << ",\"device_id\":"     << e_.device_id
+        << ",\"range_index\":"   << e_.range_index
+        << ",\"range_name\":\""  << jsonEscape(e_.range_name) << "\""
+        << ",\"kernel_name\":\"" << jsonEscape(e_.kernel_name) << "\""
+        << ",\"launch_ordinal\":" << e_.launch_ordinal
+        << ",\"sm_throughput_pct\":" << e_.sm_throughput_pct
+        << ",\"l1_hit_rate_pct\":"   << e_.l1_hit_rate_pct
+        << ",\"l2_hit_rate_pct\":"   << e_.l2_hit_rate_pct
+        << ",\"dram_read_bytes\":"   << e_.dram_read_bytes
+        << ",\"dram_write_bytes\":"  << e_.dram_write_bytes
+        << ",\"tensor_active_pct\":" << e_.tensor_active_pct
+        << "}";
+    return oss.str();
+}
+
 }  // namespace gpufl::model

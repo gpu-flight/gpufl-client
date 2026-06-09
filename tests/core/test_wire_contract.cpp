@@ -28,6 +28,7 @@
 #include "gpufl/core/version.hpp"
 #include "gpufl/core/model/batch_models.hpp"
 #include "gpufl/core/model/lifecycle_model.hpp"
+#include "gpufl/core/model/perf_metric_model.hpp"
 
 namespace {
 
@@ -118,6 +119,54 @@ TEST(WireContract, JobStartEmitsNvidiaNoneSentinel) {
         << "explicit-None sessions must emit profiling_engine: nvidia.none: " << json;
 }
 
+// ── job_start multi-pass grouping (P1) ─────────────────────────────────────
+//
+// analysis_id / pass_index / pass_count are emitted together, and ONLY when
+// analysis_id is set (a multi-pass run). They are additive optional fields on
+// the non-columnar job_start record, so they do NOT bump kWireVersion — the
+// backend ignores unknown fields until the P2 merge consumes them.
+TEST(WireContract, JobStartEmitsMultiPassGroupingWhenSet) {
+    gpufl::InitEvent e;
+    e.pid = 7;
+    e.app = "mp_app";
+    e.session_id = "sess-mp";
+    e.ts_ns = 1;
+    e.session_kind = "trace";
+    e.profiling_engine = "nvidia.sass_metrics";
+    e.analysis_id = "ana-123";
+    e.pass_index = 2;
+    e.pass_count = 3;
+
+    const std::string json = gpufl::model::InitEventModel(e).buildJson();
+
+    EXPECT_TRUE(JsonContains(json, "\"analysis_id\":\"ana-123\""));
+    EXPECT_TRUE(JsonContains(json, "\"pass_index\":2"));
+    EXPECT_TRUE(JsonContains(json, "\"pass_count\":3"));
+}
+
+// A single-pass run leaves analysis_id empty; all three fields must be omitted
+// so the job_start wire is byte-identical to pre-P1 (and pass_index==0 is never
+// confused with "unset").
+TEST(WireContract, JobStartOmitsMultiPassGroupingWhenUnset) {
+    gpufl::InitEvent e;
+    e.pid = 7;
+    e.app = "sp_app";
+    e.session_id = "sess-sp";
+    e.ts_ns = 1;
+    e.session_kind = "trace";
+    e.profiling_engine = "nvidia.trace";
+    // analysis_id intentionally left empty → ordinary single-pass run.
+
+    const std::string json = gpufl::model::InitEventModel(e).buildJson();
+
+    EXPECT_EQ(json.find("\"analysis_id\""), std::string::npos)
+        << "analysis_id must be omitted for single-pass runs: " << json;
+    EXPECT_EQ(json.find("\"pass_index\""), std::string::npos)
+        << "pass_index must be omitted when analysis_id is unset: " << json;
+    EXPECT_EQ(json.find("\"pass_count\""), std::string::npos)
+        << "pass_count must be omitted when analysis_id is unset: " << json;
+}
+
 // ── shutdown ──────────────────────────────────────────────────────────────
 TEST(WireContract, ShutdownShape) {
     gpufl::ShutdownEvent e;
@@ -154,6 +203,44 @@ TEST(WireContract, SassConfigShape) {
         json,
         "\"configured_metrics\":[\"smsp__inst_executed\",\"smsp__warps_active\"]"));
     EXPECT_TRUE(JsonContains(json, "\"skipped_metrics\":[\"dram__bytes\"]"));
+}
+
+// ── execution_signature (P2 multi-pass determinism guard) ──────────────────
+//
+// One per scope per pass; the backend compares the `signature` per scope across
+// the passes of an analysis to decide whether SASS metrics may be merged onto
+// another pass's timing. `signature` is a full-width uint64 hash emitted as a
+// STRING so JSON number precision (JS doubles lose >2^53) can't corrupt it.
+TEST(WireContract, ExecutionSignatureShape) {
+    gpufl::ExecutionSignatureEvent e;
+    e.session_id = "sess-1";
+    e.ts_ns = 1234;
+    e.scope_name = "train_epoch";
+    e.signature = 12345678901234567890ULL;  // > 2^53 — must round-trip as a string
+    e.launch_count = 9002;
+    e.distinct_kernels = 27;
+
+    const std::string json = gpufl::model::ExecutionSignatureModel(e).buildJson();
+
+    EXPECT_TRUE(JsonContains(json, "\"version\":1"));
+    EXPECT_TRUE(JsonContains(json, "\"type\":\"execution_signature\""));
+    EXPECT_TRUE(JsonContains(json, "\"session_id\":\"sess-1\""));
+    EXPECT_TRUE(JsonContains(json, "\"scope_name\":\"train_epoch\""));
+    EXPECT_TRUE(JsonContains(json, "\"signature\":\"12345678901234567890\""))
+        << "uint64 signature must serialize as a quoted string: " << json;
+    EXPECT_TRUE(JsonContains(json, "\"launch_count\":9002"));
+    EXPECT_TRUE(JsonContains(json, "\"distinct_kernels\":27"));
+}
+
+TEST(WireContract, ExecutionSignatureEscapesScopeName) {
+    gpufl::ExecutionSignatureEvent e;
+    e.session_id = "sess-1";
+    e.ts_ns = 1;
+    e.scope_name = "a\"b";  // embedded quote must be JSON-escaped
+    e.signature = 0;
+    const std::string json = gpufl::model::ExecutionSignatureModel(e).buildJson();
+    EXPECT_TRUE(JsonContains(json, "\"scope_name\":\"a\\\"b\""))
+        << "scope_name must be JSON-escaped: " << json;
 }
 
 // ── kernel_event_batch ────────────────────────────────────────────────────
@@ -449,4 +536,34 @@ TEST(WireContract, MemoryAllocEventBatchColumns) {
         "\"address\",\"bytes\",\"device_id\",\"stream_id\",\"corr_id\"]"));
     EXPECT_TRUE(JsonContains(
         json, "\"rows\":[[0,0,1,3,139637976727552,1048576,0,0,42]]"));
+}
+
+TEST(WireContract, KernelPerfMetricEventFields) {
+    gpufl::KernelPerfMetricEvent ev{};
+    ev.pid = 123;
+    ev.app = "demo";
+    ev.session_id = "sess-1";
+    ev.device_id = 0;
+    ev.range_index = 2;
+    ev.range_name = "VectorAdd";
+    ev.kernel_name = "VectorAdd";
+    ev.launch_ordinal = 3;
+    ev.sm_throughput_pct = 75.25;
+    ev.l1_hit_rate_pct = 91.5;
+    ev.l2_hit_rate_pct = -1.0;
+    ev.dram_read_bytes = 1024;
+    ev.dram_write_bytes = -1;
+    ev.tensor_active_pct = -1.0;
+
+    const std::string json = gpufl::model::KernelPerfMetricModel(ev).buildJson();
+
+    EXPECT_TRUE(JsonContains(json, "\"type\":\"kernel_perf_metric_event\""));
+    EXPECT_TRUE(JsonContains(json, "\"range_index\":2"));
+    EXPECT_TRUE(JsonContains(json, "\"range_name\":\"VectorAdd\""));
+    EXPECT_TRUE(JsonContains(json, "\"kernel_name\":\"VectorAdd\""));
+    EXPECT_TRUE(JsonContains(json, "\"launch_ordinal\":3"));
+    EXPECT_TRUE(JsonContains(json, "\"sm_throughput_pct\":75.2500"));
+    EXPECT_TRUE(JsonContains(json, "\"l1_hit_rate_pct\":91.5000"));
+    EXPECT_TRUE(JsonContains(json, "\"dram_read_bytes\":1024"));
+    EXPECT_TRUE(JsonContains(json, "\"dram_write_bytes\":-1"));
 }

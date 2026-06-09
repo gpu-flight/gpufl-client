@@ -1,5 +1,7 @@
 #include "gpufl/backends/nvidia/kernel_launch_handler.hpp"
 
+#include "gpufl/core/env_vars.hpp"
+
 #include <algorithm>  // std::min(initializer_list) — see occupancy calc below
 #include <cstdio>
 #include <cstdlib>
@@ -215,21 +217,15 @@ KernelLaunchHandler::requiredCallbacks() const {
 
 std::vector<CUpti_ActivityKind> KernelLaunchHandler::requiredActivityKinds()
     const {
-    if (backend_ && backend_->GetOptions().profiling_engine ==
-                        ProfilingEngine::PcSampling) {
+    // Single source of truth for whether CUPTI kernel ACTIVITY is collected:
+    // CuptiBackend::collectsKernelEvents() (covers single engines AND combos).
+    // When false (PC sampling, or SASS safe mode), launch callbacks provide
+    // synthetic kernel rows instead.
+    if (backend_ && !backend_->collectsKernelEvents()) {
         GFL_LOG_DEBUG(
-            "[KernelLaunchHandler] CUPTI kernel activity disabled in PC "
-            "Sampling mode; launch callbacks will provide synthetic kernel "
+            "[KernelLaunchHandler] CUPTI kernel activity disabled for this "
+            "engine selection; launch callbacks will provide synthetic kernel "
             "rows.");
-        return {};
-    }
-
-    if (backend_ && !backend_->AllowSassKernelActivity()) {
-        GFL_LOG_DEBUG(
-            "[KernelLaunchHandler] CUPTI kernel activity disabled in SASS "
-            "profiler safe mode; launch callbacks will provide synthetic "
-            "kernel rows. Set GPUFL_SASS_ALLOW_KERNEL_ACTIVITY=1 to test "
-            "CONCURRENT_KERNEL explicitly.");
         return {};
     }
 
@@ -324,8 +320,8 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
             std::snprintf(metaRec.user_scope, sizeof(metaRec.user_scope), "%s",
                           fullPath.c_str());
             metaRec.scope_depth = stack.size();
-        } else if (const char* injectedApp = std::getenv("GPUFL_APP_NAME")) {
-            if (std::getenv("GPUFL_INJECT") && injectedApp[0] != '\0') {
+        } else if (const char* injectedApp = std::getenv(gpufl::env::kAppName)) {
+            if (std::getenv(gpufl::env::kInject) && injectedApp[0] != '\0') {
                 std::string processScope = "process:";
                 processScope += injectedApp;
                 std::snprintf(metaRec.user_scope, sizeof(metaRec.user_scope),
@@ -456,10 +452,20 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
 
     const auto* k = reinterpret_cast<const CUpti_ActivityKernel11*>(record);
     backend_->kernel_activity_seen_.fetch_add(1, std::memory_order_relaxed);
+    const char* kernelName = k->name ? k->name : "";
+    const bool looksLikeReplayWait =
+        std::strcmp(kernelName, "WaitNs") == 0 &&
+        k->gridX == 1 && k->gridY == 1 && k->gridZ == 1 &&
+        k->blockX == 1 && k->blockY == 1 && k->blockZ == 1;
+    if (backend_->UsesRangeProfilerKernelReplay() && looksLikeReplayWait) {
+        GFL_LOG_DEBUG("[KernelLaunchHandler] skipping RangeProfilerKernelReplay "
+                      "internal wait kernel corr=", k->correlationId);
+        return false;
+    }
 
     // Diagnostic: log every real activity record as it arrives.
     GFL_LOG_DEBUG("[KernelLaunchHandler] ACTIVITY_RECORD corr=",
-                  k->correlationId, " name=", k->name,
+                  k->correlationId, " name=", kernelName,
                   " start=", k->start, " end=", k->end,
                   " dur=", k->end - k->start);
 
@@ -484,7 +490,7 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
     // thread. %.*s bounds the source read against a non-terminated name.
     std::snprintf(out.name, sizeof(out.name), "%.*s",
                   static_cast<int>(sizeof(out.name) - 1),
-                  k->name ? k->name : "");
+                  kernelName);
     out.cpu_start_ns = baseCpuNs + static_cast<int64_t>(k->start - baseCuptiTs);
     out.duration_ns = static_cast<int64_t>(k->end - k->start);
     out.dyn_shared = k->dynamicSharedMemory;

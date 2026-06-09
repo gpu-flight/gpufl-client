@@ -33,6 +33,17 @@ std::string fmtBytes(uint64_t n) {
     return std::to_string(n) + " B";
 }
 
+std::string fmtMaybeBytes(int64_t n) {
+    return n >= 0 ? fmtBytes(static_cast<uint64_t>(n)) : "n/a";
+}
+
+std::string fmtMaybePct(double v) {
+    if (v < 0 || !std::isfinite(v)) return "n/a";
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(1) << v << "%";
+    return oss.str();
+}
+
 std::string fmtDuration(double ms) {
     std::ostringstream oss;
     if (ms >= 1000.0)      oss << std::fixed << std::setprecision(2) << (ms / 1000.0) << " s";
@@ -363,6 +374,21 @@ void TextReport::parseDeviceLog(const std::vector<JsonValue>& records,
             }
         } else if (type == "kernel_detail") {
             details[rec.value<unsigned>("corr_id", 0u)] = rec;
+        } else if (type == "kernel_perf_metric_event") {
+            PerfMetricRecord pm;
+            pm.target_kind = "Kernel";
+            pm.name = rec.value<std::string>("kernel_name", "");
+            if (pm.name.empty()) pm.name = rec.value<std::string>("range_name", "");
+            pm.range_name = rec.value<std::string>("range_name", "");
+            pm.launch_ordinal = rec.value<unsigned>("launch_ordinal", 0u);
+            pm.device_id = rec.value<int>("device_id", 0);
+            pm.sm_throughput_pct = rec.value<double>("sm_throughput_pct", -1.0);
+            pm.l1_hit_rate_pct = rec.value<double>("l1_hit_rate_pct", -1.0);
+            pm.l2_hit_rate_pct = rec.value<double>("l2_hit_rate_pct", -1.0);
+            pm.dram_read_bytes = rec.value<int64_t>("dram_read_bytes", -1);
+            pm.dram_write_bytes = rec.value<int64_t>("dram_write_bytes", -1);
+            pm.tensor_active_pct = rec.value<double>("tensor_active_pct", -1.0);
+            if (!pm.name.empty()) perf_metrics_.push_back(std::move(pm));
         } else if (type == "memcpy_event_batch") {
             auto ci = buildColumnIndex(rec["columns"]);
             int64_t base = rec.value<int64_t>("base_time_ns", 0);
@@ -473,6 +499,21 @@ void TextReport::parseScopeLog(const std::vector<JsonValue>& records,
                     lookupOr(scope_name_dict, scope_id, "scope_"),
                 });
             }
+        } else if (type == "perf_metric_event") {
+            PerfMetricRecord pm;
+            pm.target_kind = "Scope";
+            pm.name = rec.value<std::string>("name", "");
+            if (pm.name.empty()) pm.name = rec.value<std::string>("user_scope", "");
+            pm.device_id = rec.value<int>("device_id", 0);
+            pm.start_ns = rec.value<int64_t>("start_ns", 0);
+            pm.end_ns = rec.value<int64_t>("end_ns", 0);
+            pm.sm_throughput_pct = rec.value<double>("sm_throughput_pct", -1.0);
+            pm.l1_hit_rate_pct = rec.value<double>("l1_hit_rate_pct", -1.0);
+            pm.l2_hit_rate_pct = rec.value<double>("l2_hit_rate_pct", -1.0);
+            pm.dram_read_bytes = rec.value<int64_t>("dram_read_bytes", -1);
+            pm.dram_write_bytes = rec.value<int64_t>("dram_write_bytes", -1);
+            pm.tensor_active_pct = rec.value<double>("tensor_active_pct", -1.0);
+            if (!pm.name.empty()) perf_metrics_.push_back(std::move(pm));
         } else if (type == "sass_config") {
             sass_active_ = true;
         }
@@ -539,6 +580,7 @@ std::string TextReport::generate() const {
     writeMemcpySummary(out);
     writeSystemMetrics(out);
     writeScopeSummary(out);
+    writePerfMetricsSummary(out);
     writePmSamplingSummary(out);
     writeProfileAnalysis(out);
     return out.str();
@@ -1029,6 +1071,51 @@ void TextReport::writeScopeSummary(std::ostringstream& out) const {
                    "Use GPU Time to compare kernel perf.\n";
         }
     }
+}
+
+void TextReport::writePerfMetricsSummary(std::ostringstream& out) const {
+    if (perf_metrics_.empty()) return;
+
+    out << "\n" << SEP << "\n  Range Profiler Counters\n" << SEP << "\n";
+    out << "  Total Counter Rows:   " << perf_metrics_.size() << "\n\n";
+
+    std::vector<const PerfMetricRecord*> rows;
+    rows.reserve(perf_metrics_.size());
+    for (const auto& r : perf_metrics_) rows.push_back(&r);
+    std::sort(rows.begin(), rows.end(), [](const auto* a, const auto* b) {
+        auto score = [](const PerfMetricRecord* r) {
+            return r->sm_throughput_pct >= 0 ? r->sm_throughput_pct : 0.0;
+        };
+        return score(a) > score(b);
+    });
+    if (top_n_ > 0 && static_cast<int>(rows.size()) > top_n_) rows.resize(top_n_);
+
+    out << "  " << std::left << std::setw(8) << "Target"
+        << std::setw(32) << "Name"
+        << std::right << std::setw(10) << "SM"
+        << std::setw(10) << "L1"
+        << std::setw(10) << "L2"
+        << std::setw(10) << "Tensor"
+        << std::setw(14) << "DRAM R"
+        << std::setw(14) << "DRAM W" << "\n";
+    out << "  " << std::string(108, '-') << "\n";
+
+    for (const auto* r : rows) {
+        const std::string display_name =
+            r->target_kind == "Kernel" ? shortenKernelName(r->name) : r->name;
+        out << "  " << std::left << std::setw(8) << r->target_kind
+            << std::setw(32) << truncate(display_name, 30)
+            << std::right << std::setw(10) << fmtMaybePct(r->sm_throughput_pct)
+            << std::setw(10) << fmtMaybePct(r->l1_hit_rate_pct)
+            << std::setw(10) << fmtMaybePct(r->l2_hit_rate_pct)
+            << std::setw(10) << fmtMaybePct(r->tensor_active_pct)
+            << std::setw(14) << fmtMaybeBytes(r->dram_read_bytes)
+            << std::setw(14) << fmtMaybeBytes(r->dram_write_bytes)
+            << "\n";
+    }
+
+    out << "\n  Note: Scope rows come from RangeProfiler; kernel rows come from "
+           "RangeProfilerKernelReplay.\n";
 }
 
 

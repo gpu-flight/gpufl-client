@@ -18,6 +18,8 @@
 #include <gtest/gtest.h>
 
 #include <cstdlib>
+
+#include "gpufl/core/env_vars.hpp"
 #include <optional>
 #include <string>
 
@@ -49,9 +51,9 @@ protected:
     void SetUp() override {
         // Each test starts from a clean env. Capture whatever was set
         // outside the test process so we can restore it after.
-        const char* prior = std::getenv("GPUFL_DISABLED");
+        const char* prior = std::getenv(gpufl::env::kDisabled);
         if (prior) saved_env_ = prior;
-        unsetEnv_("GPUFL_DISABLED");
+        unsetEnv_(gpufl::env::kDisabled);
     }
     void TearDown() override {
         // Always shut down — safe even if init() returned false (no
@@ -59,9 +61,9 @@ protected:
         gpufl::shutdown();
         // Restore env.
         if (saved_env_.has_value()) {
-            setEnv_("GPUFL_DISABLED", saved_env_->c_str());
+            setEnv_(gpufl::env::kDisabled, saved_env_->c_str());
         } else {
-            unsetEnv_("GPUFL_DISABLED");
+            unsetEnv_(gpufl::env::kDisabled);
         }
     }
     std::optional<std::string> saved_env_;
@@ -98,12 +100,12 @@ TEST_F(DisabledFlagTest, EnabledTrueIsTheDefault) {
 
 TEST_F(DisabledFlagTest, EnvVarTruthyDisables) {
     for (const char* v : {"1", "true", "TRUE", "yes", "on", "  yes  "}) {
-        setEnv_("GPUFL_DISABLED", v);
+        setEnv_(gpufl::env::kDisabled, v);
         gpufl::InitOptions opts;  // enabled stays true
         EXPECT_FALSE(gpufl::init(opts))
             << "env GPUFL_DISABLED='" << v << "' should disable but didn't";
         gpufl::shutdown();
-        unsetEnv_("GPUFL_DISABLED");
+        unsetEnv_(gpufl::env::kDisabled);
     }
 }
 
@@ -117,7 +119,7 @@ TEST_F(DisabledFlagTest, EnvVarFalsyDoesNotDisable) {
     // different post-CUDA outcomes; the only invariant is "disable
     // didn't fire.")
     for (const char* v : {"0", "false", "no", "off", ""}) {
-        setEnv_("GPUFL_DISABLED", v);
+        setEnv_(gpufl::env::kDisabled, v);
         gpufl::InitOptions opts;
         opts.enabled = false;  // we WANT this to win — proving env didn't
         // With both env=falsy and opts.enabled=false, the field decides:
@@ -126,14 +128,14 @@ TEST_F(DisabledFlagTest, EnvVarFalsyDoesNotDisable) {
             << "env='" << v
             << "' is falsy → field (enabled=false) should still disable";
         gpufl::shutdown();
-        unsetEnv_("GPUFL_DISABLED");
+        unsetEnv_(gpufl::env::kDisabled);
     }
 }
 
 TEST_F(DisabledFlagTest, EnvVarOverridesEnabledTrueKwarg) {
     // Env var is the kill switch — wins even when the caller explicitly
     // requested enabled=true.
-    setEnv_("GPUFL_DISABLED", "1");
+    setEnv_(gpufl::env::kDisabled, "1");
     gpufl::InitOptions opts;
     opts.enabled = true;
     EXPECT_FALSE(gpufl::init(opts));

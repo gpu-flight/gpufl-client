@@ -191,7 +191,10 @@ gpufl.shutdown()
 
 ## Profiling Engines
 
-CUPTI only allows one profiling mode per CUDA context at a time. Choose an engine at init:
+GPUFlight separates lightweight activity tracing from heavier counter/sampling
+engines. In embedded C++/Python mode you normally choose one
+`ProfilingEngine` at init. In launcher mode (`gpufl trace`) you can run
+multiple passes of the same command and upload/merge them later.
 
 ```python
 from gpufl import ProfilingEngine
@@ -209,7 +212,31 @@ gpufl.init("my-app",
 | `SassMetrics` | Per-instruction execution counts (binary instrumentation) | `session.inspect_profile_samples()` | Thread divergence and instruction-level behavior |
 | `PmSampling` | Time-series hardware counter samples from CUPTI PM Sampling | `session.inspect_pm_sampling()` | Hardware-counter timelines by scope |
 | `RangeProfiler` | SM throughput, L1/L2 hit rates, DRAM bandwidth, tensor core % | `session.inspect_perf_metrics()` | Hardware counter deep-dives |
+| `RangeProfilerKernelReplay` | Kernel replay hardware counters keyed by replay range/kernel name | `session.inspect_perf_metrics()` / report | Per-kernel hardware counters when timing can be correlated separately |
 | `Deep` | Deep decision pipeline: SASS first, PC-sampling fallback, PM Sampling when available | Text report plus profiling analyzer views | Single-run deep profiling with safe defaults |
+
+### Launcher multi-pass
+
+`gpufl trace` can run several passes of the same target process. This is the
+recommended path when you want data from engines that cannot safely coexist in
+one CUDA context.
+
+```bash
+gpufl trace --passes Trace,PcSampling,RangeProfilerKernelReplay -- python train.py
+```
+
+For embedded examples and test scripts, the lower-level compatibility-matrix
+knob is also available:
+
+```bash
+GPUFL_ENGINE_COMBO=Trace,PcSampling,RangeProfilerKernelReplay ./my_app
+```
+
+Think of merged data as a union of capabilities, not a blind overwrite.
+`Trace` owns canonical kernel timing. `PcSampling` adds stall samples that do
+not overlap with trace timing. `RangeProfilerKernelReplay` adds per-kernel
+hardware counters; local reports and `inspect_perf_metrics()` surface those
+rows alongside scope-level `RangeProfiler` counters.
 
 ### C++ Usage
 

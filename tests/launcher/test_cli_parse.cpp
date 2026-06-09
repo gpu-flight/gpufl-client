@@ -168,6 +168,85 @@ TEST(CliParseTrace, FlagsAfterDashDashTreatedAsCommandArgs) {
     EXPECT_EQ(r.args->command[1], "--verbose");
 }
 
+// ── gpufl trace --passes / multi-pass plan resolution ────────────────────
+
+TEST(CliParseTrace, PassesParsedAsList) {
+    auto r = parseTraceArgs(
+        argsFor({"--passes", "Trace,PcSampling,SassMetrics", "--", "./bin"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    ASSERT_EQ(r.args->passes.size(), 3u);
+    EXPECT_EQ(r.args->passes[0], "Trace");
+    EXPECT_EQ(r.args->passes[1], "PcSampling");
+    EXPECT_EQ(r.args->passes[2], "SassMetrics");
+    EXPECT_TRUE(r.args->engine.empty());
+}
+
+TEST(CliParseTrace, PassesTrimsWhitespace) {
+    // Spaces after commas (a natural way to type the list) are tolerated.
+    auto r = parseTraceArgs(
+        argsFor({"--passes=Trace, SassMetrics", "--", "./bin"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    ASSERT_EQ(r.args->passes.size(), 2u);
+    EXPECT_EQ(r.args->passes[0], "Trace");
+    EXPECT_EQ(r.args->passes[1], "SassMetrics");
+}
+
+TEST(CliParseTrace, PassesInvalidEngineRejected) {
+    auto r = parseTraceArgs(argsFor({"--passes=Trace,warpdrive", "--", "./bin"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("invalid --passes"), std::string::npos);
+}
+
+TEST(CliParseTrace, PassesEmptyRejected) {
+    auto r = parseTraceArgs(argsFor({"--passes=", "--", "./bin"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("--passes requires"), std::string::npos);
+}
+
+TEST(CliParseTrace, EngineAndPassesMutuallyExclusive) {
+    auto r = parseTraceArgs(
+        argsFor({"--engine=Deep", "--passes=Trace", "--", "./bin"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("mutually exclusive"), std::string::npos);
+}
+
+TEST(ResolvePassPlan, ExplicitPassesWin) {
+    TraceArgs a;
+    a.passes = {"Trace", "SassMetrics"};
+    a.engine = "";  // empty — passes take precedence regardless
+    const auto plan = resolvePassPlan(a);
+    ASSERT_EQ(plan.size(), 2u);
+    EXPECT_EQ(plan[0], "Trace");
+    EXPECT_EQ(plan[1], "SassMetrics");
+}
+
+TEST(ResolvePassPlan, DeepExpandsToDefaultPlan) {
+    TraceArgs a;
+    a.engine = "Deep";
+    const auto plan = resolvePassPlan(a);
+    ASSERT_EQ(plan.size(), 3u);
+    EXPECT_EQ(plan[0], "Trace");
+    EXPECT_EQ(plan[1], "PcSampling");
+    EXPECT_EQ(plan[2], "SassMetrics");
+}
+
+TEST(ResolvePassPlan, SingleExplicitEngineIsOnePass) {
+    TraceArgs a;
+    a.engine = "PcSampling";
+    const auto plan = resolvePassPlan(a);
+    ASSERT_EQ(plan.size(), 1u);
+    EXPECT_EQ(plan[0], "PcSampling");
+}
+
+TEST(ResolvePassPlan, NoEngineIsOneDefaultPass) {
+    // No --engine, no --passes → one pass with an empty engine string, i.e.
+    // "use the profile's default engine" — the legacy single-pass behavior.
+    TraceArgs a;
+    const auto plan = resolvePassPlan(a);
+    ASSERT_EQ(plan.size(), 1u);
+    EXPECT_TRUE(plan[0].empty());
+}
+
 // ── gpufl upload ────────────────────────────────────────────────────────
 
 TEST(CliParseUpload, BasicLogPath) {

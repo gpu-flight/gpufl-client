@@ -95,6 +95,24 @@ struct InitEvent {
     // lives next to the InitEvent build site (gpufl.cpp).
     std::string session_kind;
     std::string profiling_engine;
+    // Multi-pass profiling grouping (P1 of the multi-pass workstream).
+    // A single "analysis" = N separately-launched passes (one CUPTI engine
+    // each, isolated to dodge the SASS/kernel-activity deadlock + cross-
+    // perturbation) that the backend stitches back into one kernel view.
+    // The launcher's multi-pass driver sets GPUFL_ANALYSIS_ID/PASS_INDEX/
+    // PASS_COUNT in each child; gpufl::init() reads them into these fields.
+    //   analysis_id : stable id shared by every pass of one analysis
+    //                 (empty for an ordinary single-pass run — then
+    //                 pass_index/pass_count are NOT emitted).
+    //   pass_index  : 0-based position of this pass within the analysis.
+    //   pass_count  : total passes planned for the analysis (lets the
+    //                 backend detect a missing/failed pass).
+    // All three are emitted to job_start only when analysis_id is non-empty,
+    // so single runs are byte-identical to pre-P1 (and pass_index==0 is
+    // never ambiguous with "unset").
+    std::string analysis_id;
+    int pass_index = 0;
+    int pass_count = 0;
 };
 
 struct ShutdownEvent {
@@ -110,6 +128,26 @@ struct SassConfigEvent {
     uint32_t device_id = 0;
     std::vector<std::string> configured_metrics;  // metrics successfully enabled
     std::vector<std::string> skipped_metrics;     // metrics CUPTI rejected for this GPU
+};
+
+// Per-scope Execution Signature (P2 multi-pass determinism guard input).
+// Accumulated from KERNEL_LAUNCH_META — which fires in EVERY engine mode, so
+// every isolated pass (even SASS, where kernel-activity is off) has the full
+// per-launch inventory. `signature` hashes the sorted MULTISET of
+// (mangled kernel name, grid, block, dyn_smem) -> launch count within the scope
+// (mangled is intentional: byte-identical across passes, so no demangle is
+// needed here). The backend compares this fingerprint per scope across the
+// passes of one analysis: equal => the launch pattern is deterministic and SASS
+// metrics from one pass may be merged onto another pass's timing for that
+// scope; different (e.g. cuDNN autotune changed grid/block/count) => abort the
+// SASS merge for that scope. Emitted once per scope at session end.
+struct ExecutionSignatureEvent {
+    std::string session_id;
+    int64_t     ts_ns = 0;
+    std::string scope_name;        // full user-scope path; "" = global / no scope
+    uint64_t    signature = 0;     // FNV-1a 64 over the sorted launch multiset
+    uint64_t    launch_count = 0;  // total kernel launches attributed to the scope
+    uint32_t    distinct_kernels = 0;  // distinct (name,grid,block,smem) keys
 };
 
 struct CaptureCapability {
@@ -499,16 +537,37 @@ struct PerfMetricEvent {
     int64_t end_ns = 0;
     int device_id = 0;
 
-    // Hardware counters (-1.0 = not available for this GPU/metric)
+    // Hardware counters (-1/-1.0 = not available for this GPU/metric)
     double sm_throughput_pct = -1.0;   // SM active % of peak
     double l1_hit_rate_pct = -1.0;     // L1 global load hit rate
     double l2_hit_rate_pct = -1.0;     // L2 read hit rate
-    uint64_t dram_read_bytes = 0;      // DRAM read bytes
-    uint64_t dram_write_bytes = 0;     // DRAM write bytes
+    int64_t dram_read_bytes = -1;      // DRAM read bytes
+    int64_t dram_write_bytes = -1;     // DRAM write bytes
     double tensor_active_pct = -1.0;   // Tensor core active % (-1 if N/A)
 
     std::string user_scope;
     int scope_depth = 0;
+};
+
+struct KernelPerfMetricEvent {
+    int pid = 0;
+    std::string app;
+    std::string session_id;
+    int device_id = 0;
+    size_t range_index = 0;
+    std::string range_name;
+
+    // Candidate join fields. KernelReplay auto-ranges usually expose a kernel
+    // range name, but not the CUPTI activity correlation id.
+    std::string kernel_name;
+    uint32_t launch_ordinal = 0;
+
+    double sm_throughput_pct = -1.0;
+    double l1_hit_rate_pct = -1.0;
+    double l2_hit_rate_pct = -1.0;
+    int64_t dram_read_bytes = -1;
+    int64_t dram_write_bytes = -1;
+    double tensor_active_pct = -1.0;
 };
 
 /**

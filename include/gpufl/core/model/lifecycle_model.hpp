@@ -37,4 +37,14 @@ private:
     const CaptureCapabilitiesEvent& e_;
 };
 
+struct ExecutionSignatureModel final : IJsonSerializable {
+    explicit ExecutionSignatureModel(const ExecutionSignatureEvent& e) : e_(e) {}
+    std::string buildJson() const override;
+    // Scope-attributed per-pass kernel-launch fingerprint — grouped with the
+    // other per-scope profiling data (profile_sample_batch) on the Scope channel.
+    Channel channel() const override { return Channel::Scope; }
+private:
+    const ExecutionSignatureEvent& e_;
+};
+
 }  // namespace gpufl::model

@@ -14,7 +14,9 @@
 #include <gtest/gtest.h>
 
 #include "gpufl/core/itanium_demangle.hpp"
+#include "gpufl/core/stack_trace.hpp"
 
+using gpufl::core::DemangleFunctionKey;
 using gpufl::core::DemangleItaniumName;
 
 // ── Pass-through cases ───────────────────────────────────────────────
@@ -143,4 +145,47 @@ TEST(ItaniumDemangle, UnknownTemplateArgFallsBack) {
         << "must always return something displayable, even on parse failure";
     // Doesn't matter whether it's the original mangled form or a
     // partial demangle — we just guarantee the caller can show it.
+}
+
+// ── DemangleFunctionKey: "name@source" → "demangled@source" ──────────
+//
+// SASS / PC sampling intern their per-symbol identity as
+// `mangled_name + "@" + source_file`. DemangleFunctionKey demangles ONLY the
+// name half so the result joins Trace's already-demangled kernel_dict for the
+// multi-pass merge, while the source path survives verbatim. Delegates to
+// DemangleName, so the same substring-not-byte-exact contract applies.
+
+TEST(DemangleFunctionKey, DemanglesNameKeepsSourceTail) {
+    const auto out =
+        DemangleFunctionKey("_Z16branchByWarpQuadPfPKfi@/kernels/foo.cu");
+    EXPECT_NE(out.find("branchByWarpQuad"), std::string::npos)
+        << "name half must be demangled — got: " << out;
+    EXPECT_NE(out.find("@/kernels/foo.cu"), std::string::npos)
+        << "the @source tail must survive verbatim — got: " << out;
+}
+
+TEST(DemangleFunctionKey, NonMangledNamePassesThrough) {
+    // Already-demangled / plain names + their source survive byte-for-byte.
+    EXPECT_EQ(DemangleFunctionKey("vectorAdd@/kernels/foo.cu"),
+              "vectorAdd@/kernels/foo.cu");
+}
+
+TEST(DemangleFunctionKey, NoAtSignDemanglesWholeKey) {
+    const auto out = DemangleFunctionKey("_Z16branchByWarpQuadPfPKfi");
+    EXPECT_NE(out.find("branchByWarpQuad"), std::string::npos) << out;
+    EXPECT_EQ(out.find('@'), std::string::npos)
+        << "must not invent a source tail when the key has none — got: " << out;
+}
+
+TEST(DemangleFunctionKey, EmptySourceKeepsTrailingAt) {
+    const auto out = DemangleFunctionKey("_Z16branchByWarpQuadPfPKfi@");
+    EXPECT_NE(out.find("branchByWarpQuad"), std::string::npos) << out;
+    ASSERT_FALSE(out.empty());
+    EXPECT_EQ(out.back(), '@')
+        << "empty source → trailing '@' preserved — got: " << out;
+}
+
+TEST(DemangleFunctionKey, EmptyNameKeepsSource) {
+    // First '@' is at index 0 → empty name half, source survives.
+    EXPECT_EQ(DemangleFunctionKey("@/kernels/foo.cu"), "@/kernels/foo.cu");
 }

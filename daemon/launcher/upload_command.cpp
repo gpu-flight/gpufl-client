@@ -11,6 +11,8 @@
 
 #include "upload_command.hpp"
 
+#include "gpufl/core/env_vars.hpp"
+
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -31,8 +33,8 @@ std::string resolve(const std::string& flag, const char* env_name) {
 }  // namespace
 
 int runUpload(const UploadArgs& args) {
-    const std::string backend_url = resolve(args.backend_url, "GPUFL_BACKEND_URL");
-    const std::string api_key     = resolve(args.api_key,     "GPUFL_API_KEY");
+    const std::string backend_url = resolve(args.backend_url, gpufl::env::kBackendUrl);
+    const std::string api_key     = resolve(args.api_key,     gpufl::env::kApiKey);
 
     if (backend_url.empty()) {
         std::fprintf(stderr,
@@ -49,7 +51,7 @@ int runUpload(const UploadArgs& args) {
     opts.log_path          = args.log_path;
     opts.backend_url       = backend_url;
     opts.api_key           = api_key;
-    opts.api_path          = resolve(args.api_path, "GPUFL_API_PATH");
+    opts.api_path          = resolve(args.api_path, gpufl::env::kApiPath);
     opts.total_timeout_ms  = args.timeout_s * 1000;
     opts.max_retries       = args.retries;
     opts.report_progress   = !args.quiet;

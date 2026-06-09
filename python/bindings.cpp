@@ -75,6 +75,8 @@ PYBIND11_MODULE(_gpufl_client, m) {
         .value("SassMetrics",   gpufl::ProfilingEngine::SassMetrics)
         .value("PmSampling",    gpufl::ProfilingEngine::PmSampling)
         .value("RangeProfiler", gpufl::ProfilingEngine::RangeProfiler)
+        .value("RangeProfilerKernelReplay",
+               gpufl::ProfilingEngine::RangeProfilerKernelReplay)
         .value("Deep",          gpufl::ProfilingEngine::Deep)
         .export_values();
 
@@ -91,6 +93,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
         .def_readwrite("enable_debug_output",   &gpufl::InitOptions::enable_debug_output)
         .def_readwrite("enable_stack_trace",    &gpufl::InitOptions::enable_stack_trace)
         .def_readwrite("enable_source_collection", &gpufl::InitOptions::enable_source_collection)
+        .def_readwrite("flush_logs_always",     &gpufl::InitOptions::flush_logs_always)
         // feature gates — surfaced on the InitOptions class so
         // power users can tweak them via the dataclass-style API.
         .def_readwrite("enable_external_correlation", &gpufl::InitOptions::enable_external_correlation)
@@ -155,7 +158,8 @@ PYBIND11_MODULE(_gpufl_client, m) {
                      uint32_t pm_sampling_max_samples,
                      std::string pm_sampling_preset,
                      std::vector<std::string> pm_sampling_metrics,
-                     bool pm_sampling_scope_only) -> bool {
+                     bool pm_sampling_scope_only,
+                     bool flush_logs_always) -> bool {
 
         gpufl::InitOptions opts;
         opts.app_name              = app_name;
@@ -167,6 +171,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
         opts.enable_debug_output   = enable_debug_output;
         opts.enable_stack_trace    = enable_stack_trace;
         opts.enable_source_collection = enable_source_collection;
+        opts.flush_logs_always     = flush_logs_always;
         opts.profiling_engine      = profiling_engine;
         opts.config_file           = config_file;
         opts.backend_url           = std::move(backend_url);
@@ -205,7 +210,8 @@ PYBIND11_MODULE(_gpufl_client, m) {
        py::arg("pm_sampling_max_samples")     = 4096,
        py::arg("pm_sampling_preset")          = "overview",
        py::arg("pm_sampling_metrics")         = std::vector<std::string>{},
-       py::arg("pm_sampling_scope_only")      = true);
+       py::arg("pm_sampling_scope_only")      = true,
+       py::arg("flush_logs_always")           = false);
 
     m.def("system_start", [](std::string name) { gpufl::systemStart(std::move(name)); },
         py::arg("name") = "system");

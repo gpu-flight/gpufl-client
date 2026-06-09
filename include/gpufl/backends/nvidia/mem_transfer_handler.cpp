@@ -91,6 +91,7 @@ MemTransferHandler::requiredCallbacks() const {
 
 std::vector<CUpti_ActivityKind> MemTransferHandler::requiredActivityKinds()
     const {
+    if (backend_ && !backend_->collectsKernelEvents()) return {};
     if (backend_ && !backend_->AllowSassMemTransferActivity()) return {};
     return {CUPTI_ACTIVITY_KIND_MEMCPY, CUPTI_ACTIVITY_KIND_MEMCPY2,
             CUPTI_ACTIVITY_KIND_MEMSET};
@@ -261,7 +262,7 @@ bool MemTransferHandler::handleActivityRecord(const CUpti_Activity* record,
         // (joinLaunchMeta in monitor.cpp, keyed by corr_id) — no meta_mu_ here.
         // (Step 4b-2.)
         g_monitorBuffer.Push(out);
-        backend_->NoteMemoryActivityEmitted();
+        backend_->NoteMemTransferActivityEmitted();
         return true;
     }
 
@@ -281,7 +282,7 @@ bool MemTransferHandler::handleActivityRecord(const CUpti_Activity* record,
         // (joinLaunchMeta in monitor.cpp, keyed by corr_id) — no meta_mu_ here.
         // (Step 4b-2.)
         g_monitorBuffer.Push(out);
-        backend_->NoteMemoryActivityEmitted();
+        backend_->NoteMemTransferActivityEmitted();
         return true;
     }
 

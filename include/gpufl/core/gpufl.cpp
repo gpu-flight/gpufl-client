@@ -1,5 +1,7 @@
 #include "gpufl.hpp"
 
+#include "gpufl/core/env_vars.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -219,7 +221,7 @@ namespace {
 // so the two layers stay interchangeable. Empty / unset / anything else
 // → false.
 bool envDisabled_() {
-    const char* v = std::getenv("GPUFL_DISABLED");
+    const char* v = std::getenv(gpufl::env::kDisabled);
     if (!v) return false;
     std::string s(v);
     // Trim ASCII whitespace.
@@ -229,6 +231,15 @@ bool envDisabled_() {
     // Lower-case.
     for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return s == "1" || s == "true" || s == "yes" || s == "on";
+}
+
+bool windowsInjectedProcess_() {
+#if defined(_WIN32)
+    const char* injected = std::getenv(gpufl::env::kInject);
+    return injected && std::string(injected) == "1";
+#else
+    return false;
+#endif
 }
 
 }  // namespace
@@ -257,7 +268,7 @@ bool init(const InitOptions& opts) {
     {
         std::string configPath = g_opts.config_file;
         if (configPath.empty()) {
-            if (const char* env = std::getenv("GPUFL_CONFIG_FILE")) configPath = env;
+            if (const char* env = std::getenv(gpufl::env::kConfigFile)) configPath = env;
         }
         if (!configPath.empty()) {
             ConfigFileLoader::apply(g_opts, configPath);
@@ -269,15 +280,15 @@ bool init(const InitOptions& opts) {
         std::string key  = g_opts.api_key;
         std::string apiPath = g_opts.api_path;
         if (url.empty()) {
-            if (const char* e = std::getenv("GPUFL_BACKEND_URL")) url = e;
+            if (const char* e = std::getenv(gpufl::env::kBackendUrl)) url = e;
             // Legacy name — accept for one release to ease migration.
-            else if (const char* e2 = std::getenv("GPUFL_REMOTE_CONFIG")) url = e2;
+            else if (const char* e2 = std::getenv(gpufl::env::kRemoteConfig)) url = e2;
         }
         if (key.empty()) {
-            if (const char* e = std::getenv("GPUFL_API_KEY")) key = e;
+            if (const char* e = std::getenv(gpufl::env::kApiKey)) key = e;
         }
         if (apiPath.empty()) {
-            if (const char* e = std::getenv("GPUFL_API_PATH")) apiPath = e;
+            if (const char* e = std::getenv(gpufl::env::kApiPath)) apiPath = e;
         }
         // Normalize once — every downstream consumer (HttpLogSink wiring
         // below, the version-discovery probe) just appends after this.
@@ -368,7 +379,7 @@ bool init(const InitOptions& opts) {
     // Accepts exactly the six canonical engine names. Unrecognized
     // values are logged and ignored (the engine stays at whatever
     // g_opts set above) rather than silently doing nothing.
-    if (const char* envEngine = std::getenv("GPUFL_PROFILING_ENGINE")) {
+    if (const char* envEngine = std::getenv(gpufl::env::kProfilingEngine)) {
         const std::string val(envEngine);
         bool matched = true;
         if (val == "Monitor")                  mOpts.profiling_engine = ProfilingEngine::Monitor;
@@ -377,6 +388,8 @@ bool init(const InitOptions& opts) {
         else if (val == "SassMetrics")         mOpts.profiling_engine = ProfilingEngine::SassMetrics;
         else if (val == "PmSampling")          mOpts.profiling_engine = ProfilingEngine::PmSampling;
         else if (val == "RangeProfiler")       mOpts.profiling_engine = ProfilingEngine::RangeProfiler;
+        else if (val == "RangeProfilerKernelReplay")
+            mOpts.profiling_engine = ProfilingEngine::RangeProfilerKernelReplay;
         else if (val == "Deep")                mOpts.profiling_engine = ProfilingEngine::Deep;
         else matched = false;
         if (matched) {
@@ -422,15 +435,15 @@ bool init(const InitOptions& opts) {
     // gpufl.init(); this covers the pure-C++ path.
     if (mOpts.profiling_engine == ProfilingEngine::SassMetrics ||
         mOpts.profiling_engine == ProfilingEngine::Deep) {
-        const char* knobEnv = std::getenv("GPUFL_EAGER_MODULE_LOADING");
+        const char* knobEnv = std::getenv(gpufl::env::kEagerModuleLoading);
         const std::string knob = knobEnv ? knobEnv : "";
         const bool optedIn = (knob == "1" || knob == "true" ||
                               knob == "yes" || knob == "on");
-        if (optedIn && std::getenv("CUDA_MODULE_LOADING") == nullptr) {
+        if (optedIn && std::getenv(gpufl::env::kCudaModuleLoading) == nullptr) {
 #if defined(_WIN32)
-            _putenv_s("CUDA_MODULE_LOADING", "EAGER");
+            _putenv_s(gpufl::env::kCudaModuleLoading, "EAGER");
 #else
-            setenv("CUDA_MODULE_LOADING", "EAGER", /*overwrite=*/0);
+            setenv(gpufl::env::kCudaModuleLoading, "EAGER", /*overwrite=*/0);
 #endif
             GFL_LOG_DEBUG("[gpufl] CUDA_MODULE_LOADING=EAGER set "
                           "(GPUFL_EAGER_MODULE_LOADING opt-in) for SASS/Deep.");
@@ -495,14 +508,35 @@ bool init(const InitOptions& opts) {
     if (rt_ptr->collector) {
         ie.devices = rt_ptr->collector->sampleAll();
     }
-    if (rt_ptr->static_info_collector) {
+    const bool skipStaticInfoDuringInject = windowsInjectedProcess_();
+    if (rt_ptr->static_info_collector && !skipStaticInfoDuringInject) {
         ie.gpu_static_device_infos =
             rt_ptr->static_info_collector->sampleStaticInfo();
+    } else if (skipStaticInfoDuringInject) {
+        GFL_LOG_DEBUG("Skipping CUDA static GPU inventory during Windows injection init.");
     }
     ie.host = rt_ptr->host_collector->sample();
 
     ie.session_kind = ProfilingEngineSessionKind(mOpts.profiling_engine);
     ie.profiling_engine = ProfilingEngineWireName(mOpts.profiling_engine);
+
+    // Multi-pass grouping (P1): the launcher's multi-pass driver tags each
+    // child with GPUFL_ANALYSIS_ID + its 0-based GPUFL_PASS_INDEX and the
+    // GPUFL_PASS_COUNT total so the backend can stitch the isolated passes
+    // into one analysis. Read straight from the env here (same pattern as the
+    // GPUFL_PROFILING_ENGINE override above). Absent → an ordinary single-pass
+    // run: analysis_id stays empty and the three fields are omitted from
+    // job_start (see InitEventModel), keeping single runs wire-identical.
+    if (const char* envAnalysis = std::getenv(gpufl::env::kAnalysisId);
+        envAnalysis && *envAnalysis) {
+        ie.analysis_id = envAnalysis;
+        if (const char* envIdx = std::getenv(gpufl::env::kPassIndex))
+            ie.pass_index = std::atoi(envIdx);
+        if (const char* envCnt = std::getenv(gpufl::env::kPassCount))
+            ie.pass_count = std::atoi(envCnt);
+        GFL_LOG_DEBUG("Multi-pass: analysis_id=", ie.analysis_id,
+                      " pass ", ie.pass_index, "/", ie.pass_count);
+    }
 
     rt_ptr->logger->write(model::InitEventModel(ie));
 
@@ -756,8 +790,14 @@ void ScopedMonitor::init_(const ScopeMeta& meta) {
 
     // Scope callbacks are useful for both tracing and profiling backends.
     Monitor::BeginProfilerScope(name_.c_str());
+    // Perf scope (Range Profiler / Perfworks). Also fire it when an engine combo
+    // (GPUFL_ENGINE_COMBO) is active even with a Trace base — otherwise a
+    // Trace+RangeProfiler combo would never trigger Range's perf scope. Harmless
+    // no-op for engines that don't use perf scopes (PC / PM).
+    const char* comboEnv = std::getenv(gpufl::env::kEngineCombo);
+    const bool comboActive = comboEnv && comboEnv[0] != '\0';
     if (g_opts.profiling_engine != ProfilingEngine::Monitor &&
-        g_opts.profiling_engine != ProfilingEngine::Trace) {
+        (g_opts.profiling_engine != ProfilingEngine::Trace || comboActive)) {
         Monitor::BeginPerfScope(name_.c_str());
     }
 
@@ -807,8 +847,10 @@ ScopedMonitor::~ScopedMonitor() {
     Monitor::PushScopeRow(row);
 
     Monitor::EndProfilerScope(name_.c_str());
+    const char* comboEnv = std::getenv(gpufl::env::kEngineCombo);
+    const bool comboActive = comboEnv && comboEnv[0] != '\0';
     if (g_opts.profiling_engine != ProfilingEngine::Monitor &&
-        g_opts.profiling_engine != ProfilingEngine::Trace) {
+        (g_opts.profiling_engine != ProfilingEngine::Trace || comboActive)) {
         Monitor::EndPerfScope(
             name_.c_str());  // triggers EndPerfPassAndDecode first
         if (IMonitorBackend* b = Monitor::GetBackend()) {

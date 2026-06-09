@@ -277,6 +277,7 @@ int RocprofilerBackend::toolInitialize() {
             case ProfilingEngine::SassMetrics:
             case ProfilingEngine::Deep:
             case ProfilingEngine::RangeProfiler:
+            case ProfilingEngine::RangeProfilerKernelReplay:
                 engine_ = std::make_unique<DispatchCounterEngine>();
                 break;
             default:

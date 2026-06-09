@@ -26,6 +26,8 @@ void ConfigFileLoader::apply(InitOptions& opts, const std::string& path) {
         else if (v == "SassMetrics")   opts.profiling_engine = ProfilingEngine::SassMetrics;
         else if (v == "PmSampling")    opts.profiling_engine = ProfilingEngine::PmSampling;
         else if (v == "RangeProfiler") opts.profiling_engine = ProfilingEngine::RangeProfiler;
+        else if (v == "RangeProfilerKernelReplay")
+            opts.profiling_engine = ProfilingEngine::RangeProfilerKernelReplay;
         else if (v == "Deep")          opts.profiling_engine = ProfilingEngine::Deep;
     }
 
