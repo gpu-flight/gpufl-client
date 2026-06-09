@@ -20,10 +20,12 @@ if (-not $Combos -or $Combos.Count -eq 0) {
         "PcSampling",
         "PmSampling",
         "RangeProfiler",
+        "RangeProfilerKernelReplay",
         "Trace,PmSampling",
         "Trace,PcSampling",
         "PmSampling,PcSampling",
-        "Trace,RangeProfiler"
+        "Trace,RangeProfiler",
+        "Trace,RangeProfilerKernelReplay"
     )
 }
 if ($IncludeSass) {

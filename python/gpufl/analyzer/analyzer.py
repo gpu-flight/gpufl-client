@@ -180,11 +180,22 @@ class GpuFlightSession:
 
             if not scope_df.empty and 'type' in scope_df.columns:
                 self.scopes = scope_df
-                self.perf   = scope_df[scope_df['type'] == 'perf_metric_event'].copy()
+                perf_frames = [scope_df[scope_df['type'] == 'perf_metric_event'].copy()]
+                if not device_df.empty and 'type' in device_df.columns:
+                    perf_frames.append(device_df[device_df['type'] == 'kernel_perf_metric_event'].copy())
+                self.perf = pd.concat(
+                    [f for f in perf_frames if not f.empty],
+                    ignore_index=True,
+                    sort=False,
+                ) if any(not f.empty for f in perf_frames) else pd.DataFrame()
                 self.pm_samples = scope_df[scope_df['type'] == 'pm_sample'].copy() if 'pm_sample' in set(scope_df['type']) else pd.DataFrame()
             else:
                 self.scopes = pd.DataFrame()
-                self.perf   = pd.DataFrame()
+                self.perf = (
+                    device_df[device_df['type'] == 'kernel_perf_metric_event'].copy()
+                    if not device_df.empty and 'type' in device_df.columns
+                    else pd.DataFrame()
+                )
                 self.pm_samples = pd.DataFrame()
 
             self.system         = system_df
@@ -503,12 +514,27 @@ class GpuFlightSession:
                     })
         pm_df = pd.DataFrame(pm_rows)
 
-        # ── perf_metric_event (scope log — still per-event, not batched) ──────
+        # ── perf_metric_event / kernel_perf_metric_event (per-event counters) ─
         perf_df = pd.DataFrame()
         if not scope_df.empty and 'type' in scope_df.columns:
             perf_rows = scope_df[scope_df['type'] == 'perf_metric_event']
             if not perf_rows.empty:
                 perf_df = perf_rows.copy()
+                perf_df['kind'] = 'scope'
+                if 'name' not in perf_df.columns and 'user_scope' in perf_df.columns:
+                    perf_df['name'] = perf_df['user_scope']
+        if not device_df.empty and 'type' in device_df.columns:
+            kernel_perf_rows = device_df[device_df['type'] == 'kernel_perf_metric_event']
+            if not kernel_perf_rows.empty:
+                kernel_perf = kernel_perf_rows.copy()
+                kernel_perf['kind'] = 'kernel'
+                if 'name' not in kernel_perf.columns:
+                    kernel_perf['name'] = kernel_perf.get('kernel_name')
+                if 'name' in kernel_perf.columns and 'kernel_name' in kernel_perf.columns:
+                    kernel_perf['name'] = kernel_perf['name'].fillna(kernel_perf['kernel_name'])
+                if 'name' in kernel_perf.columns and 'range_name' in kernel_perf.columns:
+                    kernel_perf['name'] = kernel_perf['name'].fillna(kernel_perf['range_name'])
+                perf_df = pd.concat([perf_df, kernel_perf], ignore_index=True, sort=False)
 
         # ── device_metric_batch (system log) ──────────────────────────────────
         dm_rows = []
@@ -595,6 +621,22 @@ class GpuFlightSession:
             self.memcpy = m
 
         if not self.perf.empty:
+            if 'kind' not in self.perf.columns:
+                if 'type' in self.perf.columns:
+                    self.perf['kind'] = self.perf['type'].map({
+                        'kernel_perf_metric_event': 'kernel',
+                        'perf_metric_event': 'scope',
+                    }).fillna('scope')
+                else:
+                    self.perf['kind'] = 'scope'
+            if 'name' not in self.perf.columns:
+                self.perf['name'] = None
+            if 'kernel_name' in self.perf.columns:
+                self.perf['name'] = self.perf['name'].fillna(self.perf['kernel_name'])
+            if 'range_name' in self.perf.columns:
+                self.perf['name'] = self.perf['name'].fillna(self.perf['range_name'])
+            if 'user_scope' in self.perf.columns:
+                self.perf['name'] = self.perf['name'].fillna(self.perf['user_scope'])
             for col in [
                 'start_ns', 'end_ns',
                 'sm_throughput_pct', 'l1_hit_rate_pct', 'l2_hit_rate_pct',
@@ -1321,14 +1363,15 @@ class GpuFlightSession:
 
     def _print_perf_metric_hint(self):
         self.console.print(
-            "[yellow]No perf_metric_event records found in scope log.[/yellow]\n"
+            "[yellow]No perf metric counter records found in logs.[/yellow]\n"
             "  To collect hardware-counter perf metrics:\n"
             "    1. [bold]profiling_engine[/bold]: pass "
-            "[cyan]ProfilingEngine.RangeProfiler[/cyan] to "
+            "[cyan]ProfilingEngine.RangeProfiler[/cyan] or "
+            "[cyan]ProfilingEngine.RangeProfilerKernelReplay[/cyan] to "
             "[cyan]gpufl.init()[/cyan].\n"
-            "    2. [bold]Scopes required[/bold]: wrap GPU work in "
+            "    2. [bold]Scopes[/bold]: RangeProfiler emits on scope close; wrap GPU work in "
             "[cyan]with gpufl.Scope(\"name\"):[/cyan] blocks — perf "
-            "metrics emit on scope close.\n"
+            "metrics emit on scope close. Kernel replay emits per replayed kernel range.\n"
             "    3. [bold]Mutually exclusive with PC sampling[/bold]: "
             "RangeProfiler and PcSampling both use hardware perf "
             "counters; pick one per session.\n"
@@ -1395,6 +1438,10 @@ class GpuFlightSession:
             if col in p.columns:
                 # Backend uses -1.0 sentinel for unavailable counters.
                 p.loc[p[col] < 0, col] = float('nan')
+        for col in ['dram_read_bytes', 'dram_write_bytes']:
+            if col in p.columns:
+                p[col] = pd.to_numeric(p[col], errors='coerce')
+                p.loc[p[col] < 0, col] = float('nan')
 
         def avg_if_exists(col: str):
             return p[col].dropna().mean() if col in p.columns else float('nan')
@@ -1425,7 +1472,10 @@ class GpuFlightSession:
             if col not in p.columns:
                 p[col] = float('nan')
 
-        agg = p.groupby('name', dropna=False).agg(
+        if 'kind' not in p.columns:
+            p['kind'] = 'scope'
+
+        agg = p.groupby(['kind', 'name'], dropna=False).agg(
             count=('name', 'count'),
             sm=('sm_throughput_pct', 'mean'),
             l1=('l1_hit_rate_pct', 'mean'),
@@ -1435,8 +1485,9 @@ class GpuFlightSession:
             dram_w=('dram_write_bytes', 'mean'),
         ).sort_values('count', ascending=False).head(top_n)
 
-        table = Table(title=f"Perf Metrics by Scope — Top {top_n}")
-        table.add_column("Scope", style="cyan")
+        table = Table(title=f"Perf Metrics by Target - Top {top_n}")
+        table.add_column("Target", style="cyan")
+        table.add_column("Name", style="cyan")
         table.add_column("Events", justify="right")
         table.add_column("SM%", justify="right")
         table.add_column("L1%", justify="right")
@@ -1445,9 +1496,10 @@ class GpuFlightSession:
         table.add_column("DRAM Read", justify="right")
         table.add_column("DRAM Write", justify="right")
 
-        for scope_name, row in agg.iterrows():
+        for (kind, target_name), row in agg.iterrows():
             table.add_row(
-                str(scope_name),
+                str(kind),
+                str(target_name),
                 str(int(row['count'])),
                 fmt_pct(row['sm']),
                 fmt_pct(row['l1']),

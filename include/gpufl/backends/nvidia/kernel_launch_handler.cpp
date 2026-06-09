@@ -452,10 +452,20 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
 
     const auto* k = reinterpret_cast<const CUpti_ActivityKernel11*>(record);
     backend_->kernel_activity_seen_.fetch_add(1, std::memory_order_relaxed);
+    const char* kernelName = k->name ? k->name : "";
+    const bool looksLikeReplayWait =
+        std::strcmp(kernelName, "WaitNs") == 0 &&
+        k->gridX == 1 && k->gridY == 1 && k->gridZ == 1 &&
+        k->blockX == 1 && k->blockY == 1 && k->blockZ == 1;
+    if (backend_->UsesRangeProfilerKernelReplay() && looksLikeReplayWait) {
+        GFL_LOG_DEBUG("[KernelLaunchHandler] skipping RangeProfilerKernelReplay "
+                      "internal wait kernel corr=", k->correlationId);
+        return false;
+    }
 
     // Diagnostic: log every real activity record as it arrives.
     GFL_LOG_DEBUG("[KernelLaunchHandler] ACTIVITY_RECORD corr=",
-                  k->correlationId, " name=", k->name,
+                  k->correlationId, " name=", kernelName,
                   " start=", k->start, " end=", k->end,
                   " dur=", k->end - k->start);
 
@@ -480,7 +490,7 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
     // thread. %.*s bounds the source read against a non-terminated name.
     std::snprintf(out.name, sizeof(out.name), "%.*s",
                   static_cast<int>(sizeof(out.name) - 1),
-                  k->name ? k->name : "");
+                  kernelName);
     out.cpu_start_ns = baseCpuNs + static_cast<int64_t>(k->start - baseCuptiTs);
     out.duration_ns = static_cast<int64_t>(k->end - k->start);
     out.dyn_shared = k->dynamicSharedMemory;

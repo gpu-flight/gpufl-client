@@ -223,6 +223,7 @@ except ImportError as e:
         SassMetrics   = "SassMetrics"
         PmSampling    = "PmSampling"
         RangeProfiler = "RangeProfiler"
+        RangeProfilerKernelReplay = "RangeProfilerKernelReplay"
         Deep          = "Deep"
 
     class InitOptions:

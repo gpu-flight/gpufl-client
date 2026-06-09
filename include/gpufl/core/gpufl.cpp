@@ -388,6 +388,8 @@ bool init(const InitOptions& opts) {
         else if (val == "SassMetrics")         mOpts.profiling_engine = ProfilingEngine::SassMetrics;
         else if (val == "PmSampling")          mOpts.profiling_engine = ProfilingEngine::PmSampling;
         else if (val == "RangeProfiler")       mOpts.profiling_engine = ProfilingEngine::RangeProfiler;
+        else if (val == "RangeProfilerKernelReplay")
+            mOpts.profiling_engine = ProfilingEngine::RangeProfilerKernelReplay;
         else if (val == "Deep")                mOpts.profiling_engine = ProfilingEngine::Deep;
         else matched = false;
         if (matched) {

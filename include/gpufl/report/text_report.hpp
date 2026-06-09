@@ -113,6 +113,22 @@ class TextReport {
         std::string scope_name;
     };
 
+    struct PerfMetricRecord {
+        std::string target_kind;
+        std::string name;
+        std::string range_name;
+        uint32_t launch_ordinal = 0;
+        int device_id = 0;
+        int64_t start_ns = 0;
+        int64_t end_ns = 0;
+        double sm_throughput_pct = -1.0;
+        double l1_hit_rate_pct = -1.0;
+        double l2_hit_rate_pct = -1.0;
+        int64_t dram_read_bytes = -1;
+        int64_t dram_write_bytes = -1;
+        double tensor_active_pct = -1.0;
+    };
+
     struct SessionInfo {
         std::string app_name;
         std::string session_id;
@@ -155,6 +171,7 @@ class TextReport {
     std::vector<ScopeEventRecord> scope_events_;
     std::vector<ProfileSampleRecord> profile_samples_;
     std::vector<PmSampleRecord> pm_samples_;
+    std::vector<PerfMetricRecord> perf_metrics_;
     std::vector<CaptureCapabilityRecord> capture_capabilities_;
     std::string requested_engine_;
     std::string selected_engine_;
@@ -191,6 +208,7 @@ class TextReport {
     void writeMemcpySummary(std::ostringstream& out) const;
     void writeSystemMetrics(std::ostringstream& out) const;
     void writeScopeSummary(std::ostringstream& out) const;
+    void writePerfMetricsSummary(std::ostringstream& out) const;
     void writePmSamplingSummary(std::ostringstream& out) const;
     void writeProfileAnalysis(std::ostringstream& out) const;
 };

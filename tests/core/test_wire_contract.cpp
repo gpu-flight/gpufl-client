@@ -28,6 +28,7 @@
 #include "gpufl/core/version.hpp"
 #include "gpufl/core/model/batch_models.hpp"
 #include "gpufl/core/model/lifecycle_model.hpp"
+#include "gpufl/core/model/perf_metric_model.hpp"
 
 namespace {
 
@@ -535,4 +536,34 @@ TEST(WireContract, MemoryAllocEventBatchColumns) {
         "\"address\",\"bytes\",\"device_id\",\"stream_id\",\"corr_id\"]"));
     EXPECT_TRUE(JsonContains(
         json, "\"rows\":[[0,0,1,3,139637976727552,1048576,0,0,42]]"));
+}
+
+TEST(WireContract, KernelPerfMetricEventFields) {
+    gpufl::KernelPerfMetricEvent ev{};
+    ev.pid = 123;
+    ev.app = "demo";
+    ev.session_id = "sess-1";
+    ev.device_id = 0;
+    ev.range_index = 2;
+    ev.range_name = "VectorAdd";
+    ev.kernel_name = "VectorAdd";
+    ev.launch_ordinal = 3;
+    ev.sm_throughput_pct = 75.25;
+    ev.l1_hit_rate_pct = 91.5;
+    ev.l2_hit_rate_pct = -1.0;
+    ev.dram_read_bytes = 1024;
+    ev.dram_write_bytes = -1;
+    ev.tensor_active_pct = -1.0;
+
+    const std::string json = gpufl::model::KernelPerfMetricModel(ev).buildJson();
+
+    EXPECT_TRUE(JsonContains(json, "\"type\":\"kernel_perf_metric_event\""));
+    EXPECT_TRUE(JsonContains(json, "\"range_index\":2"));
+    EXPECT_TRUE(JsonContains(json, "\"range_name\":\"VectorAdd\""));
+    EXPECT_TRUE(JsonContains(json, "\"kernel_name\":\"VectorAdd\""));
+    EXPECT_TRUE(JsonContains(json, "\"launch_ordinal\":3"));
+    EXPECT_TRUE(JsonContains(json, "\"sm_throughput_pct\":75.2500"));
+    EXPECT_TRUE(JsonContains(json, "\"l1_hit_rate_pct\":91.5000"));
+    EXPECT_TRUE(JsonContains(json, "\"dram_read_bytes\":1024"));
+    EXPECT_TRUE(JsonContains(json, "\"dram_write_bytes\":-1"));
 }

@@ -75,6 +75,7 @@ class TextReport:
             self._section_memcpy_summary(),
             self._section_system_metrics(),
             self._section_scope_summary(),
+            self._section_perf_metrics_summary(),
             self._section_pm_sampling_summary(),
             self._section_profile_analysis(),
         ]
@@ -528,6 +529,90 @@ class TextReport:
             "  Note: PM Sampling rows are hardware-counter timeline samples. "
             "They are aggregated by scope here; use analyzer.inspect_pm_sampling() "
             "for the raw table."
+        )
+        return lines
+
+    def _section_perf_metrics_summary(self) -> list[str]:
+        perf = getattr(self.session, "perf", pd.DataFrame())
+        if perf.empty:
+            return []
+
+        p = perf.copy()
+        if "name" not in p.columns:
+            p["name"] = None
+        if "kernel_name" in p.columns:
+            p["name"] = p["name"].fillna(p["kernel_name"])
+        if "range_name" in p.columns:
+            p["name"] = p["name"].fillna(p["range_name"])
+        if "user_scope" in p.columns:
+            p["name"] = p["name"].fillna(p["user_scope"])
+        if "kind" not in p.columns:
+            if "type" in p.columns:
+                p["kind"] = p["type"].map({
+                    "kernel_perf_metric_event": "kernel",
+                    "perf_metric_event": "scope",
+                }).fillna("scope")
+            else:
+                p["kind"] = "scope"
+
+        metric_cols = [
+            "sm_throughput_pct", "l1_hit_rate_pct", "l2_hit_rate_pct",
+            "tensor_active_pct", "dram_read_bytes", "dram_write_bytes",
+        ]
+        for col in metric_cols:
+            if col not in p.columns:
+                p[col] = float("nan")
+            p[col] = pd.to_numeric(p[col], errors="coerce")
+            p.loc[p[col] < 0, col] = float("nan")
+
+        p = p[p["name"].notna()].copy()
+        if p.empty:
+            return []
+
+        agg = (
+            p.groupby(["kind", "name"], dropna=False)
+            .agg(
+                count=("name", "count"),
+                sm=("sm_throughput_pct", "mean"),
+                l1=("l1_hit_rate_pct", "mean"),
+                l2=("l2_hit_rate_pct", "mean"),
+                tensor=("tensor_active_pct", "mean"),
+                dram_r=("dram_read_bytes", "mean"),
+                dram_w=("dram_write_bytes", "mean"),
+            )
+            .sort_values("sm", ascending=False, na_position="last")
+            .head(self.top_n)
+        )
+
+        def fmt_pct(v):
+            return f"{v:.1f}%" if pd.notna(v) else "n/a"
+
+        def short(value, limit):
+            text = str(value)
+            return text if len(text) <= limit else text[:limit - 3] + "..."
+
+        lines = ["", _SEP, "  Range Profiler Counters", _SEP]
+        lines.append(f"  Total Counter Rows:   {len(p)}")
+        lines.append("")
+        lines.append(
+            f"  {'Target':<8}{'Name':<32}{'SM':>10}{'L1':>10}{'L2':>10}"
+            f"{'Tensor':>10}{'DRAM R':>14}{'DRAM W':>14}"
+        )
+        lines.append("  " + "-" * 108)
+        for (kind, name), row in agg.iterrows():
+            lines.append(
+                f"  {str(kind):<8}{short(name, 30):<32}"
+                f"{fmt_pct(row['sm']):>10}"
+                f"{fmt_pct(row['l1']):>10}"
+                f"{fmt_pct(row['l2']):>10}"
+                f"{fmt_pct(row['tensor']):>10}"
+                f"{(_fmt_bytes(row['dram_r']) if pd.notna(row['dram_r']) else 'n/a'):>14}"
+                f"{(_fmt_bytes(row['dram_w']) if pd.notna(row['dram_w']) else 'n/a'):>14}"
+            )
+        lines.append("")
+        lines.append(
+            "  Note: Scope rows come from RangeProfiler; kernel rows come from "
+            "RangeProfilerKernelReplay."
         )
         return lines
 

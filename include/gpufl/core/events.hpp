@@ -537,16 +537,37 @@ struct PerfMetricEvent {
     int64_t end_ns = 0;
     int device_id = 0;
 
-    // Hardware counters (-1.0 = not available for this GPU/metric)
+    // Hardware counters (-1/-1.0 = not available for this GPU/metric)
     double sm_throughput_pct = -1.0;   // SM active % of peak
     double l1_hit_rate_pct = -1.0;     // L1 global load hit rate
     double l2_hit_rate_pct = -1.0;     // L2 read hit rate
-    uint64_t dram_read_bytes = 0;      // DRAM read bytes
-    uint64_t dram_write_bytes = 0;     // DRAM write bytes
+    int64_t dram_read_bytes = -1;      // DRAM read bytes
+    int64_t dram_write_bytes = -1;     // DRAM write bytes
     double tensor_active_pct = -1.0;   // Tensor core active % (-1 if N/A)
 
     std::string user_scope;
     int scope_depth = 0;
+};
+
+struct KernelPerfMetricEvent {
+    int pid = 0;
+    std::string app;
+    std::string session_id;
+    int device_id = 0;
+    size_t range_index = 0;
+    std::string range_name;
+
+    // Candidate join fields. KernelReplay auto-ranges usually expose a kernel
+    // range name, but not the CUPTI activity correlation id.
+    std::string kernel_name;
+    uint32_t launch_ordinal = 0;
+
+    double sm_throughput_pct = -1.0;
+    double l1_hit_rate_pct = -1.0;
+    double l2_hit_rate_pct = -1.0;
+    int64_t dram_read_bytes = -1;
+    int64_t dram_write_bytes = -1;
+    double tensor_active_pct = -1.0;
 };
 
 /**

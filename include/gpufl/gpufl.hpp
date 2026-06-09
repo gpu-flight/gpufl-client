@@ -107,6 +107,8 @@ struct InitOptions {
     //                   ~100× costlier on pre-sm_120 GPUs)
     //   PmSampling    — time-series hardware PM samples
     //   RangeProfiler — scope-level hardware throughput counters
+    //   RangeProfilerKernelReplay
+    //                 - kernel-level hardware counters via CUPTI KernelReplay
     //   Deep          — PcSampling + SassMetrics in one run
     ProfilingEngine profiling_engine = ProfilingEngine::Monitor;
 

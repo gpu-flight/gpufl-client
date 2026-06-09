@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <optional>
+#include <iterator>
 #include <vector>
 
 #include "gpufl/backends/nvidia/engine/profiling_engine.hpp"
@@ -85,6 +86,17 @@ class CompositeEngine final : public IProfilingEngine {
         for (auto& e : engines_)
             if (e) { if (auto ev = e->takeLastPerfEvent()) return ev; }
         return std::nullopt;
+    }
+    std::vector<KernelPerfMetricEvent> takeKernelPerfEvents() override {
+        std::vector<KernelPerfMetricEvent> out;
+        for (auto& e : engines_) {
+            if (!e) continue;
+            auto events = e->takeKernelPerfEvents();
+            out.insert(out.end(),
+                       std::make_move_iterator(events.begin()),
+                       std::make_move_iterator(events.end()));
+        }
+        return out;
     }
     bool hasInsufficientPrivileges() const override {
         for (auto& e : engines_) if (e && e->hasInsufficientPrivileges()) return true;

@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "gpufl/backends/nvidia/cupti_common.hpp"
 #include "gpufl/core/events.hpp"
@@ -77,6 +78,11 @@ class IProfilingEngine {
     /** @brief Consume and return the last decoded perf-metric event. */
     virtual std::optional<PerfMetricEvent> takeLastPerfEvent() {
         return std::nullopt;
+    }
+
+    /** @brief Consume decoded kernel replay metric events, if any. */
+    virtual std::vector<KernelPerfMetricEvent> takeKernelPerfEvents() {
+        return {};
     }
 
     /**

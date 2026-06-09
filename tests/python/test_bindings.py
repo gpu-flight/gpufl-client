@@ -70,7 +70,9 @@ EXPECTED_PROFILING_ENGINES = [
     "Trace",         # activity trace (kernels + memcpy + sync), no sampling
     "PcSampling",
     "SassMetrics",
+    "PmSampling",
     "RangeProfiler",
+    "RangeProfilerKernelReplay",
     "Deep",          # PcSampling + SassMetrics
 ]
 

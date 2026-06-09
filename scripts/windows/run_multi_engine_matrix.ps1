@@ -25,12 +25,16 @@ if (-not $Combos -or $Combos.Count -eq 0) {
         "Trace",
         "PcSampling",
         "RangeProfiler",
+        "RangeProfilerKernelReplay",
         "Trace,PcSampling",
         "Trace,PmSampling",
         "Trace,RangeProfiler",
+        "Trace,RangeProfilerKernelReplay",
         "Trace,PcSampling,PmSampling",
         "Trace,PcSampling,RangeProfiler",
+        "Trace,PcSampling,RangeProfilerKernelReplay",
         "Trace,PmSampling,RangeProfiler",
+        "Trace,PmSampling,RangeProfilerKernelReplay",
         "Trace,PcSampling,PmSampling,RangeProfiler"
     )
 }

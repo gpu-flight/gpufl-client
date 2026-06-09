@@ -3,6 +3,7 @@
 #include <cuda_runtime.h>
 #include <cupti.h>
 
+#include <algorithm>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -67,6 +68,14 @@ class CuptiBackend : public IMonitorBackend {
     // off; SASS off unless AllowSassKernelActivity). Drives both the handler's
     // requiredActivityKinds() and the capability report.
     bool collectsKernelEvents() const;
+    bool UsesRangeProfilerKernelReplay() const {
+        if (!combo_.empty()) {
+            return std::find(combo_.begin(), combo_.end(),
+                             ProfilingEngine::RangeProfilerKernelReplay) !=
+                   combo_.end();
+        }
+        return opts_.profiling_engine == ProfilingEngine::RangeProfilerKernelReplay;
+    }
     // True when CUPTI kernel ACTIVITY records won't be collected, so every
     // launch must be reported from its callback as a synthetic kernel (PC
     // Sampling, or SASS profiler safe mode without GPUFL_SASS_ALLOW_KERNEL_

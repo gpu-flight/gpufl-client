@@ -40,6 +40,7 @@
 #include "gpufl/core/env_vars.hpp"
 #include "gpufl/core/logger/logger.hpp"
 #include "gpufl/core/model/lifecycle_model.hpp"
+#include "gpufl/core/model/perf_metric_model.hpp"
 #include "gpufl/core/runtime.hpp"
 #include "gpufl/core/ring_buffer.hpp"
 #include "gpufl/core/stack_registry.hpp"
@@ -349,6 +350,8 @@ std::vector<ProfilingEngine> ParseEngineComboEnv() {
             else if (tok == "SassMetrics")   out.push_back(ProfilingEngine::SassMetrics);
             else if (tok == "PmSampling")    out.push_back(ProfilingEngine::PmSampling);
             else if (tok == "RangeProfiler") out.push_back(ProfilingEngine::RangeProfiler);
+            else if (tok == "RangeProfilerKernelReplay")
+                out.push_back(ProfilingEngine::RangeProfilerKernelReplay);
             else if (tok == "Deep")          out.push_back(ProfilingEngine::Deep);
             else
                 GFL_LOG_ERROR("[CuptiBackend] GPUFL_ENGINE_COMBO: unknown engine '",
@@ -391,6 +394,7 @@ struct EngineRequestSet {
     bool sass = false;
     bool pm = false;
     bool range = false;
+    bool range_kernel = false;
 
     bool needsCubin() const { return pc || sass; }
     bool ownsTimelineActivity() const { return trace || pm || range; }
@@ -407,6 +411,8 @@ EngineRequestSet BuildEngineRequestSet(
             out.sass = out.sass || engine == ProfilingEngine::SassMetrics;
             out.pm = out.pm || engine == ProfilingEngine::PmSampling;
             out.range = out.range || engine == ProfilingEngine::RangeProfiler;
+            out.range_kernel = out.range_kernel ||
+                engine == ProfilingEngine::RangeProfilerKernelReplay;
         }
         return out;
     }
@@ -419,6 +425,7 @@ EngineRequestSet BuildEngineRequestSet(
     out.pm = selected == ProfilingEngine::PmSampling ||
              selected == ProfilingEngine::Deep;
     out.range = selected == ProfilingEngine::RangeProfiler;
+    out.range_kernel = selected == ProfilingEngine::RangeProfilerKernelReplay;
     return out;
 }
 
@@ -437,6 +444,7 @@ struct EngineRuntimeState {
     EnginePathState pc;
     EnginePathState pm;
     EnginePathState range;
+    EnginePathState range_kernel;
 };
 
 EngineRuntimeState InspectEngineRuntimeState(const IProfilingEngine* engine,
@@ -464,8 +472,9 @@ EngineRuntimeState InspectEngineRuntimeState(const IProfilingEngine* engine,
             out.pc.observe(armed, produced);
         } else if (dynamic_cast<const PmSamplingEngine*>(sub)) {
             out.pm.observe(armed, produced);
-        } else if (dynamic_cast<const RangeProfilerEngine*>(sub)) {
-            out.range.observe(armed, produced);
+        } else if (const auto* range = dynamic_cast<const RangeProfilerEngine*>(sub)) {
+            if (range->kernelReplayMode()) out.range_kernel.observe(armed, produced);
+            else out.range.observe(armed, produced);
         }
     };
 
@@ -497,6 +506,9 @@ EngineRuntimeState InspectEngineRuntimeState(const IProfilingEngine* engine,
             break;
         case ProfilingEngine::RangeProfiler:
             out.range.observe(armed, produced);
+            break;
+        case ProfilingEngine::RangeProfilerKernelReplay:
+            out.range_kernel.observe(armed, produced);
             break;
         default:
             break;
@@ -561,6 +573,9 @@ void CuptiBackend::initialize(const MonitorOptions& opts) {
 #if GPUFL_HAS_PERFWORKS
         if (requests.range)
             subs.push_back(std::make_unique<RangeProfilerEngine>());
+        if (requests.range_kernel)
+            subs.push_back(std::make_unique<RangeProfilerEngine>(
+                RangeProfilerEngine::Mode::KernelReplay));
 #endif
         if (requests.pc)
             subs.push_back(std::make_unique<PcSamplingEngine>());
@@ -599,6 +614,17 @@ void CuptiBackend::initialize(const MonitorOptions& opts) {
 #else
             GFL_LOG_ERROR(
                 "[CuptiBackend] RangeProfiler engine requires "
+                "GPUFL_HAS_PERFWORKS; falling back to kernel-trace only");
+#endif
+            break;
+        case ProfilingEngine::RangeProfilerKernelReplay:
+#if GPUFL_HAS_PERFWORKS
+            engine_ = std::make_unique<RangeProfilerEngine>(
+                RangeProfilerEngine::Mode::KernelReplay);
+            GFL_LOG_DEBUG("[CuptiBackend] Engine: RangeProfilerKernelReplay");
+#else
+            GFL_LOG_ERROR(
+                "[CuptiBackend] RangeProfilerKernelReplay engine requires "
                 "GPUFL_HAS_PERFWORKS; falling back to kernel-trace only");
 #endif
             break;
@@ -1385,6 +1411,21 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
                             ? "Range Profiler scope-level hardware counters were collected for this session."
                             : "Range Profiler was enabled but produced no decoded range counters this session.")
                       : "Range Profiler counters were not collected for this session.");
+    AddCapability(evt, "kernel_replay_counters",
+                  requests.range_kernel,
+                  engineState.range_kernel.active
+                      ? (engineState.range_kernel.has_data ? "collected" : "enabled_no_data")
+                      : (requests.range_kernel ? "skipped" : "not_requested"),
+                  engineState.range_kernel.active
+                      ? "cupti_range_profiler_kernel_replay" : "disabled",
+                  engineState.range_kernel.active
+                      ? (engineState.range_kernel.has_data ? "" : "enabled_but_no_ranges")
+                      : "not_selected_or_not_operational",
+                  engineState.range_kernel.active
+                      ? (engineState.range_kernel.has_data
+                            ? "Range Profiler kernel replay counters were collected for this session."
+                            : "Range Profiler kernel replay was enabled but produced no decoded kernel ranges this session.")
+                      : "Range Profiler kernel replay counters were not collected for this session.");
     AddCapability(evt, "source_correlation", engineState.pc.active,
                   engineState.pc.active
                       ? (sourceHasData ? "collected" : "enabled_no_data")
@@ -1466,7 +1507,17 @@ void CuptiBackend::stop() {
     // Stop the engine BEFORE flushing activity records.  PcSamplingEngine::stop()
     // disables the SamplingAPI session — while it's armed, cuptiActivityFlushAll
     // returns zero kernel records on driver 590+.
-    if (engine_) engine_->stop();
+    if (engine_) {
+        engine_->stop();
+        if (const Runtime* rt = runtime(); rt && rt->logger) {
+            for (auto& ev : engine_->takeKernelPerfEvents()) {
+                ev.pid = detail::GetPid();
+                ev.app = rt->app_name;
+                ev.session_id = rt->session_id;
+                rt->logger->write(model::KernelPerfMetricModel(ev));
+            }
+        }
+    }
 
     // Disable all activity kinds FIRST, before the flush. The previous
     // order (sync → flush → disable) left activity tracking enabled
