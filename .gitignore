@@ -12,6 +12,7 @@ cmake/
 CMakeFiles/
 CMakeCache.txt
 wget-log*
+runs/
 
 ### docker
 example/python/docker/**/
