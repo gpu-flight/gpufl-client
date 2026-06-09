@@ -233,6 +233,15 @@ bool envDisabled_() {
     return s == "1" || s == "true" || s == "yes" || s == "on";
 }
 
+bool windowsInjectedProcess_() {
+#if defined(_WIN32)
+    const char* injected = std::getenv(gpufl::env::kInject);
+    return injected && std::string(injected) == "1";
+#else
+    return false;
+#endif
+}
+
 }  // namespace
 
 bool init(const InitOptions& opts) {
@@ -497,9 +506,12 @@ bool init(const InitOptions& opts) {
     if (rt_ptr->collector) {
         ie.devices = rt_ptr->collector->sampleAll();
     }
-    if (rt_ptr->static_info_collector) {
+    const bool skipStaticInfoDuringInject = windowsInjectedProcess_();
+    if (rt_ptr->static_info_collector && !skipStaticInfoDuringInject) {
         ie.gpu_static_device_infos =
             rt_ptr->static_info_collector->sampleStaticInfo();
+    } else if (skipStaticInfoDuringInject) {
+        GFL_LOG_DEBUG("Skipping CUDA static GPU inventory during Windows injection init.");
     }
     ie.host = rt_ptr->host_collector->sample();
 

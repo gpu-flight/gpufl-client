@@ -360,20 +360,160 @@ std::vector<ProfilingEngine> ParseEngineComboEnv() {
     return out;
 }
 
-bool EngineListContains(const std::vector<ProfilingEngine>& engines,
-                        ProfilingEngine engine) {
-    return std::find(engines.begin(), engines.end(), engine) != engines.end();
+bool WindowsInjectedProcess() {
+#if defined(_WIN32)
+    const char* injected = std::getenv(gpufl::env::kInject);
+    return injected && std::strcmp(injected, "1") == 0;
+#else
+    return false;
+#endif
+}
+
+// NVIDIA calls InitializeInjection while the Windows CUDA driver is still
+// initializing. Creating a CUDA context from that callback can re-enter the
+// driver and deadlock, so the injected path only uses an already-current
+// context.
+bool TryCurrentCudaContext(CUcontext* ctx) {
+    if (!ctx) return false;
+    if (*ctx && IsContextValid(*ctx)) return true;
+
+    CUcontext current = nullptr;
+    if (cuCtxGetCurrent(&current) == CUDA_SUCCESS && current) {
+        *ctx = current;
+        return true;
+    }
+    return false;
+}
+
+struct EngineRequestSet {
+    bool trace = false;
+    bool pc = false;
+    bool sass = false;
+    bool pm = false;
+    bool range = false;
+
+    bool needsCubin() const { return pc || sass; }
+    bool ownsTimelineActivity() const { return trace || pm || range; }
+};
+
+EngineRequestSet BuildEngineRequestSet(
+    ProfilingEngine selected,
+    const std::vector<ProfilingEngine>& combo) {
+    EngineRequestSet out;
+    if (!combo.empty()) {
+        for (const ProfilingEngine engine : combo) {
+            out.trace = out.trace || engine == ProfilingEngine::Trace;
+            out.pc = out.pc || engine == ProfilingEngine::PcSampling;
+            out.sass = out.sass || engine == ProfilingEngine::SassMetrics;
+            out.pm = out.pm || engine == ProfilingEngine::PmSampling;
+            out.range = out.range || engine == ProfilingEngine::RangeProfiler;
+        }
+        return out;
+    }
+
+    out.trace = selected == ProfilingEngine::Trace;
+    out.pc = selected == ProfilingEngine::PcSampling ||
+             selected == ProfilingEngine::Deep;
+    out.sass = selected == ProfilingEngine::SassMetrics ||
+               selected == ProfilingEngine::Deep;
+    out.pm = selected == ProfilingEngine::PmSampling ||
+             selected == ProfilingEngine::Deep;
+    out.range = selected == ProfilingEngine::RangeProfiler;
+    return out;
+}
+
+struct EnginePathState {
+    bool active = false;
+    bool has_data = false;
+
+    void observe(bool armed, bool produced) {
+        active = active || armed || produced;
+        has_data = has_data || produced;
+    }
+};
+
+struct EngineRuntimeState {
+    EnginePathState sass;
+    EnginePathState pc;
+    EnginePathState pm;
+    EnginePathState range;
+};
+
+EngineRuntimeState InspectEngineRuntimeState(const IProfilingEngine* engine,
+                                             ProfilingEngine selected,
+                                             bool comboActive) {
+    EngineRuntimeState out;
+    if (!engine) return out;
+
+    auto observeConcrete = [&](const IProfilingEngine* sub) {
+        if (!sub) return;
+        const bool armed = sub->isOperational();
+        const bool produced = sub->producedData();
+
+        if (comboActive) {
+            // Keep the matrix log close to the single place that inspects
+            // runtime engine state.
+            GFL_LOG_ERROR("[Composite][matrix] ", sub->name(), " armed=",
+                          armed ? "yes" : "no", " produced=",
+                          produced ? "yes" : "no");
+        }
+
+        if (dynamic_cast<const SassMetricsEngine*>(sub)) {
+            out.sass.observe(armed, produced);
+        } else if (dynamic_cast<const PcSamplingEngine*>(sub)) {
+            out.pc.observe(armed, produced);
+        } else if (dynamic_cast<const PmSamplingEngine*>(sub)) {
+            out.pm.observe(armed, produced);
+        } else if (dynamic_cast<const RangeProfilerEngine*>(sub)) {
+            out.range.observe(armed, produced);
+        }
+    };
+
+    if (comboActive) {
+        if (const auto* comp = dynamic_cast<const CompositeEngine*>(engine)) {
+            for (const auto& sub : comp->engines()) observeConcrete(sub.get());
+        }
+        return out;
+    }
+
+    if (const auto* deep = dynamic_cast<const PcSamplingWithSassEngine*>(engine)) {
+        out.sass.observe(deep->sassActive(), deep->sassProducedData());
+        out.pc.observe(deep->pcSamplingActive(), deep->pcProducedData());
+        out.pm.observe(deep->pmSamplingActive(), deep->pmProducedData());
+        return out;
+    }
+
+    const bool armed = engine->isOperational();
+    const bool produced = engine->producedData();
+    switch (selected) {
+        case ProfilingEngine::SassMetrics:
+            out.sass.observe(armed, produced);
+            break;
+        case ProfilingEngine::PcSampling:
+            out.pc.observe(armed, produced);
+            break;
+        case ProfilingEngine::PmSampling:
+            out.pm.observe(armed, produced);
+            break;
+        case ProfilingEngine::RangeProfiler:
+            out.range.observe(armed, produced);
+            break;
+        default:
+            break;
+    }
+    return out;
 }
 
 void ApplyComboPlanOverrides(ResolvedProfilingPlan& plan,
                              const std::vector<ProfilingEngine>& combo) {
     if (combo.empty()) return;
+    const EngineRequestSet requests =
+        BuildEngineRequestSet(ProfilingEngine::Monitor, combo);
 
     // PC / SASS read cubin binaries for source correlation and disassembly.
     // The policy resolver sees only the base single engine, so re-apply this
     // after every resolve while a combo is active.
-    if (EngineListContains(combo, ProfilingEngine::PcSampling) ||
-        EngineListContains(combo, ProfilingEngine::SassMetrics)) {
+    if (requests.needsCubin()) {
         plan.needs_cubin_capture = true;
     }
 
@@ -408,22 +548,21 @@ void CuptiBackend::initialize(const MonitorOptions& opts) {
     // (PcSampling LAST) so SASS/Range disable before the PC Sampling API.
     combo_ = ParseEngineComboEnv();
     if (!combo_.empty()) {
-        const auto has = [&](ProfilingEngine e) {
-            return EngineListContains(combo_, e);
-        };
+        const EngineRequestSet requests =
+            BuildEngineRequestSet(opts_.profiling_engine, combo_);
         ApplyComboPlanOverrides(resolved_plan_, combo_);
         std::vector<std::unique_ptr<IProfilingEngine>> subs;
 #if GPUFL_HAS_PERFWORKS
-        if (has(ProfilingEngine::PmSampling))
+        if (requests.pm)
             subs.push_back(std::make_unique<PmSamplingEngine>());
 #endif
-        if (has(ProfilingEngine::SassMetrics))
+        if (requests.sass)
             subs.push_back(std::make_unique<SassMetricsEngine>());
 #if GPUFL_HAS_PERFWORKS
-        if (has(ProfilingEngine::RangeProfiler))
+        if (requests.range)
             subs.push_back(std::make_unique<RangeProfilerEngine>());
 #endif
-        if (has(ProfilingEngine::PcSampling))
+        if (requests.pc)
             subs.push_back(std::make_unique<PcSamplingEngine>());
 
         if (!subs.empty()) {
@@ -648,7 +787,9 @@ void CuptiBackend::start() {
     // SASS safe-mode policy is device dependent, and the policy log should
     // report the real SM version. Querying requiredActivityKinds() before this
     // point used device_id_=0 and could choose the wrong activity policy.
-    const bool haveCudaContext = EnsureCudaContext(&ctx_);
+    const bool haveCudaContext =
+        WindowsInjectedProcess() ? TryCurrentCudaContext(&ctx_)
+                                 : EnsureCudaContext(&ctx_);
     if (haveCudaContext) {
         cuptiGetDeviceId(ctx_, &device_id_);
         GetSMProps(device_id_);
@@ -663,9 +804,17 @@ void CuptiBackend::start() {
             profiling_request_, device_facts_, EnvOverrides::FromProcess());
         ApplyComboPlanOverrides(resolved_plan_, combo_);
     } else if (engine_) {
-        GFL_LOG_ERROR(
+        GFL_LOG_DEBUG(
             "[CuptiBackend] Failed to get CUDA context; "
             "engine will not start.");
+    }
+
+    if (WindowsInjectedProcess() && !haveCudaContext) {
+        GFL_LOG_DEBUG(
+            "[CuptiBackend] Skipping CUPTI activity start during Windows "
+            "injection init because no CUDA context is current.");
+        engine_.reset();
+        return;
     }
 
     if (IsSassProfilerMode()) {
@@ -943,14 +1092,8 @@ bool CuptiBackend::collectsKernelEvents() const {
         // Combo: collect kernel activity iff a kernel-collecting engine is in
         // the set (Trace / PmSampling / RangeProfiler). PC sampling and SASS do
         // not collect kernel activity on their own.
-        for (const ProfilingEngine e : combo_) {
-            if (e == ProfilingEngine::Trace ||
-                e == ProfilingEngine::PmSampling ||
-                e == ProfilingEngine::RangeProfiler) {
-                return true;
-            }
-        }
-        return false;
+        return BuildEngineRequestSet(opts_.profiling_engine, combo_)
+            .ownsTimelineActivity();
     }
     // Single engine — preserve prior behavior exactly:
     //   PcSampling -> off; SASS / Deep -> off unless AllowSassKernelActivity;
@@ -967,77 +1110,18 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
         return;
     }
 
-    const auto comboHas = [&](ProfilingEngine e) {
-        return std::find(combo_.begin(), combo_.end(), e) != combo_.end();
-    };
-    const bool requestedSass =
-        comboActive() ? comboHas(ProfilingEngine::SassMetrics)
-                      : (opts_.profiling_engine == ProfilingEngine::SassMetrics ||
-                         opts_.profiling_engine == ProfilingEngine::Deep);
-    const bool requestedPc =
-        comboActive() ? comboHas(ProfilingEngine::PcSampling)
-                      : (opts_.profiling_engine == ProfilingEngine::PcSampling ||
-                         opts_.profiling_engine == ProfilingEngine::Deep);
-    const bool requestedPm =
-        comboActive() ? comboHas(ProfilingEngine::PmSampling)
-                      : (opts_.profiling_engine == ProfilingEngine::PmSampling ||
-                         opts_.profiling_engine == ProfilingEngine::Deep);
-    const bool requestedRange =
-        comboActive() ? comboHas(ProfilingEngine::RangeProfiler)
-                      : opts_.profiling_engine == ProfilingEngine::RangeProfiler;
-    const bool sassMode = requestedSass;
-    const bool pcSamplingMode = requestedPc;
+    const EngineRequestSet requests =
+        BuildEngineRequestSet(opts_.profiling_engine, combo_);
     const bool kernelActivity = collectsKernelEvents();
-    const bool syntheticKernels = !kernelActivity && (sassMode || pcSamplingMode);
-    const bool cubinRequested = requestedPc || requestedSass;
+    const bool syntheticKernels = !kernelActivity && (requests.sass || requests.pc);
+    const bool cubinRequested = requests.needsCubin();
     const bool cubinCapture = NeedsCubinCapture();
-
-    bool sassActive = false;
-    bool pcActive = false;
-    bool pmActive = false;
-    bool rangeActive = false;
-
     // Capability emission happens after final engine shutdown so the report can
     // see late-flushed samples. Some engines drop their operational flag during
     // shutdown, so keep a path active if it was requested and produced data.
-    if (comboActive()) {
-        if (const auto* comp =
-                dynamic_cast<const CompositeEngine*>(engine_.get())) {
-            for (const auto& sub : comp->engines()) {
-                if (!sub) continue;
-                const bool armed = sub->isOperational();
-                const bool produced = sub->producedData();
-                // The compatibility matrix, straight from the run: which
-                // sub-engines armed and which produced data for this combo.
-                GFL_LOG_ERROR("[Composite][matrix] ", sub->name(), " armed=",
-                              armed ? "yes" : "no", " produced=",
-                              produced ? "yes" : "no");
-                if (dynamic_cast<const SassMetricsEngine*>(sub.get()))
-                    sassActive = armed || produced;
-                else if (dynamic_cast<const PcSamplingEngine*>(sub.get()))
-                    pcActive = armed || produced;
-                else if (dynamic_cast<const PmSamplingEngine*>(sub.get()))
-                    pmActive = armed || produced;
-                else if (dynamic_cast<const RangeProfilerEngine*>(sub.get()))
-                    rangeActive = armed || produced;
-            }
-        }
-    } else if (opts_.profiling_engine == ProfilingEngine::SassMetrics && engine_) {
-        sassActive = engine_->isOperational() || engine_->producedData();
-    } else if (opts_.profiling_engine == ProfilingEngine::PcSampling && engine_) {
-        pcActive = engine_->isOperational() || engine_->producedData();
-    } else if (opts_.profiling_engine == ProfilingEngine::PmSampling && engine_) {
-        pmActive = engine_->isOperational() || engine_->producedData();
-    } else if (opts_.profiling_engine == ProfilingEngine::RangeProfiler && engine_) {
-        rangeActive = engine_->isOperational() || engine_->producedData();
-    } else if (opts_.profiling_engine == ProfilingEngine::Deep) {
-        if (const auto* deep =
-                dynamic_cast<const PcSamplingWithSassEngine*>(engine_.get())) {
-            sassActive = deep->sassActive() || deep->sassProducedData();
-            pcActive = deep->pcSamplingActive() || deep->pcProducedData();
-            pmActive = deep->pmSamplingActive() || deep->pmProducedData();
-        }
-    }
+    const EngineRuntimeState engineState =
+        InspectEngineRuntimeState(engine_.get(), opts_.profiling_engine,
+                                  comboActive());
 
     // Did each path actually emit rows (vs merely arm)? Drives the
     // "enabled_no_data" status so a capability that was turned ON but produced
@@ -1069,48 +1153,12 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
     const bool externalHasData = externalRows > 0;
     const bool sourceHasData = sourceRows > 0 || functionRows > 0;
 
-    bool sassHasData = false;
-    bool pcHasData = false;
-    bool pmHasData = false;
-    bool rangeHasData = false;
-    if (comboActive()) {
-        if (const auto* comp =
-                dynamic_cast<const CompositeEngine*>(engine_.get())) {
-            for (const auto& sub : comp->engines()) {
-                if (!sub) continue;
-                if (dynamic_cast<const SassMetricsEngine*>(sub.get()))
-                    sassHasData = sub->producedData();
-                else if (dynamic_cast<const PcSamplingEngine*>(sub.get()))
-                    pcHasData = sub->producedData();
-                else if (dynamic_cast<const PmSamplingEngine*>(sub.get()))
-                    pmHasData = sub->producedData();
-                else if (dynamic_cast<const RangeProfilerEngine*>(sub.get()))
-                    rangeHasData = sub->producedData();
-            }
-        }
-    } else if (engine_) {
-        if (const auto* deep =
-                dynamic_cast<const PcSamplingWithSassEngine*>(engine_.get())) {
-            sassHasData = deep->sassProducedData();
-            pcHasData = deep->pcProducedData();
-            pmHasData = deep->pmProducedData();
-        } else if (opts_.profiling_engine == ProfilingEngine::SassMetrics) {
-            sassHasData = engine_->producedData();
-        } else if (opts_.profiling_engine == ProfilingEngine::PcSampling) {
-            pcHasData = engine_->producedData();
-        } else if (opts_.profiling_engine == ProfilingEngine::PmSampling) {
-            pmHasData = engine_->producedData();
-        } else if (opts_.profiling_engine == ProfilingEngine::RangeProfiler) {
-            rangeHasData = engine_->producedData();
-        }
-    }
-
     std::string selected = ProfilingEngineWireName(opts_.profiling_engine);
     if (comboActive()) {
         selected = "nvidia.composite";
     } else if (opts_.profiling_engine == ProfilingEngine::Deep) {
-        if (sassActive) selected = "nvidia.sass_metrics";
-        else if (pcActive) selected = "nvidia.pc_sampling";
+        if (engineState.sass.active) selected = "nvidia.sass_metrics";
+        else if (engineState.pc.active) selected = "nvidia.pc_sampling";
         else selected = "nvidia.none";
     }
 
@@ -1135,8 +1183,8 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
                             : "disabled"),
                   kernelHasData
                       ? (syntheticKernels
-                            ? (pcSamplingMode ? "cupti_kernel_activity_conflicts_with_pc_sampling"
-                                              : "cupti_kernel_activity_deadlock_risk")
+                            ? (requests.pc ? "cupti_kernel_activity_conflicts_with_pc_sampling"
+                                           : "cupti_kernel_activity_deadlock_risk")
                             : "")
                       : (kernelActivity
                             ? (metricsOnly ? "disabled_to_preserve_sass_counters"
@@ -1144,7 +1192,7 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
                             : "not_selected"),
                   kernelHasData
                       ? (syntheticKernels
-                            ? (pcSamplingMode
+                            ? (requests.pc
                                   ? "Kernel rows were collected from launch callbacks; durations are estimated because CUPTI kernel activity is disabled while PC Sampling API is active."
                                   : "Kernel rows were collected from launch callbacks; durations are estimated because CUPTI kernel activity is disabled in SASS safe mode.")
                             : "Kernel rows were collected from CUPTI kernel activity records.")
@@ -1274,64 +1322,80 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
                             ? "This profiling path requested CUBIN capture, but it was disabled by policy or environment."
                             : "This profiling engine does not request CUBIN capture."));
     AddCapability(evt, "sass_metrics",
-                  requestedSass,
-                  sassActive ? (sassHasData ? "collected" : "enabled_no_data") :
-                      (requestedSass ? "skipped" : "not_requested"),
-                  sassActive ? "cupti_sass_metrics" : "disabled",
-                  sassActive ? (sassHasData ? "" : "enabled_but_no_samples")
-                             : "not_selected_or_not_operational",
-                  sassActive
-                      ? (sassHasData
+                  requests.sass,
+                  engineState.sass.active
+                      ? (engineState.sass.has_data ? "collected" : "enabled_no_data")
+                      : (requests.sass ? "skipped" : "not_requested"),
+                  engineState.sass.active ? "cupti_sass_metrics" : "disabled",
+                  engineState.sass.active
+                      ? (engineState.sass.has_data ? "" : "enabled_but_no_samples")
+                      : "not_selected_or_not_operational",
+                  engineState.sass.active
+                      ? (engineState.sass.has_data
                             ? "SASS metrics were collected for this session."
                             : "SASS metrics were enabled but produced no instruction-level samples this session (e.g. kernels too short, or CUPTI replay returned no data).")
                       : "SASS metrics were not collected for this session.");
     AddCapability(evt, "pc_sampling",
-                  requestedPc,
-                  pcActive ? (pcHasData ? "collected" : "enabled_no_data") :
-                      (opts_.profiling_engine == ProfilingEngine::Deep && sassActive ? "skipped" :
-                       (requestedPc ? "skipped" : "not_requested")),
-                  pcActive ? "cupti_pc_sampling" : "disabled",
-                  opts_.profiling_engine == ProfilingEngine::Deep && sassActive
+                  requests.pc,
+                  engineState.pc.active
+                      ? (engineState.pc.has_data ? "collected" : "enabled_no_data")
+                      : (opts_.profiling_engine == ProfilingEngine::Deep &&
+                                 engineState.sass.active
+                             ? "skipped"
+                             : (requests.pc ? "skipped" : "not_requested")),
+                  engineState.pc.active ? "cupti_pc_sampling" : "disabled",
+                  opts_.profiling_engine == ProfilingEngine::Deep &&
+                          engineState.sass.active
                       ? "mutually_exclusive_with_sass_metrics" :
-                    (pcActive ? (pcHasData ? "" : "enabled_but_no_samples")
-                              : "not_selected_or_not_operational"),
-                  opts_.profiling_engine == ProfilingEngine::Deep && sassActive
+                    (engineState.pc.active
+                         ? (engineState.pc.has_data ? "" : "enabled_but_no_samples")
+                         : "not_selected_or_not_operational"),
+                  opts_.profiling_engine == ProfilingEngine::Deep &&
+                          engineState.sass.active
                       ? "Deep selected SASS metrics; PC sampling was skipped because SASS metrics and PC sampling are mutually exclusive in one run."
-                      : (pcActive ? (pcHasData
+                      : (engineState.pc.active ? (engineState.pc.has_data
                             ? "PC sampling was collected for this session."
                             : "PC sampling was enabled but produced no stall samples this session (e.g. kernels too short for the sampling period).")
                                   : "PC sampling was not collected for this session."));
     AddCapability(evt, "pm_sampling",
-                  requestedPm,
-                  pmActive ? (pmHasData ? "collected" : "enabled_no_data")
-                           : (requestedPm ? "skipped" : "not_requested"),
-                  pmActive ? "cupti_pm_sampling" : "disabled",
-                  pmActive ? (pmHasData ? "" : "enabled_but_no_samples")
-                           : "not_selected_or_not_operational",
-                  pmActive
-                      ? (pmHasData
+                  requests.pm,
+                  engineState.pm.active
+                      ? (engineState.pm.has_data ? "collected" : "enabled_no_data")
+                      : (requests.pm ? "skipped" : "not_requested"),
+                  engineState.pm.active ? "cupti_pm_sampling" : "disabled",
+                  engineState.pm.active
+                      ? (engineState.pm.has_data ? "" : "enabled_but_no_samples")
+                      : "not_selected_or_not_operational",
+                  engineState.pm.active
+                      ? (engineState.pm.has_data
                             ? "PM sampling hardware metric samples were collected for this session."
                             : "PM sampling was enabled but produced no hardware samples this session.")
                       : "PM sampling was not collected for this session.");
     AddCapability(evt, "range_counters",
-                  requestedRange,
-                  rangeActive ? (rangeHasData ? "collected" : "enabled_no_data")
-                              : (requestedRange ? "skipped" : "not_requested"),
-                  rangeActive ? "cupti_range_profiler" : "disabled",
-                  rangeActive ? (rangeHasData ? "" : "enabled_but_no_ranges")
-                              : "not_selected_or_not_operational",
-                  rangeActive
-                      ? (rangeHasData
+                  requests.range,
+                  engineState.range.active
+                      ? (engineState.range.has_data ? "collected" : "enabled_no_data")
+                      : (requests.range ? "skipped" : "not_requested"),
+                  engineState.range.active ? "cupti_range_profiler" : "disabled",
+                  engineState.range.active
+                      ? (engineState.range.has_data ? "" : "enabled_but_no_ranges")
+                      : "not_selected_or_not_operational",
+                  engineState.range.active
+                      ? (engineState.range.has_data
                             ? "Range Profiler scope-level hardware counters were collected for this session."
                             : "Range Profiler was enabled but produced no decoded range counters this session.")
                       : "Range Profiler counters were not collected for this session.");
-    AddCapability(evt, "source_correlation", pcActive,
-                  pcActive ? (sourceHasData ? "collected" : "enabled_no_data")
-                           : (sassActive ? "skipped" : "not_requested"),
-                  pcActive ? "pc_sampling_source_locator" : "disabled",
-                  pcActive ? (sourceHasData ? "" : "enabled_but_no_records")
-                           : (sassActive ? "sass_metrics_have_no_source_lines" : "not_requested"),
-                  pcActive
+    AddCapability(evt, "source_correlation", engineState.pc.active,
+                  engineState.pc.active
+                      ? (sourceHasData ? "collected" : "enabled_no_data")
+                      : (engineState.sass.active ? "skipped" : "not_requested"),
+                  engineState.pc.active ? "pc_sampling_source_locator" : "disabled",
+                  engineState.pc.active
+                      ? (sourceHasData ? "" : "enabled_but_no_records")
+                      : (engineState.sass.active
+                             ? "sass_metrics_have_no_source_lines"
+                             : "not_requested"),
+                  engineState.pc.active
                       ? (sourceHasData
                             ? "PC sampling source locator/function records were collected for CUDA source correlation."
                             : "PC sampling source correlation was enabled but emitted no source locator/function records.")

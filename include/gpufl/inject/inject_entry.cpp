@@ -446,6 +446,12 @@ void doInjectInit() {
         // the launcher's chosen dir.
         opts.log_path = std::string(v) + "/app.log";
     }
+#ifdef _WIN32
+    // Windows CUDA injection can leave the process through CRT/driver teardown
+    // paths where the final logger close is not reliable. Keep each NDJSON line
+    // durable even if a clean shutdown/compress step is missed.
+    opts.flush_logs_always = true;
+#endif
     // gpufl::init() reads the rest of the GPUFL_* env vars itself,
     // including GPUFL_PROFILING_ENGINE — it is the single string->enum
     // engine parser (see gpufl.cpp). It also reads backend_url, api_key,
