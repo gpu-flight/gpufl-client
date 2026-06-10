@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "cli_parse.hpp"
+#include "monitor_command.hpp"
 #include "trace_command.hpp"
 #include "upload_command.hpp"
 
@@ -52,6 +53,20 @@ int runUploadFromArgs(const std::vector<std::string>& argv) {
     return runUpload(*parsed.args);
 }
 
+int runMonitorFromArgs(const std::vector<std::string>& argv) {
+    auto parsed = parseMonitorArgs(argv);
+    if (!parsed.args) {
+        if (parsed.error == "__help__") {
+            std::fputs(monitorHelp(), stdout);
+            return 0;
+        }
+        std::fprintf(stderr, "gpufl monitor: %s\n\n", parsed.error.c_str());
+        std::fputs(monitorHelp(), stderr);
+        return 2;
+    }
+    return runMonitor(*parsed.args);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -66,6 +81,8 @@ int main(int argc, char** argv) {
             return runTraceFromArgs(top.remaining);
         case Subcommand::Upload:
             return runUploadFromArgs(top.remaining);
+        case Subcommand::Monitor:
+            return runMonitorFromArgs(top.remaining);
         case Subcommand::Unknown:
             std::fprintf(stderr, "gpufl: unknown subcommand: %s\n\n",
                          top.remaining.empty() ? "" : top.remaining[0].c_str());

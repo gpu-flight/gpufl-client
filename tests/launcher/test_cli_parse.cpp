@@ -326,6 +326,65 @@ TEST(CliParseUpload, HelpFlag) {
     EXPECT_EQ(r.error, "__help__");
 }
 
+// ── gpufl monitor ───────────────────────────────────────────────────────────
+
+TEST(CliParseMonitor, Defaults) {
+    auto r = parseMonitorArgs(argsFor({}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    EXPECT_EQ(r.args->name, "gpufl-monitor");
+    EXPECT_TRUE(r.args->output_dir.empty());
+    EXPECT_EQ(r.args->interval_ms, 5000);
+    EXPECT_FALSE(r.args->upload);
+    EXPECT_EQ(r.args->api_version, "v1");
+    EXPECT_EQ(r.args->log_types, "system");
+}
+
+TEST(CliParseMonitor, AllCommonFlags) {
+    auto r = parseMonitorArgs(argsFor({
+        "--name=llm-node-1", "--output", "/tmp/gpufl-monitor",
+        "--interval=1000", "--upload", "--backend-url=https://api.example.com",
+        "--api-key", "gpfl_key", "--api-version=v2", "--agent-jar=/tmp/agent.jar",
+        "--agent-cursor=/tmp/cursor.json", "--log-types=system,device",
+        "-v", "-q"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    EXPECT_EQ(r.args->name, "llm-node-1");
+    EXPECT_EQ(r.args->output_dir, "/tmp/gpufl-monitor");
+    EXPECT_EQ(r.args->interval_ms, 1000);
+    EXPECT_TRUE(r.args->upload);
+    EXPECT_EQ(r.args->backend_url, "https://api.example.com");
+    EXPECT_EQ(r.args->api_key, "gpfl_key");
+    EXPECT_EQ(r.args->api_version, "v2");
+    EXPECT_EQ(r.args->agent_jar, "/tmp/agent.jar");
+    EXPECT_EQ(r.args->agent_cursor, "/tmp/cursor.json");
+    EXPECT_EQ(r.args->log_types, "system,device");
+    EXPECT_TRUE(r.args->verbose);
+    EXPECT_TRUE(r.args->quiet);
+}
+
+TEST(CliParseMonitor, InvalidIntervalRejected) {
+    auto r = parseMonitorArgs(argsFor({"--interval=0"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("invalid --interval"), std::string::npos);
+}
+
+TEST(CliParseMonitor, AgentJarParsed) {
+    auto r = parseMonitorArgs(argsFor({"--agent-jar", "/opt/gpufl-agent.jar"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    EXPECT_EQ(r.args->agent_jar, "/opt/gpufl-agent.jar");
+}
+
+TEST(CliParseMonitor, BareArgumentRejected) {
+    auto r = parseMonitorArgs(argsFor({"python", "server.py"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("does not launch"), std::string::npos);
+}
+
+TEST(CliParseMonitor, HelpFlag) {
+    auto r = parseMonitorArgs(argsFor({"--help"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_EQ(r.error, "__help__");
+}
+
 TEST(CliParseTopLevel, NoArgsShowsHelp) {
     char* argv[] = {const_cast<char*>("gpufl"), nullptr};
     auto p = parseTopLevel(1, argv);
@@ -356,6 +415,16 @@ TEST(CliParseTopLevel, TraceSubcommandStripsFirstToken) {
     ASSERT_EQ(p.remaining.size(), 2u);
     EXPECT_EQ(p.remaining[0], "--");
     EXPECT_EQ(p.remaining[1], "./app");
+}
+
+TEST(CliParseTopLevel, MonitorSubcommandStripsFirstToken) {
+    char* argv[] = {const_cast<char*>("gpufl"),
+                    const_cast<char*>("monitor"),
+                    const_cast<char*>("--interval=1000"), nullptr};
+    auto p = parseTopLevel(3, argv);
+    EXPECT_EQ(p.sub, Subcommand::Monitor);
+    ASSERT_EQ(p.remaining.size(), 1u);
+    EXPECT_EQ(p.remaining[0], "--interval=1000");
 }
 
 TEST(CliParseTopLevel, UnknownSubcommand) {
