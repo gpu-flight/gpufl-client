@@ -43,11 +43,30 @@ struct UploadArgs {
     bool force = false;             // --force: re-upload despite cursor
 };
 
+// Parsed `gpufl monitor` invocation. This starts the long-running
+// telemetry-only sampler in the launcher process. When --upload is set, the
+// launcher also starts gpufl-agent as the live uploader.
+struct MonitorArgs {
+    std::string name = "gpufl-monitor";  // --name / -n
+    std::string output_dir;              // --output / -o; default ~/.gpufl/monitor/{ts}_{sid}
+    int interval_ms = 5000;              // --interval
+    bool upload = false;                 // --upload: start gpufl-agent
+    std::string backend_url;             // --backend-url; else GPUFL_BACKEND_URL
+    std::string api_key;                 // --api-key; else GPUFL_API_KEY
+    std::string api_version = "v1";      // --api-version
+    std::string agent_jar;               // --agent-jar; else GPUFL_AGENT_JAR
+    std::string agent_cursor;            // --agent-cursor; default <output>/cursor.json
+    std::string log_types = "system";    // --log-types
+    bool quiet = false;                  // -q
+    bool verbose = false;                // -v
+};
+
 enum class Subcommand {
     Help,        // `gpufl --help` / `gpufl` with no args
     Version,     // `gpufl version` / `gpufl -V`
     Trace,       // `gpufl trace [opts] -- <command>...`
     Upload,      // `gpufl upload <log_path> [opts]`
+    Monitor,     // `gpufl monitor [opts]`
     Unknown,
 };
 
@@ -92,10 +111,19 @@ struct UploadParseResult {
 
 UploadParseResult parseUploadArgs(const std::vector<std::string>& argv);
 
+// Parses the args passed to `gpufl monitor`.
+struct MonitorParseResult {
+    std::optional<MonitorArgs> args;
+    std::string error;
+};
+
+MonitorParseResult parseMonitorArgs(const std::vector<std::string>& argv);
+
 // Help text printed for `gpufl --help`, `gpufl trace --help`,
-// and `gpufl upload --help`.
+// `gpufl upload --help`, and `gpufl monitor --help`.
 const char* topLevelHelp();
 const char* traceHelp();
 const char* uploadHelp();
+const char* monitorHelp();
 
 }  // namespace gpufl::launcher

@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.31)
 
-add_executable(gpufl-monitor main.cpp)
+add_executable(gpufl-monitor
+    main.cpp
+    monitor_runner.cpp
+)
 
 target_link_libraries(gpufl-monitor PRIVATE gpufl::gpufl)
 

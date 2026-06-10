@@ -27,7 +27,7 @@ FlagBreak splitFlag(const std::string& tok) {
 // sync with the ProfilingEngine ladder.
 constexpr const char* kEngines[] = {
     "Monitor", "Trace", "PcSampling", "SassMetrics",
-    "PmSampling", "RangeProfiler", "Deep"};
+    "PmSampling", "RangeProfiler", "RangeProfilerKernelReplay", "Deep"};
 bool isValidEngine(const std::string& e) {
     for (auto* k : kEngines) if (e == k) return true;
     return false;
@@ -53,6 +53,7 @@ const char* topLevelHelp() {
         "\n"
         "SUBCOMMANDS:\n"
         "    trace      Inject GPUFlight into a target process and capture telemetry\n"
+        "    monitor    Run long-lived GPU/host telemetry collection\n"
         "    upload     Upload a captured session's NDJSON logs to the backend\n"
         "    version    Print version + build info\n"
         "\n"
@@ -73,7 +74,8 @@ const char* traceHelp() {
         "        --profile <PROF>    comprehensive (default) | light | monitoring-only\n"
         "        --engine <ENG>      Override profiling engine. One of:\n"
         "                            Monitor | Trace | PcSampling | SassMetrics |\n"
-        "                            PmSampling | RangeProfiler | Deep\n"
+        "                            PmSampling | RangeProfiler |\n"
+        "                            RangeProfilerKernelReplay | Deep\n"
         "                            (Deep = the default multi-pass plan: Trace,\n"
         "                            PcSampling, SassMetrics run as isolated passes\n"
         "                            and merged by the backend.)\n"
@@ -113,6 +115,8 @@ ParsedTopLevel parseTopLevel(int argc, char** argv) {
         out.sub = Subcommand::Trace;
     } else if (first == "upload") {
         out.sub = Subcommand::Upload;
+    } else if (first == "monitor") {
+        out.sub = Subcommand::Monitor;
     } else {
         out.sub = Subcommand::Unknown;
         out.remaining.push_back(first);
@@ -174,7 +178,7 @@ TraceParseResult parseTraceArgs(const std::vector<std::string>& argv) {
                 return {std::nullopt,
                         "invalid --engine value: " + out.engine +
                         " (expected: Monitor | Trace | PcSampling | SassMetrics | "
-                        "PmSampling | RangeProfiler | Deep)"};
+                        "PmSampling | RangeProfiler | RangeProfilerKernelReplay | Deep)"};
             }
         } else if (key == "--passes") {
             std::string v;
@@ -195,7 +199,7 @@ TraceParseResult parseTraceArgs(const std::vector<std::string>& argv) {
                                 "invalid --passes engine: " + item +
                                 " (expected a comma-separated list of: Monitor | "
                                 "Trace | PcSampling | SassMetrics | PmSampling | "
-                                "RangeProfiler | Deep)"};
+                                "RangeProfiler | RangeProfilerKernelReplay | Deep)"};
                     }
                     out.passes.push_back(item);
                 }
@@ -261,6 +265,38 @@ const char* uploadHelp() {
         "    gpufl upload ./logs --all-sessions\n"
         "    GPUFL_API_KEY=gpfl_… GPUFL_BACKEND_URL=https://api.gpuflight.com \\\n"
         "        gpufl upload ./logs --session-id <uuid>\n";
+}
+
+const char* monitorHelp() {
+    return
+        "gpufl monitor - Run long-lived GPU/host telemetry collection\n"
+        "\n"
+        "USAGE:\n"
+        "    gpufl monitor [OPTIONS]\n"
+        "\n"
+        "OPTIONS:\n"
+        "    -n, --name <NAME>       Monitor session name. Default: gpufl-monitor\n"
+        "    -o, --output <DIR>      Local NDJSON output dir\n"
+        "                            (default: ~/.gpufl/monitor/{ts}_{session_id}/)\n"
+        "        --interval <MS>     Sampling interval in milliseconds. Default: 5000\n"
+        "        --upload            Start gpufl-agent as the live uploader\n"
+        "        --backend-url <URL> Backend base URL for --upload\n"
+        "                            Env fallback: GPUFL_BACKEND_URL\n"
+        "        --api-key <KEY>     Bearer token for --upload\n"
+        "                            Env fallback: GPUFL_API_KEY\n"
+        "        --api-version <VER> Agent HTTP API version. Default: v1\n"
+        "        --agent-jar <PATH>  Run agent as `java -jar <PATH>`\n"
+        "                            Env fallback: GPUFL_AGENT_JAR\n"
+        "        --agent-cursor <P>  Agent cursor file. Default: <output>/cursor.json\n"
+        "        --log-types <LIST>  Agent channels to upload. Default: system\n"
+        "    -q, --quiet             Suppress launcher chatter\n"
+        "    -v, --verbose           Verbose launcher logging\n"
+        "    -h, --help              Print this help\n"
+        "\n"
+        "EXAMPLES:\n"
+        "    gpufl monitor\n"
+        "    gpufl monitor --interval 1000\n"
+        "    gpufl monitor --name llm-node-1 --upload\n";
 }
 
 UploadParseResult parseUploadArgs(const std::vector<std::string>& argv) {
@@ -339,6 +375,85 @@ UploadParseResult parseUploadArgs(const std::vector<std::string>& argv) {
     if (!out.session_id.empty() && out.all_sessions) {
         return {std::nullopt, "--session-id and --all-sessions are mutually exclusive"};
     }
+    return {out, ""};
+}
+
+MonitorParseResult parseMonitorArgs(const std::vector<std::string>& argv) {
+    MonitorArgs out;
+
+    auto parsePositiveInt = [](const std::string& s, int& slot) -> bool {
+        if (s.empty()) return false;
+        char* end = nullptr;
+        long v = std::strtol(s.c_str(), &end, 10);
+        if (*end != '\0' || v <= 0) return false;
+        slot = static_cast<int>(v);
+        return true;
+    };
+
+    for (size_t i = 0; i < argv.size(); ++i) {
+        const std::string& tok = argv[i];
+        if (tok == "-h" || tok == "--help") return {std::nullopt, "__help__"};
+        if (tok == "-v" || tok == "--verbose") { out.verbose = true; continue; }
+        if (tok == "-q" || tok == "--quiet")   { out.quiet = true; continue; }
+        if (tok == "--upload")                 { out.upload = true; continue; }
+
+        auto fb = splitFlag(tok);
+        const std::string& key = fb.key;
+        auto take_value = [&](std::string& slot) -> std::string {
+            if (fb.inline_value) { slot = *fb.inline_value; return ""; }
+            if (i + 1 >= argv.size()) return "missing value for " + key;
+            slot = argv[++i];
+            return "";
+        };
+
+        if (key == "-n" || key == "--name") {
+            auto err = take_value(out.name);
+            if (!err.empty()) return {std::nullopt, err};
+            if (out.name.empty()) return {std::nullopt, "--name cannot be empty"};
+        } else if (key == "-o" || key == "--output") {
+            auto err = take_value(out.output_dir);
+            if (!err.empty()) return {std::nullopt, err};
+            if (out.output_dir.empty()) return {std::nullopt, "--output cannot be empty"};
+        } else if (key == "--interval") {
+            std::string v;
+            auto err = take_value(v);
+            if (!err.empty()) return {std::nullopt, err};
+            if (!parsePositiveInt(v, out.interval_ms)) {
+                return {std::nullopt,
+                        "invalid --interval value: " + v +
+                        " (expected a positive integer, milliseconds)"};
+            }
+        } else if (key == "--backend-url") {
+            auto err = take_value(out.backend_url);
+            if (!err.empty()) return {std::nullopt, err};
+        } else if (key == "--api-key") {
+            auto err = take_value(out.api_key);
+            if (!err.empty()) return {std::nullopt, err};
+        } else if (key == "--api-version") {
+            auto err = take_value(out.api_version);
+            if (!err.empty()) return {std::nullopt, err};
+            if (out.api_version.empty()) return {std::nullopt, "--api-version cannot be empty"};
+        } else if (key == "--agent-jar") {
+            auto err = take_value(out.agent_jar);
+            if (!err.empty()) return {std::nullopt, err};
+            if (out.agent_jar.empty()) return {std::nullopt, "--agent-jar cannot be empty"};
+        } else if (key == "--agent-cursor") {
+            auto err = take_value(out.agent_cursor);
+            if (!err.empty()) return {std::nullopt, err};
+            if (out.agent_cursor.empty()) return {std::nullopt, "--agent-cursor cannot be empty"};
+        } else if (key == "--log-types") {
+            auto err = take_value(out.log_types);
+            if (!err.empty()) return {std::nullopt, err};
+            if (out.log_types.empty()) return {std::nullopt, "--log-types cannot be empty"};
+        } else if (!tok.empty() && tok[0] == '-') {
+            return {std::nullopt, "unknown flag: " + key};
+        } else {
+            return {std::nullopt,
+                    "unexpected argument: " + tok +
+                    " (`gpufl monitor` does not launch a target process; use `gpufl trace -- <cmd>`)"};
+        }
+    }
+
     return {out, ""};
 }
 

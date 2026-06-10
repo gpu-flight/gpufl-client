@@ -1,17 +1,9 @@
-#include <csignal>
 #include <cstdlib>
-#include <cerrno>
-#include <cstring>
 #include <iostream>
 #include <string>
-#include <thread>
 
-#ifndef _WIN32
-#include <pthread.h>
-#endif
-
-#include "gpufl/gpufl.hpp"
 #include "gpufl/core/env_vars.hpp"
+#include "monitor_runner.hpp"
 
 namespace {
 
@@ -20,91 +12,29 @@ std::string getenv_or(const char* var, const char* fallback) {
     return val ? std::string(val) : std::string(fallback);
 }
 
-#ifdef _WIN32
-volatile std::sig_atomic_t g_shutdownRequested = 0;
-
-void signalHandler(int /*sig*/) {
-    g_shutdownRequested = 1;
-}
-
-bool blockTerminationSignals() {
-    return true;
-}
-
-bool waitForShutdownSignal() {
-    while (!g_shutdownRequested) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+int getenv_int_or(const char* var, int fallback) {
+    const char* val = std::getenv(var);
+    if (!val || !*val) return fallback;
+    try {
+        return std::stoi(val);
+    } catch (...) {
+        return fallback;
     }
-    return true;
 }
-#else
-bool blockTerminationSignals() {
-    sigset_t set;
-    if (::sigemptyset(&set) != 0) return false;
-    if (::sigaddset(&set, SIGINT) != 0) return false;
-    if (::sigaddset(&set, SIGTERM) != 0) return false;
-
-    return ::pthread_sigmask(SIG_BLOCK, &set, nullptr) == 0;
-}
-
-bool waitForShutdownSignal() {
-    sigset_t set;
-    if (::sigemptyset(&set) != 0) return false;
-    if (::sigaddset(&set, SIGINT) != 0) return false;
-    if (::sigaddset(&set, SIGTERM) != 0) return false;
-
-    int sig = 0;
-    const int rc = ::sigwait(&set, &sig);
-    return rc == 0;
-}
-#endif
 
 }  // namespace
 
 int main() {
-#ifdef _WIN32
-    std::signal(SIGINT, signalHandler);
-    std::signal(SIGTERM, signalHandler);
-#endif
+    gpufl::daemon::MonitorRunOptions opts;
+    opts.app_name = getenv_or(gpufl::env::kMonitorApp, "gpufl-monitor");
+    opts.log_path = getenv_or(gpufl::env::kMonitorLogDir,
+                              "/var/gpufl/monitor/session");
+    opts.interval_ms = getenv_int_or(gpufl::env::kMonitorIntervalMs, 5000);
 
-    if (!blockTerminationSignals()) {
-        std::cerr << "Failed to block termination signals: "
-                  << std::strerror(errno) << '\n';
-        return 1;
+    if (opts.interval_ms <= 0) {
+        std::cerr << "GPUFL_MONITOR_INTERVAL_MS must be positive.\n";
+        return 2;
     }
 
-    const std::string appName = getenv_or(gpufl::env::kMonitorApp, "gpufl-monitor");
-    const std::string logPath =
-        getenv_or(gpufl::env::kMonitorLogDir, "/var/gpufl/monitor/session");
-    const int intervalMs =
-        std::stoi(getenv_or(gpufl::env::kMonitorIntervalMs, "5000"));
-
-    std::cout << "Starting GPUFL monitor with app name: " << appName
-              << ", log path: " << logPath << ", interval: " << intervalMs
-              << "ms\n";
-    gpufl::InitOptions opts;
-    opts.app_name = appName;
-    opts.log_path = logPath;
-    // Telemetry-only daemon: Monitor means no CUPTI at all, just the
-    // NVML/host metrics sampler driven by continuous_system_sampling
-    // below. (This used to pass `None`, which despite the name still
-    // subscribed CUPTI and captured kernel events the daemon never wanted.)
-    opts.profiling_engine = gpufl::ProfilingEngine::Monitor;
-    opts.continuous_system_sampling = true;
-    opts.system_sample_rate_ms = intervalMs;
-    opts.enable_debug_output = true;
-    opts.flush_logs_always = true;
-
-    if (!gpufl::init(opts)) {
-        return 1;
-    }
-
-    if (!waitForShutdownSignal()) {
-        std::cerr << "Failed while waiting for termination signal.\n";
-        gpufl::shutdown();
-        return 1;
-    }
-
-    gpufl::shutdown();
-    return 0;
+    return gpufl::daemon::runMonitorForeground(opts);
 }

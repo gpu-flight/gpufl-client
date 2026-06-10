@@ -22,6 +22,8 @@ add_executable(gpufl_launcher
     main.cpp
     cli_parse.cpp
     ${GPUFL_LAUNCHER_TRACE_IMPL}
+    monitor_command.cpp
+    ../monitor/monitor_runner.cpp
     upload_command.cpp
 )
 
@@ -32,6 +34,11 @@ set_target_properties(gpufl_launcher PROPERTIES OUTPUT_NAME gpufl)
 # Most of gpufl's object files are unreferenced from the launcher and
 # get DCE'd at link time with --gc-sections.
 target_link_libraries(gpufl_launcher PRIVATE gpufl::gpufl)
+
+target_include_directories(gpufl_launcher PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../monitor
+)
 
 target_compile_features(gpufl_launcher PRIVATE cxx_std_17)
 
