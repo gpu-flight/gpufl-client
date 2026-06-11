@@ -71,6 +71,15 @@ class IProfilingEngine {
      */
     virtual void flushBeforeCudaTeardown(const char* /*reason*/) {}
 
+    /**
+     * @brief Cheap per-kernel-launch tick, called from the launch API_ENTER
+     * callback on the app thread. PC sampling uses it as its periodic
+     * collection beat (internally throttled): the app thread is the only
+     * reliably scheduled, context-current place to run a mid-session
+     * stop→collect→re-arm on Windows-injected targets.
+     */
+    virtual void onLaunchTick() {}
+
     // ---- Perf-scope hooks (Range Profiler / Perfworks) ----
     virtual void onPerfScopeStart(const char* /*name*/) {}
     virtual void onPerfScopeStop(const char* /*name*/) {}
@@ -104,6 +113,14 @@ class IProfilingEngine {
      * the None engine).
      */
     virtual bool hasInsufficientPrivileges() const { return false; }
+
+    /**
+     * @brief True when the driver exposed zero PC sampling stall reasons
+     * (cuptiPCSamplingGetNumStallReasons returned 0) — sampling data
+     * collection is unavailable on this GPU/driver even though
+     * cuptiPCSamplingEnable succeeds. Default: false.
+     */
+    virtual bool stallReasonsUnavailable() const { return false; }
 
     /**
      * @brief True if this engine started successfully and is producing

@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 
 #include "gpufl/backends/nvidia/engine/profiling_engine.hpp"
@@ -40,6 +41,8 @@ class PcSamplingEngine final : public IProfilingEngine {
     void onScopeStart(const char* name) override;
     void onScopeStop(const char* name)  override;
     void drainData() override;
+    void flushBeforeCudaTeardown(const char* reason) override;
+    void onLaunchTick() override;
 
     /// True when using the PC Sampling API (newer GPUs) rather than
     /// the legacy Activity API.  Used by the composite engine to decide
@@ -55,6 +58,10 @@ class PcSamplingEngine final : public IProfilingEngine {
      */
     bool hasInsufficientPrivileges() const override {
         return sampling_api_blocked_.load(std::memory_order_relaxed);
+    }
+
+    bool stallReasonsUnavailable() const override {
+        return stall_reasons_unavailable_.load(std::memory_order_relaxed);
     }
 
     /** Operational means we have an active method (not None) AND we're not blocked. */
@@ -77,7 +84,23 @@ class PcSamplingEngine final : public IProfilingEngine {
 
     bool EnableSamplingFeatures_();
     void StartPcSampling_();
-    void StopAndCollectPcSampling_();
+    /// @param sync_device cudaDeviceSynchronize before stopping. Callers on
+    ///        plain threads pass true; the CUPTI-callback path passes false —
+    ///        cudart inside a CUPTI callback can re-enter the driver, and in
+    ///        KERNEL_SERIALIZED mode every sampled kernel has already
+    ///        completed by the time the next API callback runs anyway.
+    void StopAndCollectPcSampling_(bool sync_device = true);
+    /// The cuptiPCSamplingGetData drain loop: parses PC records into
+    /// PC_SAMPLE activity records. Callable while sampling is still armed
+    /// (the NVIDIA pc_sampling sample's serialized-mode pattern — only
+    /// completed kernels' samples are returned) or after a Stop.
+    void CollectPcSamplingData_();
+    /// Shared mid-session collect: throttled armed-GetData, safe to call
+    /// from CUPTI callbacks (try_lock, no cudart, no PCSamplingStop —
+    /// Stop returns 999 inside CUPTI callbacks). `force` bypasses the
+    /// interval throttle (used at process-scope end — the last healthy
+    /// moment before Windows process-exit teardown).
+    void MaybePeriodicCollect_(const char* reason, bool force);
 
     MonitorOptions opts_;
     EngineContext  ctx_;
@@ -87,8 +110,34 @@ class PcSamplingEngine final : public IProfilingEngine {
     std::atomic<bool> sampling_api_ready_{false};
     std::atomic<bool> sampling_api_started_{false};
     std::atomic<bool> sampling_api_blocked_{false};
+    std::atomic<bool> stall_reasons_unavailable_{false};
     std::atomic<bool> produced_data_{false};
     bool privilege_probed_ = false;
+
+    // Serializes the start/stop/collect lifecycle across its callers: the
+    // engine's own cycle thread, scope-begin re-arms on app threads, and
+    // session stop/shutdown. Without it a cycle's Stop could interleave
+    // with a scope-begin Start.
+    std::mutex sampling_lifecycle_mu_;
+    // Minimum gap between periodic collects. Short GPU phases (a script
+    // whose kernels all finish within seconds of context creation) must
+    // still get at least one mid-run collect before exit teardown breaks
+    // cuptiPCSamplingStop, so this errs small; each collect is one
+    // stop→GetData→start cycle (~sub-ms) on the app thread.
+    static constexpr int64_t kCollectIntervalNs = 1'000'000'000;  // 1 s
+    // Last periodic collect (cycle), wall ns. 0 = none yet.
+    std::atomic<int64_t> last_cycle_ns_{0};
+
+    // The engine owns its collection cadence: the monitor collector thread
+    // (which calls drainData) spends whole sessions inside synchronous
+    // nvdisasm disassembly (flushBatches → flushDisassembly), so a cycle
+    // hung off it starves and the session's samples die with the
+    // process-exit cuptiPCSamplingStop. Started when sampling first arms;
+    // joined by stop()/shutdown() BEFORE they take the lifecycle mutex.
+    std::thread cycle_thread_;
+    std::atomic<bool> cycle_thread_running_{false};
+    void StartCycleThread_();
+    void StopCycleThread_();
 
     std::unique_ptr<PCSamplingBuffers, PCSamplingDeleter> pc_sampling_buffers_;
     size_t num_stall_reasons_ = 0;  // original slot count; must reset before each getData

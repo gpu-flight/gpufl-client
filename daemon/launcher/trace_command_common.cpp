@@ -373,6 +373,13 @@ int repairUncompressedLogs(const fs::path& root) {
         if (fs::exists(gz_path, exists_ec)) {
             std::error_code remove_ec;
             fs::remove(path, remove_ec);
+            if (remove_ec) {
+                std::fprintf(stderr,
+                             "[gpufl] warning: could not remove stale %s "
+                             "(%s) — its .gz holds the same data\n",
+                             path.string().c_str(),
+                             remove_ec.message().c_str());
+            }
             continue;
         }
 
@@ -382,6 +389,13 @@ int repairUncompressedLogs(const fs::path& root) {
             if (fs::exists(path, remaining_ec)) {
                 std::error_code remove_ec;
                 fs::remove(path, remove_ec);
+                if (remove_ec) {
+                    std::fprintf(stderr,
+                                 "[gpufl] warning: could not remove %s after "
+                                 "compressing (%s)\n",
+                                 path.string().c_str(),
+                                 remove_ec.message().c_str());
+                }
             }
         }
     }

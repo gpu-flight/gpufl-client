@@ -445,6 +445,9 @@ void doInjectInit() {
         // --output dir should be used as-is.
         opts.log_path = std::string(v);
     }
+    if (const char* v = envOrNull(gpufl::env::kDebugOutput)) {
+        opts.enable_debug_output = std::strcmp(v, "1") == 0;
+    }
 #ifdef _WIN32
     // Windows CUDA injection can leave the process through CRT/driver teardown
     // paths where the final logger close is not reliable. Keep each NDJSON line

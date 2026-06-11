@@ -35,6 +35,10 @@ ResourceHandler::requiredCallbacks() const {
     return {
         {CUPTI_CB_DOMAIN_RESOURCE, CUPTI_CBID_RESOURCE_MODULE_LOADED},
         {CUPTI_CB_DOMAIN_RESOURCE, CUPTI_CBID_RESOURCE_MODULE_PROFILED},
+        // Completes a deferred engine start: Windows injection initializes
+        // before the target has a CUDA context, so context-bound engines
+        // (PC sampling, SASS, …) wait for the first context here.
+        {CUPTI_CB_DOMAIN_RESOURCE, CUPTI_CBID_RESOURCE_CONTEXT_CREATED},
         // Drain activity buffers while the context is still alive, just before
         // the driver tears it down — for contexts destroyed mid-process (an
         // explicit cudaDeviceReset/cuCtxDestroy, or multi-context apps), where
@@ -51,6 +55,15 @@ ResourceHandler::requiredCallbacks() const {
 void ResourceHandler::handle(CUpti_CallbackDomain domain, CUpti_CallbackId cbid,
                              const void *cbdata) {
     auto resourceData = static_cast<const CUpti_ResourceData *>(cbdata);
+
+    // The target created its first CUDA context — complete a deferred
+    // engine start (no-op when the engine started normally). The heavy
+    // work runs on the backend's own thread, NOT here: this callback
+    // fires from inside the driver's context-creation path.
+    if (cbid == CUPTI_CBID_RESOURCE_CONTEXT_CREATED) {
+        if (backend_) backend_->RequestDeferredEngineStart(resourceData->context);
+        return;
+    }
 
     // Context is about to be destroyed — flush activity NOW, synchronously,
     // while it's still valid. Returning from this callback lets the driver

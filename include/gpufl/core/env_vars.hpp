@@ -61,6 +61,11 @@ constexpr const char* kInjectCompletionFd   = "GPUFL_INJECT_COMPLETION_FD";
 // on no-CUDA targets; normally InitializeInjection drives init after cuInit.
 constexpr const char* kInjectUseConstructor = "GPUFL_INJECT_USE_CONSTRUCTOR";
 
+// Opt-in ("1"): turn on gpufl's debug logging (GFL_LOG_DEBUG → stderr) in the
+// injected target — same switch InitOptions.enable_debug_output exposes to
+// embedding callers, but reachable for `gpufl trace` runs.
+constexpr const char* kDebugOutput          = "GPUFL_DEBUG";
+
 // ── Inject-lib timing knobs (tuning / debugging the injection lifecycle) ────
 constexpr const char* kInjectShutdownDelayMs = "GPUFL_INJECT_SHUTDOWN_DELAY_MS";
 constexpr const char* kInjectSyncWaitMs      = "GPUFL_INJECT_SYNC_WAIT_MS";

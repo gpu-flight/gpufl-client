@@ -710,6 +710,10 @@ void CuptiBackend::shutdown() {
     if (active_.load(std::memory_order_relaxed)) {
         stop();
     }
+    // stop() already waited out an in-flight deferred start, but cover the
+    // !active_ path too before tearing the engine down.
+    engine_start_pending_.store(false, std::memory_order_release);
+    { std::lock_guard lk(deferred_start_mu_); }
 
     // Delegate engine teardown first
     if (engine_) {
@@ -838,11 +842,16 @@ void CuptiBackend::start() {
     }
 
     if (WindowsInjectedProcess() && !haveCudaContext && engine_) {
+        // Don't drop the engine — injection init runs during cuInit, before
+        // the target creates any context, so this is the NORMAL case for an
+        // injected `gpufl trace` run (it used to silently disable PC/SASS
+        // sampling for every such session). The CONTEXT_CREATED resource
+        // callback completes the start once the target's context exists.
         GFL_LOG_DEBUG(
             "[CuptiBackend] No CUDA context is current during Windows "
-            "injection init; disabling context-bound profiling engine but "
-            "keeping activity trace callbacks enabled.");
-        engine_.reset();
+            "injection init; deferring engine start until the target "
+            "creates one (CONTEXT_CREATED).");
+        engine_start_pending_.store(true, std::memory_order_release);
     } else if (WindowsInjectedProcess() && !haveCudaContext) {
         GFL_LOG_DEBUG(
             "[CuptiBackend] No CUDA context is current during Windows "
@@ -1026,12 +1035,22 @@ void CuptiBackend::start() {
         engine_->start();
     }
 
+    ReenableActivityAfterEngineStart_();
+
+    active_.store(true);
+    StartActivityFlushThreadIfNeeded_();
+    GFL_LOG_DEBUG("Backend started.");
+}
+
+void CuptiBackend::ReenableActivityAfterEngineStart_() {
     // Re-enable activity kinds after engine start. Some engines call
     // cuptiProfilerInitialize() or cuptiSassMetricsEnable(), which on some
     // systems (e.g. insufficient profiler privileges) can internally reset or
     // disable previously-enabled activity kinds including
     // CUPTI_ACTIVITY_KIND_KERNEL.  Re-enabling here is idempotent and ensures
     // kernel activity records are produced regardless of engine type.
+    // Runs on the normal start() path AND after a deferred engine start
+    // (the gating policies below are recomputed, not captured).
     {
         std::set<CUpti_ActivityKind> kinds;
         for (const auto& h : handlers_)
@@ -1049,6 +1068,11 @@ void CuptiBackend::start() {
         LogNvtxMarkerActivityDisabled_("post-engine-selected");
     }
 
+    const bool timelineActivity = collectsKernelEvents();
+    const bool enableExternalCorrelation =
+        timelineActivity && opts_.enable_external_correlation &&
+        AllowSassExternalCorrelation();
+
     // also re-enable EXTERNAL_CORRELATION + RUNTIME after engine
     // start. The engines above (PcSampling, SassMetrics, RangeProfiler)
     // reset ALL activity-kind subscriptions, not just kernel-related
@@ -1056,7 +1080,7 @@ void CuptiBackend::start() {
     // from the re-enable set — this block restores them.
     //
     // RUNTIME is the anchor that makes EXTERNAL_CORRELATION actually
-    // emit records (see the start-of-start() block for the rationale).
+    // emit records (see the pre-engine block in start() for the rationale).
     if (enableExternalCorrelation) {
         const CUptiResult ec_res =
             cuptiActivityEnable(CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION);
@@ -1113,10 +1137,94 @@ void CuptiBackend::start() {
             (g_res == CUPTI_SUCCESS ? "OK" : "FAILED"),
             " (CUptiResult=", static_cast<int>(g_res), ")");
     }
+}
 
-    active_.store(true);
-    StartActivityFlushThreadIfNeeded_();
-    GFL_LOG_DEBUG("Backend started.");
+void CuptiBackend::RequestDeferredEngineStart(CUcontext ctx) {
+    if (!engine_start_pending_.load(std::memory_order_acquire)) return;
+    if (!ctx) return;
+    // First context wins — the engines are single-context by design
+    // (EngineContext carries one CUcontext).
+    CUcontext expected = nullptr;
+    if (!deferred_ctx_.compare_exchange_strong(expected, ctx,
+                                               std::memory_order_acq_rel)) {
+        return;
+    }
+    // Runs SYNCHRONOUSLY in the CONTEXT_CREATED callback, on the app thread
+    // that created the context — the same pattern NVIDIA's
+    // pc_sampling_continuous injection uses, and crucially the same thread
+    // that will later run gpufl shutdown's cuptiPCSamplingStop (an earlier
+    // worker-thread variant produced CUPTI_ERROR_UNKNOWN at stop). Only
+    // CUPTI + driver-API calls are made here; cudart-based device facts
+    // (GetSMProps) are left to their lazy call sites — cudart can re-enter
+    // the driver if initialized from inside this callback.
+    FinishDeferredEngineStart_();
+}
+
+void CuptiBackend::FinishDeferredEngineStart_() {
+    std::lock_guard lk(deferred_start_mu_);
+    if (!engine_start_pending_.load(std::memory_order_acquire)) return;
+    if (!engine_) {
+        engine_start_pending_.store(false, std::memory_order_release);
+        return;
+    }
+    const CUcontext ctx = deferred_ctx_.load(std::memory_order_acquire);
+    if (!ctx) return;
+
+    // The engines' start paths guard on IsContextValid() = "current on the
+    // calling thread". During CONTEXT_CREATED the new context may not be
+    // bound yet — bind it, do the work, restore whatever was there.
+    CUcontext prev = nullptr;
+    cuCtxGetCurrent(&prev);
+    if (prev != ctx && cuCtxSetCurrent(ctx) != CUDA_SUCCESS) {
+        GFL_LOG_ERROR(
+            "[CuptiBackend] Deferred engine start: cuCtxSetCurrent failed; "
+            "engine stays disabled.");
+        return;
+    }
+    ctx_ = ctx;
+
+    // Device facts via CUPTI + driver API only (no cudart — see
+    // RequestDeferredEngineStart).
+    cuptiGetDeviceId(ctx_, &device_id_);
+    chip_name_ = getChipName(device_id_);
+    {
+        CUdevice dev{};
+        if (cuDeviceGet(&dev, static_cast<int>(device_id_)) == CUDA_SUCCESS) {
+            char name[256]{};
+            if (cuDeviceGetName(name, sizeof(name), dev) == CUDA_SUCCESS) {
+                cached_device_name_ = name;
+            }
+            int cc_major = 0;
+            int cc_minor = 0;
+            cuDeviceGetAttribute(&cc_major,
+                                 CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
+                                 dev);
+            cuDeviceGetAttribute(&cc_minor,
+                                 CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR,
+                                 dev);
+            device_facts_.compute_major = cc_major;
+            device_facts_.compute_minor = cc_minor;
+        }
+    }
+    device_facts_.cupti_version = GetCuptiVersion();
+    resolved_plan_ = NvidiaProfilingPolicy::Resolve(
+        profiling_request_, device_facts_, EnvOverrides::FromProcess());
+    ApplyComboPlanOverrides(resolved_plan_, combo_);
+
+    EngineContext ectx{ctx_, device_id_, chip_name_, &cubin_mu_,
+                       &cubin_by_crc_};
+    engine_->initialize(opts_, ectx);
+    engine_->start();
+    ReenableActivityAfterEngineStart_();
+
+    if (prev != ctx) {
+        cuCtxSetCurrent(prev);
+    }
+
+    engine_start_pending_.store(false, std::memory_order_release);
+    GFL_LOG_DEBUG(
+        "[CuptiBackend] Deferred engine start complete (device=", device_id_,
+        ", chip=", chip_name_, ").");
 }
 
 
@@ -1368,6 +1476,34 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
                             ? "SASS metrics were collected for this session."
                             : "SASS metrics were enabled but produced no instruction-level samples this session (e.g. kernels too short, or CUPTI replay returned no data).")
                       : "SASS metrics were not collected for this session.");
+    // Distinguish WHY PC sampling ended up inactive — "skipped" alone sent
+    // earlier sessions on a wild goose chase (the real cause was the engine
+    // never getting a CUDA context under Windows injection).
+    const bool pcPrivBlocked = engine_ && engine_->hasInsufficientPrivileges();
+    const bool pcNoStallReasons = engine_ && engine_->stallReasonsUnavailable();
+    const bool pcNoContext =
+        engine_start_pending_.load(std::memory_order_acquire);
+    const char* pcInactiveReason =
+        pcPrivBlocked      ? "insufficient_privilege"
+        : pcNoStallReasons ? "no_stall_reasons"
+        : pcNoContext      ? "no_cuda_context"
+                           : "not_selected_or_not_operational";
+    const char* pcInactiveMessage =
+        pcPrivBlocked
+            ? "PC sampling was blocked by GPU profiling permissions — enable "
+              "\"GPU performance counters for all users\" in the NVIDIA "
+              "Control Panel or run elevated."
+        : pcNoStallReasons
+            ? "The driver exposed no PC sampling stall reasons "
+              "(cuptiPCSamplingGetNumStallReasons returned 0) — no counter "
+              "access in this process. Run elevated (administrator) or "
+              "enable \"GPU performance counters for all users\" in the "
+              "NVIDIA Control Panel; if it persists, this GPU/driver does "
+              "not support PC sampling."
+        : pcNoContext
+            ? "PC sampling never started because the target process did not "
+              "create a CUDA context."
+            : "PC sampling was not collected for this session.";
     AddCapability(evt, "pc_sampling",
                   requests.pc,
                   engineState.pc.active
@@ -1382,14 +1518,14 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
                       ? "mutually_exclusive_with_sass_metrics" :
                     (engineState.pc.active
                          ? (engineState.pc.has_data ? "" : "enabled_but_no_samples")
-                         : "not_selected_or_not_operational"),
+                         : pcInactiveReason),
                   opts_.profiling_engine == ProfilingEngine::Deep &&
                           engineState.sass.active
                       ? "Deep selected SASS metrics; PC sampling was skipped because SASS metrics and PC sampling are mutually exclusive in one run."
                       : (engineState.pc.active ? (engineState.pc.has_data
                             ? "PC sampling was collected for this session."
                             : "PC sampling was enabled but produced no stall samples this session (e.g. kernels too short for the sampling period).")
-                                  : "PC sampling was not collected for this session."));
+                                  : pcInactiveMessage));
     AddCapability(evt, "pm_sampling",
                   requests.pm,
                   engineState.pm.active
@@ -1507,6 +1643,11 @@ void CuptiBackend::FlushProfilingDataBeforeCudaTeardown(const char* reason) {
     engine_->flushBeforeCudaTeardown(reason);
 }
 
+void CuptiBackend::EngineLaunchTick() {
+    if (!initialized_ || !active_.load(std::memory_order_relaxed)) return;
+    if (engine_) engine_->onLaunchTick();
+}
+
 void CuptiBackend::DrainProfilingData() {
     if (!initialized_ || !active_.load(std::memory_order_relaxed)) return;
     if (engine_) {
@@ -1555,6 +1696,11 @@ void CuptiBackend::StopActivityFlushThread_() {
 void CuptiBackend::stop() {
     if (!initialized_) return;
     active_.store(false);
+    // A CONTEXT_CREATED callback on another app thread may be inside
+    // FinishDeferredEngineStart_ — clear the pending flag and wait it out
+    // so engine_->stop() below can't race engine_->start().
+    engine_start_pending_.store(false, std::memory_order_release);
+    { std::lock_guard lk(deferred_start_mu_); }
     StopActivityFlushThread_();
 
     // Stop the engine BEFORE flushing activity records.  PcSamplingEngine::stop()

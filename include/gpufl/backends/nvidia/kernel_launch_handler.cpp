@@ -269,6 +269,10 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
 
     if (cbInfo->callbackSite == CUPTI_API_ENTER) {
         backend_->NoteKernelLaunchForCleanupFlush();
+        // PC sampling collects on this beat (internally throttled; no-op for
+        // other engines) — the app thread at launch ENTER is context-current
+        // and, in KERNEL_SERIALIZED mode, all prior kernels have completed.
+        backend_->EngineLaunchTick();
 
         // Build a KERNEL_LAUNCH_META record and push it to the lock-free ring
         // (Step 4b-2). The corr->meta join that used to run here under meta_mu_

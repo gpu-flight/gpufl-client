@@ -81,6 +81,9 @@ class CompositeEngine final : public IProfilingEngine {
     void flushBeforeCudaTeardown(const char* reason) override {
         for (auto& e : engines_) if (e) e->flushBeforeCudaTeardown(reason);
     }
+    void onLaunchTick() override {
+        for (auto& e : engines_) if (e) e->onLaunchTick();
+    }
 
     std::optional<PerfMetricEvent> takeLastPerfEvent() override {
         for (auto& e : engines_)
@@ -100,6 +103,10 @@ class CompositeEngine final : public IProfilingEngine {
     }
     bool hasInsufficientPrivileges() const override {
         for (auto& e : engines_) if (e && e->hasInsufficientPrivileges()) return true;
+        return false;
+    }
+    bool stallReasonsUnavailable() const override {
+        for (auto& e : engines_) if (e && e->stallReasonsUnavailable()) return true;
         return false;
     }
     bool isOperational() const override {

@@ -67,6 +67,16 @@ class PcSamplingWithSassEngine final : public IProfilingEngine {
             || (sass_ && sass_->hasInsufficientPrivileges());
     }
 
+    bool stallReasonsUnavailable() const override {
+        return pc_ && pc_->stallReasonsUnavailable();
+    }
+
+    void onLaunchTick() override {
+        if (pc_)   pc_->onLaunchTick();
+        if (sass_) sass_->onLaunchTick();
+        if (pm_)   pm_->onLaunchTick();
+    }
+
     /** Operational if EITHER path armed: PC sampling running, or SASS
      *  enabled. On Blackwell, start() resets pc_ once SASS wins, so we must
      *  also accept sass_ok_ — otherwise an active SASS session would

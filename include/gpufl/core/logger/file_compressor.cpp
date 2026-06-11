@@ -5,6 +5,8 @@
 
 #include <zlib.h>
 
+#include "gpufl/core/debug_logger.hpp"
+
 namespace gpufl {
 namespace fs = std::filesystem;
 
@@ -46,6 +48,17 @@ bool GzipFileCompressor::compress(const std::string& path) {
     std::error_code ec;
     if (ok) {
         fs::remove(path, ec);
+        if (ec) {
+            // Most often ERROR_SHARING_VIOLATION on Windows: something
+            // else (a tail, an editor, an AV scan, an uploader) still has
+            // the file open. The data is safe — the .gz is complete — but
+            // a stale .log now sits next to it; the uploader removes it
+            // on first discovery. Log it so the leftover is explainable.
+            GFL_LOG_ERROR("[Logger] compressed '", path,
+                          "' but could not remove the original (",
+                          ec.message(),
+                          ") — stale .log left next to the .gz.");
+        }
     } else {
         fs::remove(outPath, ec);
     }

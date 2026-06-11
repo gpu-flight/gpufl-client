@@ -113,6 +113,10 @@ class CuptiBackend : public IMonitorBackend {
         kernel_launch_callback_seen_.store(true, std::memory_order_release);
         last_cleanup_flush_ns_.store(0, std::memory_order_release);
     }
+    // Per-launch engine tick from the launch API_ENTER callback (app
+    // thread). PC sampling's periodic collection beat; see
+    // IProfilingEngine::onLaunchTick.
+    void EngineLaunchTick();
     void NoteMemoryActivityEmitted() {
         memory_activity_emitted_.fetch_add(1, std::memory_order_relaxed);
     }
@@ -190,6 +194,22 @@ class CuptiBackend : public IMonitorBackend {
     bool ShouldEnableNvtxMarkerActivityForSelectedEngine_() const;
     static void EnableNvtxMarkerActivity_(const char* phase);
     static void LogNvtxMarkerActivityDisabled_(const char* phase);
+
+    // Deferred engine start — Windows injection runs InitializeInjection
+    // during cuInit, BEFORE the app creates any CUDA context, and the
+    // context-bound engines (PC sampling, SASS, PM, Range) can't start
+    // without one. Instead of dropping the engine (the old behavior, which
+    // made a `gpufl trace --passes PcSampling` session collect zero
+    // samples), start() flags the engine as pending and the CONTEXT_CREATED
+    // resource callback completes the start synchronously on the context-
+    // creating app thread (NVIDIA's pc_sampling_continuous pattern; it also
+    // keeps cuptiPCSamplingStart/Stop on one thread). Only CUPTI + driver-
+    // API calls are made there — cudart (GetSMProps) stays lazy.
+    void RequestDeferredEngineStart(CUcontext ctx);
+    void FinishDeferredEngineStart_();
+    // Activity kinds that engines reset during their start — re-enabled
+    // both on the normal start() path and after a deferred engine start.
+    void ReenableActivityAfterEngineStart_();
 
     friend class ResourceHandler;
     friend class KernelLaunchHandler;
@@ -281,6 +301,11 @@ class CuptiBackend : public IMonitorBackend {
     mutable std::atomic<bool> capture_capabilities_emitted_{false};
     uint32_t device_id_ = 0;
     std::string chip_name_;
+
+    // Deferred-engine-start state (see RequestDeferredEngineStart).
+    std::atomic<bool> engine_start_pending_{false};
+    std::atomic<CUcontext> deferred_ctx_{nullptr};
+    std::mutex deferred_start_mu_;
 
     // Active profiling engine — exactly one (or nullptr for monitoring only)
     std::unique_ptr<IProfilingEngine> engine_;
