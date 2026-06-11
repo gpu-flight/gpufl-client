@@ -1,7 +1,9 @@
 #include "gpufl/core/logger/file_compressor.hpp"
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <thread>
 
 #include <zlib.h>
 
@@ -9,6 +11,22 @@
 
 namespace gpufl {
 namespace fs = std::filesystem;
+
+namespace {
+/// Remove with a short backoff (100/200/400 ms). On Windows a freshly
+/// written file is frequently held for a moment by an AV scan, the
+/// search indexer, or a tailing reader — a single immediate remove
+/// loses that race and leaves a stale .log next to its .gz. True on
+/// success OR when the file is already gone.
+bool removeWithRetry(const fs::path& p, std::error_code& ec) {
+    for (int attempt = 0;; ++attempt) {
+        if (fs::remove(p, ec) || !ec) return true;
+        if (attempt >= 2) return false;
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(100 << attempt));
+    }
+}
+}  // namespace
 
 bool GzipFileCompressor::compress(const std::string& path) {
     if (path.empty()) return false;
@@ -47,13 +65,12 @@ bool GzipFileCompressor::compress(const std::string& path) {
 
     std::error_code ec;
     if (ok) {
-        fs::remove(path, ec);
-        if (ec) {
-            // Most often ERROR_SHARING_VIOLATION on Windows: something
-            // else (a tail, an editor, an AV scan, an uploader) still has
-            // the file open. The data is safe — the .gz is complete — but
-            // a stale .log now sits next to it; the uploader removes it
-            // on first discovery. Log it so the leftover is explainable.
+        if (!removeWithRetry(path, ec)) {
+            // A holder outlived the retries (a tail, an editor, an AV
+            // scan, an uploader). The data is safe — the .gz is
+            // complete — but a stale .log now sits next to it; the
+            // launcher repair and the uploader's discovery both remove
+            // it later. Log it so the leftover is explainable.
             GFL_LOG_ERROR("[Logger] compressed '", path,
                           "' but could not remove the original (",
                           ec.message(),
