@@ -257,6 +257,11 @@ std::vector<DiscoveredFile> discoverFiles(const PathParts& parts) {
         for (const auto& entry : fs::directory_iterator(session_entry.path(), ec)) {
             if (!entry.is_regular_file(ec)) continue;
             const std::string fname = entry.path().filename().string();
+            // Dot-files are never session data — notably a leftover
+            // .gpufl.synthetic-shutdown temp from an interrupted launcher
+            // marker append would otherwise parse as a bogus channel and
+            // re-upload the whole system log.
+            if (fname.empty() || fname.front() == '.') continue;
             DiscoveredFile df;
             if (!parseLogFilename(fname, df.channel, df.rotation_index, df.compressed)) {
                 continue;
@@ -656,7 +661,9 @@ std::string readFileBytes(const fs::path& p) {
 /// Decompressed size of a gzip stream from its ISIZE trailer (last 4
 /// bytes, little-endian, mod 2^32). Exact for our single-member files
 /// (the rotator caps them at Logger::kDefaultRotateBytes = 64 MiB, far
-/// under 4 GB). 0 = unknown/empty.
+/// under 4 GB) — but GARBAGE for a truncated file (the last 4 bytes are
+/// then mid-stream data, not a trailer), so a suspicious hint must be
+/// verified by verifyGzip() before acting on it. 0 = unknown/empty.
 std::size_t gzipDecompressedSizeHint(const std::string& gz) {
     if (gz.size() < 18) return 0;   // 10-byte header + 8-byte trailer
     const auto* p = reinterpret_cast<const unsigned char*>(gz.data()) + gz.size() - 4;
@@ -664,6 +671,49 @@ std::size_t gzipDecompressedSizeHint(const std::string& gz) {
            (static_cast<std::size_t>(p[1]) << 8) |
            (static_cast<std::size_t>(p[2]) << 16) |
            (static_cast<std::size_t>(p[3]) << 24);
+}
+
+/// Outcome of verifyGzip — only consulted when the ISIZE hint exceeds
+/// the size limit, which for our single-member rotated files means
+/// either a genuinely huge file or (far more likely) a TRUNCATED one
+/// from a killed session, whose trailer bytes are garbage.
+struct GzipVerifyResult {
+    bool ok      = false;   // decompresses cleanly within `limit`
+    bool corrupt = false;   // stream is truncated / not valid gzip
+};
+
+/// Stream-decompress `path` counting output bytes (nothing buffered).
+/// Distinguishes "actually too big" from "truncated/corrupt" so the
+/// user gets an honest message instead of a misleading size error.
+GzipVerifyResult verifyGzip(const fs::path& path, std::size_t limit) {
+    GzipVerifyResult out;
+    gzFile gz = gzopen(path.string().c_str(), "rb");
+    if (!gz) {
+        out.corrupt = true;
+        return out;
+    }
+    char buf[64 * 1024];
+    std::size_t total = 0;
+    int n;
+    while ((n = gzread(gz, buf, sizeof(buf))) > 0) {
+        total += static_cast<std::size_t>(n);
+        if (total > limit) {
+            gzclose(gz);
+            return out;   // genuinely too big (ok=false, corrupt=false)
+        }
+    }
+    // n == 0 → clean EOF; n < 0 → stream error (truncation lands here,
+    // and gzread also returns -1 mid-stream for an unexpected EOF).
+    if (n < 0) {
+        out.corrupt = true;
+    } else {
+        int errnum = Z_OK;
+        gzerror(gz, &errnum);
+        out.ok      = (errnum == Z_OK || errnum == Z_STREAM_END);
+        out.corrupt = !out.ok;
+    }
+    gzclose(gz);
+    return out;
 }
 
 /// Outcome of a single stream-chunk POST. Drives the retry / abort
@@ -1361,14 +1411,32 @@ UploadResult uploadLogs(const UploadOptions& opts) {
                 }
             }
             if (decompressed_bytes == 0) continue;   // empty file — nothing to send
-            if (body.size() > kMaxCompressedPostBytes ||
-                decompressed_bytes > kMaxDecompressedFileBytes) {
+            if (body.size() > kMaxCompressedPostBytes) {
                 result.warnings.push_back(
-                    basename + " is larger than the per-request limit (" +
-                    std::to_string(body.size()) + " B compressed / " +
-                    std::to_string(decompressed_bytes) + " B raw) — skipping");
+                    basename + " exceeds the per-request size limit (" +
+                    std::to_string(body.size()) + " B compressed) — skipping");
                 session_had_skips = true;
                 continue;
+            }
+            if (decompressed_bytes > kMaxDecompressedFileBytes) {
+                // For a .gz the size came from the ISIZE trailer, which is
+                // garbage on a truncated file (killed session) — verify by
+                // decompressing before refusing, so the warning tells the
+                // truth about WHICH problem this file has.
+                const GzipVerifyResult v = f.compressed
+                    ? verifyGzip(f.path, kMaxDecompressedFileBytes)
+                    : GzipVerifyResult{};
+                if (!v.ok) {
+                    result.warnings.push_back(v.corrupt
+                        ? basename + " is truncated or corrupt (incomplete gzip "
+                          "stream — likely a killed session); cannot upload"
+                        : basename + " exceeds the backend's decompressed size "
+                          "limit — skipping");
+                    session_had_skips = true;
+                    continue;
+                }
+                // Hint was garbage but the stream verifies clean and small —
+                // ship it.
             }
 
             bool skipped = false;
