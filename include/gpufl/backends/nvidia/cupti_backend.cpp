@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <cstdlib>
 #include <exception>
@@ -776,6 +777,7 @@ void CuptiBackend::start() {
     external_correlation_seen_.store(0, std::memory_order_relaxed);
     source_locator_seen_.store(0, std::memory_order_relaxed);
     function_record_seen_.store(0, std::memory_order_relaxed);
+    kernel_launch_callback_seen_.store(false, std::memory_order_relaxed);
     capture_capabilities_emitted_.store(false, std::memory_order_relaxed);
 
     // Reset the BufferCompleted companion maps for a clean per-session slate
@@ -835,12 +837,16 @@ void CuptiBackend::start() {
             "engine will not start.");
     }
 
-    if (WindowsInjectedProcess() && !haveCudaContext) {
+    if (WindowsInjectedProcess() && !haveCudaContext && engine_) {
         GFL_LOG_DEBUG(
-            "[CuptiBackend] Skipping CUPTI activity start during Windows "
-            "injection init because no CUDA context is current.");
+            "[CuptiBackend] No CUDA context is current during Windows "
+            "injection init; disabling context-bound profiling engine but "
+            "keeping activity trace callbacks enabled.");
         engine_.reset();
-        return;
+    } else if (WindowsInjectedProcess() && !haveCudaContext) {
+        GFL_LOG_DEBUG(
+            "[CuptiBackend] No CUDA context is current during Windows "
+            "injection init; starting activity trace without creating one.");
     }
 
     if (IsSassProfilerMode()) {
@@ -1109,6 +1115,7 @@ void CuptiBackend::start() {
     }
 
     active_.store(true);
+    StartActivityFlushThreadIfNeeded_();
     GFL_LOG_DEBUG("Backend started.");
 }
 
@@ -1500,9 +1507,55 @@ void CuptiBackend::FlushProfilingDataBeforeCudaTeardown(const char* reason) {
     engine_->flushBeforeCudaTeardown(reason);
 }
 
+void CuptiBackend::DrainProfilingData() {
+    if (!initialized_ || !active_.load(std::memory_order_relaxed)) return;
+    if (engine_) {
+        engine_->drainData();
+    }
+}
+
+void CuptiBackend::StartActivityFlushThreadIfNeeded_() {
+    // Windows injection cannot safely force-flush CUPTI activity at process
+    // exit because the CUDA driver may already be tearing the context down.
+    // Trace has no SamplingAPI/ProfilerAPI engine armed, so a small worker can
+    // periodically force the activity buffer while the workload is still running
+    // and the collector thread remains free to drain g_monitorBuffer.
+    if (!WindowsInjectedProcess() || engine_ || !collectsKernelEvents()) return;
+
+    bool expected = false;
+    if (!activity_flush_thread_running_.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+        return;
+    }
+
+    activity_flush_thread_ = std::thread([this] {
+        while (activity_flush_thread_running_.load(std::memory_order_acquire)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            if (!activity_flush_thread_running_.load(std::memory_order_acquire)) {
+                break;
+            }
+            if (!active_.load(std::memory_order_relaxed)) continue;
+            if (!kernel_launch_callback_seen_.load(std::memory_order_acquire)) {
+                continue;
+            }
+            LogCuptiIfUnexpected(
+                "periodic-trace-drain", "cuptiActivityFlushAll",
+                cuptiActivityFlushAll(CUPTI_ACTIVITY_FLAG_FLUSH_FORCED));
+        }
+    });
+}
+
+void CuptiBackend::StopActivityFlushThread_() {
+    activity_flush_thread_running_.store(false, std::memory_order_release);
+    if (activity_flush_thread_.joinable()) {
+        activity_flush_thread_.join();
+    }
+}
+
 void CuptiBackend::stop() {
     if (!initialized_) return;
     active_.store(false);
+    StopActivityFlushThread_();
 
     // Stop the engine BEFORE flushing activity records.  PcSamplingEngine::stop()
     // disables the SamplingAPI session — while it's armed, cuptiActivityFlushAll

@@ -17,7 +17,7 @@
 //
 //   Launcher / PyTorch:
 //     $env:GPUFL_ENGINE_COMBO = "Trace,PcSampling,PmSampling,RangeProfiler"
-//     gpufl.exe trace --engine Trace -- python train.py
+//     gpufl.exe trace --passes=Trace -- python train.py
 //
 // Combos to try — Trace gives REAL kernel timings; the rest enrich the same run:
 //     Trace,PcSampling             PC stall-reason sampling + real kernels

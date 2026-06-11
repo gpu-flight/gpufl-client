@@ -276,15 +276,15 @@ bool init(const InitOptions& opts);
 // Stop runtime, flush and close logs.
 void shutdown();
 
-// Comprehensive-profile defaults for "injection" capture mode (the
+// Comprehensive defaults for "injection" capture mode (the
 // libgpufl_inject.so launcher path). Flips most observability flags on
 // and selects the Deep engine (PcSampling + SassMetrics in one run) for
 // the richest per-instruction view.
 // Documented overhead: ~5–15% wall time on heavy CUDA workloads.
 //
-// The launcher's `--profile` flag picks between this and
-// `light_mode_default_options()`; everything else is layered on top
-// (env-var overrides + remote named config) inside gpufl::init().
+// `gpufl trace` now selects capture engines through --passes; everything else
+// is layered on top (env-var overrides + remote named config) inside
+// gpufl::init().
 inline InitOptions injection_mode_default_options() {
     InitOptions opts;
     opts.app_name                    = "gpufl-trace";

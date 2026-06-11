@@ -21,9 +21,10 @@ namespace gpufl {
 /// taken on the user thread inside onScopeStop), the only remaining
 /// producers are CUPTI callbacks: kernel activity records, memcpy
 /// activity records, NVTX markers, and PC sampling drain.  These are
-/// well below the 8K ceiling in normal use.  RingBuffer::Push retains
-/// a brief spin/yield on overrun as defense in depth.
-inline constexpr size_t kMonitorBufferSize = 8192;
+/// usually fit comfortably below this ceiling even when Windows Trace drains
+/// CUPTI activity in periodic bursts. RingBuffer::Push retains a brief
+/// spin/yield on overrun as defense in depth.
+inline constexpr size_t kMonitorBufferSize = 65536;
 
 /// Global ring buffer shared between profiling engines (producers) and
 /// the monitor collector thread (consumer).  Declared here so all
@@ -117,8 +118,8 @@ inline const char* ProfilingEngineWireName(const ProfilingEngine engine) {
 inline const char* ProfilingEngineSessionKind(const ProfilingEngine engine) {
     switch (engine) {
         case ProfilingEngine::Monitor:
-        case ProfilingEngine::Trace:
             return "monitor";
+        case ProfilingEngine::Trace:
         case ProfilingEngine::PcSampling:
         case ProfilingEngine::SassMetrics:
         case ProfilingEngine::PmSampling:

@@ -10,7 +10,7 @@ You name the engines in ONE place — the launcher — which spawns one process
 per engine and auto-assigns the ``analysis_id`` + ``pass_index`` +
 ``pass_count`` + engine (via the ``GPUFL_*`` env vars the C++ core reads)::
 
-    gpufl trace --passes Trace,RangeProfiler,PcSampling -- python train.py
+    gpufl trace --passes=Trace,RangeProfiler,PcSampling -- python train.py
 
 Your script stays **engine-agnostic** — ``targeting()`` inherits its assigned
 engine and analysis-group labels from the environment; you only describe the
@@ -114,7 +114,7 @@ def targeting(scope, *, iters=20, warmup=3, tag="",
 
     Context manager. Composes :func:`gpufl.session` (init + shutdown + optional
     upload) with a bounded per-step scope window. **Normally run under the
-    launcher** — ``gpufl trace --passes Trace,RangeProfiler,PcSampling --
+    launcher** — ``gpufl trace --passes=Trace,RangeProfiler,PcSampling --
     python train.py`` — which assigns the engine and the analysis-group labels
     per pass; then this call only describes the WINDOW. See the module
     docstring for the full recipe.

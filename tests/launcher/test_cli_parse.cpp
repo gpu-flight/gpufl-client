@@ -25,7 +25,6 @@ TEST(CliParseTrace, BasicCommand) {
     EXPECT_EQ(r.args->command.size(), 2u);
     EXPECT_EQ(r.args->command[0], "python");
     EXPECT_EQ(r.args->command[1], "train.py");
-    EXPECT_EQ(r.args->profile, "comprehensive");
     EXPECT_FALSE(r.args->verbose);
     EXPECT_FALSE(r.args->quiet);
 }
@@ -67,28 +66,25 @@ TEST(CliParseTrace, VerboseAndQuiet) {
     EXPECT_TRUE(r.args->quiet);
 }
 
-TEST(CliParseTrace, ProfileValid) {
+TEST(CliParseTrace, ProfileFlagRejectedWithMigrationHint) {
     auto r = parseTraceArgs(argsFor({"--profile=light", "--", "./bin"}));
-    ASSERT_TRUE(r.args.has_value()) << r.error;
-    EXPECT_EQ(r.args->profile, "light");
-}
-
-TEST(CliParseTrace, ProfileMonitoringOnly) {
-    auto r = parseTraceArgs(argsFor({"--profile=monitoring-only", "--", "./bin"}));
-    ASSERT_TRUE(r.args.has_value()) << r.error;
-    EXPECT_EQ(r.args->profile, "monitoring-only");
-}
-
-TEST(CliParseTrace, ProfileInvalid) {
-    auto r = parseTraceArgs(argsFor({"--profile=galactic", "--", "./bin"}));
     EXPECT_FALSE(r.args.has_value());
-    EXPECT_NE(r.error.find("invalid --profile"), std::string::npos);
+    EXPECT_NE(r.error.find("--passes=Trace"), std::string::npos);
+}
+
+TEST(CliParseTrace, ProfileFlagSpaceFormRejectedWithMigrationHint) {
+    auto r = parseTraceArgs(argsFor({"--profile=monitoring-only", "--", "./bin"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("gpufl monitor"), std::string::npos);
 }
 
 TEST(CliParseTrace, UploadFlag) {
     auto r = parseTraceArgs(argsFor({"--upload", "--", "./bin"}));
     ASSERT_TRUE(r.args.has_value()) << r.error;
     EXPECT_TRUE(r.args->upload);
+    EXPECT_EQ(r.args->api_version, "v1");
+    EXPECT_EQ(r.args->log_types, "device,scope,system");
+    EXPECT_EQ(r.args->agent_drain_ms, 3000);
 }
 
 TEST(CliParseTrace, UploadDefaultsFalse) {
@@ -97,31 +93,44 @@ TEST(CliParseTrace, UploadDefaultsFalse) {
     EXPECT_FALSE(r.args->upload);
 }
 
-TEST(CliParseTrace, EngineValid) {
+TEST(CliParseTrace, UploadAgentFlags) {
+    auto r = parseTraceArgs(argsFor({
+        "--upload",
+        "--backend-url=https://api.example.com",
+        "--api-key", "gpfl_key",
+        "--api-version=v2",
+        "--agent-jar=/tmp/agent.jar",
+        "--agent-cursor=/tmp/trace-cursor.json",
+        "--log-types=device,scope",
+        "--agent-drain-ms=500",
+        "--", "./bin"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    EXPECT_TRUE(r.args->upload);
+    EXPECT_EQ(r.args->backend_url, "https://api.example.com");
+    EXPECT_EQ(r.args->api_key, "gpfl_key");
+    EXPECT_EQ(r.args->api_version, "v2");
+    EXPECT_EQ(r.args->agent_jar, "/tmp/agent.jar");
+    EXPECT_EQ(r.args->agent_cursor, "/tmp/trace-cursor.json");
+    EXPECT_EQ(r.args->log_types, "device,scope");
+    EXPECT_EQ(r.args->agent_drain_ms, 500);
+}
+
+TEST(CliParseTrace, InvalidAgentDrainRejected) {
+    auto r = parseTraceArgs(argsFor({"--agent-drain-ms=-1", "--", "./bin"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("invalid --agent-drain-ms"), std::string::npos);
+}
+
+TEST(CliParseTrace, EngineFlagRejectedWithMigrationHint) {
     auto r = parseTraceArgs(argsFor({"--engine=Deep", "--", "./bin"}));
-    ASSERT_TRUE(r.args.has_value()) << r.error;
-    EXPECT_EQ(r.args->engine, "Deep");
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("--passes=Deep"), std::string::npos);
 }
 
-TEST(CliParseTrace, EngineValidMonitor) {
+TEST(CliParseTrace, EngineFlagSpaceFormRejectedWithMigrationHint) {
     auto r = parseTraceArgs(argsFor({"--engine", "Monitor", "--", "./bin"}));
-    ASSERT_TRUE(r.args.has_value()) << r.error;
-    EXPECT_EQ(r.args->engine, "Monitor");
-}
-
-TEST(CliParseTrace, EngineInvalid) {
-    auto r = parseTraceArgs(argsFor({"--engine=hyperdrive", "--", "./bin"}));
     EXPECT_FALSE(r.args.has_value());
-    EXPECT_NE(r.error.find("invalid --engine"), std::string::npos);
-}
-
-TEST(CliParseTrace, EngineLegacyKebabRejected) {
-    // The pre-refactor kebab vocab ("pc-sampling", "pc-sampling-with-sass",
-    // "none") is no longer accepted; the CLI now speaks the canonical
-    // ladder names that gpufl::init() parses for GPUFL_PROFILING_ENGINE.
-    auto r = parseTraceArgs(argsFor({"--engine=pc-sampling", "--", "./bin"}));
-    EXPECT_FALSE(r.args.has_value());
-    EXPECT_NE(r.error.find("invalid --engine"), std::string::npos);
+    EXPECT_NE(r.error.find("--passes=Trace"), std::string::npos);
 }
 
 TEST(CliParseTrace, UnknownFlag) {
@@ -178,7 +187,6 @@ TEST(CliParseTrace, PassesParsedAsList) {
     EXPECT_EQ(r.args->passes[0], "Trace");
     EXPECT_EQ(r.args->passes[1], "PcSampling");
     EXPECT_EQ(r.args->passes[2], "SassMetrics");
-    EXPECT_TRUE(r.args->engine.empty());
 }
 
 TEST(CliParseTrace, PassesTrimsWhitespace) {
@@ -191,8 +199,21 @@ TEST(CliParseTrace, PassesTrimsWhitespace) {
     EXPECT_EQ(r.args->passes[1], "SassMetrics");
 }
 
+TEST(CliParseTrace, PassesDeepPresetParsed) {
+    auto r = parseTraceArgs(argsFor({"--passes=Deep", "--", "./bin"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    ASSERT_EQ(r.args->passes.size(), 1u);
+    EXPECT_EQ(r.args->passes[0], "Deep");
+}
+
 TEST(CliParseTrace, PassesInvalidEngineRejected) {
     auto r = parseTraceArgs(argsFor({"--passes=Trace,warpdrive", "--", "./bin"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("invalid --passes"), std::string::npos);
+}
+
+TEST(CliParseTrace, MonitorPassRejected) {
+    auto r = parseTraceArgs(argsFor({"--passes=Monitor", "--", "./bin"}));
     EXPECT_FALSE(r.args.has_value());
     EXPECT_NE(r.error.find("invalid --passes"), std::string::npos);
 }
@@ -203,17 +224,15 @@ TEST(CliParseTrace, PassesEmptyRejected) {
     EXPECT_NE(r.error.find("--passes requires"), std::string::npos);
 }
 
-TEST(CliParseTrace, EngineAndPassesMutuallyExclusive) {
-    auto r = parseTraceArgs(
-        argsFor({"--engine=Deep", "--passes=Trace", "--", "./bin"}));
+TEST(CliParseTrace, DeepPresetCannotBeCombined) {
+    auto r = parseTraceArgs(argsFor({"--passes=Trace,Deep", "--", "./bin"}));
     EXPECT_FALSE(r.args.has_value());
-    EXPECT_NE(r.error.find("mutually exclusive"), std::string::npos);
+    EXPECT_NE(r.error.find("cannot be combined"), std::string::npos);
 }
 
 TEST(ResolvePassPlan, ExplicitPassesWin) {
     TraceArgs a;
     a.passes = {"Trace", "SassMetrics"};
-    a.engine = "";  // empty — passes take precedence regardless
     const auto plan = resolvePassPlan(a);
     ASSERT_EQ(plan.size(), 2u);
     EXPECT_EQ(plan[0], "Trace");
@@ -222,7 +241,7 @@ TEST(ResolvePassPlan, ExplicitPassesWin) {
 
 TEST(ResolvePassPlan, DeepExpandsToDefaultPlan) {
     TraceArgs a;
-    a.engine = "Deep";
+    a.passes = {"Deep"};
     const auto plan = resolvePassPlan(a);
     ASSERT_EQ(plan.size(), 3u);
     EXPECT_EQ(plan[0], "Trace");
@@ -230,21 +249,19 @@ TEST(ResolvePassPlan, DeepExpandsToDefaultPlan) {
     EXPECT_EQ(plan[2], "SassMetrics");
 }
 
-TEST(ResolvePassPlan, SingleExplicitEngineIsOnePass) {
+TEST(ResolvePassPlan, SingleExplicitPassIsOnePass) {
     TraceArgs a;
-    a.engine = "PcSampling";
+    a.passes = {"PcSampling"};
     const auto plan = resolvePassPlan(a);
     ASSERT_EQ(plan.size(), 1u);
     EXPECT_EQ(plan[0], "PcSampling");
 }
 
-TEST(ResolvePassPlan, NoEngineIsOneDefaultPass) {
-    // No --engine, no --passes → one pass with an empty engine string, i.e.
-    // "use the profile's default engine" — the legacy single-pass behavior.
+TEST(ResolvePassPlan, NoPassesIsTracePass) {
     TraceArgs a;
     const auto plan = resolvePassPlan(a);
     ASSERT_EQ(plan.size(), 1u);
-    EXPECT_TRUE(plan[0].empty());
+    EXPECT_EQ(plan[0], "Trace");
 }
 
 // ── gpufl upload ────────────────────────────────────────────────────────

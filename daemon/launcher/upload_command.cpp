@@ -62,11 +62,17 @@ int runUpload(const UploadArgs& args) {
     const gpufl::UploadResult r = gpufl::uploadLogs(opts);
 
     // Summary on stdout (machine-friendlier than the per-progress stderr).
-    std::printf("Uploaded %zu events (%.1f MB) across %zu file(s) in %.1fs.\n",
-                r.events_uploaded,
+    // Event counts are only known against legacy synchronous backends;
+    // async-accept backends (202 + spool id) report none at POST time,
+    // so bytes/files are the universal numbers.
+    std::printf("Uploaded %.1f MB across %zu file(s) in %.1fs.\n",
                 static_cast<double>(r.bytes_uploaded) / (1024.0 * 1024.0),
                 r.files_processed,
                 static_cast<double>(r.elapsed_ms) / 1000.0);
+    if (r.events_uploaded > 0) {
+        std::printf("Backend acknowledged %zu event(s) synchronously.\n",
+                    r.events_uploaded);
+    }
     if (r.files_skipped_by_cursor) {
         std::printf("Skipped %zu file(s) already uploaded (per cursor).\n",
                     r.files_skipped_by_cursor);

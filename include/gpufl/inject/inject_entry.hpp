@@ -1,7 +1,6 @@
 #pragma once
 
-// Profile-preset VALUE constants shared between the launcher binary
-// (`gpufl trace --profile`) and the injection shared library.
+// Profile-preset VALUE constants read by the injection shared library.
 //
 // NOTE: the environment-variable NAME constants that used to live here (kEnv*)
 // moved to gpufl/core/env_vars.hpp (namespace gpufl::env) so every env-var name
@@ -10,8 +9,9 @@
 
 namespace gpufl::inject {
 
-// Profile-name string values (must stay in sync with the launcher's
-// `--profile` flag parsing in cli_parse.cpp).
+// Profile-name string values. `gpufl trace --profile` is no longer exposed; the
+// launcher pins comprehensive and these remain for internal/legacy env-based
+// injection overrides.
 constexpr const char* kProfileComprehensive  = "comprehensive";
 constexpr const char* kProfileLight          = "light";
 constexpr const char* kProfileMonitoringOnly = "monitoring-only";

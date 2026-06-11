@@ -20,6 +20,7 @@ endif()
 # `gpufl trace -- <cmd>` (not `gpufl_launcher trace -- <cmd>`).
 add_executable(gpufl_launcher
     main.cpp
+    agent_launcher.cpp
     cli_parse.cpp
     ${GPUFL_LAUNCHER_TRACE_IMPL}
     monitor_command.cpp
