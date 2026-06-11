@@ -111,11 +111,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     up.add_argument(
         "log_path",
-        help=("Path prefix for the session's logs — same as the "
-              "InitOptions.log_path used when the session ran. Both the "
-              "directory and filename-prefix; e.g. "
-              "'/tmp/runs/pytorch_demo' matches "
-              "'/tmp/runs/pytorch_demo.device.log' plus rotated files."),
+        help=("Output directory for the session's logs; same as the "
+              "InitOptions.log_path used when the session ran. For example, "
+              "'/tmp/runs/pytorch_demo' contains "
+              "'<session_id>/<channel>.log[.gz]' files."),
     )
     up.add_argument(
         "--backend-url", default=None,

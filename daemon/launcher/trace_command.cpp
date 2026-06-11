@@ -27,9 +27,13 @@
 #include <random>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
+#include "agent_launcher.hpp"
 #include "gpufl/core/env_vars.hpp"
+#include "gpufl/core/logger/file_compressor.hpp"
+#include "gpufl/inject/inject_entry.hpp"
 
 namespace fs = std::filesystem;
 
@@ -133,6 +137,50 @@ void setEnvOrDie(const char* k, const std::string& v) {
     }
 }
 
+int repairUncompressedLogs(const fs::path& root) {
+    std::error_code root_ec;
+    if (root.empty() || !fs::exists(root, root_ec)) return 0;
+
+    gpufl::GzipFileCompressor compressor;
+    int repaired = 0;
+    std::error_code iter_ec;
+    for (fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, iter_ec), end;
+         !iter_ec && it != end;
+         it.increment(iter_ec)) {
+        std::error_code entry_ec;
+        if (!it->is_regular_file(entry_ec)) continue;
+        const fs::path path = it->path();
+        if (path.extension() != ".log") continue;
+
+        std::error_code size_ec;
+        const auto size = fs::file_size(path, size_ec);
+        if (size_ec) continue;
+        if (size == 0) {
+            std::error_code remove_ec;
+            fs::remove(path, remove_ec);
+            continue;
+        }
+
+        const fs::path gz_path(path.string() + ".gz");
+        std::error_code exists_ec;
+        if (fs::exists(gz_path, exists_ec)) {
+            std::error_code remove_ec;
+            fs::remove(path, remove_ec);
+            continue;
+        }
+
+        if (compressor.compress(path.string())) {
+            ++repaired;
+            std::error_code remaining_ec;
+            if (fs::exists(path, remaining_ec)) {
+                std::error_code remove_ec;
+                fs::remove(path, remove_ec);
+            }
+        }
+    }
+    return repaired;
+}
+
 }  // namespace
 
 int runTrace(const TraceArgs& args) {
@@ -155,8 +203,8 @@ int runTrace(const TraceArgs& args) {
         return 3;
     }
 
-    // Resolve the multi-pass plan (explicit --passes, --engine Deep expanded,
-    // or a single pass) — the shared source of truth lives in cli_parse.
+    // Resolve the capture plan (explicit --passes, --passes=Deep expanded, or
+    // the default Trace pass) — the shared source of truth lives in cli_parse.
     const std::vector<std::string> plan = resolvePassPlan(args);
     const bool multipass = plan.size() > 1;
 
@@ -177,6 +225,8 @@ int runTrace(const TraceArgs& args) {
                      output_dir.string().c_str(), ec.message().c_str());
         return 2;
     }
+    const fs::path agent_output_dir = fs::weakly_canonical(output_dir, ec);
+    const fs::path upload_dir = ec ? output_dir : agent_output_dir;
 
     const std::string app_name = args.name.empty()
                                ? baseName(args.command.front())
@@ -198,26 +248,48 @@ int runTrace(const TraceArgs& args) {
     setEnvOrDie(gpufl::env::kInject, "1");
     setEnvOrDie(gpufl::env::kAppName, app_name);
     setEnvOrDie(gpufl::env::kLogDir, output_dir.string());
-    setEnvOrDie(gpufl::env::kInjectProfile, args.profile);
+    setEnvOrDie(gpufl::env::kInjectProfile, gpufl::inject::kProfileComprehensive);
+    setEnvOrDie(gpufl::env::kInjectUpload, "0");
 
-    // --upload: fail fast here (before we exec) if the creds the inject lib's
-    // post-run uploadLogs() will need aren't in the environment. Each pass
-    // uploads its own session; the backend groups them by analysis_id.
+    AgentProcess agent;
     if (args.upload) {
-        const char* api_key     = std::getenv(gpufl::env::kApiKey);
-        const char* backend_url = std::getenv(gpufl::env::kBackendUrl);
-        if (!api_key || !*api_key || !backend_url || !*backend_url) {
-            std::fprintf(stderr,
-                "gpufl trace --upload: GPUFL_API_KEY and GPUFL_BACKEND_URL "
-                "must both be set in the environment to upload.\n");
+        const fs::path cursor = args.agent_cursor.empty()
+                              ? upload_dir / "cursor.json"
+                              : fs::path(args.agent_cursor);
+
+        AgentOptions agent_opts;
+        agent_opts.source_folders = upload_dir.string();
+        agent_opts.log_types = args.log_types;
+        agent_opts.cursor_file = cursor.string();
+        agent_opts.backend_url = resolveOption(args.backend_url, gpufl::env::kBackendUrl);
+        agent_opts.api_key = resolveOption(args.api_key, gpufl::env::kApiKey);
+        agent_opts.api_version = args.api_version;
+        agent_opts.agent_jar = args.agent_jar;
+
+        std::string error;
+        if (!configureAgentEnvironment(agent_opts, error)) {
+            std::fprintf(stderr, "gpufl trace --upload: %s\n", error.c_str());
             return 2;
         }
-        setEnvOrDie(gpufl::env::kInjectUpload, "1");
+
+        AgentLaunchPlan plan;
+        if (!buildAgentLaunchPlan(agent_opts, plan, error)) {
+            std::fprintf(stderr, "gpufl trace --upload: %s\n", error.c_str());
+            return 2;
+        }
+        if (!args.quiet) {
+            std::fprintf(stderr, "[gpufl] starting agent: %s\n",
+                         plan.description.c_str());
+        }
+        if (!agent.start(plan.command, error)) {
+            std::fprintf(stderr, "gpufl trace --upload: %s\n", error.c_str());
+            return 3;
+        }
     }
 
     if (multipass) {
-        setEnvOrDie(gpufl::env::kAnalysisId, analysis_id);
-        setEnvOrDie(gpufl::env::kPassCount, std::to_string(plan.size()));
+        setEnvOrDie(env::kAnalysisId, analysis_id);
+        setEnvOrDie(env::kPassCount, std::to_string(plan.size()));
     }
 
     if (!args.quiet) {
@@ -233,7 +305,6 @@ int runTrace(const TraceArgs& args) {
             std::fprintf(stderr, "[gpufl] inject lib: %s\n",
                          inject_lib.string().c_str());
             std::fprintf(stderr, "[gpufl] app_name: %s\n", app_name.c_str());
-            std::fprintf(stderr, "[gpufl] profile: %s\n", args.profile.c_str());
         }
     }
 
@@ -244,11 +315,8 @@ int runTrace(const TraceArgs& args) {
     for (size_t i = 0; i < plan.size(); ++i) {
         const std::string& engine = plan[i];
 
-        // Per-pass engine. An empty engine (legacy single pass with no
-        // --engine) leaves GPUFL_PROFILING_ENGINE as the user/profile set it.
-        if (!engine.empty()) {
-            setEnvOrDie(gpufl::env::kProfilingEngine, engine);
-        }
+        // Per-pass engine. The default no-flag path resolves to Trace.
+        setEnvOrDie(gpufl::env::kProfilingEngine, engine);
         if (multipass) {
             setEnvOrDie(gpufl::env::kPassIndex, std::to_string(i));
         }
@@ -323,6 +391,20 @@ int runTrace(const TraceArgs& args) {
 
     if (!args.quiet) {
         std::fprintf(stderr, "[gpufl] inspect: %s\n", output_dir.string().c_str());
+    }
+    if (args.upload && args.agent_drain_ms > 0) {
+        if (!args.quiet) {
+            std::fprintf(stderr, "[gpufl] waiting %.2fs for agent drain\n",
+                         args.agent_drain_ms / 1000.0);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(args.agent_drain_ms));
+    }
+    if (args.upload) {
+        agent.stop();
+    }
+    const int repaired_logs = repairUncompressedLogs(output_dir);
+    if (!args.quiet && repaired_logs > 0) {
+        std::fprintf(stderr, "[gpufl] compressed %d log file(s)\n", repaired_logs);
     }
 
     return overall_rc;

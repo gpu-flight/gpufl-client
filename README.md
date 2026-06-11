@@ -34,7 +34,7 @@ Try the portal with real session data — no sign-up required:
 - **Production Grade**: Uses a **Lock-Free Ring Buffer** and a **Background Collector Thread** to decouple logging from your hot path.
 - **Logical Scoping**: Group thousands of micro-kernels into meaningful phases (e.g., "Inference", "PhysicsStep") using `GFL_SCOPE` or `gpufl.Scope`.
 - **Rich Metadata**: Captures kernel names, grid/block dimensions, register counts, shared memory usage, occupancy with per-resource breakdown, and CPU stack traces.
-- **Profiling Engines**: Choose from PC Sampling (stall analysis), SASS Metrics (instruction-level divergence), or Range Profiler (hardware counters) — one engine per session.
+- **Profiling Passes**: Use `gpufl trace --passes` for Trace, PC Sampling, SASS Metrics, PM Sampling, or Range Profiler captures; launcher mode can run isolated passes and merge them later.
 - **System Monitoring**: Collects GPU utilization, VRAM, temperature, power, and clock speeds via NVML.
 - **Sidecar Ready**: Outputs structured NDJSON logs with automatic rotation and gzip compression.
 - **Deferred Upload**: After a session ends, ship its NDJSON files to the GPUFlight backend with one call (`gpufl.upload_logs(...)`) or the orchestrated `with gpufl.session(backend_url=..., api_key=...):` context manager. All HTTP happens post-shutdown, so transient network failures cannot affect your GPU workload. Ideal for local dev, SSH, and Jupyter — no sidecar needed.
@@ -219,10 +219,12 @@ gpufl.init("my-app",
 
 `gpufl trace` can run several passes of the same target process. This is the
 recommended path when you want data from engines that cannot safely coexist in
-one CUDA context.
+one CUDA context. Without `--passes`, launcher mode runs a single `Trace` pass.
+Use `--passes=Deep` as shorthand for `Trace,PcSampling,SassMetrics`. Use
+`gpufl monitor` for monitoring-only GPU/host telemetry.
 
 ```bash
-gpufl trace --passes Trace,PcSampling,RangeProfilerKernelReplay -- python train.py
+gpufl trace --passes=Trace,PcSampling,RangeProfilerKernelReplay -- python train.py
 ```
 
 For embedded examples and test scripts, the lower-level compatibility-matrix
@@ -322,17 +324,17 @@ if not result.success:
 
 ```bash
 gpufl upload ./logs \
-    --backend-url https://api.gpuflight.com \
-    --api-key gpfl_xxxxxxxxxxxx
+    --backend-url=https://api.gpuflight.com \
+    --api-key=gpfl_xxxxxxxxxxxx
 
 # Specific session
-gpufl upload ./logs --session-id <uuid> --backend-url ... --api-key ...
+gpufl upload ./logs --session-id=<uuid> --backend-url=... --api-key=...
 
 # Batch every session in the dir
-gpufl upload ./logs --all-sessions --backend-url ... --api-key ...
+gpufl upload ./logs --all-sessions --backend-url=... --api-key=...
 
 # Re-upload after the cursor marked it done
-gpufl upload ./logs --force --backend-url ... --api-key ...
+gpufl upload ./logs --force --backend-url=... --api-key=...
 ```
 
 > The native `gpufl` binary is **Linux-only**. On Windows/macOS (or any
@@ -340,7 +342,7 @@ gpufl upload ./logs --force --backend-url ... --api-key ...
 > through the Python package:
 >
 > ```bash
-> python -m gpufl.cli upload ./logs --backend-url ... --api-key ...
+> python -m gpufl.cli upload ./logs --backend-url=... --api-key=...
 > ```
 >
 > Up to v1.1.0rc2 this shipped as a `gpufl` pip console-script; it was

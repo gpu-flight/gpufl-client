@@ -9,6 +9,7 @@
 #include <stack>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "gpufl/core/activity_record.hpp"
@@ -239,6 +240,7 @@ static void flushBatches(Logger& logger, const std::string& session_id) {
 // Stores the whole KERNEL_LAUNCH_META ActivityRecord — it already carries every
 // field the join and the synthetic-kernel path need, so no parallel struct.
 static std::unordered_map<uint64_t, ActivityRecord> g_launchMetaByCorr;
+static std::unordered_set<uint64_t> g_emittedKernelCorrIds;
 
 // ── Execution Signature (P2 multi-pass determinism guard) ──────────────────
 // Per-scope multiset of (mangled kernel name + launch dims) -> launch count,
@@ -568,6 +570,12 @@ static bool collectorProcessNext() {
                 g_adapter ? g_adapter->platformName() : "unknown";
 
             if (rec.type == TraceType::KERNEL) {
+                if (rec.corr_id != 0 &&
+                    !g_emittedKernelCorrIds.insert(rec.corr_id).second) {
+                    GFL_LOG_DEBUG("[CollectorLoop] skipping duplicate kernel corr=",
+                                  rec.corr_id);
+                    return true;
+                }
                 emitKernelRecord(rec, stack_trace, rt);
 
             } else if (rec.type == TraceType::MEMCPY) {
@@ -826,6 +834,7 @@ void Monitor::Initialize(const MonitorOptions& opts) {
     // Worker-local launch-meta join map (Step 4b-2): drop any entries a prior
     // session left behind so corr ids can't collide across init/shutdown cycles.
     g_launchMetaByCorr.clear();
+    g_emittedKernelCorrIds.clear();
     g_syncStackByCorr.clear();  // Step 4c: same cross-session hygiene for syncs.
     g_execSignatureByScope.clear();  // P2 exec-signature: drop prior session's multiset.
     g_kernelBatchId  = 0;

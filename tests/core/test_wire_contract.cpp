@@ -25,6 +25,7 @@
 #include <string>
 
 #include "gpufl/core/events.hpp"
+#include "gpufl/core/monitor.hpp"
 #include "gpufl/core/version.hpp"
 #include "gpufl/core/model/batch_models.hpp"
 #include "gpufl/core/model/lifecycle_model.hpp"
@@ -53,6 +54,15 @@ namespace {
 // the build.
 TEST(WireContract, WireVersionIsPinned) {
     EXPECT_STREQ(gpufl::kWireVersion, "1");
+}
+
+TEST(WireContract, TraceEngineIsTraceSessionKind) {
+    EXPECT_STREQ(
+        gpufl::ProfilingEngineSessionKind(gpufl::ProfilingEngine::Monitor),
+        "monitor");
+    EXPECT_STREQ(
+        gpufl::ProfilingEngineSessionKind(gpufl::ProfilingEngine::Trace),
+        "trace");
 }
 
 // ── job_start ─────────────────────────────────────────────────────────────

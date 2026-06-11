@@ -440,11 +440,10 @@ void doInjectInit() {
         opts.app_name = v;
     }
     if (const char* v = envOrNull(gpufl::env::kLogDir)) {
-        // Init expects a file path; the launcher provides the dir,
-        // we tack on app.log so log_rotator's three NDJSON channels
-        // (app.device.log / app.scope.log / app.system.log) land in
-        // the launcher's chosen dir.
-        opts.log_path = std::string(v) + "/app.log";
+        // v1.2 log_path is a directory. The logger writes
+        // <log_path>/<session_id>/<channel>.log[.gz], so the launcher's
+        // --output dir should be used as-is.
+        opts.log_path = std::string(v);
     }
 #ifdef _WIN32
     // Windows CUDA injection can leave the process through CRT/driver teardown

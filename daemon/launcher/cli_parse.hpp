@@ -12,17 +12,21 @@ namespace gpufl::launcher {
 struct TraceArgs {
     std::string name;                   // --name / -n; default: basename of cmd[0]
     std::string output_dir;             // --output / -o; default: ~/.gpufl/traces/{ts}_{sid}
-    std::string profile = "comprehensive"; // --profile
-    std::string engine;                 // --engine; empty = profile default
-    // --passes: explicit multi-pass plan — a comma-separated list of engines,
-    // one isolated pass each (e.g. "Trace,PcSampling,SassMetrics"). Mutually
-    // exclusive with --engine. Empty here means "no explicit plan"; the plan is
-    // then resolved from --engine (Deep expands to the default multi-pass plan)
-    // — see resolvePassPlan().
+    // --passes: explicit capture plan: a comma-separated list of engines, one
+    // isolated pass each (e.g. "Trace,PcSampling,SassMetrics"). "--passes=Deep"
+    // is a shorthand for the default deep plan. Empty here means "no explicit
+    // plan"; the launcher runs a single Trace pass.
     std::vector<std::string> passes;
     bool verbose = false;               // -v
     bool quiet = false;                 // -q
-    bool upload = false;                // --upload: ship trace to backend post-run
+    bool upload = false;                // --upload: start gpufl-agent for live upload
+    std::string backend_url;            // --backend-url; else GPUFL_BACKEND_URL
+    std::string api_key;                // --api-key; else GPUFL_API_KEY
+    std::string api_version = "v1";     // --api-version
+    std::string agent_jar;              // --agent-jar; else GPUFL_AGENT_JAR
+    std::string agent_cursor;           // --agent-cursor; default <output>/cursor.json
+    std::string log_types = "device,scope,system"; // --log-types
+    int agent_drain_ms = 3000;          // --agent-drain-ms after target exits
     std::vector<std::string> command;   // tokens after `--`
 };
 
@@ -31,7 +35,7 @@ struct TraceArgs {
 // upload_command.cpp resolves creds from env when a flag is omitted and
 // calls gpufl::uploadLogs().
 struct UploadArgs {
-    std::string log_path;           // positional: session log-path prefix
+    std::string log_path;           // positional: trace output directory
     std::string backend_url;        // --backend-url (else env GPUFL_BACKEND_URL)
     std::string api_key;            // --api-key (else env GPUFL_API_KEY)
     std::string api_path;           // --api-path; empty resolves to /api/v1
@@ -87,17 +91,15 @@ struct TraceParseResult {
 
 TraceParseResult parseTraceArgs(const std::vector<std::string>& argv);
 
-// Resolves the ordered multi-pass plan (one isolated CUPTI engine per pass)
-// from parsed trace args. Precedence:
-//   1. explicit --passes list (verbatim);
-//   2. --engine Deep        → the default multi-pass plan
+// Resolves the ordered capture plan (one isolated CUPTI engine per pass) from
+// parsed trace args. Precedence:
+//   1. --passes=Deep        -> the default deep plan
 //                             [Trace, PcSampling, SassMetrics];
-//   3. otherwise            → a single pass = {engine} (engine may be "" =
-//                             use the profile's default engine — the legacy
-//                             single-pass behavior, unchanged).
+//   2. explicit --passes    -> the listed engines, one pass each;
+//   3. otherwise            -> a single Trace pass.
 // A returned size() > 1 is a multi-pass run (the launcher assigns one
 // analysis_id and labels each pass). This is the single source of truth for
-// the default plan, shared by the Linux and Windows launchers.
+// the default deep plan, shared by the Linux and Windows launchers.
 std::vector<std::string> resolvePassPlan(const TraceArgs& args);
 
 // Parses the args passed to `gpufl upload`. On success returns the

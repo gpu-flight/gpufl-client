@@ -29,19 +29,18 @@ namespace gpufl {
  */
 struct UploadOptions {
     /**
-     * Same shape as `InitOptions::log_path`. Both the directory AND
-     * filename-prefix of the session's NDJSON output. For example,
-     * passing "/tmp/runs/pytorch_demo" causes uploadLogs to look for
+     * Same shape as `InitOptions::log_path`: the session output root.
+     * For example, passing "/tmp/runs/pytorch_demo" causes uploadLogs
+     * to look for
      *
-     *   /tmp/runs/pytorch_demo.device.log         (active)
-     *   /tmp/runs/pytorch_demo.scope.log
-     *   /tmp/runs/pytorch_demo.system.log
-     *   /tmp/runs/pytorch_demo.device.1.log.gz   (rotated, oldest = highest N)
-     *   /tmp/runs/pytorch_demo.scope.1.log.gz
-     *   …
+     *   /tmp/runs/pytorch_demo/<session_id>/device.log[.gz]
+     *   /tmp/runs/pytorch_demo/<session_id>/scope.log[.gz]
+     *   /tmp/runs/pytorch_demo/<session_id>/system.log[.gz]
+     *   /tmp/runs/pytorch_demo/<session_id>/device.1.log.gz
+     *   ...
      *
-     * If the path ends in ".log" the suffix is stripped before glob
-     * (matches LogFileRotator::basePrefix() semantics).
+     * Legacy pre-v1.2 prefix paths are still handled by discovery when
+     * present.
      */
     std::string log_path;
 
@@ -173,10 +172,16 @@ struct UploadResult {
     /** Count of files that were skipped because the cursor said so. */
     std::size_t files_skipped_by_cursor = 0;
 
-    /** Number of NDJSON events POSTed successfully (2xx). */
+    /**
+     * Number of NDJSON events the backend acknowledged synchronously.
+     * Only legacy (pre-Phase 3a) backends report per-line counts at
+     * POST time; against an async-accept backend (202 + spool_id) this
+     * stays 0 — use {@code bytes_uploaded}/{@code files_processed} for
+     * progress reporting instead.
+     */
     std::size_t events_uploaded = 0;
 
-    /** Sum of NDJSON-line bytes successfully uploaded (uncompressed). */
+    /** Sum of NDJSON bytes successfully uploaded (uncompressed). */
     std::size_t bytes_uploaded = 0;
 
     /** Wall time of the upload in milliseconds. */
@@ -219,22 +224,22 @@ struct UploadResult {
  *   - session_id_filter set: upload only that session.
  *   - all_sessions=true: upload every session, oldest-first.
  *
- * Lifecycle ordering is enforced **per session**: for each selected
- * session, `job_start` is POSTed first, all batch events in file
- * order, then `shutdown` last — before any subsequent session begins.
- * This keeps the backend's session-lifecycle bookkeeping consistent
- * even when multiple sessions share a log directory.
- *
- * Files visited in (channel, rotation-index DESC, active) order so
- * per-channel chronological order is preserved within each session.
+ * Upload unit is one rotated file (U1): each `.log.gz` is POSTed in a
+ * single request with its bytes as-is (no decompress/re-chunk pass).
+ * Files go in (channel, rotation-index DESC, active-last) order, so
+ * `job_start` (first line of the oldest file) is POSTed first and
+ * `shutdown` (last line of the active file) last — arrival order per
+ * session is preserved before any subsequent session begins.
  *
  * Cursor file:
  *   - Tracks rotated `.log.gz` files that have shipped (skip on
- *     re-run); active `.log` files are always re-streamed.
+ *     re-run); the active file is always re-sent.
  *   - Tracks `session_id`s that have completed a successful upload.
  *     Default and session_id_filter modes refuse to re-upload a
  *     completed session unless `force=true`. all_sessions mode
  *     silently skips completed sessions unless `force=true`.
+ *     A session with any skipped/failed file is NOT marked completed,
+ *     so a re-run retries it.
  *
  * Local NDJSON files are NEVER deleted by this call.
  */

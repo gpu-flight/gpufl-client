@@ -9,6 +9,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -106,7 +107,10 @@ class CuptiBackend : public IMonitorBackend {
         return resolved_plan_.allow_sass_external_correlation;
     }
     void FlushProfilingDataBeforeCudaTeardown(const char* reason);
+    void StartActivityFlushThreadIfNeeded_();
+    void StopActivityFlushThread_();
     void NoteKernelLaunchForCleanupFlush() {
+        kernel_launch_callback_seen_.store(true, std::memory_order_release);
         last_cleanup_flush_ns_.store(0, std::memory_order_release);
     }
     void NoteMemoryActivityEmitted() {
@@ -156,9 +160,7 @@ class CuptiBackend : public IMonitorBackend {
         GFL_LOG_DEBUG("OnScopeStart");
         if (engine_) engine_->onScopeStart(name);
     }
-    void DrainProfilingData() override {
-        if (engine_) engine_->drainData();
-    }
+    void DrainProfilingData() override;
     void OnScopeStop(const char* name) override {
         GFL_LOG_DEBUG("OnScopeStop");
         if (engine_) engine_->onScopeStop(name);
@@ -268,7 +270,10 @@ class CuptiBackend : public IMonitorBackend {
     std::atomic<uint64_t> external_correlation_seen_{0};
     std::atomic<uint64_t> source_locator_seen_{0};
     std::atomic<uint64_t> function_record_seen_{0};
+    std::atomic<bool> kernel_launch_callback_seen_{false};
     std::atomic<int64_t> last_cleanup_flush_ns_{0};
+    std::atomic<bool> activity_flush_thread_running_{false};
+    std::thread activity_flush_thread_;
     // Re-entrancy guard for FlushOnContextDestroy(): cuptiActivityFlushAll
     // drives BufferCompleted on the calling thread, so this prevents a nested
     // context-destroy callback from recursing into another flush.

@@ -1,20 +1,25 @@
-// High-level structure:
-//   1. parse log_path → (directory, file-prefix)
-//   2. discover .log / .log.gz files matching the prefix; sort by
-//      (channel, rotation_index DESC, active-file last)
-//   3. read cursor file → set of filenames already uploaded
-//   4. for each file in order:
-//        - if in cursor (and not the active file): skip
-//        - open (decompress if .gz), stream NDJSON line by line
-//        - for each line: extract `"type"`, route to POST
-//          * `shutdown` → hold in a deferred-tail buffer, POST after all files
-//          * everything else (including `job_start`, which appears first
-//            naturally because it lives in the oldest file's first line)
-//            → POST immediately
-//      after a successful pass over a non-active file: append to cursor
-//   5. POST the held `shutdown` events last so the backend's
-//      session-lifecycle bookkeeping sees a clean job_start → … → shutdown
-//      sequence in arrival order
+// High-level structure (U1: file-unit upload — one POST per rotated file):
+//   1. resolve log_path as a v1.2 session-output root, with legacy prefix fallback
+//   2. discover .log / .log.gz files; sort by
+//      (session_id, channel, rotation_index DESC, active-file last)
+//   3. read cursor file → uploaded files + completed sessions
+//   4. for each target session, for each of its files in order:
+//        - rotated file already in cursor: skip (crash-resume)
+//        - POST the file body in ONE request: .log.gz bytes go on the
+//          wire AS-IS (Content-Encoding: gzip, zero re-encode), plain
+//          .log is gzipped first
+//        - rotated file shipped → append to cursor
+//      The old 5000-line/5 MB client-side chunking is gone: the rotator
+//      already caps files (Logger::kDefaultRotateBytes = 64 MiB raw,
+//      ≈ 4–8 MB gz), the backend accept path just streams the body to
+//      spool/lake storage, and the worker ingest is line-streamed — so
+//      the file IS the natural unit, ~13× fewer round trips / GCS
+//      objects / ingestion jobs per file.
+//   5. lifecycle ordering: job_start lives in the oldest file (POSTed
+//      first) and shutdown in the active file (POSTed last), so arrival
+//      order is preserved without the old extract-and-defer pass. Note
+//      arrival ≠ ingest-completion order under the async queue — the
+//      ordering chain (upload-plan U3) is the real guarantee.
 //   6. enforce total_timeout_ms across the whole loop — abort + return
 //      success=false on overrun rather than blocking the host process
 
@@ -44,6 +49,7 @@
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/host_info.hpp"
 #include "gpufl/core/json/json.hpp"
+#include "gpufl/core/logger/logger.hpp"
 #include "gpufl/core/version.hpp"
 
 namespace gpufl {
@@ -352,7 +358,7 @@ class NdjsonReader {
 // Schema v2:
 //   {
 //     "schema_version": 2,
-//     "uploaded_files":      ["app.device.1.log.gz", ...],
+//     "uploaded_files":      ["<session_id>/device.1.log.gz", ...],
 //     "completed_sessions": {
 //       "<session_id>": {"completed_at": "2026-05-26T15:30:00Z",
 //                        "events": 1234}
@@ -500,42 +506,6 @@ std::string fastExtractType(const std::string& line) {
     return line.substr(start, end - start);
 }
 
-std::string extractType(const std::string& line) {
-    std::string t = fastExtractType(line);
-    if (!t.empty()) return t;
-    // Fallback: structured parse. Slow but reliable for unusual line shapes.
-    const json::JsonValue v = json::parseJson(line);
-    if (v.is_object() && v.contains("type") && v.at("type").is_string()) {
-        return v.at("type").get_string();
-    }
-    return {};
-}
-
-/// Same idea for the `"session_id":"<uuid>"` field. Every event the
-/// client emits carries one at the top level, so a single substring
-/// search per line is both correct and ~100× faster than a full JSON
-/// parse.
-std::string fastExtractSessionId(const std::string& line) {
-    static const std::string kKey = "\"session_id\":\"";
-    const auto pos = line.find(kKey);
-    if (pos == std::string::npos) return {};
-    const auto start = pos + kKey.size();
-    const auto end = line.find('"', start);
-    if (end == std::string::npos) return {};
-    return line.substr(start, end - start);
-}
-
-std::string extractSessionId(const std::string& line) {
-    std::string s = fastExtractSessionId(line);
-    if (!s.empty()) return s;
-    const json::JsonValue v = json::parseJson(line);
-    if (v.is_object() && v.contains("session_id") &&
-        v.at("session_id").is_string()) {
-        return v.at("session_id").get_string();
-    }
-    return {};
-}
-
 /// Pull a numeric `ts_ns` out of an NDJSON line. Used only on
 /// `job_start` events to pick the "latest" session by timestamp.
 /// Returns 0 if the field is missing or unparseable — sorts to the
@@ -668,6 +638,32 @@ std::string gzipString(const std::string& input) {
     if (rc != Z_STREAM_END) return {};
     out.resize(produced);
     return out;
+}
+
+/// Slurp a file's raw bytes. Empty string on open/read failure (caller
+/// warns + skips the file). Rotated logs are ≤ ~10 MB gzipped, so whole-
+/// file buffering is fine; this is the same memory order the old chunk
+/// assembly used.
+std::string readFileBytes(const fs::path& p) {
+    const std::ifstream in(p, std::ios::binary);
+    if (!in) return {};
+    std::ostringstream oss;
+    oss << in.rdbuf();
+    if (in.bad()) return {};
+    return oss.str();
+}
+
+/// Decompressed size of a gzip stream from its ISIZE trailer (last 4
+/// bytes, little-endian, mod 2^32). Exact for our single-member files
+/// (the rotator caps them at Logger::kDefaultRotateBytes = 64 MiB, far
+/// under 4 GB). 0 = unknown/empty.
+std::size_t gzipDecompressedSizeHint(const std::string& gz) {
+    if (gz.size() < 18) return 0;   // 10-byte header + 8-byte trailer
+    const auto* p = reinterpret_cast<const unsigned char*>(gz.data()) + gz.size() - 4;
+    return static_cast<std::size_t>(p[0]) |
+           (static_cast<std::size_t>(p[1]) << 8) |
+           (static_cast<std::size_t>(p[2]) << 16) |
+           (static_cast<std::size_t>(p[3]) << 24);
 }
 
 /// Outcome of a single stream-chunk POST. Drives the retry / abort
@@ -848,12 +844,13 @@ StreamPostResult postStreamChunk(httplib::Client&         client,
         return out;
     }
     if (status == 413) {
-        // Body exceeded backend's 50 MB cap — we should never hit this
-        // because our chunk targets are well under that. Treat as
-        // client error (don't retry) so the caller logs + skips.
+        // Body exceeded the backend's decompressed cap (128 MB) — we
+        // pre-check file sizes against it, so this means the check and
+        // the server disagree. Treat as client error (don't retry) so
+        // the caller logs + skips the file.
         out.failure_reason =
-            "chunk exceeded backend body limit (HTTP 413) — client bug, "
-            "chunk size should be < 50 MB";
+            "file exceeded backend body limit (HTTP 413) — rotated log "
+            "larger than the backend's decompressed cap?";
         out.outcome = StreamPostOutcome::ClientError;
         return out;
     }
@@ -1090,11 +1087,15 @@ UploadResult uploadLogs(const UploadOptions& opts) {
             const auto& tsid = targets.front().session_id;
             auto it = cursor.completed_sessions.find(tsid);
             if (it != cursor.completed_sessions.end()) {
+                // The events count is only known when the upload ran
+                // against a legacy synchronous backend; omit it at 0.
+                const std::string events_note = it->second.events > 0
+                    ? " (" + std::to_string(it->second.events) + " events)"
+                    : "";
                 result.warnings.emplace_back(
                     "Session '" + tsid + "' was already uploaded on " +
-                    it->second.completed_at_iso8601 + " (" +
-                    std::to_string(it->second.events) +
-                    " events). Pass force=true (CLI: --force) to re-upload.");
+                    it->second.completed_at_iso8601 + events_note +
+                    ". Pass force=true (CLI: --force) to re-upload.");
                 result.elapsed_ms = elapsedMs();
                 return result;  // success stays false
             }
@@ -1123,18 +1124,27 @@ UploadResult uploadLogs(const UploadOptions& opts) {
     // caches after first call.
     const std::string envelope_hostname = getLocalHostname();
 
-    // Chunk-size limits. Targets the bulk-NDJSON sweet spot: large
-    // enough to amortize HTTPS handshake + framework overhead, small
-    // enough to (a) keep memory bounded and (b) stay well under the
-    // backend's 50 MB decompressed cap. With ~250 B average per event,
-    // 5000 lines lands at ~1.2 MB pre-gzip / ~120 KB post-gzip.
-    static constexpr std::size_t kChunkLineLimit = 5000;
-    static constexpr std::size_t kChunkByteLimit = 5 * 1024 * 1024;  // 5 MB uncompressed
+    // File-size guards. The upload unit is one rotated file; these only
+    // reject pathological inputs the backend (or its fronting infra)
+    // would refuse anyway:
+    //   - compressed: Cloud Run hard-caps a request body at 32 MiB —
+    //     leave headroom. (Infra bound — unrelated to the rotate size.)
+    //   - decompressed: derived from the rotator's threshold (the file
+    //     size IS the rotate setting): 2× covers the one-line overshoot
+    //     the rotator allows plus any future modest bump, and matches
+    //     the backend's 128 MB streaming cap
+    //     (StreamEventIngestionConstants.MAX_DECOMPRESSED_BODY_BYTES).
+    //     Pre-checking the gzip ISIZE trailer avoids shipping megabytes
+    //     just to be 413'd.
+    // Real files sit at the 64 MiB rotate default (≈ 4–8 MB gz), far
+    // under both limits.
+    static constexpr std::size_t kMaxCompressedPostBytes   = 30 * 1024 * 1024;
+    static constexpr std::size_t kMaxDecompressedFileBytes = 2 * Logger::kDefaultRotateBytes;
 
     // Progress reporting state.
     auto last_progress_time = upload_start;
     std::size_t bytes_since_last_progress = 0;
-    auto maybeLogProgress = [&](bool force) {
+    auto maybeLogProgress = [&](const bool force) {
         if (!opts.report_progress) return;
         const auto now = std::chrono::steady_clock::now();
         const auto elapsed_since = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1161,7 +1171,7 @@ UploadResult uploadLogs(const UploadOptions& opts) {
         bytes_since_last_progress = 0;
     };
 
-    auto budgetExpired = [&]() {
+    auto budgetExpired = [&] {
         return elapsedMs() >= opts.total_timeout_ms;
     };
 
@@ -1169,102 +1179,73 @@ UploadResult uploadLogs(const UploadOptions& opts) {
     bool budget_aborted  = false;
     bool old_backend_404 = false;   // /events/stream missing → abort all sessions
 
-    // Per-chunk POST with retry. Gzips the assembled NDJSON body,
-    // sends it to /api/v1/events/stream with the session-id header,
-    // parses the per-line accept/reject response, updates counters.
+    // Per-file POST with retry. The body is the file's gzipped bytes
+    // (either the .log.gz content verbatim or a just-gzipped .log);
+    // `decompressed_bytes` drives the byte accounting and progress.
     //
-    // Returns true if the chunk was either accepted (possibly with
-    // some per-line warnings) OR refused with a recorded warning AND
-    // the upload should continue. Returns false only when the WHOLE
-    // upload must abort (auth failure, budget exhausted, or 404 from
-    // an old backend that doesn't have /stream).
+    // Returns true if the file was either accepted (possibly with
+    // per-line warnings from a legacy sync backend) OR refused with a
+    // recorded warning AND the upload should continue. Returns false
+    // only when the WHOLE upload must abort (auth failure, budget
+    // exhausted, or 404 from an old backend that doesn't have /stream).
     //
-    // `chunk_lines` is the count we sent — used to spot the case where
-    // the backend's parsed `accepted + rejected` doesn't match (e.g.,
-    // server bug or response truncation): we trust the server's
-    // accepted count and warn on the delta.
-    auto flushChunk = [&](const std::string& session_id,
-                          const std::string& ndjson_body,
-                          const std::size_t  chunk_lines) -> bool {
-        if (ndjson_body.empty() || chunk_lines == 0) return true;
+    // `session_events` accumulates the per-session accepted count —
+    // only legacy synchronous backends report one; the async-accept
+    // path (202 + spool_id) has no per-line counts at POST time.
+    //
+    // `skipped_out` is set when the file was given up on (4xx, retries
+    // exhausted) but the upload continues — the caller must then NOT
+    // mark the session completed, so a re-run retries the hole.
+    auto postFile = [&](const std::string& session_id,
+                        const std::string& display_name,
+                        const std::string& gz_body,
+                        const std::size_t  decompressed_bytes,
+                        std::size_t&       session_events,
+                        bool&              skipped_out) -> bool {
+        skipped_out = false;
+        if (gz_body.empty()) return true;
         if (budgetExpired()) {
             budget_aborted = true;
             return false;
         }
 
-        const std::string gz_body = gzipString(ndjson_body);
-        if (gz_body.empty()) {
-            // zlib failed — surface as a warning and SKIP this chunk
-            // (return true to keep going with the next chunk). Should
-            // never happen in practice; defense for a misbuilt zlib.
-            result.warnings.push_back(
-                "gzip compression failed for chunk of " +
-                std::to_string(chunk_lines) + " line(s) — skipping chunk");
-            return true;
-        }
-
-        std::string fail_reason;
         for (int attempt = 0; attempt <= opts.max_retries; ++attempt) {
             const StreamPostResult r = postStreamChunk(
                 *client, api_path, session_id, envelope_hostname,
                 opts.api_key, ua_header, gz_body);
 
             if (r.outcome == StreamPostOutcome::Ok) {
-                // Two backend shapes, two accounting paths:
-                //
-                //   1. async_accepted (Phase 3a+): the backend spooled
-                //      our body and queued it for the SpoolWorker.
-                //      There's no per-line breakdown to consume — by
-                //      contract, the worker will ingest exactly what
-                //      we sent (per-line rejections show up in the
-                //      backend's structured log, not our response).
-                //      Trust chunk_lines as the accepted count, stash
-                //      the spool_id for operator debugging, return.
-                //
-                //   2. Legacy synchronous accept (pre-Phase 3a): the
-                //      response carries explicit accepted/rejected
-                //      counts and any per-line errors. Trust the
-                //      server's count and surface partials as
-                //      warnings.
-                //
-                // No mismatch warning in the async path — the invariant
-                // "accepted + rejected == chunk_lines" doesn't apply
-                // when the server hasn't done the dispatch yet.
+                result.bytes_uploaded     += decompressed_bytes;
+                bytes_since_last_progress += decompressed_bytes;
+                // Two backend shapes:
+                //   1. async-accept (Phase 3a+): 202 + spool_id, no
+                //      per-line counts — the worker ingests out-of-band.
+                //   2. legacy synchronous: explicit accepted/rejected
+                //      counts + per-line errors. Surface partials as
+                //      warnings, trust the server's accepted count.
                 if (r.async_accepted) {
-                    result.events_uploaded += chunk_lines;
-                    result.bytes_uploaded  += ndjson_body.size();
-                    bytes_since_last_progress += ndjson_body.size();
                     if (!r.spool_id.empty()) {
                         result.spool_ids.push_back(r.spool_id);
                     }
                     return true;
                 }
-
-                // Legacy synchronous path. The server's response is the
-                // source of truth: accepted == chunk_lines when nothing
-                // was rejected, otherwise rejected > 0 and
-                // r.line_errors carries the explanations.
                 result.events_uploaded += r.accepted;
-                result.bytes_uploaded  += ndjson_body.size();
-                bytes_since_last_progress += ndjson_body.size();
-
-                if (r.accepted + r.rejected != chunk_lines) {
+                session_events         += r.accepted;
+                if (r.rejected > 0) {
                     result.warnings.push_back(
-                        "chunk for session " + session_id + ": sent " +
-                        std::to_string(chunk_lines) + " line(s), backend reported " +
-                        std::to_string(r.accepted) + " accepted + " +
-                        std::to_string(r.rejected) + " rejected (mismatch)");
+                        display_name + ": backend rejected " +
+                        std::to_string(r.rejected) + " line(s)");
                 }
                 for (const auto& le : r.line_errors) {
                     result.warnings.push_back(
-                        "chunk line " + std::to_string(le.line) +
+                        display_name + " line " + std::to_string(le.line) +
                         " (type=" + le.type + ") rejected: " + le.reason);
                 }
                 return true;
             }
             if (r.outcome == StreamPostOutcome::OldBackend404) {
                 // Backend predates the /stream endpoint. No retry —
-                // every chunk would hit the same 404. Abort the whole
+                // every file would hit the same 404. Abort the whole
                 // upload with a migration-hint warning.
                 result.warnings.push_back(r.failure_reason);
                 old_backend_404 = true;
@@ -1272,32 +1253,33 @@ UploadResult uploadLogs(const UploadOptions& opts) {
             }
             if (r.outcome == StreamPostOutcome::AuthFailure) {
                 result.warnings.push_back(
-                    "chunk POST /events/stream failed: " + r.failure_reason +
+                    "POST /events/stream failed: " + r.failure_reason +
                     " — aborting remaining uploads");
                 auth_failed = true;
                 return false;
             }
             if (r.outcome == StreamPostOutcome::ClientError) {
-                // 4xx that isn't auth or 404. Probably 413 (we built
-                // a too-big chunk — a bug) or 400 (header missing or
-                // body malformed). Log and skip — retrying won't help.
+                // 4xx that isn't auth or 404 (e.g. 413/400). Log and
+                // skip the file — retrying won't help.
                 result.warnings.push_back(
-                    "chunk POST /events/stream failed: " + r.failure_reason +
-                    " — skipping chunk of " + std::to_string(chunk_lines) + " line(s)");
+                    "POST /events/stream failed: " + r.failure_reason +
+                    " — skipping " + display_name);
+                skipped_out = true;
                 return true;
             }
             // TransientFailure: retry on the loop's next iteration if
             // we have budget for both more retries AND wall time.
-            fail_reason = r.failure_reason;
+            std::string fail_reason = r.failure_reason;
             if (attempt < opts.max_retries && !budgetExpired()) {
                 std::this_thread::sleep_for(
                     std::chrono::milliseconds(opts.retry_delay_ms));
                 continue;
             }
             result.warnings.push_back(
-                "chunk POST /events/stream failed after " +
+                "POST /events/stream failed after " +
                 std::to_string(attempt + 1) + " attempt(s): " + fail_reason +
-                " — skipping chunk of " + std::to_string(chunk_lines) + " line(s)");
+                " — skipping " + display_name);
+            skipped_out = true;
             return true;
         }
         return true;
@@ -1314,152 +1296,112 @@ UploadResult uploadLogs(const UploadOptions& opts) {
 
     // ── Per-session upload loop ──────────────────────────────────────
     //
-    // For each target session: stream every discovered file, filter
-    // events by session_id, build up an NDJSON chunk in memory,
-    // flush when the chunk hits the line- or byte-cap. shutdown events
-    // are deferred to a separate final chunk so the backend sees a
-    // clean job_start → batches → shutdown arrival order per session.
+    // For each target session: POST each of its files whole, in the
+    // discovery order (oldest rotation first, active file last). A
+    // file lives in its session's subdirectory, so a file maps to
+    // exactly one session — no per-line filtering needed; the backend
+    // validates every line's session_id against the header anyway.
     //
-    // Chunks DON'T align with file boundaries — a session whose data
-    // spans multiple rotated files just flushes when full, regardless
-    // of which file the next line came from. That keeps wire-efficiency
-    // tied to the chunk-size cap, not to the rotator's per-file size.
+    // Lifecycle ordering rides on the file order: job_start is the
+    // first line of the oldest file (POSTed first) and shutdown the
+    // last line of the active file (POSTed last). Arrival order is
+    // thus preserved; ingest-COMPLETION order under the async queue is
+    // the upload-plan U3 ordering chain's job, same as before.
     for (const auto& target : targets) {
         if (auth_failed || budget_aborted || old_backend_404) break;
         const std::string& current_sid = target.session_id;
 
-        // Chunk accumulator for this session. NDJSON: one event per
-        // line, '\n' separator, trailing newline on every line so the
-        // backend's BufferedReader splits cleanly.
-        std::string chunk_buf;
-        chunk_buf.reserve(kChunkByteLimit + 64 * 1024);  // headroom for the final line that pushed us over
-        std::size_t chunk_lines = 0;
-
-        // shutdown events deferred to the end of this session's
-        // chunks — preserves per-session lifecycle ordering on the
-        // backend regardless of which file they actually lived in.
-        std::vector<std::string> deferred_shutdowns;
-
-        std::size_t events_from_session = 0;
+        std::size_t events_from_session = 0;   // known only on legacy sync backends
         bool session_ok = true;
+        bool session_had_skips = false;
+        bool posted_anything = false;
 
         GFL_LOG_DEBUG("[uploadLogs] session ", current_sid, " starting");
-
-        // Helper closure: flush the current chunk and reset. Returns
-        // false to break out when the upload must abort.
-        auto flushSessionChunk = [&]() -> bool {
-            if (chunk_lines == 0) return true;
-            const std::size_t batch_lines = chunk_lines;
-            if (!flushChunk(current_sid, chunk_buf, batch_lines)) {
-                session_ok = false;
-                return false;
-            }
-            events_from_session += batch_lines;
-            chunk_buf.clear();
-            chunk_lines = 0;
-            maybeLogProgress(/*force=*/false);
-            return true;
-        };
 
         for (auto& f : files) {
             if (auth_failed || budget_aborted || old_backend_404) {
                 session_ok = false;
                 break;
             }
-            // v1.2: files are discovered with `session_id` set from
-            // their parent subdir name. Skip files belonging to a
-            // different session before opening — saves the gunzip /
-            // line-by-line scan cost for sessions we're not uploading
-            // in this pass (especially valuable in all_sessions mode
-            // where we visit each file once per matching session).
             if (f.session_id != current_sid) continue;
 
-            const std::string basename = f.path.filename().string();
+            const std::string basename   = f.path.filename().string();
+            const std::string cursor_key = current_sid + "/" + basename;
 
-            NdjsonReader reader(f.path, f.compressed);
-            if (!reader.ok()) {
-                result.warnings.push_back("Could not open " + basename + " — skipping");
+            // Rotated files are immutable once written — skip the ones
+            // a previous run already shipped (crash-resume). The active
+            // file (rotation 0) is never cursor-skipped; completed
+            // sessions were already filtered out above.
+            if (!opts.force && f.rotation_index >= 1 &&
+                cursor.uploaded_files.count(cursor_key) > 0) {
+                result.files_skipped_by_cursor++;
                 continue;
             }
+
+            std::string body = readFileBytes(f.path);
+            if (body.empty()) {
+                result.warnings.push_back("Could not read " + basename + " — skipping");
+                session_had_skips = true;
+                continue;
+            }
+
+            // .log.gz goes on the wire AS-IS; a plain .log (rare — the
+            // discovery pass gzips orphans in place) is gzipped here.
+            std::size_t decompressed_bytes;
+            if (f.compressed) {
+                decompressed_bytes = gzipDecompressedSizeHint(body);
+            } else {
+                decompressed_bytes = body.size();
+                body = gzipString(body);
+                if (body.empty()) {
+                    result.warnings.push_back(
+                        "gzip compression failed for " + basename + " — skipping");
+                    session_had_skips = true;
+                    continue;
+                }
+            }
+            if (decompressed_bytes == 0) continue;   // empty file — nothing to send
+            if (body.size() > kMaxCompressedPostBytes ||
+                decompressed_bytes > kMaxDecompressedFileBytes) {
+                result.warnings.push_back(
+                    basename + " is larger than the per-request limit (" +
+                    std::to_string(body.size()) + " B compressed / " +
+                    std::to_string(decompressed_bytes) + " B raw) — skipping");
+                session_had_skips = true;
+                continue;
+            }
+
+            bool skipped = false;
+            if (!postFile(current_sid, basename, body, decompressed_bytes,
+                          events_from_session, skipped)) {
+                session_ok = false;
+                break;
+            }
+            if (skipped) {
+                session_had_skips = true;
+                continue;
+            }
+            posted_anything = true;
             files_visited.insert(basename);
 
-            std::string line;
-            while (reader.readLine(line)) {
-                if (line.empty()) continue;
-
-                // Cheap session filter. Three cases:
-                //   1. session_id field missing entirely → the line is
-                //      malformed (every gpufl event carries session_id).
-                //      Warn + skip; don't silently lose visibility into
-                //      bad data.
-                //   2. session_id present but doesn't match this target →
-                //      another session's event. Silently skip — that's
-                //      the whole point of the filter.
-                //   3. session_id matches → process below.
-                const std::string line_sid = fastExtractSessionId(line);
-                if (line_sid.empty()) {
-                    result.warnings.push_back(
-                        "Unparseable NDJSON line in " + basename +
-                        " (no session_id field) — skipping");
-                    continue;
-                }
-                if (line_sid != current_sid) continue;
-
-                const std::string type = extractType(line);
-                if (type.empty()) {
-                    result.warnings.push_back(
-                        "Unparseable NDJSON line in " + basename +
-                        " (no type field) — skipping");
-                    continue;
-                }
-                if (type == "shutdown") {
-                    // Hold for the per-session final chunk so the
-                    // backend's lifecycle bookkeeping sees shutdown
-                    // arrive after every batch event.
-                    deferred_shutdowns.push_back(line);
-                    continue;
-                }
-
-                chunk_buf.append(line);
-                chunk_buf.push_back('\n');
-                chunk_lines++;
-
-                // Flush when either cap hits. Checking AFTER append so
-                // we never exceed the byte cap by more than one line.
-                if (chunk_lines >= kChunkLineLimit ||
-                    chunk_buf.size() >= kChunkByteLimit) {
-                    if (!flushSessionChunk()) break;
+            // Persist per-file progress for rotated files so a crash
+            // mid-session resumes after the last shipped file instead
+            // of starting over.
+            if (f.rotation_index >= 1) {
+                cursor.uploaded_files.insert(cursor_key);
+                if (!writeCursor(parts.directory, opts.cursor_filename, cursor)) {
+                    result.warnings.emplace_back(
+                        "Could not write cursor file " + opts.cursor_filename);
                 }
             }
-            if (!session_ok) break;
+            maybeLogProgress(/*force=*/false);
         }
 
-        // Remaining lines (under the cap) become the second-to-last
-        // chunk of this session. Then the deferred shutdowns ride in
-        // the very last chunk on their own — keeps them strictly after
-        // every batch.
-        if (session_ok && chunk_lines > 0) {
-            flushSessionChunk();
-        }
-        if (session_ok && !deferred_shutdowns.empty()) {
-            std::string sd_chunk;
-            sd_chunk.reserve(64 * 1024);
-            for (const auto& l : deferred_shutdowns) {
-                sd_chunk.append(l);
-                sd_chunk.push_back('\n');
-            }
-            const std::size_t sd_lines = deferred_shutdowns.size();
-            if (!flushChunk(current_sid, sd_chunk, sd_lines)) {
-                session_ok = false;
-            } else {
-                events_from_session += sd_lines;
-            }
-        }
-
-        // Mark this session as completed in the cursor if it shipped
-        // cleanly. We persist after each session — a mid-run crash
-        // still lets re-runs skip the sessions that did complete.
-        if (session_ok && events_from_session > 0) {
+        // Mark this session as completed in the cursor only when every
+        // file shipped (a skipped file is a hole — leave the session
+        // incomplete so a re-run retries it). Persisted after each
+        // session so a mid-run crash keeps the finished ones skipped.
+        if (session_ok && posted_anything && !session_had_skips) {
             CompletedSession cs;
             cs.completed_at_iso8601 = nowIso8601Utc();
             cs.events = events_from_session;
@@ -1468,8 +1410,7 @@ UploadResult uploadLogs(const UploadOptions& opts) {
                 result.warnings.emplace_back(
                     "Could not write cursor file " + opts.cursor_filename);
             }
-            GFL_LOG_DEBUG("[uploadLogs] session ", current_sid,
-                          " complete (", events_from_session, " events)");
+            GFL_LOG_DEBUG("[uploadLogs] session ", current_sid, " complete");
         }
     }
 

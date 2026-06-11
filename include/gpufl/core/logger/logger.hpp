@@ -31,6 +31,17 @@ class ILogSink;
  */
 class Logger {
    public:
+    /**
+     * Default per-file rotation threshold. Referenced by the uploader
+     * (upload_logs.cpp) — since U1 a rotated file is the upload unit
+     * (one POST per file), so its size guards derive from this value
+     * and the backend's decompressed body cap is sized at 2× it. If
+     * this grows, grow the backend's
+     * StreamEventIngestionConstants.MAX_DECOMPRESSED_BODY_BYTES in
+     * lockstep.
+     */
+    static constexpr std::size_t kDefaultRotateBytes = 64 * 1024 * 1024;
+
     struct Options {
         std::string base_path;
         /**
@@ -47,7 +58,13 @@ class Logger {
          * the uploader detects it only to emit a migration warning.
          */
         std::string session_id;
-        std::size_t rotate_bytes = 64 * 1024 * 1024;  // 64 MiB default
+        /**
+         * Rotate a channel file once the next write would push it past
+         * this many bytes (checked BEFORE writing, so a file only ever
+         * exceeds it by at most one event line). Keep ≤ half the
+         * backend's decompressed body cap — see kDefaultRotateBytes.
+         */
+        std::size_t rotate_bytes = kDefaultRotateBytes;
         std::size_t max_files = 100;
         bool compress_rotated = true;
         bool flush_always = false;

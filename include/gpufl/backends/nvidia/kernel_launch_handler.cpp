@@ -229,11 +229,14 @@ std::vector<CUpti_ActivityKind> KernelLaunchHandler::requiredActivityKinds()
         return {};
     }
 
-    // SASS metrics on sm_86/CUDA 13.2 produce all-zero counters when only
-    // CONCURRENT_KERNEL is enabled. Main's validated coexistence path enables
-    // both serialized and concurrent kernel activity; keep that combination so
-    // kernel rows and non-zero SASS counters are collected in one run.
-    return {CUPTI_ACTIVITY_KIND_KERNEL, CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL};
+    // Trace should subscribe to exactly one kernel activity kind. Enabling both
+    // KERNEL and CONCURRENT_KERNEL can emit duplicate rows for the same CUPTI
+    // correlation id, and the duplicate rate varies with flush timing. SASS
+    // coexistence is the only path that intentionally keeps both enabled.
+    if (backend_ && backend_->IsSassProfilerMode()) {
+        return {CUPTI_ACTIVITY_KIND_KERNEL, CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL};
+    }
+    return {CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL};
 }
 
 bool KernelLaunchHandler::shouldHandle(const CUpti_CallbackDomain domain,

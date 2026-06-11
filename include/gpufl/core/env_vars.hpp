@@ -45,8 +45,10 @@ constexpr const char* kInject               = "GPUFL_INJECT";
 constexpr const char* kAppName              = "GPUFL_APP_NAME";
 // Local NDJSON output directory (becomes InitOptions.log_path).
 constexpr const char* kLogDir               = "GPUFL_LOG_DIR";
-// Profile preset: "comprehensive" | "light" | "monitoring-only" (the matching
-// VALUE constants are kProfile* in inject/inject_entry.hpp).
+// Internal/legacy injection profile preset: "comprehensive" | "light" |
+// "monitoring-only" (the matching VALUE constants are kProfile* in
+// inject/inject_entry.hpp). `gpufl trace` no longer exposes --profile and pins
+// this to "comprehensive".
 constexpr const char* kInjectProfile        = "GPUFL_INJECT_PROFILE";
 // Opt-in ("1"): inject lib runs uploadLogs() right after shutdown(), shipping
 // the session NDJSON with the kApiKey / kBackendUrl / kApiPath creds.
@@ -68,8 +70,9 @@ constexpr const char* kInjectInitDelayMs     = "GPUFL_INJECT_INIT_DELAY_MS";
 
 // ── Profiling engine selection ──────────────────────────────────────────────
 // Override the resolved ProfilingEngine; gpufl::init() is the single string→enum
-// parser. Canonical values: Monitor | Trace | PcSampling | SassMetrics |
-// PmSampling | RangeProfiler | Deep.
+// parser. Canonical init values include Monitor; `gpufl trace --passes`
+// intentionally excludes Monitor and routes monitoring-only use cases to
+// `gpufl monitor`.
 constexpr const char* kProfilingEngine    = "GPUFL_PROFILING_ENGINE";
 // Compatibility-matrix testing / generalized composite: run an arbitrary set of
 // engines in ONE process — comma-separated canonical names — overriding the

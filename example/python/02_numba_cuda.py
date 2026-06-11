@@ -24,9 +24,9 @@ def matmul_kernel(A, B, C):
 
 def run_benchmark():
     # --- 2. Initialize GPUFL ---
-    # LOG_PATH is the file prefix the FileLogSink writes to — it produces
-    # <LOG_PATH>.device.log / .scope.log / .system.log. We reuse it below
-    # to point generate_report() at the same files.
+    # LOG_PATH is the session output root. FileLogSink writes
+    # <LOG_PATH>/<session_id>/<channel>.log[.gz], and generate_report()
+    # can read the same directory later.
     LOG_PATH = "./gfl_logs"
 
     BACKEND_URL = os.environ.get("GPUFL_BACKEND_URL", "https://api.gpuflight.com")
