@@ -46,13 +46,15 @@ struct DictLine final : IJsonSerializable {
     Channel channel() const override { return Channel::All; }
 };
 
-/// Disassembly and source content go to Device channel only.
-/// These are large payloads that don't need to be tripled across all logs.
-struct DeviceLine final : IJsonSerializable {
+/// Disassembly and source content go to the dedicated Sass channel
+/// (sass.log): these artifact payloads dwarf the event stream (60+ MB of
+/// SASS listings vs ~17 MB of kernels in a torch run) and bloated
+/// device.log past upload caps when they shared it.
+struct SassLine final : IJsonSerializable {
     std::string json;
-    explicit DeviceLine(std::string j) : json(std::move(j)) {}
+    explicit SassLine(std::string j) : json(std::move(j)) {}
     std::string buildJson() const override { return json; }
-    Channel channel() const override { return Channel::Device; }
+    Channel channel() const override { return Channel::Sass; }
 };
 
 void appendDict(std::ostringstream& oss, const char* key,
@@ -166,7 +168,7 @@ void DictionaryManager::flushSourceContent(Logger& logger,
             oss << '"' << model::jsonEscape(ln) << '"';
         }
         oss << "]}";
-        logger.write(DeviceLine{oss.str()});
+        logger.write(SassLine{oss.str()});
     }
 }
 
@@ -475,11 +477,11 @@ void DictionaryManager::flushDisassembly(Logger& logger,
                 oss << '}';
             }
             oss << "]}";
-            logger.write(DeviceLine{oss.str()});
+            logger.write(SassLine{oss.str()});
         }
 
         // For AMD code objects with DWARF debug info, emit source file content
-        // and a profile_sample_batch that maps pc_offset → source_file:line.
+        // and a profile_sample_batch that maps pc_offset -> source_file:line.
         // This enables the same source-correlated ISA view as NVIDIA/CUPTI.
         if (isAmd) {
             // Collect unique source files and intern them

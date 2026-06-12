@@ -73,8 +73,12 @@ BuildPcSamplingConfig(const uint32_t samplingPeriod,
         CUpti_PCSamplingConfigurationInfo info = {};
         info.attributeType =
             CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_SCRATCH_BUFFER_SIZE;
+        // Host-resident staging between HW buffer and GetData. CUPTI sizing:
+        // ~1 MB per ~5,500 PCs with all stall reasons, so 32 MB covers
+        // ~175k distinct PCs per drain window - generous at our 1 s collect
+        // cadence (the old 256 MB was wildly oversized per context).
         info.attributeData.scratchBufferSizeData.scratchBufferSize =
-            256 * 1024 * 1024;
+            32 * 1024 * 1024;
         addConfig(info);
     }
     {

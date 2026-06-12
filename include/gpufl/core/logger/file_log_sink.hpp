@@ -88,6 +88,7 @@ class FileLogSink final : public ILogSink {
     std::unique_ptr<FileChannel> chanDevice_;
     std::unique_ptr<FileChannel> chanScope_;
     std::unique_ptr<FileChannel> chanSystem_;
+    std::unique_ptr<FileChannel> chanSass_;
     // The shared session `.tmp` dir, removed once in close() after every
     // channel has finalized (its own actives would block earlier removal).
     std::string temp_dir_;
