@@ -3,6 +3,7 @@
 #include <cupti_pcsampling.h>
 
 #include <cstdlib>
+#include <cstring>
 
 #include "gpufl/core/debug_logger.hpp"
 
@@ -24,6 +25,15 @@ SourceCorrelation CuptiSass::sampleSourceCorrelation(const void* cubin,
                                                      size_t cubinSize,
                                                      const char* functionName,
                                                      uint64_t pcOffset) {
+    if (!cubin || cubinSize == 0 || !functionName || functionName[0] == '\0') {
+        GFL_LOG_ERROR(
+            "[SASS Metrics] skipping cuptiGetSassToSourceCorrelation: "
+            "invalid input (cubin=", cubin, ", cubinSize=", cubinSize,
+            ", functionName=", (functionName ? functionName : "<null>"),
+            ", pcOffset=", pcOffset, ")");
+        return {};
+    }
+
     CUpti_GetSassToSourceCorrelationParams params = {
         CUpti_GetSassToSourceCorrelationParamsSize};
     params.cubin = cubin;
@@ -36,7 +46,10 @@ SourceCorrelation CuptiSass::sampleSourceCorrelation(const void* cubin,
         const char* err;
         cuptiGetResultString(res, &err);
         GFL_LOG_ERROR("[SASS Metrics] cuptiGetSassToSourceCorrelation FAILED: ",
-                      err);
+                      err, " (cubin=", cubin, ", cubinSize=", cubinSize,
+                      ", functionNameLen=", std::strlen(functionName),
+                      ", pcOffset=", pcOffset, ", params.size=",
+                      params.size, ")");
         return {};
     }
 

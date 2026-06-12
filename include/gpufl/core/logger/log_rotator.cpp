@@ -1,8 +1,14 @@
 #include "gpufl/core/logger/log_rotator.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <sstream>
+#include <thread>
+
+#include "gpufl/core/debug_logger.hpp"
+#include "gpufl/core/logger/log_salvage.hpp"
 
 namespace gpufl {
 namespace fs = std::filesystem;
@@ -24,9 +30,11 @@ std::string LogFileRotator::sessionDir() const {
     return p.string();
 }
 
+std::string LogFileRotator::tempDir() const { return sessionDir() + "/.tmp"; }
+
 std::string LogFileRotator::activePath() const {
     std::ostringstream oss;
-    oss << sessionDir() << "/" << opt_.channel_name << ".log";
+    oss << tempDir() << "/" << opt_.channel_name << ".log";
     return oss.str();
 }
 
@@ -36,70 +44,100 @@ std::string LogFileRotator::rotatedPath(std::size_t index) const {
     return oss.str();
 }
 
-void LogFileRotator::rotate() const {
-    const std::size_t maxFiles = std::max<std::size_t>(opt_.max_files, 1);
-    const std::string active = activePath();
-
-    {
-        const std::string oldest = rotatedPath(maxFiles);
-        std::error_code ec;
-        fs::remove(oldest, ec);
-        fs::remove(oldest + ".gz", ec);
-    }
-
-    for (std::size_t i = maxFiles; i > 1; --i) {
-        const std::string fromBase = rotatedPath(i - 1);
-        const std::string toBase = rotatedPath(i);
-        if (std::error_code ec; fs::exists(fromBase + ".gz", ec)) {
-            fs::rename(fromBase + ".gz", toBase + ".gz", ec);
-        } else if (fs::exists(fromBase, ec)) {
-            fs::rename(fromBase, toBase, ec);
-        }
-    }
-
-    {
-        const std::string rotated = rotatedPath(1);
-        if (std::error_code ec; fs::exists(active, ec)) {
-            fs::rename(active, rotated, ec);
-            if (opt_.compress_rotated && compressor_ && fs::exists(rotated, ec)) {
-                compressor_->compress(rotated);
-            }
-        }
-    }
-}
-
-void LogFileRotator::compressActive() const {
-    // Defensive guards. Each branch is a no-op rather than an error -
-    // compress-on-shutdown is best-effort: a session that crashed
-    // before opening any channel, or that opted out of compression,
-    // is still a valid session and shouldn't surface failure.
-    if (!opt_.compress_rotated) return;
-    if (!compressor_) return;
-
+LogFileRotator::ExportWindowResult LogFileRotator::exportWindow_() const {
     const std::string active = activePath();
     std::error_code ec;
-    if (!fs::exists(active, ec)) return;
+    if (!fs::exists(active, ec)) return ExportWindowResult::NoData;
+    if (fs::file_size(active, ec) == 0) return ExportWindowResult::NoData;
 
-    // Empty file → nothing useful to compress. Remove so the session
-    // dir doesn't leak a zero-byte .log alongside potentially-real
-    // .log.gz files from earlier rotations within the same session.
-    if (fs::file_size(active, ec) == 0) {
-        fs::remove(active, ec);
-        return;
+    // Append-style monotonic index (higher = newer). Published files and
+    // unpublished .tmp staging both count, so a failed publish cannot be
+    // overwritten by the next rotation.
+    const std::size_t next =
+        nextLogWindowIndex(fs::path(sessionDir()), opt_.channel_name);
+
+    if (!compressor_) {
+        const std::string target = rotatedPath(next);
+        fs::rename(active, target, ec);
+        if (ec) {
+            GFL_LOG_ERROR("[Logger] window export: publish failed for '",
+                          active, "' (", ec.message(),
+                          ") - deferred in the active file.");
+            return ExportWindowResult::DeferredInActive;
+        }
+        pruneLogWindows(fs::path(sessionDir()), opt_.channel_name,
+                        opt_.max_files);
+        return ExportWindowResult::Published;
     }
 
-    compressor_->compress(active);
+    const std::string target = rotatedPath(next) + ".gz";
+    std::ostringstream stg;
+    stg << tempDir() << "/" << opt_.channel_name << "." << next << ".log.gz";
+    const std::string staging = stg.str();
 
-    // Belt-and-suspenders: if compress() reports success but the
-    // source file is somehow still there (Windows file-locking edge
-    // case, async filesystem, etc.), force-remove it. Leaving both
-    // <channel>.log and <channel>.log.gz behind would cause the
-    // uploader to read both and upload duplicates. Better to lose a
-    // few bytes than emit two copies of every event.
-    std::error_code rm_ec;
-    if (fs::exists(active, rm_ec)) {
-        fs::remove(active, rm_ec);
+    // 1. gzip the active file into staging (inside .tmp) - a pure READ of
+    // the active file, immune to holders. The session root never sees a
+    // partial file.
+    if (!compressor_->compressTo(active, staging)) {
+        std::error_code rm_ec;
+        fs::remove(staging, rm_ec);
+        GFL_LOG_ERROR("[Logger] window export: compress failed for '", active,
+                      "' - deferred to the next write.");
+        return ExportWindowResult::DeferredInActive;
     }
+
+    // 2. Truncate the active file BEFORE publishing the export: if this
+    // is denied (holder without write sharing - rare), drop staging and
+    // defer. The data then exists exactly once, in the active file.
+    {
+        std::ofstream trunc(active, std::ios::out | std::ios::trunc);
+        if (!trunc) {
+            std::error_code rm_ec;
+            fs::remove(staging, rm_ec);
+            GFL_LOG_ERROR("[Logger] window export: truncate denied for '",
+                          active, "' - deferred to the next write.");
+            return ExportWindowResult::DeferredInActive;
+        }
+    }
+
+    // 3. Publish: staging → <channel>.<N>.log.gz in the session root.
+    // Consumers only ever see the finished file. If the rename is blocked
+    // (AV grabbing brand-new files), the data survives in staging and the
+    // launcher's salvage pass publishes it later.
+    bool published = false;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        fs::rename(staging, target, ec);
+        if (!ec) {
+            published = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100 << attempt));
+    }
+    if (!published) {
+        GFL_LOG_ERROR("[Logger] window export: publish failed for '", staging,
+                      "' (", ec.message(),
+                      ") - left for the salvage pass.");
+        return ExportWindowResult::StagedForSalvage;
+    }
+
+    pruneLogWindows(fs::path(sessionDir()), opt_.channel_name, opt_.max_files);
+    return ExportWindowResult::Published;
 }
+
+void LogFileRotator::rotate() const { exportWindow_(); }
+
+void LogFileRotator::compressActive() const {
+    const ExportWindowResult result = exportWindow_();
+    // Best-effort removal of this channel's (now exported) active file.
+    // If exportWindow_ deferred in the active file, leave it for the salvage
+    // path instead of deleting the only copy of the window.
+    if (result == ExportWindowResult::DeferredInActive) return;
+    // The shared .tmp dir itself is removed once by FileLogSink::close()
+    // after EVERY channel has closed - other channels' actives are still
+    // open while the first one finalizes.
+    std::error_code ec;
+    fs::remove(activePath(), ec);
+}
+
 
 }  // namespace gpufl

@@ -32,23 +32,47 @@ class LogFileRotator {
    public:
     LogFileRotator(LogRotationOptions opt, IFileCompressor* compressor);
 
+    /**
+     * The active file lives in the session's TEMP subdir
+     * (`<session>/.tmp/<channel>.log`), never in the session root. The
+     * root only ever receives FINISHED `.gz` files, exported atomically -
+     * so consumers (uploader, analyzer, UI) can read the session at any
+     * time without seeing half-written or stale-duplicate files, and an
+     * un-deletable leftover is an obviously-garbage `.tmp` dir instead of
+     * a data file that shadows real content.
+     */
     [[nodiscard]] std::string activePath() const;
-    void rotate()const;
 
     /**
-     * Compress the active `.log` file in place to `.log.gz` and remove
-     * the original. Called on clean shutdown (FileLogSink::close →
-     * Logger::close → gpufl::shutdown) so a finished session leaves
-     * behind only compressed files. No-op when:
-     *   - compress_rotated is false (caller opted out)
-     *   - the active file doesn't exist (never opened)
-     *   - a compressor isn't configured (defense)
+     * Export the current window. The active file is never renamed or
+     * deleted - operations on it are limited to READ (gzip) and TRUNCATE,
+     * which work even while another process holds the file:
+     *   1. gzip active → `.tmp/<channel>.<N>.log.gz` (staging, pure read)
+     *   2. truncate active (restart the window)
+     *   3. move staging → `<session>/<channel>.<N>.log.gz` (fresh name at
+     *      a monotonic index - no shifting, no overwrite hazard)
+     * Any failed step logs and defers: data stays exactly-once (in the
+     * active file or in staging, both inside `.tmp`, which consumers
+     * ignore), and the next write or the launcher's salvage pass retries.
+     */
+    void rotate() const;
+
+    /**
+     * Finalize this channel on clean shutdown (FileLogSink::close →
+     * Logger::close → gpufl::shutdown): export the last window like
+     * rotate() and drop the channel's active file. The shared `.tmp` dir
+     * is removed separately via removeTempDir() once all channels closed.
      *
-     * On crash (i.e. shutdown never runs), the uncompressed .log is
-     * left intact - the uploader lazily compresses on first read so
-     * the on-wire format is uniform.
+     * On crash (shutdown never runs) the active `.log` stays in `.tmp` -
+     * the launcher repair / uploader salvage exports it on first sight.
      */
     void compressActive() const;
+
+    /**
+     * The session temp dir: `<base_path>/<session_id>/.tmp`. Removed
+     * wholesale by FileLogSink::close() after every channel finalized.
+     */
+    [[nodiscard]] std::string tempDir() const;
 
    private:
     /**
@@ -57,6 +81,16 @@ class LogFileRotator {
      */
     [[nodiscard]] std::string sessionDir() const;
     [[nodiscard]] std::string rotatedPath(std::size_t index) const;
+
+    enum class ExportWindowResult {
+        NoData,
+        Published,
+        StagedForSalvage,
+        DeferredInActive,
+    };
+
+    /** Shared body of rotate()/compressActive(). */
+    ExportWindowResult exportWindow_() const;
 
     LogRotationOptions opt_;
     IFileCompressor* compressor_ = nullptr;  // non-owning

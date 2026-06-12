@@ -351,7 +351,7 @@ TEST(UploadLogs, UploadsAllEventsAcrossChannelsAndRotation) {
 
     // job_start must arrive first (first line of the oldest file of the
     // first channel). The last file's last line is its shutdown copy -
-    // files go (channel asc, rotation desc, active last).
+    // files go (channel asc, rotation asc, active last).
     EXPECT_EQ(events.front().first, "job_start");
     EXPECT_EQ(events.back().first,  "shutdown");
 
@@ -950,6 +950,9 @@ TEST(UploadLogs, JobStartFirstShutdownLast) {
         R"({"type":"job_start","session_id":"s","ts_ns":1})",
         R"({"type":"kernel_event_batch","session_id":"s","batch_id":1,"rows":[]})",
     }, /*gzip=*/true);
+    writeLog(tmp / "s" / "device.2.log.gz", {
+        R"({"type":"device_metric_batch","session_id":"s","batch_id":2,"rows":[]})",
+    }, /*gzip=*/true);
     writeLog(tmp / "s" / "device.log", {
         R"({"type":"kernel_event_batch","session_id":"s","batch_id":2,"rows":[]})",
         R"({"type":"shutdown","session_id":"s","ts_ns":99})",
@@ -966,10 +969,13 @@ TEST(UploadLogs, JobStartFirstShutdownLast) {
     ASSERT_TRUE(result.success);
 
     const auto events = srv.allEvents();
-    ASSERT_EQ(events.size(), 4u);
+    ASSERT_EQ(events.size(), 5u);
     EXPECT_EQ(events.front().first, "job_start")
         << "job_start must be the first NDJSON line shipped - it heads "
         << "the oldest rotated file, which is POSTed first.";
+    EXPECT_EQ(events[2].first, "device_metric_batch")
+        << "rotation index 2 must be uploaded after index 1 and before "
+        << "the active file.";
     EXPECT_EQ(events.back().first, "shutdown")
         << "shutdown must be the last NDJSON line shipped - it tails "
         << "the active file, which is POSTed last.";
@@ -980,6 +986,44 @@ TEST(UploadLogs, JobStartFirstShutdownLast) {
 // ─────────────────────────────────────────────────────────────────────
 // File-unit upload - one POST per file regardless of line count.
 // ─────────────────────────────────────────────────────────────────────
+
+TEST(UploadLogs, SalvagesSessionTmpBeforeDiscovery) {
+    const fs::path tmp = fs::temp_directory_path() / "gpufl_upload_test_tmp_salvage";
+    fs::remove_all(tmp);
+    fs::create_directories(tmp / "s" / ".tmp");
+
+    writeLog(tmp / "s" / ".tmp" / "device.1.log.gz", {
+        R"({"type":"job_start","session_id":"s","ts_ns":1})",
+    }, /*gzip=*/true);
+    writeLog(tmp / "s" / ".tmp" / "device.log", {
+        R"({"type":"shutdown","session_id":"s","ts_ns":99})",
+    });
+
+    CaptureServer srv;
+    gpufl::UploadOptions opts;
+    opts.log_path        = tmp.string();
+    opts.backend_url     = srv.base_url();
+    opts.api_key         = "x";
+    opts.report_progress = false;
+
+    const auto result = gpufl::uploadLogs(opts);
+    ASSERT_TRUE(result.success) << "warnings: "
+        << (result.warnings.empty() ? "<none>" : result.warnings.front());
+
+    const auto events = srv.allEvents();
+    ASSERT_EQ(events.size(), 2u);
+    EXPECT_EQ(events.front().first, "job_start");
+    EXPECT_EQ(events.back().first, "shutdown");
+    EXPECT_TRUE(fs::exists(tmp / "s" / "device.1.log.gz"));
+    EXPECT_TRUE(fs::exists(tmp / "s" / "device.2.log.gz"))
+        << "active .tmp/device.log should be exported after the staged "
+        << "window with a monotonic index.";
+    EXPECT_FALSE(fs::exists(tmp / "s" / ".tmp"))
+        << "salvage should remove the session .tmp directory once no "
+        << "deferred data remains.";
+
+    fs::remove_all(tmp);
+}
 
 TEST(UploadLogs, ManyEventsShipInOneRequestPerFile) {
     // U1 regression guard: a file with far more lines than the old

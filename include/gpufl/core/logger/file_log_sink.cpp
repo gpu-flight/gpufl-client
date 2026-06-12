@@ -5,6 +5,7 @@
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/logger/file_compressor.hpp"
 #include "gpufl/core/logger/log_rotator.hpp"
+#include "gpufl/core/logger/log_salvage.hpp"
 
 namespace gpufl {
 namespace fs = std::filesystem;
@@ -188,6 +189,10 @@ FileLogSink::FileLogSink(const Logger::Options& opt) {
     chanDevice_ = std::make_unique<FileChannel>("device", opt);
     chanScope_  = std::make_unique<FileChannel>("scope",  opt);
     chanSystem_ = std::make_unique<FileChannel>("system", opt);
+    LogRotationOptions r{};
+    r.base_path = opt.base_path;
+    r.session_id = opt.session_id;
+    temp_dir_ = LogFileRotator(r, nullptr).tempDir();
 }
 
 FileLogSink::~FileLogSink() { close(); }
@@ -205,6 +210,29 @@ void FileLogSink::close() {
     chanDevice_.reset();
     chanScope_.reset();
     chanSystem_.reset();
+    // Every channel has exported and dropped its active file - the
+    // shared session temp dir can go now (loud on failure, swept by the
+    // launcher's salvage pass otherwise).
+    if (!temp_dir_.empty()) {
+        const fs::path session_dir = fs::path(temp_dir_).parent_path();
+        const auto salvage = salvageSessionTempDir(session_dir);
+        if (salvage.deferred > 0 || sessionTempDirHasDeferredData(session_dir)) {
+            GFL_LOG_ERROR("[Logger] session temp dir '", temp_dir_,
+                          "' still contains deferred log data (salvaged=",
+                          salvage.salvaged, ", deferred=", salvage.deferred,
+                          ") - leaving it for the next salvage pass.");
+            temp_dir_.clear();
+            return;
+        }
+        std::error_code ec;
+        fs::remove_all(temp_dir_, ec);
+        if (ec) {
+            GFL_LOG_ERROR("[Logger] could not remove session temp dir '",
+                          temp_dir_, "' (", ec.message(),
+                          ") - safe to delete once no process holds it.");
+        }
+        temp_dir_.clear();
+    }
 }
 
 FileLogSink::FileChannel* FileLogSink::resolveChannel(Channel ch) const {
