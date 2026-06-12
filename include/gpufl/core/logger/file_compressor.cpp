@@ -28,58 +28,70 @@ bool removeWithRetry(const fs::path& p, std::error_code& ec) {
 }
 }  // namespace
 
+bool GzipFileCompressor::compressTo(const std::string& src,
+                                    const std::string& dst) {
+    if (src.empty() || dst.empty()) return false;
+
+    std::ifstream in(src, std::ios::binary);
+    if (!in) return false;
+
+    gzFile gz = gzopen(dst.c_str(), "wb");
+    if (!gz) return false;
+
+    bool ok = true;
+    char buf[65536];
+    while (in) {
+        in.read(buf, sizeof(buf));
+        const auto n = static_cast<unsigned>(in.gcount());
+        if (n > 0 && gzwrite(gz, buf, n) != static_cast<int>(n)) {
+            ok = false;
+            break;
+        }
+    }
+    if (in.bad()) ok = false;
+    if (gzclose(gz) != Z_OK) ok = false;
+    if (!ok) {
+        std::error_code ec;
+        fs::remove(dst, ec);
+    }
+    return ok;
+}
+
 bool GzipFileCompressor::compress(const std::string& path) {
     if (path.empty()) return false;
 
     const std::string outPath = path + ".gz";
 
-    // Scope the input stream tightly so it's closed BEFORE we try to
-    // remove the source. On Windows, fs::remove fails with
-    // ERROR_SHARING_VIOLATION while any handle to the file is still
-    // open - which would leave the uncompressed source next to the
-    // new .gz, and the uploader would then read both and upload the
-    // same events twice. (Linux's unlink-while-open is forgiving so
-    // this only manifested on Windows, but the explicit scope is
-    // correct on every platform.)
-    bool ok = true;
-    {
-        std::ifstream in(path, std::ios::binary);
-        if (!in) return false;
-
-        gzFile gz = gzopen(outPath.c_str(), "wb");
-        if (!gz) return false;
-
-        char buf[65536];
-        while (in) {
-            in.read(buf, sizeof(buf));
-            const auto n = static_cast<unsigned>(in.gcount());
-            if (n > 0 && gzwrite(gz, buf, n) != static_cast<int>(n)) {
-                ok = false;
-                break;
-            }
-        }
-        gzclose(gz);
-        // in's dtor runs here, closing the source handle on every
-        // platform - safe to fs::remove below.
-    }
+    // compressTo only READS the source; its stream is closed before the
+    // remove below. On Windows, fs::remove fails with
+    // ERROR_SHARING_VIOLATION while any other handle to the file is
+    // open - which would leave the uncompressed source next to the new
+    // .gz, and the uploader would then read both and upload the same
+    // events twice.
+    const bool ok = compressTo(path, outPath);
+    if (!ok) return false;
 
     std::error_code ec;
-    if (ok) {
-        if (!removeWithRetry(path, ec)) {
-            // A holder outlived the retries (a tail, an editor, an AV
-            // scan, an uploader). The data is safe - the .gz is
-            // complete - but a stale .log now sits next to it; the
-            // launcher repair and the uploader's discovery both remove
-            // it later. Log it so the leftover is explainable.
+    if (!removeWithRetry(path, ec)) {
+        // A holder outlived the retries (a tail, an editor, an AV scan).
+        // Windows lets nobody delete a file held without delete sharing -
+        // but write sharing is common, so TRUNCATE the original instead:
+        // the data then exists exactly once (in the .gz) and the leftover
+        // is an empty husk that any later cleanup removes once the holder
+        // lets go.
+        std::ofstream trunc(path, std::ios::out | std::ios::trunc);
+        if (trunc) {
+            GFL_LOG_DEBUG("[Logger] compressed '", path,
+                          "' - original was held, truncated to empty "
+                          "instead of removed.");
+        } else {
             GFL_LOG_ERROR("[Logger] compressed '", path,
-                          "' but could not remove the original (",
-                          ec.message(),
+                          "' but could not remove or truncate the original "
+                          "(", ec.message(),
                           ") - stale .log left next to the .gz.");
         }
-    } else {
-        fs::remove(outPath, ec);
     }
-    return ok;
+    return true;
 }
 
 }  // namespace gpufl

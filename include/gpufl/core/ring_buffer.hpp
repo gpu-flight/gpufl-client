@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <thread>
 #include <type_traits>
 
@@ -30,6 +31,8 @@ class RingBuffer {
     alignas(CACHE_LINE_SIZE) std::atomic<size_t> head_{0};
 
     alignas(CACHE_LINE_SIZE) size_t tail_{0};
+
+    alignas(CACHE_LINE_SIZE) std::atomic<size_t> dropped_{0};
 
    public:
     bool Push(const T& item) {
@@ -66,6 +69,7 @@ class RingBuffer {
         if (!slot->state.compare_exchange_strong(expected, SlotState::WRITING,
                                                  std::memory_order_acquire,
                                                  std::memory_order_relaxed)) {
+            dropped_.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
 
@@ -91,6 +95,14 @@ class RingBuffer {
 
         tail_++;
         return true;
+    }
+
+    size_t droppedCount() const {
+        return dropped_.load(std::memory_order_relaxed);
+    }
+
+    size_t resetDroppedCount() {
+        return dropped_.exchange(0, std::memory_order_relaxed);
     }
 };
 }  // namespace gpufl

@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <thread>
 
@@ -17,6 +18,7 @@
 #include "gpufl/core/activity_record.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
+#include "gpufl/core/env_vars.hpp"
 #include "gpufl/core/ring_buffer.hpp"
 #include "gpufl/core/teardown_flag.hpp"
 
@@ -144,7 +146,18 @@ bool PcSamplingEngine::initialize(const MonitorOptions& opts,
     sampling_api_ready_.store(false);
     sampling_api_started_.store(false);
     sampling_api_blocked_.store(false);
-    GFL_LOG_DEBUG("[PcSamplingEngine] initialized");
+
+    // Kernel-timeline collection mode. PC/SASS already has launch-callback
+    // kernel rows, so keep the periodic CUPTI path light by default; the
+    // stop/flush/start drain is useful for experiments but has proven timing
+    // sensitive with some PyTorch/CUPTI combinations.
+    kernel_collect_ = KernelCollect::None;
+    if (const char* v = std::getenv(env::kPcKernelCollect)) {
+        if (std::strcmp(v, "all") == 0) kernel_collect_ = KernelCollect::All;
+        else if (std::strcmp(v, "none") == 0) kernel_collect_ = KernelCollect::None;
+    }
+    GFL_LOG_DEBUG("[PcSamplingEngine] initialized (kernel_collect=",
+                  static_cast<int>(kernel_collect_), ")");
     return true;
 }
 
@@ -211,9 +224,11 @@ void PcSamplingEngine::start() {
 
 void PcSamplingEngine::StartCycleThread_() {
     if (cycle_thread_running_.exchange(true)) return;
-    // First cycle waits a full interval - collecting 250 ms after arming
-    // would split the warmup into a tiny first batch for nothing.
-    last_cycle_ns_.store(detail::GetTimestampNs(), std::memory_order_relaxed);
+    // Let the first plain-thread drain happen on the first 250 ms tick. The
+    // final Windows-injected teardown path cannot safely flush activity, so
+    // waiting a whole second here drops short sessions.
+    last_kernel_drain_ns_.store(0, std::memory_order_relaxed);
+    last_sample_collect_ns_.store(0, std::memory_order_relaxed);
     GFL_LOG_DEBUG("[PC Sampling] launching collection cycle thread");
     cycle_thread_ = std::thread([this] {
         GFL_LOG_DEBUG("[PC Sampling] cycle thread running");
@@ -260,13 +275,11 @@ void PcSamplingEngine::stop() {
 }
 
 void PcSamplingEngine::drainData() {
-    // Periodic armed-GetData on the engine's cycle thread. Deferring ALL
-    // collection to session stop loses the whole session on Windows-
-    // injected runs: by then process-exit teardown is underway and the
-    // PCSampling data calls fail with CUPTI_ERROR_UNKNOWN. Collecting here
-    // (and on launch ticks - shared throttle) bounds the loss to one
-    // window. No PCSamplingStop mid-run: sampling stays armed and GetData
-    // returns completed kernels' samples (KERNEL_SERIALIZED).
+    // Periodic collection on the engine's cycle thread (deferring all of it to
+    // session stop loses the session to process-exit teardown). Two paths by
+    // kernel_collect_: light = armed GetData (no Stop; KERNEL_SERIALIZED still
+    // returns completed kernels' samples); heavy = DrainKernelsAndCollect_,
+    // which Stops to force a kernel-activity flush for a full timeline.
     if (pc_sampling_method_ != Method::SamplingAPI) return;
     if (!sampling_api_started_.load()) return;
 
@@ -275,7 +288,58 @@ void PcSamplingEngine::drainData() {
     if (!ctx_.cuda_ctx) return;
     if (cuCtxSetCurrent(ctx_.cuda_ctx) != CUDA_SUCCESS) return;
 
-    MaybePeriodicCollect_("cycle", /*force=*/false);
+    // Drain kernel activity (heavy: stop->flush->start) only when explicitly
+    // requested; otherwise just collect PC samples (light).
+    const bool want_drain =
+        kernel_collect_ == KernelCollect::All &&
+        !drain_unavailable_.load(std::memory_order_relaxed);
+    if (want_drain) {
+        DrainKernelsAndCollect_();
+    } else {
+        MaybePeriodicCollect_("cycle", /*force=*/false);
+    }
+}
+
+void PcSamplingEngine::DrainKernelsAndCollect_() {
+    const int64_t now = detail::GetTimestampNs();
+    const int64_t last = last_kernel_drain_ns_.load(std::memory_order_relaxed);
+    if (last != 0 && now - last < kCollectIntervalNs) return;
+    if (!sampling_lifecycle_mu_.try_lock()) return;
+    std::lock_guard lk(sampling_lifecycle_mu_, std::adopt_lock);
+    if (!sampling_api_started_.load()) return;
+    last_kernel_drain_ns_.store(now, std::memory_order_relaxed);
+
+    // Stop sampling: required because a forced activity flush returns zero
+    // kernel records while PC sampling is armed (driver 590+). Stop/Start
+    // mid-run are privileged (INSUFFICIENT_PRIVILEGES under a non-elevated
+    // run) — on that error, stop draining for the session and let armed
+    // GetData carry the PC samples. Restart after the flush; it succeeds
+    // even with kernels running (unlike the initial arm).
+    CUpti_PCSamplingStopParams sp = {};
+    sp.size = sizeof(sp);
+    sp.ctx = ctx_.cuda_ctx;
+    const CUptiResult rStop = cuptiPCSamplingStop(&sp);
+    if (rStop != CUPTI_SUCCESS) {
+        if (IsInsufficientPrivilege(rStop)) {
+            drain_unavailable_.store(true, std::memory_order_relaxed);
+            GFL_LOG_DEBUG("[PC Sampling] kernel drain needs elevation (stop=",
+                          rStop, "); falling back to sample-only collection.");
+        }
+        return;  // sampling is still armed (Stop failed)
+    }
+
+    cuptiActivityFlushAll(CUPTI_ACTIVITY_FLAG_FLUSH_FORCED);
+    CollectPcSamplingData_();
+
+    CUpti_PCSamplingStartParams stp = {};
+    stp.size = sizeof(stp);
+    stp.ctx = ctx_.cuda_ctx;
+    if (const CUptiResult rStart = cuptiPCSamplingStart(&stp);
+        rStart != CUPTI_SUCCESS) {
+        sampling_api_started_.store(false);
+        LogCuptiErrorIfFailed(this->name(), "cuptiPCSamplingStart(drain-restart)",
+                              rStart);
+    }
 }
 
 void PcSamplingEngine::shutdown() {
@@ -558,7 +622,8 @@ void PcSamplingEngine::MaybePeriodicCollect_(const char* reason,
 
     if (!force) {
         const int64_t now = detail::GetTimestampNs();
-        const int64_t last = last_cycle_ns_.load(std::memory_order_relaxed);
+        const int64_t last =
+            last_sample_collect_ns_.load(std::memory_order_relaxed);
         if (last != 0 && now - last < kCollectIntervalNs) return;
     }
 
@@ -567,7 +632,8 @@ void PcSamplingEngine::MaybePeriodicCollect_(const char* reason,
     if (!sampling_lifecycle_mu_.try_lock()) return;
     std::lock_guard lk(sampling_lifecycle_mu_, std::adopt_lock);
     if (!sampling_api_started_.load()) return;
-    last_cycle_ns_.store(detail::GetTimestampNs(), std::memory_order_relaxed);
+    last_sample_collect_ns_.store(detail::GetTimestampNs(),
+                                  std::memory_order_relaxed);
 
     GFL_LOG_DEBUG("[PC Sampling] periodic collect (", reason ? reason : "?",
                   force ? ", forced" : "", ")");
@@ -739,6 +805,15 @@ void PcSamplingEngine::CollectPcSamplingData_() {
                             std::snprintf(out.function_name,
                                           sizeof(out.function_name), "%s",
                                           pc.functionName);
+                            if (std::strlen(pc.functionName) >=
+                                sizeof(out.function_name)) {
+                                GFL_LOG_DEBUG(
+                                    "[PC Sampling] function name truncated in "
+                                    "ActivityRecord; using original CUPTI "
+                                    "functionName for source correlation "
+                                    "(len=", std::strlen(pc.functionName),
+                                    ")");
+                            }
                         } else {
                             std::snprintf(out.function_name,
                                           sizeof(out.function_name), "unknown");
@@ -757,11 +832,12 @@ void PcSamplingEngine::CollectPcSamplingData_() {
                                 cubinSize = it->second.data.size();
                             }
                         }
-                        if (cubinData) {
+                        if (cubinData && cubinSize > 0 && pc.functionName &&
+                            pc.functionName[0] != '\0') {
                             GFL_LOG_DEBUG("start getting source correlation");
                             auto [fileName, dirName, lineNumber] =
                                 nvidia::CuptiSass::sampleSourceCorrelation(
-                                    cubinData, cubinSize, out.function_name,
+                                    cubinData, cubinSize, pc.functionName,
                                     pc.pcOffset);
                             if (!fileName.empty()) {
                                 const std::string fullPath =

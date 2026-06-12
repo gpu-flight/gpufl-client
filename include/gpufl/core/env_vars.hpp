@@ -66,6 +66,15 @@ constexpr const char* kInjectUseConstructor = "GPUFL_INJECT_USE_CONSTRUCTOR";
 // embedding callers, but reachable for `gpufl trace` runs.
 constexpr const char* kDebugOutput          = "GPUFL_DEBUG";
 
+// Override the per-file log rotation threshold in bytes (default:
+// Logger::kDefaultRotateBytes = 64 MiB). Mainly for tests - a tiny value
+// exercises rotation without writing tens of MB.
+constexpr const char* kLogRotateBytes       = "GPUFL_LOG_ROTATE_BYTES";
+
+// Opt-in ("1", "true", "yes", "on"): flush each log line immediately.
+// Useful when diagnosing whether missing records are buffered in userspace.
+constexpr const char* kFlushLogsAlways      = "GPUFL_FLUSH_LOGS_ALWAYS";
+
 // ── Inject-lib timing knobs (tuning / debugging the injection lifecycle) ────
 constexpr const char* kInjectShutdownDelayMs = "GPUFL_INJECT_SHUTDOWN_DELAY_MS";
 constexpr const char* kInjectSyncWaitMs      = "GPUFL_INJECT_SYNC_WAIT_MS";
@@ -92,6 +101,15 @@ constexpr const char* kEagerModuleLoading = "GPUFL_EAGER_MODULE_LOADING";
 constexpr const char* kAnalysisId = "GPUFL_ANALYSIS_ID";
 constexpr const char* kPassIndex  = "GPUFL_PASS_INDEX";
 constexpr const char* kPassCount  = "GPUFL_PASS_COUNT";
+
+// PC sampling knobs ───────────────────────────────────────────────────────
+// Kernel-timeline collection strategy for the standalone PcSampling pass:
+//   "none" - PC samples only; PC/SASS kernel rows come from launch callbacks
+//            (default)
+//   "all"  - experimental mid-run stop->flush->start activity drain
+// Draining can be timing sensitive on some CUPTI/PyTorch combinations; on
+// privilege failures the engine falls back to sample-only collection.
+constexpr const char* kPcKernelCollect = "GPUFL_PC_KERNEL_COLLECT";
 
 // ── Deep engine knobs ───────────────────────────────────────────────────────
 constexpr const char* kDeepPcOnly  = "GPUFL_DEEP_PC_ONLY";

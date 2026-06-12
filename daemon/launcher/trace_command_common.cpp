@@ -22,6 +22,7 @@
 #include "gpufl/core/env_vars.hpp"
 #include "gpufl/core/json/json.hpp"
 #include "gpufl/core/logger/file_compressor.hpp"
+#include "gpufl/core/logger/log_salvage.hpp"
 #include "gpufl/inject/inject_entry.hpp"
 
 namespace gpufl::launcher {
@@ -360,8 +361,10 @@ int repairUncompressedLogs(const fs::path& root) {
     std::error_code root_ec;
     if (root.empty() || !fs::exists(root, root_ec)) return 0;
 
+    const auto salvaged = salvageSessionTempDirs(root);
+    int repaired = salvaged.salvaged;
+
     GzipFileCompressor compressor;
-    int repaired = 0;
     std::error_code iter_ec;
     for (fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, iter_ec), end;
          !iter_ec && it != end;
@@ -369,6 +372,9 @@ int repairUncompressedLogs(const fs::path& root) {
         std::error_code entry_ec;
         if (!it->is_regular_file(entry_ec)) continue;
         const fs::path path = it->path();
+        // .tmp contents were handled by the salvage pass above; a dir
+        // that survived it is still held - leave it alone.
+        if (path.parent_path().filename() == ".tmp") continue;
         if (path.extension() != ".log") continue;
 
         std::error_code size_ec;
@@ -385,28 +391,25 @@ int repairUncompressedLogs(const fs::path& root) {
         if (fs::exists(gz_path, exists_ec)) {
             std::error_code remove_ec;
             if (!removeWithRetry(path, remove_ec)) {
-                std::fprintf(stderr,
-                             "[gpufl] warning: could not remove stale %s "
-                             "(%s) - its .gz holds the same data\n",
-                             path.string().c_str(),
-                             remove_ec.message().c_str());
+                // Held without delete sharing - truncate so the data
+                // exists only in the .gz; the empty husk is swept by a
+                // later pass once the holder lets go.
+                std::ofstream trunc(path, std::ios::out | std::ios::trunc);
+                if (!trunc) {
+                    std::fprintf(stderr,
+                                 "[gpufl] warning: could not remove stale %s "
+                                 "(%s) - its .gz holds the same data\n",
+                                 path.string().c_str(),
+                                 remove_ec.message().c_str());
+                }
             }
             continue;
         }
 
         if (compressor.compress(path.string())) {
+            // compress() removes (or truncates) the original itself and
+            // logs when it can't - nothing left to do here.
             ++repaired;
-            std::error_code remaining_ec;
-            if (fs::exists(path, remaining_ec)) {
-                std::error_code remove_ec;
-                if (!removeWithRetry(path, remove_ec)) {
-                    std::fprintf(stderr,
-                                 "[gpufl] warning: could not remove %s after "
-                                 "compressing (%s)\n",
-                                 path.string().c_str(),
-                                 remove_ec.message().c_str());
-                }
-            }
         }
     }
     return repaired;

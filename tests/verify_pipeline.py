@@ -1,9 +1,44 @@
 import gpufl as gfl
 import gzip
 import os
+import re
 import time
 import tempfile
 import shutil
+
+
+def _read_channel_logs(session_dir, channel):
+    """Return (paths, lines) for active or rotated files in one log channel."""
+    active = {
+        f"{channel}.log": (10**9, 0),
+        f"{channel}.log.gz": (10**9, 1),
+    }
+    rotated_re = re.compile(rf"^{re.escape(channel)}\.(\d+)\.log(\.gz)?$")
+
+    matches = []
+    for entry in os.listdir(session_dir):
+        path = os.path.join(session_dir, entry)
+        if not os.path.isfile(path):
+            continue
+        if entry in active:
+            matches.append((active[entry], path))
+            continue
+        match = rotated_re.match(entry)
+        if match:
+            index = int(match.group(1))
+            compressed = 1 if match.group(2) else 0
+            matches.append(((index, compressed), path))
+
+    paths = [path for _, path in sorted(matches)]
+    lines = []
+    for path in paths:
+        if path.endswith(".gz"):
+            with gzip.open(path, 'rt') as f:
+                lines.extend(f.readlines())
+        else:
+            with open(path, 'r') as f:
+                lines.extend(f.readlines())
+    return paths, lines
 
 
 def test_pipeline():
@@ -73,23 +108,14 @@ def test_pipeline():
 
         categories = ["scope", "system"]
         for cat in categories:
-            log_path = os.path.join(session_dir, f"{cat}.log")
-            gz_path = log_path + ".gz"
-
-            if os.path.exists(gz_path):
-                with gzip.open(gz_path, 'rt') as f:
-                    lines = f.readlines()
-                found_at = gz_path
-            elif os.path.exists(log_path):
-                with open(log_path, 'r') as f:
-                    lines = f.readlines()
-                found_at = log_path
-            else:
-                print(f"FAILED: Expected {cat}.log or {cat}.log.gz in {session_dir}")
+            found_paths, lines = _read_channel_logs(session_dir, cat)
+            if not found_paths:
+                print(f"FAILED: Expected {cat} log files in {session_dir}")
                 keep = True
                 raise SystemExit(1)
 
-            print(f"   [OK] Found {cat} log: {os.path.basename(found_at)}")
+            found_names = [os.path.basename(path) for path in found_paths]
+            print(f"   [OK] Found {cat} log: {found_names}")
 
             has_init = any('"type":"job_start"' in line for line in lines)
             if not has_init:

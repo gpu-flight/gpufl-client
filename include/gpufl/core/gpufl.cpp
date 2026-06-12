@@ -325,6 +325,22 @@ bool init(const InitOptions& opts) {
     logOpts.session_id = rt->session_id;
     logOpts.system_sample_rate_ms = g_opts.system_sample_rate_ms;
     logOpts.flush_always = g_opts.flush_logs_always;
+    if (const char* v = std::getenv(env::kFlushLogsAlways)) {
+        std::string flag(v);
+        std::transform(flag.begin(), flag.end(), flag.begin(),
+                       [](unsigned char c) {
+                           return static_cast<char>(std::tolower(c));
+                       });
+        if (flag == "1" || flag == "true" || flag == "yes" ||
+            flag == "on") {
+            logOpts.flush_always = true;
+        }
+    }
+    if (const char* v = std::getenv(env::kLogRotateBytes)) {
+        if (const auto bytes = std::strtoull(v, nullptr, 10); bytes > 0) {
+            logOpts.rotate_bytes = static_cast<std::size_t>(bytes);
+        }
+    }
 
     g_lastLogPath = logPath;
     g_lastSessionId = rt->session_id;

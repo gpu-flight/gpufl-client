@@ -63,10 +63,18 @@ _STALL_NAMES: dict[int, str] = {
 
 
 class GpuFlightSession:
-    def __init__(self, log_dir: str, session_id: str = None, log_prefix: str = "gfl_block", max_stack_depth: int = 5):
+    def __init__(
+        self,
+        log_dir: str,
+        session_id: str = None,
+        log_prefix: str = "gfl_block",
+        max_stack_depth: int = 5,
+        load_all_rotated: bool = False,
+    ):
         self.log_dir = Path(log_dir)
         self.console = Console()
         self.max_stack_depth = max_stack_depth
+        self.load_all_rotated = load_all_rotated
         self.app_name = None
         self._requested_session = session_id
 
@@ -76,9 +84,9 @@ class GpuFlightSession:
         #    (<log_dir>/<session_id>/<channel>.log[.gz]). Resolve which dir
         #    actually holds this run's logs before loading.
         self._read_dir = self._resolve_read_dir(session_id)
-        device_df = self._load_log(self._resolve_log_path(log_prefix, "device"))
-        scope_df  = self._load_log(self._resolve_log_path(log_prefix, "scope"))
-        system_df = self._load_log(self._resolve_log_path(log_prefix, "system"))
+        device_df = self._load_logs(self._resolve_log_paths(log_prefix, "device"))
+        scope_df  = self._load_logs(self._resolve_log_paths(log_prefix, "scope"))
+        system_df = self._load_logs(self._resolve_log_paths(log_prefix, "system"))
 
         # 1.5 Resolve the target session and scope every raw frame to it. The
         # log files are append-only, so re-running into the same prefix leaves
@@ -301,13 +309,14 @@ class GpuFlightSession:
         except (OSError, FileNotFoundError):
             return False
 
-    def _resolve_log_path(self, log_prefix: str, channel: str) -> "Path | None":
-        """Find the best file for `channel` under the resolved read dir.
+    def _resolve_log_paths(self, log_prefix: str, channel: str) -> list[Path]:
+        """Find log file(s) for `channel` under the resolved read dir.
 
         Handles current (bare `<channel>.log[.gz]`) and legacy
         (`<prefix>.<channel>.log[.gz]`) names, active and rotated
-        (`...<channel>.<N>.log[.gz]`), compressed or not. Active wins over
-        rotated; among rotated the lowest index wins; uncompressed breaks ties.
+        (`...<channel>.<N>.log[.gz]`), compressed or not. By default this keeps
+        the historical light behavior and reads one best file. Pass
+        load_all_rotated=True to concatenate all windows chronologically.
         """
         base = log_prefix[:-4] if log_prefix.endswith(".log") else log_prefix
         ch = re.escape(channel)
@@ -320,21 +329,58 @@ class GpuFlightSession:
         except (OSError, FileNotFoundError):
             return None
 
-        best = None  # (rank_tuple, Path)
+        by_slot = {}  # logical slot -> (chronological_key, default_key, Path)
         for p in entries:
             if not p.is_file():
                 continue
             m = rx.match(p.name)
             if not m:
                 continue
+            try:
+                # Skip empty husks: when a held .log can't be deleted after
+                # compression it is truncated to 0 bytes instead, and must
+                # not shadow its .gz twin here.
+                if p.stat().st_size == 0:
+                    continue
+            except OSError:
+                continue
             idx = int(m.group(1)) if m.group(1) else -1
             compressed = 1 if m.group(2) else 0
-            # active (idx -1) before rotated; lowest rotated index next;
-            # uncompressed before compressed as a final tiebreak.
-            key = (0 if idx < 0 else 1, idx if idx >= 0 else 0, compressed)
-            if best is None or key < best[0]:
-                best = (key, p)
-        return best[1] if best else None
+            slot = idx
+            chronological_key = (
+                1 if idx < 0 or idx == 0 else 0,
+                idx if idx > 0 else 0,
+                compressed,
+            )
+            default_key = (
+                0 if idx < 0 else 1,
+                idx if idx >= 0 else 0,
+                compressed,
+            )
+            # For duplicate .log/.log.gz of the same logical slot, keep the
+            # uncompressed file first for legacy compatibility; empty husks
+            # were skipped above.
+            if slot not in by_slot or chronological_key < by_slot[slot][0]:
+                by_slot[slot] = (chronological_key, default_key, p)
+
+        ordered_items = sorted(by_slot.values(), key=lambda item: item[0])
+        ordered = [p for _, _, p in ordered_items]
+        if self.load_all_rotated:
+            return ordered
+
+        if len(ordered) > 1:
+            chosen = min(by_slot.values(), key=lambda item: item[1])[2]
+            self.console.print(
+                f"[yellow]Note:[/yellow] {len(ordered)} {channel} log windows "
+                f"found; reading only {chosen.name}. Pass "
+                f"load_all_rotated=True to merge all windows."
+            )
+            return [chosen]
+        return ordered[:1]
+
+    def _resolve_log_path(self, log_prefix: str, channel: str) -> "Path | None":
+        paths = self._resolve_log_paths(log_prefix, channel)
+        return paths[0] if paths else None
 
     def _load_log(self, path: Path | None):
         """Efficiently loads JSONL into Pandas"""
@@ -351,6 +397,13 @@ class GpuFlightSession:
                     except Exception:
                         pass
         return pd.DataFrame(data)
+
+    def _load_logs(self, paths: list[Path]):
+        frames = [self._load_log(p) for p in paths]
+        frames = [df for df in frames if not df.empty]
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True)
 
     # ── Batch format support ──────────────────────────────────────────────────
 

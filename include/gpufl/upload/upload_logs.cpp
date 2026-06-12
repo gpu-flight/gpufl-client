@@ -1,7 +1,7 @@
 // High-level structure (U1: file-unit upload - one POST per rotated file):
 //   1. resolve log_path as a v1.2 session-output root, with legacy prefix fallback
-//   2. discover .log / .log.gz files; sort by
-//      (session_id, channel, rotation_index DESC, active-file last)
+//   2. salvage .tmp leftovers, discover .log / .log.gz files; sort by
+//      (session_id, channel, rotation_index ASC, active-file last)
 //   3. read cursor file → uploaded files + completed sessions
 //   4. for each target session, for each of its files in order:
 //        - rotated file already in cursor: skip (crash-resume)
@@ -49,6 +49,7 @@
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/host_info.hpp"
 #include "gpufl/core/json/json.hpp"
+#include "gpufl/core/logger/log_salvage.hpp"
 #include "gpufl/core/logger/logger.hpp"
 #include "gpufl/core/version.hpp"
 
@@ -291,10 +292,12 @@ std::vector<DiscoveredFile> discoverFiles(const PathParts& parts) {
         }
     }
 
-    // Sort: by (session_id, channel) lexicographic, then by upload
-    // order within a channel - oldest first. Rotation index N=max_files
-    // is the oldest; active (N=0) is newest. So within (sid, channel):
-    // descending rotation_index, with active (0) last.
+    // Sort: by (session_id, channel) lexicographic, then chronologically
+    // within a channel - oldest first, so dictionary_update lines are
+    // ingested before the rows that reference them. Windows are exported
+    // append-style: rotation index 1 is the OLDEST, higher indices are
+    // newer, and a bare active file (index 0, legacy/crash leftover) is
+    // the newest of all.
     std::sort(out.begin(), out.end(),
               [](const DiscoveredFile& a, const DiscoveredFile& b) {
                   if (a.session_id != b.session_id) return a.session_id < b.session_id;
@@ -302,7 +305,7 @@ std::vector<DiscoveredFile> discoverFiles(const PathParts& parts) {
                   const bool a_active = a.rotation_index == 0;
                   const bool b_active = b.rotation_index == 0;
                   if (a_active != b_active) return !a_active;  // active goes last
-                  return a.rotation_index > b.rotation_index;  // higher = older = first
+                  return a.rotation_index < b.rotation_index;  // lower = older = first
               });
     return out;
 }
@@ -1057,6 +1060,12 @@ UploadResult uploadLogs(const UploadOptions& opts) {
     }
 
     // ── Discover files + sessions ────────────────────────────────────
+    const auto salvaged = salvageSessionTempDirs(parts.directory);
+    if (salvaged.salvaged > 0 || salvaged.deferred > 0) {
+        GFL_LOG_DEBUG("[uploadLogs] salvaged ", salvaged.salvaged,
+                      " temp log file(s), deferred ", salvaged.deferred);
+    }
+
     auto files = discoverFiles(parts);
     if (files.empty()) {
         GFL_LOG_DEBUG("[uploadLogs] no session subdirs found in ",

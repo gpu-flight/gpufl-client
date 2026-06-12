@@ -82,8 +82,19 @@ class PcSamplingEngine final : public IProfilingEngine {
         SamplingAPI, // cuptiPCSampling* API (newer GPUs)
     };
 
+    // Kernel-timeline collection strategy (GPUFL_PC_KERNEL_COLLECT).
+    enum class KernelCollect {
+        None,  // PC samples only; PC/SASS uses launch-callback kernel rows
+        All,   // experimental stop/flush/start drain every cycle
+    };
+
     bool EnableSamplingFeatures_();
     void StartPcSampling_();
+    /// One drain cycle on a plain thread (KernelCollect::All): stop → forced
+    /// activity flush (pulls kernel records that don't surface while sampling
+    /// is armed) → GetData → restart. Elevated-only; on a privilege failure it
+    /// disables draining for the session and falls back to armed GetData.
+    void DrainKernelsAndCollect_();
     /// @param sync_device cudaDeviceSynchronize before stopping. Callers on
     ///        plain threads pass true; the CUPTI-callback path passes false -
     ///        cudart inside a CUPTI callback can re-enter the driver, and in
@@ -114,6 +125,13 @@ class PcSamplingEngine final : public IProfilingEngine {
     std::atomic<bool> produced_data_{false};
     bool privilege_probed_ = false;
 
+    // Kernel-timeline collection mode, parsed once from GPUFL_PC_KERNEL_COLLECT
+    // in initialize(). drain_unavailable_ latches when a mid-run stop/flush
+    // returns INSUFFICIENT_PRIVILEGES so we stop retrying and degrade to
+    // armed-GetData (sample-only) collection.
+    KernelCollect kernel_collect_ = KernelCollect::None;
+    std::atomic<bool> drain_unavailable_{false};
+
     // Serializes the start/stop/collect lifecycle across its callers: the
     // engine's own cycle thread, scope-begin re-arms on app threads, and
     // session stop/shutdown. Without it a cycle's Stop could interleave
@@ -125,8 +143,13 @@ class PcSamplingEngine final : public IProfilingEngine {
     // cuptiPCSamplingStop, so this errs small; each collect is one
     // stop→GetData→start cycle (~sub-ms) on the app thread.
     static constexpr int64_t kCollectIntervalNs = 1'000'000'000;  // 1 s
-    // Last periodic collect (cycle), wall ns. 0 = none yet.
-    std::atomic<int64_t> last_cycle_ns_{0};
+    // Last sample-only GetData collect, wall ns. This is intentionally
+    // separate from last_kernel_drain_ns_: launch callbacks may sample often,
+    // but they must not starve the plain-thread stop/flush/start drain that
+    // pulls kernel activity records.
+    std::atomic<int64_t> last_sample_collect_ns_{0};
+    // Last kernel activity drain (stop -> flush -> start), wall ns.
+    std::atomic<int64_t> last_kernel_drain_ns_{0};
 
     // The engine owns its collection cadence: the monitor collector thread
     // (which calls drainData) spends whole sessions inside synchronous

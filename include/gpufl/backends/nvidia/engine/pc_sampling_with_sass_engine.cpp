@@ -36,7 +36,7 @@ namespace {
 // PC sampling is always the fallback, so a Deep session is never unsafe.
 bool ShouldAttemptSassInDeep() {
     // Manual escape hatch: force PC-sampling-only regardless of hardware.
-    if (const char* e = std::getenv(gpufl::env::kDeepPcOnly);
+    if (const char* e = std::getenv(env::kDeepPcOnly);
         e && e[0] != '\0' && e[0] != '0') {
         return false;
     }

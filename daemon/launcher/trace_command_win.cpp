@@ -153,15 +153,28 @@ class WindowsTracePlatform final : public TracePlatform {
         STARTUPINFOW si{};
         si.cb = sizeof(si);
         PROCESS_INFORMATION pi{};
+        HANDLE job = CreateJobObjectW(nullptr, nullptr);
+        if (job) {
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+            limits.BasicLimitInformation.LimitFlags =
+                    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if (!SetInformationJobObject(
+                    job, JobObjectExtendedLimitInformation, &limits,
+                    sizeof(limits))) {
+                CloseHandle(job);
+                job = nullptr;
+            }
+        }
 
         if (!CreateProcessW(/*lpApplicationName=*/nullptr,
                             cmdbuf.data(),
                             /*procAttrs=*/nullptr, /*threadAttrs=*/nullptr,
                             /*inheritHandles=*/TRUE,
-                            /*creationFlags=*/0,
+                            /*creationFlags=*/CREATE_SUSPENDED,
                             /*lpEnvironment=*/nullptr,
                             /*lpCurrentDirectory=*/nullptr,
                             &si, &pi)) {
+            if (job) CloseHandle(job);
             out.launcher_error = true;
             out.rc = 2;
             out.error = "cannot launch " + command.front() + " (CreateProcess err=" +
@@ -169,12 +182,19 @@ class WindowsTracePlatform final : public TracePlatform {
             return out;
         }
 
+        if (job && !AssignProcessToJobObject(job, pi.hProcess)) {
+            CloseHandle(job);
+            job = nullptr;
+        }
+        ResumeThread(pi.hThread);
+
         WaitForSingleObject(pi.hProcess, INFINITE);
 
         DWORD exit_code = 1;
         GetExitCodeProcess(pi.hProcess, &exit_code);
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
+        if (job) CloseHandle(job);
 
         out.rc = static_cast<int>(exit_code);
         return out;

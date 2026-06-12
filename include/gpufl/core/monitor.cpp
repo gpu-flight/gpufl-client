@@ -144,22 +144,30 @@ static BatchBuffer<MemoryAllocEventBatchRow>     g_memAllocBatch;
 static uint64_t g_syncBatchId     = 0;
 static uint64_t g_memAllocBatchId = 0;
 
-static void flushBatches(Logger& logger, const std::string& session_id) {
+enum class FlushBatchesMode {
+    Fast,
+    Full,
+};
+
+static void flushBatches(Logger& logger, const std::string& session_id,
+                         FlushBatchesMode mode = FlushBatchesMode::Fast) {
     // Dictionary MUST be written before any batch that references its
     // name_id / kernel_id / function_id / metric_id entries, otherwise
     // readers see rows that reference undefined dictionary IDs.
     //
-    // We call flushDictionary twice: once at the top for source content
-    // and disassembly (which also reference dict IDs but are rare), and
-    // again immediately before each batch emission. This closes a race
-    // where the app thread could intern a new scope name AFTER the
-    // initial flushDictionary call but BEFORE the batch flush - the
+    // We call flushDictionary at the top for any full-mode source content
+    // and disassembly (which also reference dict IDs), and again immediately
+    // before each batch emission. This closes a race where the app thread
+    // could intern a new scope name AFTER the initial flushDictionary call
+    // but BEFORE the batch flush - the
     // new name would be pushed into g_scopeBatch but remain dirty in
     // the dict, producing an ordering bug where scope_event_batch
     // references name_ids 2-5 before their dict_update is emitted.
     g_dictManager.flushDictionary(logger, session_id);
-    g_dictManager.flushSourceContent(logger, session_id);
-    g_dictManager.flushDisassembly(logger, session_id);
+    if (mode == FlushBatchesMode::Full) {
+        g_dictManager.flushSourceContent(logger, session_id);
+        g_dictManager.flushDisassembly(logger, session_id);
+    }
     if (!g_kernelBatch.empty()) {
         g_dictManager.flushDictionary(logger, session_id);
         logger.write(model::KernelEventBatchModel(
@@ -818,7 +826,7 @@ void CollectorLoop() {
     if (Runtime* rt = runtime(); rt && rt->logger) {
         drainSyntheticKernels(rt);
         emitExecutionSignatures(rt);
-        flushBatches(*rt->logger, rt->session_id);
+        flushBatches(*rt->logger, rt->session_id, FlushBatchesMode::Full);
     }
     GFL_LOG_DEBUG("[CollectorLoop] END");
 }
@@ -827,6 +835,7 @@ void Monitor::Initialize(const MonitorOptions& opts) {
     if (g_initialized.exchange(true)) return;
 
     // Reset batch state for this session
+    g_monitorBuffer.resetDroppedCount();
     g_dictManager.reset();
     g_dictManager.enable_source_collection = opts.enable_source_collection;
     g_kernelBatch.clear();
@@ -902,9 +911,15 @@ void Monitor::Shutdown() {
             // when CollectorLoop already drained them - the map is cleared.
             drainSyntheticKernels(rt);
             emitExecutionSignatures(rt);
-            flushBatches(*rt->logger, rt->session_id);
+            flushBatches(*rt->logger, rt->session_id, FlushBatchesMode::Full);
         }
         GFL_LOG_DEBUG("Monitor::Shutdown: post-join drained=", drained);
+    }
+
+    if (const size_t dropped = g_monitorBuffer.resetDroppedCount();
+        dropped > 0) {
+        GFL_LOG_ERROR("Monitor::Shutdown: dropped ", dropped,
+                      " monitor record(s) due to ring-buffer backpressure");
     }
 
     GFL_LOG_DEBUG("Monitor::Shutdown: adapter.reset()");

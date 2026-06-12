@@ -84,6 +84,7 @@ target_sources(gpufl PRIVATE
     include/gpufl/core/sass_compressor.cpp
     include/gpufl/core/logger/logger.cpp
     include/gpufl/core/logger/log_rotator.cpp
+    include/gpufl/core/logger/log_salvage.cpp
     include/gpufl/core/logger/file_log_sink.cpp
     include/gpufl/upload/upload_logs.cpp
     include/gpufl/core/host_info.cpp
