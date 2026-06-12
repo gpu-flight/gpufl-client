@@ -42,7 +42,7 @@ inline gpufl::ComputeCapability GetTestDeviceCC() {
 
 /**
  * Skip the test if the attached GPU is below the given compute capability.
- * Safe to call after SKIP_IF_NO_CUDA() — relies on the CUDA runtime being up.
+ * Safe to call after SKIP_IF_NO_CUDA() - relies on the CUDA runtime being up.
  */
 #define SKIP_IF_CC_BELOW(major, minor)                                         \
     do {                                                                       \

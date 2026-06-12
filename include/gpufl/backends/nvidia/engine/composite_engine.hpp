@@ -24,15 +24,15 @@ namespace gpufl {
  * behavior (coexist / one-declines / deadlock) is directly observable from the
  * per-engine capability the backend emits.
  *
- * "Trace" (CUPTI activity records — kernel / memcpy / sync) is NOT a sub-engine
+ * "Trace" (CUPTI activity records - kernel / memcpy / sync) is NOT a sub-engine
  * here: it's the activity-record layer that `CuptiBackend` enables when the combo
  * includes Trace (`collectsKernelEvents()`). This composite holds only the
  * API-driven engines (PcSampling / SassMetrics / PmSampling / RangeProfiler).
  *
  * Lifecycle ordering: sub-engines are driven in a FIXED forward order for
- * start, stop, and shutdown alike (the same convention the old composite used —
+ * start, stop, and shutdown alike (the same convention the old composite used -
  * NOT construct/reverse-destruct). The teardown-safety rule (a Profiler-API
- * engine — SASS / Range — must be disabled BEFORE the PC-Sampling API) is
+ * engine - SASS / Range - must be disabled BEFORE the PC-Sampling API) is
  * satisfied by the backend supplying the list already ordered with PcSampling
  * LAST. Forward-order stop then disables SASS/Range before PC.
  */

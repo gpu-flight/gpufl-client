@@ -40,7 +40,7 @@ ResourceHandler::requiredCallbacks() const {
         // (PC sampling, SASS, …) wait for the first context here.
         {CUPTI_CB_DOMAIN_RESOURCE, CUPTI_CBID_RESOURCE_CONTEXT_CREATED},
         // Drain activity buffers while the context is still alive, just before
-        // the driver tears it down — for contexts destroyed mid-process (an
+        // the driver tears it down - for contexts destroyed mid-process (an
         // explicit cudaDeviceReset/cuCtxDestroy, or multi-context apps), where
         // the at-exit flush is skipped to avoid a driver deadlock (see
         // CuptiBackend::FlushOnContextDestroy). This does NOT fire on Windows
@@ -56,7 +56,7 @@ void ResourceHandler::handle(CUpti_CallbackDomain domain, CUpti_CallbackId cbid,
                              const void *cbdata) {
     auto resourceData = static_cast<const CUpti_ResourceData *>(cbdata);
 
-    // The target created its first CUDA context — complete a deferred
+    // The target created its first CUDA context - complete a deferred
     // engine start (no-op when the engine started normally). The heavy
     // work runs on the backend's own thread, NOT here: this callback
     // fires from inside the driver's context-creation path.
@@ -65,7 +65,7 @@ void ResourceHandler::handle(CUpti_CallbackDomain domain, CUpti_CallbackId cbid,
         return;
     }
 
-    // Context is about to be destroyed — flush activity NOW, synchronously,
+    // Context is about to be destroyed - flush activity NOW, synchronously,
     // while it's still valid. Returning from this callback lets the driver
     // proceed with teardown, so the flush must complete before we return.
     if (cbid == CUPTI_CBID_RESOURCE_CONTEXT_DESTROY_STARTING) {
@@ -93,7 +93,7 @@ void ResourceHandler::handle(CUpti_CallbackDomain domain, CUpti_CallbackId cbid,
             // CUPTI_CBID_RESOURCE_MODULE_PROFILED fires on every kernel
             // launch when PC sampling is active, including for
             // SASS-patched cubin variants.  Use the raw pointer as an
-            // O(1) sentinel — cubin memory is stable for the process
+            // O(1) sentinel - cubin memory is stable for the process
             // lifetime.  We must NOT skip MODULE_PROFILED entirely:
             // its cubin may have a different CRC than the original
             // MODULE_LOADED cubin, and CUPTI's PC sampling data
@@ -104,7 +104,7 @@ void ResourceHandler::handle(CUpti_CallbackDomain domain, CUpti_CallbackId cbid,
                 backend_->seen_cubin_ptrs_.insert(cubinPtr);
             }
 
-            // Copy the cubin bytes here (safe — no CUPTI calls).
+            // Copy the cubin bytes here (safe - no CUPTI calls).
             // cuptiGetCubinCrc() must NOT be called from this callback:
             // SASS holds CUPTI-internal locks during cubin patching (even
             // with enableLazyPatching=0, modules loaded after

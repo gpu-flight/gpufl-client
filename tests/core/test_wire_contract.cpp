@@ -9,7 +9,7 @@
 //
 // If a client-side edit renames a type, reorders a column, drops a field,
 // or bumps the in-band "version", that is a backwards-incompatible wire
-// change — it MUST be paired with a coordinated backend change and a
+// change - it MUST be paired with a coordinated backend change and a
 // kWireVersion bump. This test exists so such a change trips the build
 // here, loudly, instead of silently corrupting ingested data in prod.
 //
@@ -50,7 +50,7 @@ namespace {
 //
 // kWireVersion is the schema version of the in-band "version":<n> field on
 // every batch envelope. Today's payloads are version "1". Bumping this is a
-// deliberate, backend-coordinated act — pin it so an accidental edit fails
+// deliberate, backend-coordinated act - pin it so an accidental edit fails
 // the build.
 TEST(WireContract, WireVersionIsPinned) {
     EXPECT_STREQ(gpufl::kWireVersion, "1");
@@ -133,7 +133,7 @@ TEST(WireContract, JobStartEmitsNvidiaNoneSentinel) {
 //
 // analysis_id / pass_index / pass_count are emitted together, and ONLY when
 // analysis_id is set (a multi-pass run). They are additive optional fields on
-// the non-columnar job_start record, so they do NOT bump kWireVersion — the
+// the non-columnar job_start record, so they do NOT bump kWireVersion - the
 // backend ignores unknown fields until the P2 merge consumes them.
 TEST(WireContract, JobStartEmitsMultiPassGroupingWhenSet) {
     gpufl::InitEvent e;
@@ -226,7 +226,7 @@ TEST(WireContract, ExecutionSignatureShape) {
     e.session_id = "sess-1";
     e.ts_ns = 1234;
     e.scope_name = "train_epoch";
-    e.signature = 12345678901234567890ULL;  // > 2^53 — must round-trip as a string
+    e.signature = 12345678901234567890ULL;  // > 2^53 - must round-trip as a string
     e.launch_count = 9002;
     e.distinct_kernels = 27;
 
@@ -405,7 +405,7 @@ TEST(WireContract, DeviceMetricBatchExtendedColumns) {
 // v2 format (1.0.3+): two extra columns `repeat` and `warmup` carry
 // benchmark metadata on BEGIN rows produced by GFL_BENCH / Python's
 // iterable Scope. Rows that don't set them (legacy GFL_SCOPE, END
-// rows) emit 0/0 — semantically a no-op for older readers that
+// rows) emit 0/0 - semantically a no-op for older readers that
 // project only the first 5 columns.
 TEST(WireContract, ScopeEventBatchColumns) {
     gpufl::BatchBuffer<gpufl::ScopeBatchRow> batch;
@@ -434,14 +434,14 @@ TEST(WireContract, ScopeEventBatchColumns) {
         "\"columns\":[\"dt_ns\",\"scope_instance_id\",\"name_id\","
         "\"event_type\",\"depth\",\"repeat\",\"warmup\"]"));
     // BEGIN/END rows from a non-bench scope carry 0/0 in the trailing
-    // two columns — wire output is otherwise byte-identical to v1.
+    // two columns - wire output is otherwise byte-identical to v1.
     EXPECT_TRUE(JsonContains(json,
         "\"rows\":[[0,1,1,0,0,0,0],[5500,1,1,1,0,0,0]]"));
 }
 
 // Verifies that when a scope's BEGIN row carries benchmark metadata
 // (set by GFL_BENCH / ScopedMonitor(name, ScopeMeta{...})), the
-// values surface on the wire. END rows always emit 0/0 — the backend
+// values surface on the wire. END rows always emit 0/0 - the backend
 // joins by scope_instance_id and reads metadata from the BEGIN row.
 TEST(WireContract, ScopeEventBatchCarriesRepeatAndWarmupOnBegin) {
     gpufl::BatchBuffer<gpufl::ScopeBatchRow> batch;

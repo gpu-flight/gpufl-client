@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # GPUFlight Jupyter playground.
 #
-# Installs the PUBLISHED gpufl wheel from PyPI — the same artifact end users
+# Installs the PUBLISHED gpufl wheel from PyPI - the same artifact end users
 # get from `pip install gpufl`. As of 1.0.0 the Linux wheel bundles its own
 # CUDA runtime (libcudart), CUPTI (libcupti) and OpenSSL, so there is NO
 # source build and NO system CUDA toolkit needed. The only thing required
@@ -12,11 +12,11 @@
 #   Run:    docker run --gpus all -p 8888:8888 gpufl-jupyter:1.1.0
 #
 # A '-base' image is enough: we don't compile (so no '-devel'), and we don't
-# need the runtime's CUDA libs either — numba-cuda[cu13] ships its own
+# need the runtime's CUDA libs either - numba-cuda[cu13] ships its own
 # NVVM/NVRTC wheels and the gpufl wheel bundles cudart/cupti. '-base' still
 # sets NVIDIA_VISIBLE_DEVICES / NVIDIA_DRIVER_CAPABILITIES so the GPU is
 # visible. (If numba/gpufl ever need a system CUDA lib, bump back to
-# '-runtime' — one-line change.)
+# '-runtime' - one-line change.)
 FROM nvidia/cuda:13.1.0-base-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -63,7 +63,7 @@ RUN pip install --upgrade pip
 # (and import torch BEFORE gpufl to avoid the CUPTI clash).
 
 # gpufl from PyPI, pinned for a reproducible image (bump for new releases).
-# numba-cuda[cu13] supplies the CUDA-13 NVVM/NVRTC compiler — plain `numba`
+# numba-cuda[cu13] supplies the CUDA-13 NVVM/NVRTC compiler - plain `numba`
 # ships an older CUDA-12 target that reports "no CUDA device" on CUDA 13.
 ARG GPUFL_VERSION=1.1.0
 RUN --mount=type=cache,target=/root/.cache/pip \
@@ -79,5 +79,5 @@ WORKDIR /workspace
 # Expose Jupyter port
 EXPOSE 8888
 
-# Start Jupyter Lab — no token for easy local access
+# Start Jupyter Lab - no token for easy local access
 CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--allow-root", "--NotebookApp.token=''", "--NotebookApp.password=''"]

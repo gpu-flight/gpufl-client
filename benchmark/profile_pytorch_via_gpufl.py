@@ -2,7 +2,7 @@
 PyTorch kernel-duration ground truth via gpufl logs.
 
 Background: torch.profiler/kineto fails on Blackwell laptop
-(CUPTI_ERROR_INVALID_DEVICE — PyTorch's bundled kineto/CUPTI version
+(CUPTI_ERROR_INVALID_DEVICE - PyTorch's bundled kineto/CUPTI version
 isn't sm_120-compatible). Our own CUPTI integration works on this
 GPU, so gpufl-client's monitoring mode produces the same kernel-
 duration data we wanted from torch.profiler.
@@ -10,7 +10,7 @@ duration data we wanted from torch.profiler.
 This script:
   1. gpufl.init(profiling_engine=None, monitoring only)
   2. runs MiniGPT 20 steps (the exact workload from pytorch_train.py)
-  3. gpufl.shutdown() — flushes/gzips device.log
+  3. gpufl.shutdown() - flushes/gzips device.log
   4. parses the resulting device.log.gz for kernel_event_batch records
   5. computes kernel count, per-kernel duration distribution
   6. confirms or refutes the short-kernel hypothesis
@@ -45,27 +45,27 @@ from pytorch_train import MiniGPT  # noqa: E402
 
 def run_minigpt_under_gpufl(steps: int, warmup_steps: int, batch_size: int,
                              seq_len: int, log_dir: Path):
-    """Run MiniGPT with gpufl monitoring; return nothing — data ends up
+    """Run MiniGPT with gpufl monitoring; return nothing - data ends up
     in <log_dir>/<session_id>/device.log.gz once gpufl.shutdown() runs."""
     import gpufl  # imported here so the script can still print a clear
                   # error if gpufl isn't installed
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    # Trace mode — kernel activity records are on (that's what gives us
+    # Trace mode - kernel activity records are on (that's what gives us
     # duration_ns) but PC sampling is OFF, so we're not measuring the
     # +657% overhead case, just the kernel-timing ground truth. (Note:
-    # NOT Monitor — that disables CUPTI entirely and would yield zero
+    # NOT Monitor - that disables CUPTI entirely and would yield zero
     # kernel records. We need the activity trace.) PC sampling on or off,
-    # the duration_ns values are identical — they come from CUPTI's
+    # the duration_ns values are identical - they come from CUPTI's
     # KIND_KERNEL records either way.
     ok = gpufl.init(
         "minigpt_kernel_profile",
         str(log_dir),
-        True,  # continuous_system_sampling — unused but historically positional
-        0,     # system_sample_rate_ms — off
+        True,  # continuous_system_sampling - unused but historically positional
+        0,     # system_sample_rate_ms - off
         profiling_engine=gpufl.ProfilingEngine.Trace,
         enable_debug_output=False,  # debug stderr spam dominated overhead
-                                    # in earlier runs — keep off for clean
+                                    # in earlier runs - keep off for clean
                                     # kernel timing
     )
     if not ok:
@@ -211,7 +211,7 @@ def summarize(device_log: Path, steps: int, top: int):
     total_ms = total_dur_ns / 1e6
 
     print("=" * 70)
-    print("PyTorch MiniGPT — kernel-level ground truth via gpufl logs")
+    print("PyTorch MiniGPT - kernel-level ground truth via gpufl logs")
     print("=" * 70)
     print(f"  Source: {device_log}")
     print(f"  Steps measured:                {steps}")
@@ -225,7 +225,7 @@ def summarize(device_log: Path, steps: int, top: int):
     if avg_us < 3.0:
         verdict_dur = "confirms 'short kernel' hypothesis (avg < 3us)"
     elif avg_us < 8.0:
-        verdict_dur = "partial — kernels are short-ish (avg 3-8us) but not as tiny as predicted"
+        verdict_dur = "partial - kernels are short-ish (avg 3-8us) but not as tiny as predicted"
     else:
         verdict_dur = f"refutes short-kernel hypothesis (avg = {avg_us:.1f}us)"
     print(f"  Per-kernel duration:           {verdict_dur}")
@@ -233,9 +233,9 @@ def summarize(device_log: Path, steps: int, top: int):
         verdict_mult = (f"confirms 'high actual launch count' "
                         f"({per_step:.0f}/step vs ~20 visible ops)")
     elif per_step > 50:
-        verdict_mult = f"partial — {per_step:.0f} launches/step"
+        verdict_mult = f"partial - {per_step:.0f} launches/step"
     else:
-        verdict_mult = f"unexpected — only {per_step:.0f} launches/step"
+        verdict_mult = f"unexpected - only {per_step:.0f} launches/step"
     print(f"  Launches per step:             {verdict_mult}")
     print()
 
@@ -273,7 +273,7 @@ def main():
     args = p.parse_args()
 
     if not torch.cuda.is_available():
-        print("CUDA not available — this script needs a GPU.")
+        print("CUDA not available - this script needs a GPU.")
         sys.exit(1)
 
     log_dir = Path(args.log_dir) if args.log_dir else Path(tempfile.mkdtemp(prefix='gpufl_minigpt_'))
@@ -297,7 +297,7 @@ def main():
     if not args.keep_logs and args.log_dir is None:
         shutil.rmtree(log_dir, ignore_errors=True)
     else:
-        print(f"\n(log dir retained at {log_dir} — pass --no-keep-logs to clean up)")
+        print(f"\n(log dir retained at {log_dir} - pass --no-keep-logs to clean up)")
 
 
 if __name__ == '__main__':

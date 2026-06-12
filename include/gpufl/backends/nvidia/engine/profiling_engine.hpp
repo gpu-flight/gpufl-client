@@ -24,7 +24,7 @@ struct EngineContext {
     uint32_t  device_id  = 0;
     std::string chip_name;
 
-    // Cubin map — written by ResourceHandler, read by PC Sampling / SASS
+    // Cubin map - written by ResourceHandler, read by PC Sampling / SASS
     // Metrics for source-correlation look-ups.
     std::mutex*                               cubin_mu     = nullptr;
     std::unordered_map<uint64_t, CubinInfo>*  cubin_by_crc = nullptr;
@@ -116,7 +116,7 @@ class IProfilingEngine {
 
     /**
      * @brief True when the driver exposed zero PC sampling stall reasons
-     * (cuptiPCSamplingGetNumStallReasons returned 0) — sampling data
+     * (cuptiPCSamplingGetNumStallReasons returned 0) - sampling data
      * collection is unavailable on this GPU/driver even though
      * cuptiPCSamplingEnable succeeds. Default: false.
      */
@@ -130,7 +130,7 @@ class IProfilingEngine {
 
     /**
      * @brief True if this engine actually emitted at least one profiling
-     * record/sample this session — not merely armed. Lets the capability
+     * record/sample this session - not merely armed. Lets the capability
      * report distinguish "collected" from "enabled but produced 0 data"
      * (e.g. SASS / PC sampling armed but the kernels were too short, or CUPTI
      * returned nothing). Default false; engines that emit data override it.

@@ -27,7 +27,7 @@ Homepage = "https://github.com/gpufl/gpufl-client"
 Issues = "https://github.com/gpufl/gpufl-client/issues"
 
 # NOTE: the `gpufl` console-script was retired in favor of the single
-# native `gpufl` binary (the launcher — `gpufl trace` / `gpufl upload` /
+# native `gpufl` binary (the launcher - `gpufl trace` / `gpufl upload` /
 # `gpufl version`). Shipping both meant two different programs competing
 # for the `gpufl` name on PATH; the native binary now owns it.
 #
@@ -38,11 +38,11 @@ Issues = "https://github.com/gpufl/gpufl-client/issues"
 # command (avoiding the collision with the binary).
 
 [project.optional-dependencies]
-# PyTorch integration — first-class. Uses TorchDispatchMode (stable
+# PyTorch integration - first-class. Uses TorchDispatchMode (stable
 # since torch 2.1) to capture op-level events as NVTX ranges.
 torch = ["torch>=2.1", "requests>=2.28"]
 
-# The following are v1 STUBS — modules import cleanly and raise a
+# The following are v1 STUBS - modules import cleanly and raise a
 # helpful NotImplementedError explaining the workaround (manual NVTX).
 # Full implementations ship post-launch. See gpufl/<name>/__init__.py.
 cupy = ["cupy-cuda12x>=12"]
@@ -53,7 +53,7 @@ triton = ["triton>=2.1"]
 # and new GPU architectures (Blackwell / sm_120) independently. Plain
 # `numba` ships the older bundled CUDA-12-era target, which silently
 # reports "no CUDA device" on CUDA-13-only setups and on Blackwell.
-# We deliberately do NOT pin a `[cuXX]` runtime extra here — that would
+# We deliberately do NOT pin a `[cuXX]` runtime extra here - that would
 # force a CUDA version into this shared dependency and conflict with the
 # cu12 cupy runtime in the `[all]` extra below. Users install the
 # matching CUDA runtime themselves: `pip install numba-cuda[cu13]`
@@ -92,7 +92,7 @@ wheel.packages = ["python/gpufl"]
 # Ship the project license + third-party notices inside the wheel's
 # .dist-info/licenses/. The wheel bundles OpenSSL (Apache-2.0), CUDA
 # cudart/CUPTI (NVIDIA EULA), and statically compiles in cpp-httplib (MIT)
-# and pybind11 (BSD-3) — those licenses require their notices travel with
+# and pybind11 (BSD-3) - those licenses require their notices travel with
 # the redistributed binary. (Overriding the default glob, so LICENSE must
 # be listed explicitly too.)
 wheel.license-files = ["LICENSE", "THIRD-PARTY-NOTICES.txt"]

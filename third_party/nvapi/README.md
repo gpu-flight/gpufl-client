@@ -9,7 +9,7 @@ source for `mem_util` on those GPUs; its `GPU` domain also backstops `gpu_util`.
 
 NVAPI is **open source under the MIT license** (<https://github.com/NVIDIA/nvapi>),
 including the prebuilt `amd64/nvapi64.lib` import stub. We therefore **do not
-commit it here** — the build pulls it via CMake `FetchContent` (same mechanism as
+commit it here** - the build pulls it via CMake `FetchContent` (same mechanism as
 zlib), pinned to a commit.
 
 ## How it's sourced (default)
@@ -28,7 +28,7 @@ builds never fetch it (`GPUFL_HAS_NVAPI=0`; the NVAPI code in
 
 ## Offline / local override (optional)
 
-To build without the network, point CMake at a local copy instead — it takes
+To build without the network, point CMake at a local copy instead - it takes
 precedence over FetchContent:
 
 - `cmake -DNVAPI_ROOT=C:/path/to/nvapi ...`, **or** set `NVAPI_ROOT` in the env,

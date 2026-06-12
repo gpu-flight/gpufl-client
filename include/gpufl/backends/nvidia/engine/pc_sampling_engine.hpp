@@ -85,20 +85,20 @@ class PcSamplingEngine final : public IProfilingEngine {
     bool EnableSamplingFeatures_();
     void StartPcSampling_();
     /// @param sync_device cudaDeviceSynchronize before stopping. Callers on
-    ///        plain threads pass true; the CUPTI-callback path passes false —
+    ///        plain threads pass true; the CUPTI-callback path passes false -
     ///        cudart inside a CUPTI callback can re-enter the driver, and in
     ///        KERNEL_SERIALIZED mode every sampled kernel has already
     ///        completed by the time the next API callback runs anyway.
     void StopAndCollectPcSampling_(bool sync_device = true);
     /// The cuptiPCSamplingGetData drain loop: parses PC records into
     /// PC_SAMPLE activity records. Callable while sampling is still armed
-    /// (the NVIDIA pc_sampling sample's serialized-mode pattern — only
+    /// (the NVIDIA pc_sampling sample's serialized-mode pattern - only
     /// completed kernels' samples are returned) or after a Stop.
     void CollectPcSamplingData_();
     /// Shared mid-session collect: throttled armed-GetData, safe to call
-    /// from CUPTI callbacks (try_lock, no cudart, no PCSamplingStop —
+    /// from CUPTI callbacks (try_lock, no cudart, no PCSamplingStop -
     /// Stop returns 999 inside CUPTI callbacks). `force` bypasses the
-    /// interval throttle (used at process-scope end — the last healthy
+    /// interval throttle (used at process-scope end - the last healthy
     /// moment before Windows process-exit teardown).
     void MaybePeriodicCollect_(const char* reason, bool force);
 

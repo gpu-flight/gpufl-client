@@ -4,7 +4,7 @@ Tests for the pure-Python wrapper layer in python/gpufl/__init__.py:
   * gpufl.Scope context-manager form (legacy, unchanged)
   * gpufl.Scope iterable form (repeat + warmup, new in 1.0.3)
   * The "<name>_warmup" sub-scope opened automatically when warmup > 0
-  * gpufl.clean_logs() — prefix-scoped deletion + active-session guard
+  * gpufl.clean_logs() - prefix-scoped deletion + active-session guard
 
 These all run without a GPU by monkey-patching the C++ _CScope binding
 with a recording fake. The fake captures every constructor call and every
@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-# Mirror test_bindings.py — add the source python/ dir to sys.path so a
+# Mirror test_bindings.py - add the source python/ dir to sys.path so a
 # git-checkout dev environment doesn't need an installed wheel.
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "python"))
 
@@ -48,13 +48,13 @@ def fake_cscope(monkeypatch):
             return False
 
     # The Scope wrapper looks up `_CScope` as a module global, resolved at
-    # call time — monkeypatching gpufl._CScope is enough; no reload needed.
+    # call time - monkeypatching gpufl._CScope is enough; no reload needed.
     monkeypatch.setattr(gpufl, "_CScope", FakeCScope)
     return events, ctor_calls
 
 
 # ---------------------------------------------------------------------------
-# Context-manager form — must be byte-identical to pre-1.0.3 behavior
+# Context-manager form - must be byte-identical to pre-1.0.3 behavior
 # ---------------------------------------------------------------------------
 
 class TestScopeContextManager:
@@ -74,7 +74,7 @@ class TestScopeContextManager:
 
 
 # ---------------------------------------------------------------------------
-# Iterable form — repeat without warmup
+# Iterable form - repeat without warmup
 # ---------------------------------------------------------------------------
 
 class TestScopeIterableRepeatOnly:
@@ -100,7 +100,7 @@ class TestScopeIterableRepeatOnly:
 
 
 # ---------------------------------------------------------------------------
-# Iterable form — warmup>0 opens the "<name>_warmup" sub-scope
+# Iterable form - warmup>0 opens the "<name>_warmup" sub-scope
 # ---------------------------------------------------------------------------
 
 class TestScopeIterableWarmup:
@@ -111,7 +111,7 @@ class TestScopeIterableWarmup:
         assert seen == [-3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 
     def test_warmup_opens_sub_scope_before_main_scope(self, fake_cscope):
-        """The key 1.0.3+ invariant — warmup events get their own bucket."""
+        """The key 1.0.3+ invariant - warmup events get their own bucket."""
         events, ctor_calls = fake_cscope
         list(gpufl.Scope("matmul", repeat=10, warmup=3))
 
@@ -127,7 +127,7 @@ class TestScopeIterableWarmup:
 
         main_args, main_kwargs = ctor_calls[1]
         assert main_args == ("matmul", "")
-        # Main scope keeps the original metadata — warmup count records
+        # Main scope keeps the original metadata - warmup count records
         # for audit ("3 warmup launches were excluded from this scope").
         assert main_kwargs == {"repeat": 10, "warmup": 3}
 
@@ -163,7 +163,7 @@ class TestScopeIterableWarmup:
 
 
 # ---------------------------------------------------------------------------
-# Iterable form — error paths
+# Iterable form - error paths
 # ---------------------------------------------------------------------------
 
 class TestScopeIterableErrors:
@@ -174,7 +174,7 @@ class TestScopeIterableErrors:
         # a later StopIteration.
         with pytest.raises(TypeError, match=r"repeat"):
             for _ in gpufl.Scope("no_repeat"):
-                pass  # pragma: no cover — should not execute
+                pass  # pragma: no cover - should not execute
         # No scopes were constructed.
         assert events == []
 
@@ -226,13 +226,13 @@ class TestCleanLogs:
         # Session A: one active + one rotated.gz + one unrelated file.
         (sid_a / "device.log").touch()
         (sid_a / "scope.1.log.gz").touch()
-        (sid_a / "notes.txt").touch()    # unrelated within subdir — preserves subdir
+        (sid_a / "notes.txt").touch()    # unrelated within subdir - preserves subdir
 
         # Session B: only channel files (subdir will be fully removable).
         (sid_b / "device.log").touch()
         (sid_b / "system.log.gz").touch()
 
-        # Unrelated top-level entries — must NOT be touched.
+        # Unrelated top-level entries - must NOT be touched.
         (log_root / "README.md").touch()
         (log_root / "other_app").mkdir()
         (log_root / "other_app" / "data.bin").touch()

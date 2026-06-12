@@ -42,14 +42,14 @@
 #include <cuda_runtime.h>
 #endif
 
-// NVTX (NVIDIA Tools Extension) — zero-overhead annotation library.
+// NVTX (NVIDIA Tools Extension) - zero-overhead annotation library.
 // When GPUFL_HAS_NVTX is defined (see CMakeLists NVTX block), GFL_SCOPE
 // emits a paired nvtxRangePushA/Pop around its body. The range is:
 //   - visible to Nsight Systems (cross-tool validation),
 //   - captured by GPUFlight's own CUPTI marker path (unified pipeline
 //     with framework-emitted NVTX from PyTorch / cuDNN / etc.),
 //   - zero-overhead when no profiler is attached.
-// This is additive to the native scope_event — see plan's
+// This is additive to the native scope_event - see plan's
 // "GFL_SCOPE and NVTX are complementary layers" section.
 #if GPUFL_HAS_NVTX
 // Modern CUDA toolkits ship NVTX under the nvtx3/ prefix (CUDA 11.0+);
@@ -81,12 +81,12 @@ std::atomic<bool> g_nvtx_available{false};
 // SEH-protected NVTX wrappers (Windows / MSVC).
 //
 // Access violations from NVTX are Windows STRUCTURED exceptions, not
-// C++ exceptions — a normal try/catch cannot intercept them. We wrap
+// C++ exceptions - a normal try/catch cannot intercept them. We wrap
 // the call in __try/__except and map any caught exception to rc = -1.
 //
 // IMPORTANT: these helpers MUST NOT contain C++ objects with
 // destructors. MSVC forbids __try/__except in functions that also
-// need C++ unwinding. Keep them minimal — just the raw NVTX call.
+// need C++ unwinding. Keep them minimal - just the raw NVTX call.
 #if defined(_MSC_VER)
 namespace gpufl {
 namespace detail {
@@ -129,8 +129,8 @@ __declspec(noinline) inline int SafeNvtxRangePop() {
 #if GPUFL_HAS_NVTX
 // nvtxRangePushA returns the 0-based nesting level on success, or a
 // negative value on error (injection not initialized, internal NVTX
-// error, etc). We route failures through GFL_LOG_ERROR — the project's
-// standard logger — rather than fprintf. A static std::atomic<bool>
+// error, etc). We route failures through GFL_LOG_ERROR - the project's
+// standard logger - rather than fprintf. A static std::atomic<bool>
 // guard caps the message at one per process so a persistent failure
 // doesn't spam every GFL_SCOPE enter/exit.
 #define GPUFL_NVTX_PUSH(name)                                                   \
@@ -143,7 +143,7 @@ __declspec(noinline) inline int SafeNvtxRangePop() {
                 GFL_LOG_ERROR(                                                  \
                     "nvtxRangePushA failed (rc=", _gpufl_nvtx_rc,               \
                     ") for '", (name),                                          \
-                    "' — NVTX markers will not be captured for this session. " \
+                    "' - NVTX markers will not be captured for this session. " \
                     "Verify the CUPTI library exports "                         \
                     "InitializeInjectionNvtx2 and that "                        \
                     "NVTX_INJECTION64_PATH points to it.");                     \
@@ -160,7 +160,7 @@ __declspec(noinline) inline int SafeNvtxRangePop() {
             if (!_gpufl_nvtx_pop_logged.exchange(true)) {                       \
                 GFL_LOG_ERROR(                                                  \
                     "nvtxRangePop failed (rc=", _gpufl_nvtx_rc,                 \
-                    ") — unbalanced push/pop, NVTX injection not "             \
+                    ") - unbalanced push/pop, NVTX injection not "             \
                     "initialized, or caught structured exception from "         \
                     "NVTX injection table.");                                   \
             }                                                                   \
@@ -246,16 +246,16 @@ bool windowsInjectedProcess_() {
 
 bool init(const InitOptions& opts) {
     // ── Disable kill switch ─────────────────────────────────────────────
-    // Env var wins over the InitOptions field — it's the "force off
+    // Env var wins over the InitOptions field - it's the "force off
     // without editing code" knob. When disabled, we return immediately
     // BEFORE allocating anything: no Runtime, no Monitor, no logger, no
     // version-probe thread. Every other public entry point already
     // short-circuits when `runtime() == nullptr` (gpufl::shutdown,
     // systemStart/Stop, ScopedMonitor::init_/~ScopedMonitor), so the
-    // disabled state cascades for free — no per-call-site checks needed.
+    // disabled state cascades for free - no per-call-site checks needed.
     if (envDisabled_() || !opts.enabled) {
         // Keep g_opts at defaults so any caller reading it post-init
-        // (rare — most paths gate on `runtime()` first) sees a clean
+        // (rare - most paths gate on `runtime()` first) sees a clean
         // disabled-state shape.
         g_opts = InitOptions{};
         g_opts.enabled = false;
@@ -264,7 +264,7 @@ bool init(const InitOptions& opts) {
 
     g_opts = opts;
 
-    // Read config file early — before anything uses the options
+    // Read config file early - before anything uses the options
     {
         std::string configPath = g_opts.config_file;
         if (configPath.empty()) {
@@ -281,7 +281,7 @@ bool init(const InitOptions& opts) {
         std::string apiPath = g_opts.api_path;
         if (url.empty()) {
             if (const char* e = std::getenv(gpufl::env::kBackendUrl)) url = e;
-            // Legacy name — accept for one release to ease migration.
+            // Legacy name - accept for one release to ease migration.
             else if (const char* e2 = std::getenv(gpufl::env::kRemoteConfig)) url = e2;
         }
         if (key.empty()) {
@@ -290,7 +290,7 @@ bool init(const InitOptions& opts) {
         if (apiPath.empty()) {
             if (const char* e = std::getenv(gpufl::env::kApiPath)) apiPath = e;
         }
-        // Normalize once — every downstream consumer (HttpLogSink wiring
+        // Normalize once - every downstream consumer (HttpLogSink wiring
         // below, the version-discovery probe) just appends after this.
         apiPath = normalizeApiPath(apiPath);
         // Reflect env-var-resolved values back onto g_opts so downstream
@@ -319,7 +319,7 @@ bool init(const InitOptions& opts) {
     Logger::Options logOpts;
     logOpts.base_path = logPath;
     // Threaded through so the rotator can write under
-    // `<base_path>/<session_id>/<channel>.log` — v1.2 disk layout. The
+    // `<base_path>/<session_id>/<channel>.log` - v1.2 disk layout. The
     // uploader uses the directory name to discover sessions instead of
     // parsing job_start events out of flat log files.
     logOpts.session_id = rt->session_id;
@@ -342,7 +342,7 @@ bool init(const InitOptions& opts) {
     // invokes gpufl::uploadLogs() with the configured backend_url +
     // api_key after the file sink is closed. We log a deprecation
     // notice here at init time so users see they're on the legacy
-    // path. Removed in v1.2 — at which point callers must invoke
+    // path. Removed in v1.2 - at which point callers must invoke
     // uploadLogs() (or gpufl.session() in Python) explicitly.
     if (g_opts.remote_upload) {
         GFL_LOG_ERROR(
@@ -351,14 +351,14 @@ bool init(const InitOptions& opts) {
             "gpufl::shutdown() will auto-call gpufl::uploadLogs() at "
             "the end of the session instead. This flag, and "
             "backend_url / api_key on InitOptions, will be removed "
-            "entirely in v1.2 — switch to passing creds directly to "
+            "entirely in v1.2 - switch to passing creds directly to "
             "UploadOptions / gpufl::uploadLogs() in new code.");
     }
 
     // Fire-and-forget version-discovery probe. Hits
     // <backend_url><api_path>/info/version with 2s timeouts to detect
     // client/backend version drift early and emit a clear warning.
-    // Must NEVER block init — detached, bounded by httplib timeouts.
+    // Must NEVER block init - detached, bounded by httplib timeouts.
     // Skipped when backend_url is empty (offline / file-only mode).
     if (!g_opts.backend_url.empty()) {
         std::thread([url = g_opts.backend_url,
@@ -422,7 +422,7 @@ bool init(const InitOptions& opts) {
     // EAGER module loading is OPT-IN. By default we leave CUDA on its normal
     // LAZY loading; the per-architecture SASS exclusion gate
     // (GPUFL_SASS_EXCLUDE_ARCHS, in SassMetricsEngine) is the default guard
-    // for the CUPTI lazy-patching deadlock — it disables SASS only on
+    // for the CUPTI lazy-patching deadlock - it disables SASS only on
     // architectures confirmed to hang, rather than paying EAGER's
     // whole-process startup/memory cost everywhere. EAGER remains available
     // as a per-run alternative: GPUFL_EAGER_MODULE_LOADING=1 forces it (it
@@ -541,7 +541,7 @@ bool init(const InitOptions& opts) {
     rt_ptr->logger->write(model::InitEventModel(ie));
 
     // Configure the sampler with collectors / interval. This does NOT
-    // start the worker — that happens via activate(), driven either by
+    // start the worker - that happens via activate(), driven either by
     // the continuous-mode baseline activation below or by GFL_SCOPE
     // entry / systemStart() at runtime.
     if (g_opts.system_sample_rate_ms > 0 && rt_ptr->collector) {
@@ -569,7 +569,7 @@ bool init(const InitOptions& opts) {
         rt_ptr->sampler.activate();
     }
 
-    // Intentionally disabled — shutdown order must be explicit to avoid CUPTI
+    // Intentionally disabled - shutdown order must be explicit to avoid CUPTI
     // teardown races std::atexit(shutdown);
 
 #if GPUFL_HAS_NVTX
@@ -674,7 +674,7 @@ void shutdown() {
     rt->logger->close();
     GFL_LOG_DEBUG("Shutdown: logger->close() returned");
 
-    // remote_upload deprecation shim — auto-call uploadLogs() at the
+    // remote_upload deprecation shim - auto-call uploadLogs() at the
     // end of shutdown() so pure-C++ callers who set the legacy flag
     // still get their data shipped. Matches the Python side's atexit
     // handler. The file sink has been closed above, so all NDJSON
@@ -683,7 +683,7 @@ void shutdown() {
     if (g_opts.remote_upload && !g_opts.backend_url.empty() &&
         !g_opts.api_key.empty() && !g_opts.log_path.empty()) {
         GFL_LOG_DEBUG(
-            "[remote_upload shim] running uploadLogs() at shutdown — "
+            "[remote_upload shim] running uploadLogs() at shutdown - "
             "log_path=", g_opts.log_path,
             " backend_url=", g_opts.backend_url);
         UploadOptions uopts;
@@ -691,22 +691,22 @@ void shutdown() {
         uopts.backend_url = g_opts.backend_url;
         uopts.api_key     = g_opts.api_key;
         uopts.api_path    = g_opts.api_path;
-        // Use defaults for the rest — timeouts, retries, etc. The
+        // Use defaults for the rest - timeouts, retries, etc. The
         // upload runs synchronously here; in the legacy live-streaming
         // model this work was amortized across the workload, so
         // total shutdown wall time may now be noticeably longer
-        // (proportional to log volume). Acceptable trade-off — the
+        // (proportional to log volume). Acceptable trade-off - the
         // alternative was silent data loss.
         const auto r = uploadLogs(uopts);
         if (r.success) {
             GFL_LOG_DEBUG(
-                "[remote_upload shim] uploadLogs OK — ",
+                "[remote_upload shim] uploadLogs OK - ",
                 r.events_uploaded, " event(s), ",
                 r.bytes_uploaded, " bytes, ",
                 r.elapsed_ms, "ms");
         } else {
             GFL_LOG_ERROR(
-                "[remote_upload shim] uploadLogs FAILED — ",
+                "[remote_upload shim] uploadLogs FAILED - ",
                 r.warnings.size(), " warning(s); first: ",
                 r.warnings.empty() ? std::string("(none)") :
                                      r.warnings.front());
@@ -738,7 +738,7 @@ ScopedMonitor::ScopedMonitor(std::string name, std::string tag,
     init_(ScopeMeta{});  // no benchmark metadata
 }
 
-// Canonical 1.0.3+ ctor — single options object. Tag now lives
+// Canonical 1.0.3+ ctor - single options object. Tag now lives
 // inside ScopeMeta (was a separate parameter in the earlier draft)
 // so the call site has a single source of truth and the variadic
 // GFL_SCOPE macro can wrap any combination of fields in one
@@ -781,7 +781,7 @@ void ScopedMonitor::init_(const ScopeMeta& meta) {
     row.name_id = name_id;
     row.event_type = 0;  // begin
     row.depth = depth;
-    // Benchmark metadata — 0/0 for the legacy ctors, populated for the
+    // Benchmark metadata - 0/0 for the legacy ctors, populated for the
     // ScopeMeta overload. End row (in dtor) keeps these at 0; backend
     // joins by scope_instance_id to read the begin-row values.
     row.repeat = meta.repeat;
@@ -791,7 +791,7 @@ void ScopedMonitor::init_(const ScopeMeta& meta) {
     // Scope callbacks are useful for both tracing and profiling backends.
     Monitor::BeginProfilerScope(name_.c_str());
     // Perf scope (Range Profiler / Perfworks). Also fire it when an engine combo
-    // (GPUFL_ENGINE_COMBO) is active even with a Trace base — otherwise a
+    // (GPUFL_ENGINE_COMBO) is active even with a Trace base - otherwise a
     // Trace+RangeProfiler combo would never trigger Range's perf scope. Harmless
     // no-op for engines that don't use perf scopes (PC / PM).
     const char* comboEnv = std::getenv(gpufl::env::kEngineCombo);
@@ -809,7 +809,7 @@ void ScopedMonitor::init_(const ScopeMeta& meta) {
 }
 
 ScopedMonitor::~ScopedMonitor() {
-    // Pop the NVTX range first — symmetric with the push in the
+    // Pop the NVTX range first - symmetric with the push in the
     // constructor. Safe to call even if runtime() is gone; NVTX keeps
     // its own internal range stack.
     GPUFL_NVTX_POP();

@@ -3,13 +3,13 @@
 // ─────────────────────────────────────────────────────────────────────────
 // Central registry of every environment-variable NAME GPUFlight reads or sets.
 //
-// One place, so each name lives exactly once — no more the same "GPUFL_…"
+// One place, so each name lives exactly once - no more the same "GPUFL_…"
 // string typed as a raw literal in five files and silently drifting. Read or
 // set env through these constants, never a bare string literal:
 //
 //     if (const char* v = std::getenv(gpufl::env::kApiKey)) { ... }
 //
-// Names only — the VALUES some of these carry (e.g. "EAGER" for
+// Names only - the VALUES some of these carry (e.g. "EAGER" for
 // kCudaModuleLoading, the "comprehensive"/"light"/… profile presets in
 // inject/inject_entry.hpp) live with their own logic, not here.
 //
@@ -21,11 +21,11 @@
 namespace gpufl::env {
 
 // ── Kill switch / config / credentials ─────────────────────────────────────
-// Master off switch — truthy => gpufl::init() returns early (no CUPTI / NVML).
+// Master off switch - truthy => gpufl::init() returns early (no CUPTI / NVML).
 constexpr const char* kDisabled     = "GPUFL_DISABLED";
 // Path to a local JSON config file (InitOptions.config_file fallback).
 constexpr const char* kConfigFile   = "GPUFL_CONFIG_FILE";
-// Backend base URL / bearer token / API path prefix — read by init()'s remote
+// Backend base URL / bearer token / API path prefix - read by init()'s remote
 // config probe, the inject-lib post-run upload, and the `gpufl upload` command.
 constexpr const char* kBackendUrl   = "GPUFL_BACKEND_URL";
 constexpr const char* kApiKey       = "GPUFL_API_KEY";
@@ -38,7 +38,7 @@ constexpr const char* kRemoteConfig = "GPUFL_REMOTE_CONFIG";
 // entry point reads them to drive gpufl::init(). (Moved here from
 // inject/inject_entry.hpp so every env name lives in one place.)
 //
-// Sentinel — the inject lib returns silently unless this is "1", so a stray
+// Sentinel - the inject lib returns silently unless this is "1", so a stray
 // LD_PRELOAD into a shell/utility can't accidentally fire CUPTI.
 constexpr const char* kInject               = "GPUFL_INJECT";
 // Session display name (default: basename of the launched command).
@@ -57,12 +57,12 @@ constexpr const char* kInjectUpload         = "GPUFL_INJECT_UPLOAD";
 // shutdown() so the launcher knows uploads drained. Empty = no signal.
 constexpr const char* kInjectCompletionFd   = "GPUFL_INJECT_COMPLETION_FD";
 // Opt-in ("1"): run gpufl::init() from the inject lib's ld.so constructor
-// (before main / cuInit). Off by default — pre-cuInit CUPTI subscribe segfaults
+// (before main / cuInit). Off by default - pre-cuInit CUPTI subscribe segfaults
 // on no-CUDA targets; normally InitializeInjection drives init after cuInit.
 constexpr const char* kInjectUseConstructor = "GPUFL_INJECT_USE_CONSTRUCTOR";
 
 // Opt-in ("1"): turn on gpufl's debug logging (GFL_LOG_DEBUG → stderr) in the
-// injected target — same switch InitOptions.enable_debug_output exposes to
+// injected target - same switch InitOptions.enable_debug_output exposes to
 // embedding callers, but reachable for `gpufl trace` runs.
 constexpr const char* kDebugOutput          = "GPUFL_DEBUG";
 
@@ -80,7 +80,7 @@ constexpr const char* kInjectInitDelayMs     = "GPUFL_INJECT_INIT_DELAY_MS";
 // `gpufl monitor`.
 constexpr const char* kProfilingEngine    = "GPUFL_PROFILING_ENGINE";
 // Compatibility-matrix testing / generalized composite: run an arbitrary set of
-// engines in ONE process — comma-separated canonical names — overriding the
+// engines in ONE process - comma-separated canonical names - overriding the
 // single-engine selection. e.g. GPUFL_ENGINE_COMBO=Trace,PcSampling
 constexpr const char* kEngineCombo        = "GPUFL_ENGINE_COMBO";
 // Opt-in (1/true/yes/on): force CUDA_MODULE_LOADING=EAGER for SASS / Deep.
@@ -122,7 +122,7 @@ constexpr const char* kMonitorIntervalMs = "GPUFL_MONITOR_INTERVAL_MS";
 
 // ── External / platform names GPUFlight reads or sets ───────────────────────
 // Not our knobs (CUDA-driver / dynamic-loader contracts) but referenced from
-// specific spots — centralized so the exact spelling lives in one place.
+// specific spots - centralized so the exact spelling lives in one place.
 constexpr const char* kCudaModuleLoading   = "CUDA_MODULE_LOADING";
 constexpr const char* kCudaInjection64Path = "CUDA_INJECTION64_PATH";
 constexpr const char* kNvtxInjection64Path = "NVTX_INJECTION64_PATH";

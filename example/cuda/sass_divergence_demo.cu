@@ -5,11 +5,11 @@
 // to see per-instruction warp vs thread execution counts.
 //
 // Kernels:
-//   1. uniformWork       — no divergence (baseline)
-//   2. branchByWarpLane  — classic if/else on threadIdx.x % 2
-//   3. branchByWarpQuad  — only 1 in 4 threads takes the hot path
-//   4. earlyExit         — variable-length work, some threads bail early
-//   5. indirectBranch    — data-dependent branching (random input)
+//   1. uniformWork       - no divergence (baseline)
+//   2. branchByWarpLane  - classic if/else on threadIdx.x % 2
+//   3. branchByWarpQuad  - only 1 in 4 threads takes the hot path
+//   4. earlyExit         - variable-length work, some threads bail early
+//   5. indirectBranch    - data-dependent branching (random input)
 
 #include <cuda_runtime.h>
 
@@ -36,7 +36,7 @@ static bool CheckCuda(cudaError_t err, const char* call, const char* file,
     } while (0)
 
 // ---------------------------------------------------------------------------
-// Kernel 1: No divergence — all threads do the same work.
+// Kernel 1: No divergence - all threads do the same work.
 // Expected: Active/32 = 32.0 everywhere
 // ---------------------------------------------------------------------------
 __global__ void uniformWork(float* out, const float* in, int n) {
@@ -51,7 +51,7 @@ __global__ void uniformWork(float* out, const float* in, int n) {
 }
 
 // ---------------------------------------------------------------------------
-// Kernel 2: Even/odd divergence — half the warp takes each path.
+// Kernel 2: Even/odd divergence - half the warp takes each path.
 // Expected: Active/32 = 16.0 inside each branch
 // ---------------------------------------------------------------------------
 __global__ void branchByWarpLane(float* out, const float* in, int n) {
@@ -74,7 +74,7 @@ __global__ void branchByWarpLane(float* out, const float* in, int n) {
 }
 
 // ---------------------------------------------------------------------------
-// Kernel 3: Quad divergence — only 1 in 4 threads does real work.
+// Kernel 3: Quad divergence - only 1 in 4 threads does real work.
 // Expected: Active/32 = 8.0 in the hot path
 // ---------------------------------------------------------------------------
 __global__ void branchByWarpQuad(float* out, const float* in, int n) {
@@ -82,7 +82,7 @@ __global__ void branchByWarpQuad(float* out, const float* in, int n) {
     if (idx < n) {
         float val = in[idx];
         if (threadIdx.x % 4 == 0) {
-            // Only every 4th thread enters — 8 out of 32
+            // Only every 4th thread enters - 8 out of 32
             for (int i = 0; i < 2048; ++i) {
                 val = val * 1.001f + 0.0001f;
             }
@@ -92,7 +92,7 @@ __global__ void branchByWarpQuad(float* out, const float* in, int n) {
 }
 
 // ---------------------------------------------------------------------------
-// Kernel 4: Early exit — threads with small values bail out early.
+// Kernel 4: Early exit - threads with small values bail out early.
 // Divergence depends on data: threads that exit skip the heavy loop.
 // ---------------------------------------------------------------------------
 __global__ void earlyExit(float* out, const float* in, float threshold, int n) {
@@ -102,7 +102,7 @@ __global__ void earlyExit(float* out, const float* in, float threshold, int n) {
         // Threads below threshold skip the expensive work
         if (val < threshold) {
             out[idx] = val;
-            return;  // early exit — this thread goes idle
+            return;  // early exit - this thread goes idle
         }
         // Remaining threads do the heavy computation
         for (int i = 0; i < 1024; ++i) {
@@ -113,14 +113,14 @@ __global__ void earlyExit(float* out, const float* in, float threshold, int n) {
 }
 
 // ---------------------------------------------------------------------------
-// Kernel 5: Data-dependent branching — random input drives the branch.
+// Kernel 5: Data-dependent branching - random input drives the branch.
 // Divergence is unpredictable and varies per warp.
 // ---------------------------------------------------------------------------
 __global__ void indirectBranch(float* out, const float* in, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         float val = in[idx];
-        // Branch depends on data — some warps will diverge, some won't
+        // Branch depends on data - some warps will diverge, some won't
         int category = (int)(val * 4.0f) % 4;
         switch (category) {
             case 0:
@@ -185,15 +185,15 @@ int main() {
     //   - CUDA context initialization for the GPU (~5-10 ms)
     //   - GPU clock ramp-up from idle P8 to P0 (~5 ms)
     //   - PC Sampling engine first-time config (~30-40 ms on Blackwell,
-    //     this is where the 36-stall-reason mapping happens — see
+    //     this is where the 36-stall-reason mapping happens - see
     //     [PcSamplingEngine] Configuring PC Sampling... in debug output)
     //
     // Putting this in a scope (rather than outside any scope) means:
-    //   (a) the scope pays all startup costs — the 5 "real" scopes below
+    //   (a) the scope pays all startup costs - the 5 "real" scopes below
     //       become pure kernel-launch + execution + sync time;
     //   (b) kernels render as "0_warmup" in the report instead of the
     //       confusing "global" user_scope;
-    //   (c) you can see exactly how expensive CUDA cold-start is — useful
+    //   (c) you can see exactly how expensive CUDA cold-start is - useful
     //       data for your own apps.
     //
     // Every serious CUDA profiler (Nsight, CUB/CUTLASS benchmarks) runs
@@ -209,7 +209,7 @@ int main() {
         CHECK_CUDA(cudaDeviceSynchronize());
     }
 
-    // --- Kernel 1: Baseline (no divergence) — auto-loop benchmark demo ---
+    // --- Kernel 1: Baseline (no divergence) - auto-loop benchmark demo ---
     //
     // Demonstrates GFL_BENCH (1.0.3+): the macro runs the body
     // `warmup` times BEFORE opening the scope and `repeat` times
@@ -224,7 +224,7 @@ int main() {
     // buffer drain its first burst, so the 10 measured iterations
     // reflect steady-state cost rather than cold-cache overhead.
     //
-    // The trailing semicolon after `};` is required — the macro
+    // The trailing semicolon after `};` is required - the macro
     // expands to a single expression statement (BenchInvoker
     // construction + operator+= with the lambda body).
     //
@@ -232,7 +232,7 @@ int main() {
     // the body would only exit the lambda, not main, so CHECK_CUDA
     // wouldn't propagate. cudaGetLastError() afterwards still picks
     // up any kernel launch / sync failure across the whole loop.
-    std::cout << "  [1/5] uniformWork — 3 warmup + 10 measured" << std::endl;
+    std::cout << "  [1/5] uniformWork - 3 warmup + 10 measured" << std::endl;
     constexpr int kWarmup = 3;
     constexpr int kRepeat = 10;
     GFL_BENCH("1_uniform_work",
@@ -245,7 +245,7 @@ int main() {
     CHECK_CUDA(cudaGetLastError());
 
     // --- Kernel 2: Even/odd split ---
-    std::cout << "  [2/5] branchByWarpLane — 50/50 divergence" << std::endl;
+    std::cout << "  [2/5] branchByWarpLane - 50/50 divergence" << std::endl;
     GFL_SCOPE("2_branch_by_lane") {
         branchByWarpLane<<<grid, block>>>(d_out, d_in, n);
         CHECK_CUDA(cudaGetLastError());
@@ -253,7 +253,7 @@ int main() {
     }
 
     // --- Kernel 3: Quad split ---
-    std::cout << "  [3/5] branchByWarpQuad — 75% threads idle" << std::endl;
+    std::cout << "  [3/5] branchByWarpQuad - 75% threads idle" << std::endl;
     GFL_SCOPE("3_branch_by_quad") {
         branchByWarpQuad<<<grid, block>>>(d_out, d_in, n);
         CHECK_CUDA(cudaGetLastError());
@@ -261,7 +261,7 @@ int main() {
     }
 
     // --- Kernel 4: Early exit (50% threshold) ---
-    std::cout << "  [4/5] earlyExit — data-dependent early return" << std::endl;
+    std::cout << "  [4/5] earlyExit - data-dependent early return" << std::endl;
     GFL_SCOPE("4_early_exit") {
         earlyExit<<<grid, block>>>(d_out, d_in, 0.5f, n);
         CHECK_CUDA(cudaGetLastError());
@@ -269,7 +269,7 @@ int main() {
     }
 
     // --- Kernel 5: Data-dependent switch ---
-    std::cout << "  [5/5] indirectBranch — 4-way data-dependent" << std::endl;
+    std::cout << "  [5/5] indirectBranch - 4-way data-dependent" << std::endl;
     GFL_SCOPE("5_indirect_branch") {
         indirectBranch<<<grid, block>>>(d_out, d_in, n);
         CHECK_CUDA(cudaGetLastError());

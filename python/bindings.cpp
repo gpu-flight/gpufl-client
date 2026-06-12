@@ -13,7 +13,7 @@ class PyScope {
 public:
     // `repeat` / `warmup` are benchmark metadata stamped onto the BEGIN
     // row of the underlying scope_event_batch when the scope opens.
-    // Both default to 0 — the legacy `with gpufl.Scope("x"):` call path
+    // Both default to 0 - the legacy `with gpufl.Scope("x"):` call path
     // produces byte-identical output to pre-1.0.3.
     PyScope(std::string name, std::string tag, uint32_t repeat, uint32_t warmup)
         : name_(std::move(name)),
@@ -23,7 +23,7 @@ public:
 
     void enter() {
         if (repeat_ == 0 && warmup_ == 0) {
-            // Legacy fast path — no ScopeMeta allocation needed.
+            // Legacy fast path - no ScopeMeta allocation needed.
             monitor_ = std::make_unique<gpufl::ScopedMonitor>(name_, tag_);
         } else {
             // 1.0.3+ canonical ctor: tag now lives inside ScopeMeta.
@@ -50,13 +50,13 @@ private:
 PYBIND11_MODULE(_gpufl_client, m) {
     m.doc() = "GPUFL Internal C++ Binding";
 
-    // BackendKind has a "None" value, which is a Python keyword —
+    // BackendKind has a "None" value, which is a Python keyword -
     // accessible as BackendKind.__members__["None"] but ugly. Add a
     // `None_` alias so users can write `gpufl.BackendKind.None_`. The
     // underscore-suffix is the standard Python convention for
     // keyword-clashing names (mirrors pybind11's `class_`, `type_`).
-    // (ProfilingEngine no longer has a "None" member — its floor is
-    // `Monitor` — so it needs no such alias.)
+    // (ProfilingEngine no longer has a "None" member - its floor is
+    // `Monitor` - so it needs no such alias.)
     auto backendKindEnum = py::enum_<gpufl::BackendKind>(m, "BackendKind")
         .value("Auto",   gpufl::BackendKind::Auto)
         .value("Nvidia", gpufl::BackendKind::Nvidia)
@@ -65,7 +65,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
         .export_values();
     backendKindEnum.attr("None_") = backendKindEnum.attr("__members__")[py::str("None")];
 
-    // Six canonical names, one per level, no aliases — see the enum in
+    // Six canonical names, one per level, no aliases - see the enum in
     // monitor.hpp for the naming rationale (clarity-first, plain intent
     // with the precise CUPTI term where it's the searchable one).
     py::enum_<gpufl::ProfilingEngine>(m, "ProfilingEngine")
@@ -88,13 +88,13 @@ PYBIND11_MODULE(_gpufl_client, m) {
         .def_readwrite("system_sample_rate_ms", &gpufl::InitOptions::system_sample_rate_ms)
         .def_readwrite("kernel_sample_rate_ms", &gpufl::InitOptions::kernel_sample_rate_ms)
         .def_readwrite("backend",               &gpufl::InitOptions::backend)
-        // `enable_kernel_details` binding removed May 2026 — kernel
+        // `enable_kernel_details` binding removed May 2026 - kernel
         // grid/block details are now always captured. See gpufl.hpp.
         .def_readwrite("enable_debug_output",   &gpufl::InitOptions::enable_debug_output)
         .def_readwrite("enable_stack_trace",    &gpufl::InitOptions::enable_stack_trace)
         .def_readwrite("enable_source_collection", &gpufl::InitOptions::enable_source_collection)
         .def_readwrite("flush_logs_always",     &gpufl::InitOptions::flush_logs_always)
-        // feature gates — surfaced on the InitOptions class so
+        // feature gates - surfaced on the InitOptions class so
         // power users can tweak them via the dataclass-style API.
         .def_readwrite("enable_external_correlation", &gpufl::InitOptions::enable_external_correlation)
         .def_readwrite("enable_synchronization",      &gpufl::InitOptions::enable_synchronization)
@@ -106,7 +106,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
         .def_readwrite("pm_sampling_metrics", &gpufl::InitOptions::pm_sampling_metrics)
         .def_readwrite("pm_sampling_scope_only", &gpufl::InitOptions::pm_sampling_scope_only)
         .def_readwrite("profiling_engine",      &gpufl::InitOptions::profiling_engine)
-        // Backend interactions — backend_url is the BASE URL of the
+        // Backend interactions - backend_url is the BASE URL of the
         // GPUFlight backend. Upload is a separate post-shutdown step
         // via gpufl.upload_logs() / gpufl.session(); nothing on
         // InitOptions controls upload directly anymore.
@@ -120,7 +120,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
         // wrapper around init() turns remote_upload=True into an
         // atexit-scheduled upload_logs() call for backward compat.
         .def_readwrite("remote_upload",         &gpufl::InitOptions::remote_upload)
-        // Global kill switch — when false, gpufl::init returns false
+        // Global kill switch - when false, gpufl::init returns false
         // immediately and every downstream call is a no-op via the
         // null-runtime guards. The high-level Python wrapper
         // (python/gpufl/__init__.py) also exposes this as the `enabled`
@@ -134,7 +134,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
     // is surfaced as a keyword argument here so callers don't have to
     // construct an InitOptions object themselves. Pre-v0.1.1 the binding
     // also accepted legacy `enable_profiling` / `enable_perf_scope` bool
-    // flags — those were removed in favor of the single `profiling_engine`
+    // flags - those were removed in favor of the single `profiling_engine`
     // enum, which is strictly more expressive.
     m.def("init", [](std::string app_name,
                      std::string log_path,
@@ -253,8 +253,8 @@ PYBIND11_MODULE(_gpufl_client, m) {
         .def_readonly("elapsed_ms",              &gpufl::UploadResult::elapsed_ms)
         .def_readonly("warnings",                &gpufl::UploadResult::warnings)
         // Phase 3a: async-accept backends return one spool_id per
-        // chunk. The CLI doesn't print these by default — they're
-        // operator-debugging cookies — but exposing on the Python
+        // chunk. The CLI doesn't print these by default - they're
+        // operator-debugging cookies - but exposing on the Python
         // class lets a notebook user or test harness inspect them.
         .def_readonly("spool_ids",               &gpufl::UploadResult::spool_ids)
         .def("__repr__", [](const gpufl::UploadResult& r) {
@@ -269,7 +269,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
             return o.str();
         });
 
-    // Function-style entry — accepts every UploadOptions field as a
+    // Function-style entry - accepts every UploadOptions field as a
     // keyword argument, mirroring the init() binding's shape.
     m.def("upload_logs", [](std::string log_path, std::string backend_url,
                             std::string api_key, std::string api_path,
@@ -294,7 +294,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
         opts.session_id_filter  = std::move(session_id_filter);
         opts.all_sessions       = all_sessions;
         opts.force              = force;
-        // Release the GIL — upload is I/O bound, can run for minutes,
+        // Release the GIL - upload is I/O bound, can run for minutes,
         // and we don't want to block other Python threads (notebooks
         // often run cleanup tasks concurrently).
         py::gil_scoped_release release;
@@ -317,7 +317,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
 
     // F1 (External Correlation) active push/pop. Used by
     // gpufl.torch.attach()'s TorchDispatchMode to tag every aten op's
-    // kernels with a stable id derived from the op name — gives the
+    // kernels with a stable id derived from the op name - gives the
     // dashboard's "op #N" chip without requiring users to enable
     // torch.profiler.profile() (which is heavy and intended for
     // one-off trace export, not always-on telemetry).
@@ -338,7 +338,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
     // --------------------------
 
     py::class_<PyScope>(m, "Scope")
-        // `repeat` / `warmup` are keyword-only on purpose — they're
+        // `repeat` / `warmup` are keyword-only on purpose - they're
         // optional benchmark metadata, not positional name/tag args. The
         // pure-Python `gpufl.Scope` wrapper in __init__.py forwards
         // these when its iterable (repeat=N, warmup=K) form opens the

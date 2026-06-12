@@ -663,7 +663,7 @@ class TextReport:
                             short = short[:47] + "..."
                         lines.append(f"    {short:<52}{int(count):>8} samples")
 
-        # SASS metrics — per-function instruction + memory efficiency.
+        # SASS metrics - per-function instruction + memory efficiency.
         # Mirrors include/gpufl/report/text_report.cpp + hint_engine.cpp so this
         # Python report agrees number-for-number with the C++ generateReport():
         #   warp efficiency   = thread_insts / warp_insts / 32
@@ -739,7 +739,7 @@ class TextReport:
                             "      Memory Efficiency: (not available on this GPU)"
                         )
 
-                # Interpretation hints — same thresholds as hint_engine.cpp
+                # Interpretation hints - same thresholds as hint_engine.cpp
                 # (int-truncated percentages). Stall-based hints require PC
                 # sampling data, which the SASS path doesn't carry.
                 eff_ideal = ideal if ideal > 0 else (ideal_ld + ideal_st)

@@ -8,7 +8,7 @@
 namespace gpufl::model {
 
 std::string InitEventModel::buildJson() const {
-    // Resolve once per call. Both fields are session-level metadata —
+    // Resolve once per call. Both fields are session-level metadata -
     // included at the top of `job_start` so a file-tailing agent can
     // associate every subsequent batch with the right host without
     // having to resolve the hostname itself (which would be wrong if
@@ -38,7 +38,7 @@ std::string InitEventModel::buildJson() const {
         oss << ",\"profiling_engine\":\"" << jsonEscape(e_.profiling_engine) << "\"";
     }
 
-    // Multi-pass grouping — emitted together, only for multi-pass runs.
+    // Multi-pass grouping - emitted together, only for multi-pass runs.
     // A single-pass run leaves analysis_id empty and the job_start wire is
     // byte-identical to pre-P1 (so pass_index==0 is never confused with unset).
     if (!e_.analysis_id.empty()) {
@@ -87,7 +87,7 @@ std::string ExecutionSignatureModel::buildJson() const {
         << ",\"session_id\":\"" << jsonEscape(e_.session_id) << "\""
         << ",\"ts_ns\":"        << e_.ts_ns
         << ",\"scope_name\":\"" << jsonEscape(e_.scope_name) << "\""
-        // signature is a full-width uint64 hash — emit as a STRING so a JSON
+        // signature is a full-width uint64 hash - emit as a STRING so a JSON
         // number consumer (JS doubles lose precision above 2^53) can't corrupt
         // it. The backend parses it back to an unsigned 64-bit value.
         << ",\"signature\":\""  << e_.signature << "\""

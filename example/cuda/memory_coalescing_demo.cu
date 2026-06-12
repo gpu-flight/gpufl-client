@@ -1,4 +1,4 @@
-// memory_coalescing_demo.cu — GPUFlight example
+// memory_coalescing_demo.cu - GPUFlight example
 //
 // Demonstrates how memory access patterns affect GPU performance
 // by comparing two simple matrix multiplication strategies:
@@ -14,8 +14,8 @@
 #include "gpufl/gpufl.hpp"
 
 // Each thread computes one full ROW of C.
-// Adjacent threads (lane 0, lane 1, ...) access rows 0, 1, ... of A — which
-// are contiguous — but access COLUMNS 0, 1, ... of B for the same loop
+// Adjacent threads (lane 0, lane 1, ...) access rows 0, 1, ... of A - which
+// are contiguous - but access COLUMNS 0, 1, ... of B for the same loop
 // iteration.  Since B is stored row-major, B[i*N + 0] and B[i*N + 1] are
 // adjacent, but each thread reads B[i*N + col] where col varies across the
 // OUTER loop, not across threads.  The inner-loop reads of A[row*K + i] have

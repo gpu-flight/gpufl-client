@@ -26,12 +26,12 @@ struct InitOptions {
     /**
      * System-metric sampling policy.
      *
-     *   true  — Sampler runs continuously from init() to shutdown().
+     *   true  - Sampler runs continuously from init() to shutdown().
      *           GPU/host telemetry events are emitted on a fixed interval
      *           regardless of scopes. Use for fleet monitoring, dashboards,
      *           any "always-on" use case.
      *
-     *   false — Sampler is idle by default. It activates while inside any
+     *   false - Sampler is idle by default. It activates while inside any
      *           GFL_SCOPE region (auto-bracketing), or between explicit
      *           gpufl::systemStart() / systemStop() calls. Outside those
      *           windows zero system-metric events are emitted. Use when
@@ -56,7 +56,7 @@ struct InitOptions {
     // (PyTorch's torch.profiler, TF's profile.trace, JAX, XLA) that
     // bracket their ops with cuptiActivityPushExternalCorrelationId can
     // tag every kernel with their op id. When the framework isn't
-    // pushing, CUPTI emits zero records — no overhead. Default-on
+    // pushing, CUPTI emits zero records - no overhead. Default-on
     // because it's both useful and free in the absence of frameworks;
     // disable only if running on a CUPTI version that errors on the
     // kind (logs a soft-warning if so, doesn't crash).
@@ -70,7 +70,7 @@ struct InitOptions {
     // the answer it unlocks ("X% of your wall time is `cudaStreamSync`")
     // is a top-five most-asked question. If a workload performs
     // millions of synchronizations and the volume becomes a problem,
-    // disable this flag — the rest of the pipeline keeps working.
+    // disable this flag - the rest of the pipeline keeps working.
     bool enable_synchronization = true;
     // Enable CUPTI_ACTIVITY_KIND_MEMORY2 to capture cudaMalloc /
     // cudaFree / cudaMallocAsync / cudaMallocManaged / cudaMallocHost
@@ -90,26 +90,26 @@ struct InitOptions {
     // until we've validated on a couple of internal sessions; will
     // flip to default-on in a follow-up release.
     //
-    // Cost when off: zero — we never call cuptiActivityEnable for
+    // Cost when off: zero - we never call cuptiActivityEnable for
     // the kind. Cost when on: one record per cudaGraphLaunch (very
     // low volume).
     bool enable_cuda_graphs_tracking = false;
-    // Default: Monitor — telemetry only (GPU/host metrics), no CUPTI
+    // Default: Monitor - telemetry only (GPU/host metrics), no CUPTI
     // kernel capture. The safe, lowest-overhead default: it can't hit
     // the CUPTI kernel-path overhead (PyTorch training saw +650% under
     // PC Sampling) or the kernel-path crash/hang modes, and it's all a
     // "just watch my GPU" user needs.
     //
     // Opt in explicitly for tracing/profiling, in order of cost:
-    //   Trace         — per-op timeline (kernels, memcpy, sync)
-    //   PcSampling    — + stall-reason sampling ("why is it slow")
-    //   SassMetrics   — + per-instruction counters (CUPTI replay,
+    //   Trace         - per-op timeline (kernels, memcpy, sync)
+    //   PcSampling    - + stall-reason sampling ("why is it slow")
+    //   SassMetrics   - + per-instruction counters (CUPTI replay,
     //                   ~100× costlier on pre-sm_120 GPUs)
-    //   PmSampling    — time-series hardware PM samples
-    //   RangeProfiler — scope-level hardware throughput counters
+    //   PmSampling    - time-series hardware PM samples
+    //   RangeProfiler - scope-level hardware throughput counters
     //   RangeProfilerKernelReplay
     //                 - kernel-level hardware counters via CUPTI KernelReplay
-    //   Deep          — PcSampling + SassMetrics in one run
+    //   Deep          - PcSampling + SassMetrics in one run
     ProfilingEngine profiling_engine = ProfilingEngine::Monitor;
 
     uint32_t pm_sampling_interval_us = 100;
@@ -130,7 +130,7 @@ struct InitOptions {
     std::string config_file = "";
 
     /**
-     * GPUFlight backend base URL — e.g. "https://api.gpuflight.com" or
+     * GPUFlight backend base URL - e.g. "https://api.gpuflight.com" or
      * "http://localhost:8080". Host-only; do NOT include the API
      * prefix (use {@link api_path} for that).
      *
@@ -140,12 +140,12 @@ struct InitOptions {
      *     (stored on InitOptions so the deferred upload path can pick
      *     it up without the caller having to re-supply it)
      *
-     * Setting this alone does nothing — no HTTP runs during a session.
+     * Setting this alone does nothing - no HTTP runs during a session.
      * Upload is a separate step (`gpufl::uploadLogs`, or the
      * `gpufl.session()` Python context manager).
      *
-     * **DEPRECATION NOTE (v1.2 removal)**: this field — together with
-     * {@link api_key} and {@link remote_upload} — is planned for
+     * **DEPRECATION NOTE (v1.2 removal)**: this field - together with
+     * {@link api_key} and {@link remote_upload} - is planned for
      * removal in v1.2. Long-term, all backend creds will be passed
      * directly to {@link gpufl::uploadLogs} (and the version probe
      * will read `GPUFL_BACKEND_URL` directly). The fields stay
@@ -163,7 +163,7 @@ struct InitOptions {
      * Set this only if you're running the backend behind a reverse
      * proxy / API gateway that mounts it at a non-root path (e.g.
      * `/profiler/api/v1`). It does NOT let you choose between API
-     * versions — the client library can only emit one wire format,
+     * versions - the client library can only emit one wire format,
      * and pointing it at a path that speaks a different one will
      * just produce parse errors.
      *
@@ -184,7 +184,7 @@ struct InitOptions {
     std::string api_key = "";
 
     /**
-     * **DEPRECATED — v1.1 backward-compat shim, removed in v1.2.**
+     * **DEPRECATED - v1.1 backward-compat shim, removed in v1.2.**
      *
      * Previously attached an HttpLogSink that POSTed NDJSON events live
      * during the session. That mechanism is gone in v1.1. To preserve
@@ -199,7 +199,7 @@ struct InitOptions {
      *   - **At shutdown()**: after the file sink has flushed and
      *     closed, `gpufl::uploadLogs(uopts)` is invoked synchronously
      *     with creds copied from InitOptions. Failures are logged but
-     *     never thrown — the process exits cleanly either way.
+     *     never thrown - the process exits cleanly either way.
      *   - **In Python**: the wrapper emits a `DeprecationWarning` and
      *     also schedules upload via `atexit`, so notebook / script
      *     callers who never explicitly call shutdown() still get the
@@ -211,8 +211,8 @@ struct InitOptions {
      * volume. To avoid the wait or to control timing, drop the flag
      * and call `gpufl::uploadLogs(uopts)` directly when convenient.
      *
-     * In v1.2 this field — together with {@link backend_url} and
-     * {@link api_key} — is removed; creds move entirely onto
+     * In v1.2 this field - together with {@link backend_url} and
+     * {@link api_key} - is removed; creds move entirely onto
      * `UploadOptions`. See `include/gpufl/upload/upload_logs.hpp`.
      */
     bool remote_upload = false;
@@ -220,10 +220,10 @@ struct InitOptions {
     /**
      * Global kill switch. When false, {@link gpufl::init} returns false
      * immediately without spawning any backend, opening a logger, or
-     * touching CUPTI / NVML / ROCm. Every other public entry point —
+     * touching CUPTI / NVML / ROCm. Every other public entry point -
      * {@link gpufl::shutdown}, {@link gpufl::systemStart} /
      * {@link gpufl::systemStop}, every {@link ScopedMonitor} ctor /
-     * dtor — short-circuits automatically because they all guard on
+     * dtor - short-circuits automatically because they all guard on
      * `runtime() != nullptr` and a disabled init never allocates one.
      *
      * Two equivalent ways to flip the switch:
@@ -236,7 +236,7 @@ struct InitOptions {
      *
      * Use case: toggle gpufl on/off across runs without #ifdef'ing out
      * the call sites or building a separate "no-gpufl" binary. The
-     * disabled path has effectively zero overhead — early-return at
+     * disabled path has effectively zero overhead - early-return at
      * init, then null-runtime no-ops at every other call site.
      */
     bool enabled = true;
@@ -256,7 +256,7 @@ BackendProbeResult probeRocm();
 void systemStart(std::string name = "system");
 void systemStop(std::string name = "system");
 
-// F1 (External Correlation) — active push/pop for callers that want to
+// F1 (External Correlation) - active push/pop for callers that want to
 // tag CUDA work with an op id WITHOUT relying on a framework profiler
 // being active. Used by `gpufl.torch.attach()` to stamp every aten
 // dispatch's kernels with a stable id derived from the op name.
@@ -266,7 +266,7 @@ void systemStop(std::string name = "system");
 //   4 = CUSTOM1 (used by gpufl.torch.attach), 5 = CUSTOM2.
 //
 // Calls are no-ops on non-CUPTI platforms (AMD ROCm, CPU-only fallback)
-// — safe to call from cross-platform code.
+// - safe to call from cross-platform code.
 void pushExternalCorrelation(uint32_t kind, uint64_t id);
 void popExternalCorrelation(uint32_t kind);
 
@@ -318,7 +318,7 @@ inline InitOptions light_mode_default_options() {
 }
 
 // Monitoring-only injection profile: GPU/host health telemetry with NO
-// CUPTI kernel capture at all (ProfilingEngine::Monitor) — no activity
+// CUPTI kernel capture at all (ProfilingEngine::Monitor) - no activity
 // trace, no PC sampling, no SASS. Immune to every CUPTI kernel-path
 // failure mode and the lowest overhead of the three presets. The
 // "just watch my GPU while this runs" mode for long runs / fleet
@@ -355,7 +355,7 @@ void generateReport(const std::string& output_path = "");
 //
 //     GFL_SCOPE("hot", .repeat=10, .warmup=3, .tag="ml")
 //
-// Fields are declared in init-list order — designated initializers
+// Fields are declared in init-list order - designated initializers
 // must list them in the same order (`.tag` before `.repeat` before
 // `.warmup`).  Any field can be omitted; defaults all zero / empty.
 //
@@ -376,7 +376,7 @@ struct ScopeMeta {
     // Stored for audit / reporting; not used in per-iter math.
     uint32_t warmup = 0;
 
-    // Fluent builders — the portable way to populate ScopeMeta in
+    // Fluent builders - the portable way to populate ScopeMeta in
     // pure C++17. Designated initializers (`{.repeat=10}`) require
     // C++20 (or GCC/Clang in C++17 mode with extensions); MSVC's
     // /std:c++17 rejects them outright. The builders work on every
@@ -397,7 +397,7 @@ class ScopedMonitor {
     explicit ScopedMonitor(std::string name, std::string tag);
     explicit ScopedMonitor(std::string name, bool deep_profiling);
     explicit ScopedMonitor(std::string name);
-    // Canonical 1.0.3+ ctor — single options object. `meta.tag`
+    // Canonical 1.0.3+ ctor - single options object. `meta.tag`
     // replaces the legacy separate `tag` parameter; the older
     // (name, tag, ScopeMeta) overload has been retired in favor of
     // this one so there's a single source of truth for the tag.
@@ -408,7 +408,7 @@ class ScopedMonitor {
     ScopedMonitor& operator=(const ScopedMonitor&) = delete;
 
    private:
-    // Shared ctor body — all constructors funnel through this so the
+    // Shared ctor body - all constructors funnel through this so the
     // begin-row push, NVTX push, and profiler-scope hooks live in one
     // place. `meta` defaults to ScopeMeta{} (zeros) for the legacy
     // overloads, so their wire output is byte-for-byte unchanged.
@@ -447,7 +447,7 @@ namespace detail {
 // times INSIDE the scope (bracketed by the BEGIN / END rows).
 //
 // Body is captured by reference via the `[&]` lambda the macro
-// produces, so it sees all enclosing locals — but be aware that
+// produces, so it sees all enclosing locals - but be aware that
 // `return` inside the body returns from the LAMBDA, not the
 // enclosing function. Use exceptions for fatal errors instead.
 class BenchInvoker {
@@ -489,7 +489,7 @@ class BenchInvoker {
 }  // namespace detail
 }  // namespace gpufl
 
-// GFL_SCOPE — single-arg scoped instrumentation, unchanged since
+// GFL_SCOPE - single-arg scoped instrumentation, unchanged since
 // pre-1.0.3. Pass ONLY a name. The body runs exactly once and the
 // scope brackets all the work inside it.
 //
@@ -497,9 +497,9 @@ class BenchInvoker {
 //
 // For benchmark loops with automatic warmup + repeat, see GFL_BENCH
 // below. For attaching metadata (tag / repeat / warmup) to a scope
-// without using the auto-loop helper — e.g. you have an irregular
+// without using the auto-loop helper - e.g. you have an irregular
 // loop body with `continue` / `break` / early-return semantics that
-// don't fit in a lambda — construct ScopedMonitor directly:
+// don't fit in a lambda - construct ScopedMonitor directly:
 //
 //     gpufl::ScopeMeta meta;
 //     meta.repeat = 10;
@@ -510,7 +510,7 @@ class BenchInvoker {
 #define GFL_SCOPE_TAGGED(name, tag, deep_profiling) \
     if (gpufl::ScopedMonitor _gpufl_scope{name, tag}; true)
 
-// GFL_BENCH — automatic benchmark loop. The body block runs
+// GFL_BENCH - automatic benchmark loop. The body block runs
 // `meta.warmup` times BEFORE the scope opens and `meta.repeat` times
 // INSIDE the scope (BEGIN row carries both counts). Saves you from
 // writing two for-loops + a manual ScopedMonitor:
@@ -524,14 +524,14 @@ class BenchInvoker {
 // it compiles on every major compiler in /std:c++17. Designated
 // initializers (`{.repeat=10, .warmup=3}`) work on GCC and Clang in
 // C++17 (compiler extension) and on every compiler in C++20, but
-// MSVC's /std:c++17 explicitly rejects them — so projects targeting
+// MSVC's /std:c++17 explicitly rejects them - so projects targeting
 // MSVC pre-C++20 should stick with builders.
 //
 // The body is captured by `[&]` so it sees enclosing locals.
 //
 // IMPORTANT: `return` inside the body returns from the LAMBDA, not
 // the enclosing function. Macros that expand to early-return
-// (e.g. CHECK_CUDA) won't propagate errors out — throw an exception
+// (e.g. CHECK_CUDA) won't propagate errors out - throw an exception
 // instead, or check status after the macro completes.
 #define GFL_BENCH(name, ...) \
     ::gpufl::detail::BenchInvoker{name, ::gpufl::ScopeMeta{__VA_ARGS__}} \

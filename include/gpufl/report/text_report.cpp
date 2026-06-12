@@ -673,7 +673,7 @@ void TextReport::writeKernelSummary(std::ostringstream& out) const {
         if (sessionMs > 0) {
             // GPU Busy is Sum(kernel durations) / wall-time. Under SASS
             // instrumentation those durations are inflated, so it no longer
-            // reflects native utilization — label it accordingly.
+            // reflects native utilization - label it accordingly.
             const char* busyLabel = sass_active_
                 ? "  GPU Busy (instrumented): "
                 : "  GPU Busy:             ";
@@ -867,7 +867,7 @@ void TextReport::writeSystemMetrics(std::ostringstream& out) const {
             double sumPcie=0, maxPcie=0; int pcieN=0;
             uint64_t maxMem=0;
             uint64_t lastEnergy=0, firstEnergy=0; bool hasEnergy=false;
-            // Energy via trapezoidal integration of power samples — robust on
+            // Energy via trapezoidal integration of power samples - robust on
             // Blackwell drivers where the NVML energy counter is unreliable.
             double energyJ=0, prevPowerMw=0; int64_t prevTsNs=0;
             bool havePrev=false, hasPower=false;
@@ -1061,7 +1061,7 @@ void TextReport::writeScopeSummary(std::ostringstream& out) const {
                     << std::setw(12) << fmtDuration(sg.avg()) << "\n";
         }
 
-        // Brief footnote clarifying the two columns — the difference is
+        // Brief footnote clarifying the two columns - the difference is
         // commonly asked and easy to misread. Kept to two lines so it
         // doesn't dominate the report.
         if (!scopeGpu.empty()) {

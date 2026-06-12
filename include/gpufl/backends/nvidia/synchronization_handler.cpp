@@ -26,7 +26,7 @@ SynchronizationHandler::requiredCallbacks() const {
     // CUDA synchronization API CBIDs we capture stacks for. Add new
     // CBIDs here as CUPTI exposes them (e.g. cuStreamWaitValue32/64
     // are semaphore-style waits that can also produce SYNCHRONIZATION
-    // activity records on newer CUPTI versions — confirm empirically
+    // activity records on newer CUPTI versions - confirm empirically
     // before adding).
     //
     // CUDART_VERSION guards keep the agent buildable against older
@@ -64,7 +64,7 @@ SynchronizationHandler::requiredCallbacks() const {
 std::vector<CUpti_ActivityKind>
 SynchronizationHandler::requiredActivityKinds() const {
     // Sync activity records are enabled in cupti_backend.cpp directly
-    // (CUPTI_ACTIVITY_KIND_SYNCHRONIZATION) — no per-handler activity
+    // (CUPTI_ACTIVITY_KIND_SYNCHRONIZATION) - no per-handler activity
     // enable needed here. Returning an empty list is the established
     // convention for handlers that subscribe to callbacks only.
     return {};
@@ -72,7 +72,7 @@ SynchronizationHandler::requiredActivityKinds() const {
 
 bool SynchronizationHandler::shouldHandle(CUpti_CallbackDomain domain,
                                           CUpti_CallbackId cbid) const {
-    // Mirror the CBID set registered in requiredCallbacks() — anything
+    // Mirror the CBID set registered in requiredCallbacks() - anything
     // missing here gets filtered before handle() runs and the
     // corresponding sync events arrive without a stack_id.
     if (domain == CUPTI_CB_DOMAIN_RUNTIME_API) {
@@ -116,9 +116,9 @@ void SynchronizationHandler::handle(CUpti_CallbackDomain /*domain*/,
     }
 
     if (cbInfo->callbackSite == CUPTI_API_ENTER) {
-        // Capture the user's call stack now — by the time the matching
+        // Capture the user's call stack now - by the time the matching
         // SYNCHRONIZATION activity record arrives on the buffer-flush thread,
-        // this thread's stack is long gone — and push it as a SYNC_META record
+        // this thread's stack is long gone - and push it as a SYNC_META record
         // to the lock-free ring (Step 4c). The corr->stack join moved to the
         // single collector thread (g_syncStackByCorr in monitor.cpp), so this
         // callback takes NO sync_meta_mu_. (The old SyncMeta also held an
@@ -128,7 +128,7 @@ void SynchronizationHandler::handle(CUpti_CallbackDomain /*domain*/,
         metaRec.corr_id = cbInfo->correlationId;
         if (backend_->GetOptions().enable_stack_trace) {
             // Raw addresses only; symbolization deferred to the collector
-            // thread (StackRegistry::get()) — off this per-call CUPTI callback.
+            // thread (StackRegistry::get()) - off this per-call CUPTI callback.
             metaRec.stack_id = gpufl::StackRegistry::instance().getOrRegister(
                 gpufl::core::CaptureCallStackRaw(2));
         } else {
@@ -139,7 +139,7 @@ void SynchronizationHandler::handle(CUpti_CallbackDomain /*domain*/,
                       cbInfo->correlationId, " stack_id=", metaRec.stack_id,
                       " cbid=", cbid);
     }
-    // Unlike kernels we don't need an API_EXIT recorder — sync wall time is
+    // Unlike kernels we don't need an API_EXIT recorder - sync wall time is
     // measured by CUPTI directly on the SYNCHRONIZATION activity record
     // (start/end fields), not derived from API enter/exit timestamps. We still
     // capture API_ENTER only because that's where we have the user's stack.

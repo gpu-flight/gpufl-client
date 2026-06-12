@@ -16,13 +16,13 @@ namespace gpufl::amd {
 namespace {
 
 // Counters we attempt to collect on each kernel dispatch.
-// Not all may be available on every GPU architecture — the engine
+// Not all may be available on every GPU architecture - the engine
 // discovers what's supported and tries to create a compatible config.
 // Counter groups that conflict are resolved by incremental fallback.
 //
 // NOTE: On RDNA 4 (gfx1201) with ROCm 7.2.0, many SQ instruction
 // counters return 0. This is a driver limitation that will be fixed
-// in future ROCm releases. The pipeline is correct — values will
+// in future ROCm releases. The pipeline is correct - values will
 // populate when driver support is added.
 constexpr const char* kDesiredCounters[] = {
     // Wave/occupancy (universally supported)
@@ -91,7 +91,7 @@ void DispatchCounterEngine::stop() {
 }
 
 void DispatchCounterEngine::drain() {
-    // Callback mode delivers data synchronously — nothing to drain
+    // Callback mode delivers data synchronously - nothing to drain
 }
 
 void DispatchCounterEngine::shutdown() {
@@ -239,7 +239,7 @@ void DispatchCounterEngine::recordCallback(
         static_cast<int64_t>(dispatch_data.start_timestamp);
 
     // Build the callback's records into a single bulk push.  Same
-    // direct-to-batch path the NVIDIA SASS engine now uses — keeps
+    // direct-to-batch path the NVIDIA SASS engine now uses - keeps
     // PC_SAMPLE traffic off the lock-free g_monitorBuffer ring (which
     // exists for CUPTI/rocprofiler buffer-completed handoff and was
     // overrunning when bulk producers used it for high-volume metrics).

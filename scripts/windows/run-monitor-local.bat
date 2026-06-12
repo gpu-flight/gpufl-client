@@ -13,7 +13,7 @@ if not defined GPUFL_HTTP_TOKEN (
     echo.
 )
 
-REM Just the scheme+host — the agent appends /api/{version}/events/<type>.
+REM Just the scheme+host - the agent appends /api/{version}/events/<type>.
 REM Override the API version with GPUFL_HTTP_API_VERSION when needed.
 set GPUFL_HTTP_HOST=http://host.docker.internal:8080
 

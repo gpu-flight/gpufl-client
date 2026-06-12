@@ -34,8 +34,8 @@ def mock_log_dir(tmp_path):
             "metric_dict":     {}
         },
         # Kernel batch:
-        #   row 0 — vectorAdd:  start=1000, end=2000, corr_id=101
-        #   row 1 — matrixMul:  start=3000, end=5000, corr_id=102
+        #   row 0 - vectorAdd:  start=1000, end=2000, corr_id=101
+        #   row 1 - matrixMul:  start=3000, end=5000, corr_id=102
         {
             "version": 1, "type": "kernel_event_batch",
             "session_id": "test-session", "batch_id": 1, "base_time_ns": 1000,
@@ -99,7 +99,7 @@ def mock_log_dir(tmp_path):
     # ── scope.log ─────────────────────────────────────────────────────────────
     scope_log = log_dir / f"{prefix}.scope.0.log"
     scope_events = [
-        # Dictionary (scope names duplicated here for completeness — agent sends to all channels)
+        # Dictionary (scope names duplicated here for completeness - agent sends to all channels)
         {
             "version": 1, "type": "dictionary_update",
             "session_id": "test-session",

@@ -13,7 +13,7 @@ namespace gpufl {
  * CUPTI result codes that are EXPECTED on healthy modern systems and
  * should not be surfaced as errors. The legacy activity-based PC
  * sampling path isn't supported on Volta+ GPUs, which return
- * LEGACY_PROFILER_NOT_SUPPORTED / NOT_COMPATIBLE when probed — gpufl
+ * LEGACY_PROFILER_NOT_SUPPORTED / NOT_COMPATIBLE when probed - gpufl
  * handles that by falling back to the modern PC Sampling API, so these
  * are routine fallback signals, not failures. CUPTI_CHECK logs them at
  * debug level (visible with enable_debug_output) instead of as errors,
@@ -93,7 +93,7 @@ class ICuptiHandler {
                         const void* cbdata) = 0;
     virtual const char* getName() const = 0;
 
-    // Subscription requirements — used by CuptiBackend at
+    // Subscription requirements - used by CuptiBackend at
     // initialize()/shutdown()
     virtual std::vector<CUpti_CallbackDomain> requiredDomains() const {
         return {};
@@ -103,12 +103,12 @@ class ICuptiHandler {
         return {};
     }
 
-    // Activity kind requirements — used by CuptiBackend at start()/stop()
+    // Activity kind requirements - used by CuptiBackend at start()/stop()
     virtual std::vector<CUpti_ActivityKind> requiredActivityKinds() const {
         return {};
     }
 
-    // Activity buffer processing — called by BufferCompleted for each record.
+    // Activity buffer processing - called by BufferCompleted for each record.
     // Returns true if the record was consumed (stops further dispatch).
     virtual bool handleActivityRecord(const CUpti_Activity* record,
                                       int64_t baseCpuNs, uint64_t baseCuptiTs) {

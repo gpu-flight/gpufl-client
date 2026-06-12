@@ -1,7 +1,7 @@
 """
 Python stack-site capture.
 
-The goal: when a torch op fires, find the user's Python file:line — NOT
+The goal: when a torch op fires, find the user's Python file:line - NOT
 torch internals, autograd internals, or gpufl internals. Returns a
 short "file.py:42" string suitable for embedding in an NVTX range name.
 """
@@ -41,7 +41,7 @@ def capture_python_site(max_depth: int = 16) -> Optional[str]:
     Walk up the Python call stack from the caller and return a short
     `"basename.py:lineno"` string identifying the first user-code frame.
 
-    Returns None if no user frame is found within `max_depth` frames —
+    Returns None if no user frame is found within `max_depth` frames -
     this happens when the op fires from deep inside torch internals
     with no application code on the stack (rare, mostly during torch
     compile).

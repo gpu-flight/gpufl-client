@@ -37,7 +37,7 @@ fs::path MakeTempLogDir() {
 
 namespace {
 
-// v1.2 layout — files live at `<dir>/<prefix>/<session_id>/<channel>.log`
+// v1.2 layout - files live at `<dir>/<prefix>/<session_id>/<channel>.log`
 // or `<dir>/<prefix>/<session_id>/<channel>.<N>.log[.gz]`. The test
 // helpers were originally written for the v1.1 flat layout
 // (`<dir>/<prefix>.<channel>.log`); this walks the per-session
@@ -74,7 +74,7 @@ std::vector<fs::path> FindChannelFiles(const fs::path& dir,
 }
 
 /// Read a NDJSON file (plain or gzipped) into JsonValue records.
-/// Gzipped files are transparently decompressed — needed because
+/// Gzipped files are transparently decompressed - needed because
 /// v1.2's compress-on-shutdown turns the active .log into .log.gz on
 /// clean shutdown, so test code that runs gpufl::shutdown() and then
 /// reads back the logs encounters .log.gz files.

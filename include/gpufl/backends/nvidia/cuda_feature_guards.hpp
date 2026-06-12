@@ -4,7 +4,7 @@
 //
 // CUPTI's callback-id enumerators and the `*_params` structs we cast to only
 // exist when the CUDA headers we compile against are new enough. Code that
-// references them therefore has to be wrapped in a preprocessor guard — a
+// references them therefore has to be wrapped in a preprocessor guard - a
 // runtime check is impossible because the symbol simply isn't declared on
 // older toolkits.
 //
@@ -29,8 +29,8 @@
 #endif
 
 // Extensible launch: cuLaunchKernelEx / cudaLaunchKernelExC (+ _ptsz). This is
-// the path cuda.core takes — and therefore modern numba-cuda (cuda.core >=
-// 1.0), CUTLASS, and any thread-block-cluster kernel — because it carries a
+// the path cuda.core takes - and therefore modern numba-cuda (cuda.core >=
+// 1.0), CUTLASS, and any thread-block-cluster kernel - because it carries a
 // LaunchConfig with launch attributes. Public since CUDA 11.6.
 #if defined(CUDART_VERSION) && CUDART_VERSION >= 11060
 #  define GPUFL_HAS_EXTENSIBLE_LAUNCH 1

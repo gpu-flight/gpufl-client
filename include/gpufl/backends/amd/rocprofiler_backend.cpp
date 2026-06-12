@@ -262,7 +262,7 @@ int RocprofilerBackend::toolInitialize() {
     // Create profiling engine based on user configuration.
     // On AMD, PC sampling and counter collection cannot coexist in the same
     // context, so PcSamplingWithSass falls back to dispatch counters.
-    // Trace (activity records only) creates no engine — the switch
+    // Trace (activity records only) creates no engine - the switch
     // default covers it. ProfilingEngine::Monitor never reaches this
     // backend (CreateMonitorAdapter returns nullptr for it), but guard
     // anyway so a directly-constructed Monitor backend stays engine-free.
@@ -285,7 +285,7 @@ int RocprofilerBackend::toolInitialize() {
         }
         if (engine_) {
             if (!engine_->initialize(context_, primary_gpu_agent_, opts_)) {
-                GFL_LOG_ERROR("[ROCProfilerBackend] Profiling engine initialization failed — "
+                GFL_LOG_ERROR("[ROCProfilerBackend] Profiling engine initialization failed - "
                               "continuing in monitoring-only mode");
                 engine_.reset();
             }

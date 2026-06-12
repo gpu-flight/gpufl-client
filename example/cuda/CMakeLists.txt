@@ -56,7 +56,7 @@ target_compile_options(sass_divergence_demo PRIVATE
         -gencode=arch=compute_86,code=compute_86
         >)
 
-# SASS needs the cubin embedded so the disassembly + patching path engages —
+# SASS needs the cubin embedded so the disassembly + patching path engages -
 # same -lineinfo + gencode treatment as the other SASS-exercising examples.
 target_compile_options(deep_deadlock_repro PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:

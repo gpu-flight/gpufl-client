@@ -8,7 +8,7 @@ namespace gpufl::model {
 /**
  * JSON serializer for NvtxMarkerEvent. Emitted to the Scope channel so
  * NVTX markers naturally align with scope_event_batch events on the
- * backend — NVTX markers are semantically scope-like (named regions
+ * backend - NVTX markers are semantically scope-like (named regions
  * with start/end timestamps).
  */
 struct NvtxMarkerModel final : IJsonSerializable {

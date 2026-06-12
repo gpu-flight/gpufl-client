@@ -1,11 +1,11 @@
 """Integration tests for the `continuous_system_sampling` flag.
 
-Three scenarios from the spec — each runs the real gpufl init/shutdown,
+Three scenarios from the spec - each runs the real gpufl init/shutdown,
 optionally inside a Scope, then reads back the NDJSON system log and
 counts `device_metric_batch` rows to verify what was (or wasn't)
 sampled.
 
-These tests require a real GPU + CUPTI/NVML — they auto-skip in
+These tests require a real GPU + CUPTI/NVML - they auto-skip in
 stub mode (where `gpufl.init()` returns False).
 """
 from __future__ import annotations
@@ -29,7 +29,7 @@ def _count_device_metric_rows(log_dir: Path, app_name: str) -> int:
     Each `device_metric_batch` event has a `rows` array; one row per
     NVML poll cycle per device. We count rows (not events) because the
     Sampler batches multiple samples into a single event before flushing
-    — the row count is what reflects actual sampling activity.
+    - the row count is what reflects actual sampling activity.
     """
     import gzip
 
@@ -72,7 +72,7 @@ def _run_session(
 
     Sleeps `pre_post_sleep_s` before any scope (and after, if used) so
     we can distinguish "sampling during scope" from "sampling regardless
-    of scope" — those two windows produce different row counts.
+    of scope" - those two windows produce different row counts.
     """
     app = f"test_sampling_{int(time.time_ns())}"
     log_prefix = str(log_dir / app)
@@ -84,7 +84,7 @@ def _run_session(
         enable_debug_output=False,
     )
     if not ok:
-        pytest.skip("gpufl.init returned False — no GPU / stub mode")
+        pytest.skip("gpufl.init returned False - no GPU / stub mode")
     try:
         time.sleep(pre_post_sleep_s)
         if use_scope:
@@ -98,7 +98,7 @@ def _run_session(
 
 # Each scenario maps to one of the three rows in the user's expected
 # behavior matrix. We don't compare against exact counts (timing-
-# dependent) — only the qualitative shape (zero vs many samples).
+# dependent) - only the qualitative shape (zero vs many samples).
 #
 # A "many-samples" lower bound: with a 50 ms sample interval and an
 # 800 ms scope, we'd expect ~16 raw NVML polls; the Sampler flushes
@@ -125,7 +125,7 @@ def test_continuous_true_always_samples(tmp_path):
 def test_continuous_false_no_scope_emits_no_samples(tmp_path):
     """continuous=False with no scope: zero device-metric rows.
 
-    This is the regression test for the original bug — previously
+    This is the regression test for the original bug - previously
     continuous=False (then `sampling_auto_start=False`) silently
     suppressed all system metrics. We're locking in that the new
     behavior is "no scope, no manual start → no samples" rather than
@@ -146,7 +146,7 @@ def test_continuous_false_no_scope_emits_no_samples(tmp_path):
 def test_continuous_false_with_scope_samples_during_scope(tmp_path):
     """continuous=False inside a Scope: samples only during the scope.
 
-    This is the new behavior unlocked by the ref-counted Sampler — what
+    This is the new behavior unlocked by the ref-counted Sampler - what
     `continuous_system_sampling=False` means as a *policy*: sample only
     while bracketed by GFL_SCOPE / systemStart.
     """
@@ -180,7 +180,7 @@ def test_sampling_auto_start_kwarg_deprecation_warning(tmp_path):
 
 
 def test_sampling_auto_start_and_new_name_together_raises(tmp_path):
-    """Passing both old and new kwargs is an error — not a silent winner."""
+    """Passing both old and new kwargs is an error - not a silent winner."""
     app = f"test_dup_kwarg_{int(time.time_ns())}"
     log_prefix = str(tmp_path / app)
     with pytest.raises(TypeError, match="pass only the new name"):

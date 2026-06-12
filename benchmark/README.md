@@ -25,7 +25,7 @@ python run_benchmark.py
 
 | Mode | Engine | What it measures |
 |------|--------|-----------------|
-| Baseline | — | Pure CUDA/PyTorch, no GPUFlight |
+| Baseline | - | Pure CUDA/PyTorch, no GPUFlight |
 | Monitoring only | `Monitor` | System metrics (GPU util, temp, mem) only, no CUPTI |
 | PC Sampling | `PcSampling` | Stall reason sampling |
 | SASS Metrics | `SassMetrics` | Instruction-level counters |
@@ -44,7 +44,7 @@ Tested on NVIDIA GeForce RTX 5060 Laptop GPU (8.0 GiB), GPUFlight v0.1.0.dev.
 
 | Mode | Wall (ms) | GPU (ms) | Overhead |
 |------|-----------|----------|----------|
-| Baseline (no gpufl) | 184.3 | 184.2 | — |
+| Baseline (no gpufl) | 184.3 | 184.2 | - |
 | Monitoring only | 179.8 | 179.7 | ~0% |
 | PC Sampling | 230.2 | 230.0 | +24.9% |
 | SASS Metrics | 225.5 | 225.4 | +22.3% |
@@ -54,7 +54,7 @@ Tested on NVIDIA GeForce RTX 5060 Laptop GPU (8.0 GiB), GPUFlight v0.1.0.dev.
 
 | Mode | Wall (ms) | GPU (ms) | Overhead |
 |------|-----------|----------|----------|
-| Baseline (no gpufl) | 795.8 | 795.7 | — |
+| Baseline (no gpufl) | 795.8 | 795.7 | - |
 | Monitoring only | 852.4 | 852.3 | +7.1% |
 | PC Sampling | 6085.6 | 6085.5 | +664.7% |
 | SASS Metrics | 848.3 | 848.3 | +6.6% |
@@ -62,7 +62,7 @@ Tested on NVIDIA GeForce RTX 5060 Laptop GPU (8.0 GiB), GPUFlight v0.1.0.dev.
 
 ### Key Takeaways
 
-- **Monitoring only / SASS Metrics: ~7% overhead** — acceptable for always-on profiling during development
+- **Monitoring only / SASS Metrics: ~7% overhead** - acceptable for always-on profiling during development
 - **PC Sampling: high overhead on many-small-kernel workloads** (PyTorch launches thousands of micro-kernels). Use for targeted profiling sessions, not always-on. Set via environment variable:
   ```bash
   GPUFL_PROFILING_ENGINE=SassMetrics python train.py  # low-overhead

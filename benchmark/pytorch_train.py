@@ -1,5 +1,5 @@
 """
-PyTorch MiniGPT training benchmark — measures real-world ML overhead.
+PyTorch MiniGPT training benchmark - measures real-world ML overhead.
 Runs a small transformer training loop (forward + backward + optimizer).
 Returns (wall_ms, gpu_ms) for the timed region.
 """

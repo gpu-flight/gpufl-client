@@ -2,10 +2,10 @@
 
 #include "gpufl/core/env_vars.hpp"
 
-#include <algorithm>  // std::min(initializer_list) — see occupancy calc below
+#include <algorithm>  // std::min(initializer_list) - see occupancy calc below
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>    // strnlen — bounded read in cachedDemangle
+#include <cstring>    // strnlen - bounded read in cachedDemangle
 #include <iterator>   // std::begin / std::end on the user_scope C-array
 #include <set>
 #include <string>
@@ -14,7 +14,7 @@
 #include <unistd.h>
 #elif defined(_WIN32)
 // ReadProcessMemory / GetCurrentProcess for the Windows symbolName probe below.
-// Define NOMINMAX first — this TU uses std::min and windows.h's min/max macros
+// Define NOMINMAX first - this TU uses std::min and windows.h's min/max macros
 // would otherwise shadow it.
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -97,7 +97,7 @@ bool CopyReadableCString(const char* src, std::string* out) {
 // meta record. Only grid/block + dynamic shared memory are known at launch time
 // (per-thread registers and static shared memory live on the activity record,
 // which by definition never arrives for a synthetic kernel), so occupancy is
-// bounded by warps + blocks only — byte-for-byte the math the old
+// bounded by warps + blocks only - byte-for-byte the math the old
 // CuptiBackend::FlushPendingKernels ran at stop(). Runs here on the launch
 // callback (the nvidia layer, where GetSMProps lives) so the core collector TU
 // can stay free of CUDA headers; drainSyntheticKernels in monitor.cpp just
@@ -149,12 +149,12 @@ KernelLaunchHandler::requiredCallbacks() const {
     // api_enter_ns / api_exit_ns for. Anything missing here means the
     // backend stores 0 for the API timestamps, the frontend can't
     // compute cpu_overhead / queue_latency, and the kernel detail
-    // page falls back to "—" for those metrics. Add new launch CBIDs
-    // here as CUPTI exposes them — shouldHandle() derives its filter from
+    // page falls back to "-" for those metrics. Add new launch CBIDs
+    // here as CUPTI exposes them - shouldHandle() derives its filter from
     // this list, so there's only one place to update.
     //
     // The GPUFL_HAS_* feature gates (see cuda_feature_guards.hpp) keep the
-    // agent buildable against older CUDA toolkits — the CBID enumerator
+    // agent buildable against older CUDA toolkits - the CBID enumerator
     // isn't declared if CUPTI predates the API.
     std::vector<std::pair<CUpti_CallbackDomain, CUpti_CallbackId>> cbs = {
         // ── Runtime API ───────────────────────────────────────────
@@ -162,7 +162,7 @@ KernelLaunchHandler::requiredCallbacks() const {
          CUPTI_RUNTIME_TRACE_CBID_cudaLaunch_v3020},
         {CUPTI_CB_DOMAIN_RUNTIME_API,
          CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_v7000},
-        // Per-thread default stream variants (CUDA 7.0+) — used when
+        // Per-thread default stream variants (CUDA 7.0+) - used when
         // the program is compiled with --default-stream per-thread or
         // CUDA_API_PER_THREAD_DEFAULT_STREAM is defined.
         {CUPTI_CB_DOMAIN_RUNTIME_API,
@@ -179,7 +179,7 @@ KernelLaunchHandler::requiredCallbacks() const {
          CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel_ptsz},
     };
 
-    // Cooperative kernel launches (CUDA 9.0+) — used by NCCL
+    // Cooperative kernel launches (CUDA 9.0+) - used by NCCL
     // collectives and any kernel that needs grid-wide
     // synchronization via cooperative_groups.
 #if GPUFL_HAS_COOPERATIVE_LAUNCH
@@ -197,7 +197,7 @@ KernelLaunchHandler::requiredCallbacks() const {
                    CUPTI_DRIVER_TRACE_CBID_cuLaunchCooperativeKernelMultiDevice});
 #endif
 
-    // Modern extensible launch (CUDA 11.6+) — what PyTorch ≥ 1.13,
+    // Modern extensible launch (CUDA 11.6+) - what PyTorch ≥ 1.13,
     // CUTLASS ≥ 2.10, and most new CUDA samples emit. Was the
     // primary cause of api_start_ns / api_exit_ns showing up as 0
     // for users on recent toolkits before this CBID was wired up.
@@ -244,7 +244,7 @@ bool KernelLaunchHandler::shouldHandle(const CUpti_CallbackDomain domain,
     // Single source of truth: a callback is handled iff we registered it in
     // requiredCallbacks(). Deriving the filter from that list (rather than
     // re-typing every CBID and its version guard here) means the two can
-    // never drift — a CBID added to one but forgotten in the other used to
+    // never drift - a CBID added to one but forgotten in the other used to
     // silently drop that launch API's telemetry. The set is identical for
     // every instance, so build it once on first call (thread-safe since
     // C++11) and reuse it; this stays on the per-callback hot path.
@@ -270,14 +270,14 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
     if (cbInfo->callbackSite == CUPTI_API_ENTER) {
         backend_->NoteKernelLaunchForCleanupFlush();
         // PC sampling collects on this beat (internally throttled; no-op for
-        // other engines) — the app thread at launch ENTER is context-current
+        // other engines) - the app thread at launch ENTER is context-current
         // and, in KERNEL_SERIALIZED mode, all prior kernels have completed.
         backend_->EngineLaunchTick();
 
         // Build a KERNEL_LAUNCH_META record and push it to the lock-free ring
         // (Step 4b-2). The corr->meta join that used to run here under meta_mu_
         // now happens on the single collector thread (joinLaunchMeta in
-        // monitor.cpp) — this callback takes NO lock. Push is heap-free: the
+        // monitor.cpp) - this callback takes NO lock. Push is heap-free: the
         // ring slot is preallocated and Push copies the POD into it.
         ActivityRecord metaRec{};
         metaRec.type = TraceType::KERNEL_LAUNCH_META;
@@ -376,8 +376,8 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
             }
 #if GPUFL_HAS_EXTENSIBLE_LAUNCH
             // Extensible launch (CUDA 11.6+). cuda.core's launch() routes
-            // through cuLaunchKernelEx — NOT the plain cuLaunchKernel handled
-            // above — because LaunchConfig carries launch attributes (thread-
+            // through cuLaunchKernelEx - NOT the plain cuLaunchKernel handled
+            // above - because LaunchConfig carries launch attributes (thread-
             // block clusters, cooperative, etc.). numba-cuda's modern
             // dispatcher (when cuda.core >= 1.0 is present) launches every
             // kernel this way, as do CUTLASS and recent CUDA samples. Without
@@ -414,13 +414,13 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
         }
 
         // Synthetic-kernel modes (PC Sampling / SASS safe): no CUPTI activity
-        // record will arrive, so precompute the simplified occupancy now — the
-        // only place with the nvidia SM properties — and carry it on the meta
+        // record will arrive, so precompute the simplified occupancy now - the
+        // only place with the nvidia SM properties - and carry it on the meta
         // record for drainSyntheticKernels to copy. Skipped in normal / Deep
         // mode (the activity record supplies full occupancy), keeping this
         // callback thin. NOTE: a rare leftover meta orphaned at stop() in normal
         // mode (its activity record dropped/in-flight) now ships occupancy 0
-        // instead of the old simplified value — acceptable for a degraded
+        // instead of the old simplified value - acceptable for a degraded
         // best-effort row whose duration is already a host-dispatch estimate.
         if (metaRec.has_details && backend_->WillEmitSyntheticKernels()) {
             ComputeSyntheticOccupancy(metaRec, metaRec.device_id);
@@ -477,7 +477,7 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
                   " dur=", k->end - k->start);
 
     // NOTE (1.0.1): kernel_sample_rate_ms used to throttle activity-record
-    // processing here — skipping records that arrived within a sampling
+    // processing here - skipping records that arrived within a sampling
     // window. That was a serious bug: a throttled (skipped) record left its
     // launch metadata in meta_by_corr_, and FlushPendingKernels() then
     // resurrected the kernel as a SYNTHETIC record whose "duration" was the
@@ -551,7 +551,7 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
 
     // Launch dims + occupancy come straight from the activity record:
     // CUpti_ActivityKernel11 carries the ACTUAL launched grid/block/regs/
-    // shared-mem, so they're computed with NO lock and for every kernel —
+    // shared-mem, so they're computed with NO lock and for every kernel -
     // independent of whether the launch-callback metadata is present. (Step 4b)
     out.has_details = true;
     out.grid_x = k->gridX;
@@ -622,9 +622,9 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
     }
 
     // Launch-callback metadata (scope path, stack id, API timestamps, const-
-    // bank size — the only fields NOT in the activity record) is joined on the
+    // bank size - the only fields NOT in the activity record) is joined on the
     // collector thread now (joinLaunchMeta in monitor.cpp), keyed by corr_id.
-    // This callback takes NO meta_mu_ — it pushes the raw activity record and
+    // This callback takes NO meta_mu_ - it pushes the raw activity record and
     // returns. (Step 4b-2: the join moved off the CUPTI threads to drop the
     // mutex; the matching KERNEL_LAUNCH_META was pushed by handle() at ENTER.)
     g_monitorBuffer.Push(out);

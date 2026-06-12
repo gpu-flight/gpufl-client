@@ -10,7 +10,7 @@ namespace gpufl {
  * @brief Compresses SASS disassembly by detecting runs of structurally
  *        identical instructions (differing only in immediate operands).
  *
- * Designed for extensibility — new comparison strategies (e.g.,
+ * Designed for extensibility - new comparison strategies (e.g.,
  * register-agnostic, predicate-agnostic) can be added as new methods
  * without touching the call sites.
  */
@@ -43,7 +43,7 @@ class SassCompressor {
     static std::string normalizeForCompare(const std::string& sass);
 
     /**
-     * Check if two instructions are "same shape" — same opcode and
+     * Check if two instructions are "same shape" - same opcode and
      * register operands, differing only in immediate values.
      */
     static bool isSameShape(const std::string& a, const std::string& b);

@@ -4,7 +4,7 @@
 // It runs the lambda body `meta.warmup` times BEFORE opening a
 // ScopedMonitor scope and `meta.repeat` times INSIDE it.
 //
-// These tests run without calling gpufl::init() — the ScopedMonitor ctor
+// These tests run without calling gpufl::init() - the ScopedMonitor ctor
 // short-circuits in init_() when there's no Runtime, so the scope side
 // is a no-op and we can verify pure BenchInvoker logic (body invocation
 // count + ordering) without touching CUDA, file I/O, or the collector
@@ -48,7 +48,7 @@ TEST(BenchInvoker, RepeatOnly) {
 }
 
 TEST(BenchInvoker, WarmupOnly) {
-    // Warmup-only is a legal but unusual configuration — the scope
+    // Warmup-only is a legal but unusual configuration - the scope
     // opens and closes immediately (no measured iterations). Useful
     // for documenting "I ran N warmup launches outside any timed scope."
     int runs = 0;
@@ -63,7 +63,7 @@ TEST(BenchInvoker, WarmupOnly) {
 // We can't directly observe ScopedMonitor's open/close from here without
 // initializing the full runtime + a logger spy. Instead we use a tracker
 // that snapshots `runs` at every invocation and asserts the sequence is
-// `[1, 2, ..., warmup+repeat]` with no out-of-order calls — which is the
+// `[1, 2, ..., warmup+repeat]` with no out-of-order calls - which is the
 // only property the macro contract makes.
 //
 // The "warmup happens before the scope" invariant is enforced by
@@ -100,7 +100,7 @@ TEST(BenchInvoker, LambdaCapturesEnclosingState) {
 // ── Macro expansion test ──────────────────────────────────────────────────
 //
 // Verifies the GFL_BENCH macro itself (not just BenchInvoker) compiles
-// and behaves the same. Catches regressions in the macro definition —
+// and behaves the same. Catches regressions in the macro definition -
 // e.g. the trailing `+= [&]()` pattern, the `__VA_ARGS__` forwarding,
 // or the ScopeMeta{...} wrapping.
 

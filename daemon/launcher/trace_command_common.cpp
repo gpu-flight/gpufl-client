@@ -344,7 +344,7 @@ int ensureTraceCompletionMarkers(const fs::path& output_dir,
     return synthesized;
 }
 
-/// Remove with a short backoff (100/200/400 ms) — a freshly written or
+/// Remove with a short backoff (100/200/400 ms) - a freshly written or
 /// freshly released file is often still held briefly on Windows (AV
 /// scan, indexer, an uploader that just stopped). True on success OR
 /// when the file is already gone.
@@ -387,7 +387,7 @@ int repairUncompressedLogs(const fs::path& root) {
             if (!removeWithRetry(path, remove_ec)) {
                 std::fprintf(stderr,
                              "[gpufl] warning: could not remove stale %s "
-                             "(%s) — its .gz holds the same data\n",
+                             "(%s) - its .gz holds the same data\n",
                              path.string().c_str(),
                              remove_ec.message().c_str());
             }

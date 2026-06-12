@@ -2,7 +2,7 @@
 Import a torch.profiler Chrome Trace Event JSON file into GPUFlight.
 
 This is the zero-friction onboarding path: users who already run
-torch.profiler can upload their existing trace files directly — no
+torch.profiler can upload their existing trace files directly - no
 need to install or run the GPUFlight C++ client in their training
 loop.
 
@@ -13,10 +13,10 @@ URL.
 
 The backend endpoint (`POST /api/v1/events/import/torch-profiler`)
 accepts multipart/form-data with a single "trace" field containing the
-Chrome Trace JSON. See the plan's "Backend — Chrome Trace import"
+Chrome Trace JSON. See the plan's "Backend - Chrome Trace import"
 section for the parser design.
 
-Backend endpoint is v1-deferred — this client-side helper ships but
+Backend endpoint is v1-deferred - this client-side helper ships but
 may return a clear "endpoint not yet deployed" message until the
 server lands. Safe no-op prior to backend rollout.
 """
@@ -79,7 +79,7 @@ def import_trace(
     if not os.path.isfile(path):
         raise FileNotFoundError(f"Trace file not found: {path}")
 
-    # Lazy import — keeps `import gpufl.torch` working for users who
+    # Lazy import - keeps `import gpufl.torch` working for users who
     # only need attach/detach and don't have requests installed.
     try:
         import requests
@@ -118,7 +118,7 @@ def import_trace(
         )
     if not resp.ok:
         raise RuntimeError(
-            f"Trace upload failed: HTTP {resp.status_code} — {resp.text[:200]}"
+            f"Trace upload failed: HTTP {resp.status_code} - {resp.text[:200]}"
         )
 
     body = resp.json()

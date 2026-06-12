@@ -175,7 +175,7 @@ std::string ScopeEventBatchModel::buildJson() const {
         // v2 (1.0.3): adds repeat + warmup as the last two columns.
         // Both are 0 on END rows and on BEGIN rows that didn't carry
         // benchmark metadata, so older v1 callers keep producing
-        // semantically-identical numeric payloads — only the column
+        // semantically-identical numeric payloads - only the column
         // list / version bump changes the wire format.
         oss << '[' << (r.ts_ns - base) << ',' << r.scope_instance_id << ','
             << r.name_id << ',' << static_cast<int>(r.event_type) << ','
@@ -271,7 +271,7 @@ std::string HostMetricBatchModel::buildJson() const {
     // Hostname / ip_addr are added to the batch ENVELOPE (not per-row)
     // so the backend can copy them onto every host_metric record at
     // ingestion time. A file-tailing agent reading this NDJSON gets
-    // the host label without needing to call gethostname() itself —
+    // the host label without needing to call gethostname() itself -
     // important when the agent runs on a different machine than the
     // workload (sidecar / centralized collector). Per-row replication
     // would waste bytes; the value is constant for a session.
@@ -307,7 +307,7 @@ std::string SynchronizationEventBatchModel::buildJson() const {
     const int64_t base = rows.front().start_ns;
 
     // function_id refers to a name in the function_dict shipped via
-    // dictionary_update — flushBatches() guarantees the dict is
+    // dictionary_update - flushBatches() guarantees the dict is
     // emitted before this batch so the backend can resolve every id.
     std::ostringstream oss;
     oss << "{\"version\":1,\"type\":\"synchronization_event_batch\""

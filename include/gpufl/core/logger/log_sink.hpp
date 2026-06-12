@@ -10,7 +10,7 @@ namespace gpufl {
  * Abstract destination for log lines emitted by {@link Logger}.
  *
  * The Logger holds a vector of sinks and broadcasts every write to all
- * of them. Each sink decides what to do with the line — write it to
+ * of them. Each sink decides what to do with the line - write it to
  * disk, POST it to a backend, put it on a message bus, etc.
  *
  * Ownership: Logger owns sinks via std::unique_ptr. A sink MUST be
@@ -18,7 +18,7 @@ namespace gpufl {
  *
  * Thread-safety: Logger serializes calls to write() at the Channel
  * level (per-channel mutex) today, but a sink should not assume this
- * — newer broadcast paths may parallelize. Implement write() to be
+ * - newer broadcast paths may parallelize. Implement write() to be
  * re-entrant for different channel arguments. The default contract:
  * write() may be called concurrently from multiple threads; flush()
  * and close() are only called from Logger::close() (single-threaded
@@ -36,7 +36,7 @@ class ILogSink {
      *              to one endpoint) can treat this as informational.
      * @param json  Serialized event. MAY NOT include a trailing newline
      *              (the sink is responsible for whatever framing it
-     *              needs — file sinks append '\n', HTTP sinks put the
+     *              needs - file sinks append '\n', HTTP sinks put the
      *              bytes directly into a POST body).
      */
     virtual void write(Channel ch, std::string_view json) = 0;

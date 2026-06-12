@@ -9,7 +9,7 @@ namespace gpufl::core {
  *
  * Why this lives in the agent: Linux builds get full Itanium demangling
  * for free via `abi::__cxa_demangle` from libstdc++. Windows MSVC has
- * no equivalent — its `UnDecorateSymbolName` understands MSVC's
+ * no equivalent - its `UnDecorateSymbolName` understands MSVC's
  * `?`-prefix mangling but not Itanium `_Z`-prefix. Without this fallback
  * Windows traces would ship raw `_ZN…` strings, breaking the frontend's
  * regex-based kernel categorization (GEMM / ELEMENTWISE / …) and making
@@ -27,7 +27,7 @@ namespace gpufl::core {
  *   - substitutions        S_, S0_, S1_, … (used for repeated types)
  *   - bare function types  return type + parameter list
  *   - abi-tags             B<source-name> (consumed + DISCARDED, not
- *                          rendered) — Numba/NVVM CUDA kernels encode the
+ *                          rendered) - Numba/NVVM CUDA kernels encode the
  *                          lowered signature as a long hashed abi-tag, e.g.
  *                          `_ZN8__main__13matmul_kernelB2v1B102<hash>` →
  *                          `__main__::matmul_kernel`

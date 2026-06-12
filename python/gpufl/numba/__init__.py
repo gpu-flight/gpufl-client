@@ -1,5 +1,5 @@
 """
-gpufl.numba — planned Numba CUDA integration (stub during private beta).
+gpufl.numba - planned Numba CUDA integration (stub during private beta).
 
 Numba's `@cuda.jit` compiles Python to PTX. The resulting kernels are
 captured by GPUFlight's C++ client via CUPTI the same way any CUDA

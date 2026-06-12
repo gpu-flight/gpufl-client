@@ -29,7 +29,7 @@ void Sampler::activate() {
     if (prev == 0) {
         // 0 → 1 transition: start the worker thread if we're configured
         // enough to do useful work. If we're not configured, the counter
-        // still increments — the next deactivate balances it. This keeps
+        // still increments - the next deactivate balances it. This keeps
         // the API safe to call before configure().
         if (logger_ && collector_ && intervalMs_ > 0 && !running_.load()) {
             startWorkerLocked_();
@@ -49,7 +49,7 @@ void Sampler::deactivate() {
         static std::atomic<bool> warned{false};
         if (!warned.exchange(true)) {
             GFL_LOG_ERROR("[Sampler] deactivate() called more times than "
-                          "activate() — clamping at zero. Check for "
+                          "activate() - clamping at zero. Check for "
                           "unbalanced systemStart/systemStop or leaked "
                           "ScopedMonitor destructors.");
         }

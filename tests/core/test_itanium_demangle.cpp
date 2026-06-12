@@ -9,7 +9,7 @@
 // We don't insist on byte-exact equality with libstdc++'s
 // __cxa_demangle output (different libraries format spaces and
 // commas differently). Instead we assert on the substrings the
-// downstream regex catalog cares about — that's the contract.
+// downstream regex catalog cares about - that's the contract.
 
 #include <gtest/gtest.h>
 
@@ -28,14 +28,14 @@ TEST(ItaniumDemangle, PassesThroughEmpty) {
 TEST(ItaniumDemangle, PassesThroughNonMangled) {
     // Plain CUDA kernel names (cuBLAS-style architecture-prefixed
     // SASS kernels) are not Itanium-mangled and must pass through
-    // verbatim — the catalog matches them as-is.
+    // verbatim - the catalog matches them as-is.
     EXPECT_EQ(DemangleItaniumName("ampere_sgemm_64x32_nn"),
               "ampere_sgemm_64x32_nn");
     EXPECT_EQ(DemangleItaniumName("vectorAdd"), "vectorAdd");
 }
 
 TEST(ItaniumDemangle, PassesThroughMSVCMangled) {
-    // MSVC-style names start with '?' — not our format; pass through.
+    // MSVC-style names start with '?' - not our format; pass through.
     EXPECT_EQ(DemangleItaniumName("?foo@bar@@YAHXZ"),
               "?foo@bar@@YAHXZ");
 }
@@ -73,13 +73,13 @@ TEST(ItaniumDemangle, CutlassSgemmKernel_RealCapture) {
     auto out = DemangleItaniumName(mangled);
 
     EXPECT_NE(out.find("cutlass::Kernel2"), std::string::npos)
-        << "missing namespace::class — got: " << out;
+        << "missing namespace::class - got: " << out;
     EXPECT_NE(out.find("<"), std::string::npos)
-        << "missing template-arg open — got: " << out;
+        << "missing template-arg open - got: " << out;
     EXPECT_NE(out.find("sgemm"), std::string::npos)
-        << "missing sgemm substring (catalog regex hinges on this) — got: " << out;
+        << "missing sgemm substring (catalog regex hinges on this) - got: " << out;
     EXPECT_NE(out.find("cutlass_80_simt_sgemm_256x128_8x4_nn_align1"), std::string::npos)
-        << "template-arg name should propagate through — got: " << out;
+        << "template-arg name should propagate through - got: " << out;
 }
 
 TEST(ItaniumDemangle, AtenElementwiseKernel_RealCapture) {
@@ -95,14 +95,14 @@ TEST(ItaniumDemangle, AtenElementwiseKernel_RealCapture) {
     auto out = DemangleItaniumName(mangled);
 
     EXPECT_NE(out.find("at::native"), std::string::npos)
-        << "missing at::native namespace prefix — got: " << out;
+        << "missing at::native namespace prefix - got: " << out;
     EXPECT_NE(out.find("distribution_elementwise_kernel"), std::string::npos)
-        << "missing elementwise_kernel suffix — got: " << out;
+        << "missing elementwise_kernel suffix - got: " << out;
 }
 
 TEST(ItaniumDemangle, AtenVectorizedElementwiseKernel_RealCapture) {
     // Captured verbatim from a 5060/Windows trace AFTER the first
-    // round of fixes — this one was still showing up mangled because
+    // round of fixes - this one was still showing up mangled because
     // its template-arg list contains `St5arrayI…E` (std::array<…>)
     // and the old parseSubstitution returned a bare "std" without
     // consuming the "5array" continuation, derailing the rest of the
@@ -113,22 +113,22 @@ TEST(ItaniumDemangle, AtenVectorizedElementwiseKernel_RealCapture) {
     auto out = DemangleItaniumName(mangled);
 
     EXPECT_NE(out.find("at::native::vectorized_elementwise_kernel"), std::string::npos)
-        << "missing at::native::vectorized_elementwise_kernel prefix — got: " << out;
+        << "missing at::native::vectorized_elementwise_kernel prefix - got: " << out;
     // The frontend catalog regex
     //   ^(void\s+)?at::native::(vectorized_)?elementwise_kernel.*
-    // needs to match this — confirmed if the prefix is present.
+    // needs to match this - confirmed if the prefix is present.
     EXPECT_NE(out.find("std::array"), std::string::npos)
         << "St5array should expand to std::array (regression for the St "
-           "namespace-shortcut bug) — got: " << out;
+           "namespace-shortcut bug) - got: " << out;
 }
 
-// ── Failure modes — must always return a non-empty displayable string ─
+// ── Failure modes - must always return a non-empty displayable string ─
 
 TEST(ItaniumDemangle, MalformedReturnsOriginal) {
     // Truncated / nonsense after the _Z prefix → parser fails → we
     // hand the original mangled string back so the UI still has
     // SOMETHING to display.
-    const char* bad = "_ZN7cutlass";  // truncated — no closing E
+    const char* bad = "_ZN7cutlass";  // truncated - no closing E
     EXPECT_EQ(DemangleItaniumName(bad), bad);
 }
 
@@ -137,14 +137,14 @@ TEST(ItaniumDemangle, UnknownTemplateArgFallsBack) {
     // don't fully implement. When the parser hits one and can't
     // make sense of the rest, it MUST still return a non-empty
     // displayable string (the original mangled form is the safe
-    // fallback). This test guards the contract — never return
+    // fallback). This test guards the contract - never return
     // garbage, never return empty.
     const char* withLiteral = "_ZN3foo3barIXLi42EEEvv";  // synthetic, off-by-one E
     auto out = DemangleItaniumName(withLiteral);
     EXPECT_FALSE(out.empty())
         << "must always return something displayable, even on parse failure";
     // Doesn't matter whether it's the original mangled form or a
-    // partial demangle — we just guarantee the caller can show it.
+    // partial demangle - we just guarantee the caller can show it.
 }
 
 // ── DemangleFunctionKey: "name@source" → "demangled@source" ──────────
@@ -159,9 +159,9 @@ TEST(DemangleFunctionKey, DemanglesNameKeepsSourceTail) {
     const auto out =
         DemangleFunctionKey("_Z16branchByWarpQuadPfPKfi@/kernels/foo.cu");
     EXPECT_NE(out.find("branchByWarpQuad"), std::string::npos)
-        << "name half must be demangled — got: " << out;
+        << "name half must be demangled - got: " << out;
     EXPECT_NE(out.find("@/kernels/foo.cu"), std::string::npos)
-        << "the @source tail must survive verbatim — got: " << out;
+        << "the @source tail must survive verbatim - got: " << out;
 }
 
 TEST(DemangleFunctionKey, NonMangledNamePassesThrough) {
@@ -174,7 +174,7 @@ TEST(DemangleFunctionKey, NoAtSignDemanglesWholeKey) {
     const auto out = DemangleFunctionKey("_Z16branchByWarpQuadPfPKfi");
     EXPECT_NE(out.find("branchByWarpQuad"), std::string::npos) << out;
     EXPECT_EQ(out.find('@'), std::string::npos)
-        << "must not invent a source tail when the key has none — got: " << out;
+        << "must not invent a source tail when the key has none - got: " << out;
 }
 
 TEST(DemangleFunctionKey, EmptySourceKeepsTrailingAt) {
@@ -182,7 +182,7 @@ TEST(DemangleFunctionKey, EmptySourceKeepsTrailingAt) {
     EXPECT_NE(out.find("branchByWarpQuad"), std::string::npos) << out;
     ASSERT_FALSE(out.empty());
     EXPECT_EQ(out.back(), '@')
-        << "empty source → trailing '@' preserved — got: " << out;
+        << "empty source → trailing '@' preserved - got: " << out;
 }
 
 TEST(DemangleFunctionKey, EmptyNameKeepsSource) {

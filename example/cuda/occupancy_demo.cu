@@ -5,12 +5,12 @@
 //
 // Scenario: parallel block reduction
 //
-//   block_reduce_naive     — 16 KB static shared memory per block.
+//   block_reduce_naive     - 16 KB static shared memory per block.
 //                            At most ~3 blocks fit on a typical SM (48 KB limit),
 //                            leaving threads/warps idle.
 //                            gpufl reports: limiting_resource = "shared_mem"
 //
-//   block_reduce_optimized — exact same algorithm; shared memory switched to
+//   block_reduce_optimized - exact same algorithm; shared memory switched to
 //                            dynamic allocation sized at launch (1 KB per block).
 //                            The SM can now host many more concurrent blocks.
 //                            gpufl reports: limiting_resource = "warps" (100%)
@@ -32,7 +32,7 @@ __global__ void block_reduce_naive(const float* __restrict__ in,
                                     float* __restrict__       out,
                                     int                       n)
 {
-    __shared__ float smem[4096]; // 16 KB — always reserved, even if unused
+    __shared__ float smem[4096]; // 16 KB - always reserved, even if unused
 
     int tid = threadIdx.x;
     int gid = blockIdx.x * blockDim.x + tid;
@@ -50,7 +50,7 @@ __global__ void block_reduce_naive(const float* __restrict__ in,
 // ─── Kernel 2: dynamic shared-memory allocation (the fix) ────────────────────
 //
 // Identical algorithm; smem is sized exactly to blockDim.x at launch.
-// With BLOCK = 256 that is 256 * 4 = 1 KB per block — 48× smaller than v1.
+// With BLOCK = 256 that is 256 * 4 = 1 KB per block - 48× smaller than v1.
 // The SM can now schedule the hardware-maximum number of blocks simultaneously,
 // achieving 100 % warp occupancy.
 __global__ void block_reduce_optimized(const float* __restrict__ in,

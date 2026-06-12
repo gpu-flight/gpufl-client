@@ -11,7 +11,7 @@ struct LogRotationOptions {
     /**
      * Parent directory for all session subdirectories. Trailing ".log"
      * (if present, e.g. when a caller passed a legacy-style log_path)
-     * is stripped — base_path is treated as a directory, not a prefix.
+     * is stripped - base_path is treated as a directory, not a prefix.
      */
     std::string base_path;
     /**
@@ -45,7 +45,7 @@ class LogFileRotator {
      *   - a compressor isn't configured (defense)
      *
      * On crash (i.e. shutdown never runs), the uncompressed .log is
-     * left intact — the uploader lazily compresses on first read so
+     * left intact - the uploader lazily compresses on first read so
      * the on-wire format is uniform.
      */
     void compressActive() const;

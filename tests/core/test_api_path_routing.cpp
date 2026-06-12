@@ -1,9 +1,9 @@
-// Tests for normalizeApiPath() — the pure helper that canonicalizes
+// Tests for normalizeApiPath() - the pure helper that canonicalizes
 // the api_path field on InitOptions / UploadOptions.
 //
 // Previously this file also covered HttpLogSink's URL-routing and
 // version-header behavior. HttpLogSink was removed in favor of
-// gpufl::uploadLogs() (post-shutdown deferred upload) — the equivalent
+// gpufl::uploadLogs() (post-shutdown deferred upload) - the equivalent
 // end-to-end URL-routing coverage now lives in tests/upload/
 // test_upload_logs.cpp (added with the deferred-upload work).
 

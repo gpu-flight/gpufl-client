@@ -12,7 +12,7 @@ namespace json {
 /// Escape a string for safe JSON embedding (handles \, ", \n, \r, \t, control chars).
 std::string escape(const std::string& s);
 
-// Minimal JSON value type — supports null, bool, int64, double, string, array, object.
+// Minimal JSON value type - supports null, bool, int64, double, string, array, object.
 class JsonValue {
    public:
     using Object = std::map<std::string, JsonValue>;

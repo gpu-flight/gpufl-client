@@ -17,7 +17,7 @@ namespace gpufl::model {
  *
  * The wire shape is intentionally close to NvtxMarkerModel's so the
  * Java backend's BatchIngestionServiceImpl can dispatch on `"type"`
- * cheaply — see "synchronization_event" handler.
+ * cheaply - see "synchronization_event" handler.
  */
 struct SynchronizationEventModel final : IJsonSerializable {
     explicit SynchronizationEventModel(const SynchronizationEvent& e) : e_(e) {}

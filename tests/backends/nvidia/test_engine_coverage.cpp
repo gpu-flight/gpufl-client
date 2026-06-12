@@ -37,7 +37,7 @@ bool Contains(const std::vector<std::string>& v, const std::string& needle) {
 // CUPTI + the profiler APIs do not reliably tolerate multiple init/shutdown
 // cycles within a single process (second run leaves Activity API silently
 // disabled, and certain engine paths SEH-crash on re-init). Run each engine
-// in its own process — e.g. with `--gtest_filter=AllEngines/*/<Engine>`.
+// in its own process - e.g. with `--gtest_filter=AllEngines/*/<Engine>`.
 // This flag enforces that policy loudly rather than yielding false failures.
 std::atomic<bool> g_engineCoverageRan{false};
 
@@ -111,7 +111,7 @@ TEST_P(EngineCoverageTest, EmitsExpectedEvents) {
     // On Linux with the SamplingAPI (driver 590+), cuptiPCSamplingGetData
     // can return NOT_INITIALIZED even for standalone PcSampling, and
     // RangeProfiler requires elevated CUPTI privileges.  Treat PC sampling
-    // and Range Profiler counts as best-effort on all platforms — the
+    // and Range Profiler counts as best-effort on all platforms - the
     // firm contract is that the engine initializes, runs, and shuts down
     // without crashing.
     const bool samplesBestEffort = true;

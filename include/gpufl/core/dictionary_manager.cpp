@@ -19,7 +19,7 @@
 #include <windows.h>  // GetTempPathA
 #else
 #include <fcntl.h>     // O_WRONLY (redirect child stderr -> /dev/null)
-#include <spawn.h>     // posix_spawn — fork-safe subprocess (NOT popen)
+#include <spawn.h>     // posix_spawn - fork-safe subprocess (NOT popen)
 #include <sys/wait.h>  // waitpid
 #include <unistd.h>    // pipe, close, dup2, STDOUT_FILENO
 #endif
@@ -73,7 +73,7 @@ void appendDict(std::ostringstream& oss, const char* key,
 
 #ifndef _WIN32
 // Launch argv[0] with stdout connected to a pipe we read and stderr sent
-// to /dev/null, via posix_spawn — deliberately NOT popen/system.
+// to /dev/null, via posix_spawn - deliberately NOT popen/system.
 //
 // popen() forks and runs /bin/sh. A plain fork() in a multithreaded
 // process clones only the calling thread but inherits every lock in its
@@ -82,7 +82,7 @@ void appendDict(std::ostringstream& oss, const char* key,
 // that lock during pre-exec setup, never exec's, and the parent then
 // blocks forever reading the pipe. flushDisassembly runs on the collector
 // thread while application threads are busy launching kernels, so a fork
-// there frequently coincides with a held malloc lock — that is the
+// there frequently coincides with a held malloc lock - that is the
 // Deep-mode hang. posix_spawn runs only async-signal-safe code in the
 // child before exec (vfork/CLONE_VFORK semantics), so it cannot deadlock
 // on an inherited lock.
@@ -132,7 +132,7 @@ uint32_t DictionaryManager::internSourceFile(const std::string& path) {
     // Read file content eagerly when source collection is enabled.
     // When disabled, we still intern the path (needed for function keys
     // and source_file_id in profile samples) but skip reading the actual
-    // source code from disk — users who don't want their source code
+    // source code from disk - users who don't want their source code
     // sent to the backend can set enable_source_collection = false.
     if (enable_source_collection) {
         std::ifstream f(path);
@@ -242,7 +242,7 @@ void DictionaryManager::flushDisassembly(Logger& logger,
                       (bytes[18] == 0xE0 && bytes[19] == 0x00));
 
         // Launch the disassembler. POSIX uses posix_spawn (see
-        // spawnReadPipe) instead of popen — popen's fork() can deadlock on
+        // spawnReadPipe) instead of popen - popen's fork() can deadlock on
         // an inherited malloc lock in this multithreaded process, which is
         // the Deep-mode hang. We exec the tool directly with an argv vector
         // (no shell), so paths/args need no quoting and there's no /bin/sh.
@@ -271,7 +271,7 @@ void DictionaryManager::flushDisassembly(Logger& logger,
         } else {
 #ifdef _WIN32
             // Discover nvdisasm.exe via CUDA_PATH env var.
-            // Wrap entire command in outer quotes for cmd.exe /c — needed
+            // Wrap entire command in outer quotes for cmd.exe /c - needed
             // when both the executable path and arguments contain spaces
             // (e.g., "C:\Program Files\...").
             char cmd[640];
@@ -300,7 +300,7 @@ void DictionaryManager::flushDisassembly(Logger& logger,
         if (!pipe) {
             std::remove(tmpPathStr.c_str());
             GFL_LOG_ERROR("[flushDisassembly] failed to launch disassembler "
-                          "— nvdisasm / llvm-objdump unavailable?");
+                          "- nvdisasm / llvm-objdump unavailable?");
             continue;
         }
 
@@ -359,7 +359,7 @@ void DictionaryManager::flushDisassembly(Logger& logger,
                     std::string comment = raw.substr(firstNonWs + 1);
                     size_t cs = comment.find_first_not_of(" \t");
                     if (cs != std::string::npos && comment[cs] == '/') {
-                        // Absolute path — find the last ':' for line number
+                        // Absolute path - find the last ':' for line number
                         size_t lastColon = comment.rfind(':');
                         if (lastColon != std::string::npos && lastColon > cs) {
                             std::string path = comment.substr(cs, lastColon - cs);

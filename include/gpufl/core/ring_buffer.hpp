@@ -39,7 +39,7 @@ class RingBuffer {
         Slot* slot = &buffer_[index];
 
         // Wait for the slot to become FREE. On wraparound the slot still
-        // holds READY data the consumer hasn't drained yet — without this
+        // holds READY data the consumer hasn't drained yet - without this
         // backpressure, bursty producers (e.g. SASS metric drain pushing
         // thousands of samples in a tight loop) overrun the ring and
         // silently drop later records (kernel activity records that arrive

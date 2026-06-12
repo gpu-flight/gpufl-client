@@ -8,15 +8,15 @@ namespace gpufl::model {
 
 std::string GraphLaunchEventModel::buildJson() const {
     // Field set:
-    //   pid, app, session_id   — universal envelope
-    //   start_ns / end_ns      — wall-clock launch window; both 0 when
+    //   pid, app, session_id   - universal envelope
+    //   start_ns / end_ns      - wall-clock launch window; both 0 when
     //                            CUPTI couldn't collect timing (the
     //                            graph_id is still useful in that case)
-    //   duration_ns            — derived; kept for backend convenience
-    //   graph_id               — unique id of the captured graph;
+    //   duration_ns            - derived; kept for backend convenience
+    //   graph_id               - unique id of the captured graph;
     //                            repeated launches share an id
-    //   device_id, stream_id   — context fields
-    //   corr_id                — joins to the driver-API record that
+    //   device_id, stream_id   - context fields
+    //   corr_id                - joins to the driver-API record that
     //                            triggered the launch (cuGraphLaunch)
     std::ostringstream oss;
     oss << "{\"type\":\"graph_launch_event\""

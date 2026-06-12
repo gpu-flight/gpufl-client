@@ -8,17 +8,17 @@ namespace gpufl::model {
 
 std::string MemoryAllocEventModel::buildJson() const {
     // Field set:
-    //   pid, app, session_id  — universal envelope
-    //   start_ns / duration_ns — host call timestamp; duration is 0
+    //   pid, app, session_id  - universal envelope
+    //   start_ns / duration_ns - host call timestamp; duration is 0
     //                            in v1 because CUpti_ActivityMemory4
     //                            carries no end timestamp
-    //   memory_op, memory_kind — both stored as integers (uint8 on
+    //   memory_op, memory_kind - both stored as integers (uint8 on
     //                            the wire); frontend renders human
     //                            labels via lookup tables
-    //   address, bytes         — VA + size of the allocation
-    //   device_id, stream_id   — context fields; stream_id is set
+    //   address, bytes         - VA + size of the allocation
+    //   device_id, stream_id   - context fields; stream_id is set
     //                            for cudaMallocAsync, 0 otherwise
-    //   corr_id                — joins to the matching API record
+    //   corr_id                - joins to the matching API record
     //                            (we don't surface this in v1 but
     //                            it's there for future leak-pairing)
     std::ostringstream oss;

@@ -3,7 +3,7 @@ TorchDispatchMode subclass that emits NVTX ranges for every torch op.
 
 The dispatch mode is a process-global switch: `attach()` enables it,
 `detach()` disables. Nesting is supported (stacking attach() calls is a
-no-op — only the first enables, only the last disables).
+no-op - only the first enables, only the last disables).
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ class _GpuflDispatchMode:
         # Lazy-bind the push/pop. `_gpufl_client` is the C++ extension;
         # if it's not available (no-GPU stub install) or it's an older
         # build that predates bindings, we fall back to no-op lambdas
-        # so the dispatch hook still runs — but we WARN loudly because
+        # so the dispatch hook still runs - but we WARN loudly because
         # this almost always means the user forgot to reinstall the
         # extension after pulling the changes, and silently degrading
         # to "no chips" is the worst possible UX.
@@ -95,7 +95,7 @@ class _GpuflDispatchMode:
             for b in name.encode("utf-8"):
                 h ^= b
                 h = (h * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF
-            # Avoid 0 — that's the "no attribution" sentinel in the
+            # Avoid 0 - that's the "no attribution" sentinel in the
             # backend / dashboard. If the hash hits 0 (vanishingly
             # unlikely), nudge to 1.
             if h == 0:
@@ -105,7 +105,7 @@ class _GpuflDispatchMode:
 
         class GpuflDispatchMode(TorchDispatchMode):
             def __torch_dispatch__(self, func, types, args=(), kwargs=None):
-                # Skip meta tensors / fake tensors — they don't launch
+                # Skip meta tensors / fake tensors - they don't launch
                 # kernels so the NVTX overhead is wasted. The op still
                 # runs normally.
                 kwargs = kwargs or {}
@@ -146,7 +146,7 @@ class _GpuflDispatchMode:
 def attach(max_stack_depth: int = 16) -> None:
     """
     Enable PyTorch op-level capture. Idempotent (safe to call multiple
-    times — only the first activates; subsequent calls increment a
+    times - only the first activates; subsequent calls increment a
     reference count).
 
     Parameters

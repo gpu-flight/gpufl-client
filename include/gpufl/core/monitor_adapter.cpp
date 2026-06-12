@@ -11,7 +11,7 @@
 namespace gpufl {
 
 std::unique_ptr<IMonitorAdapter> CreateMonitorAdapter(const MonitorOptions& opts) {
-    // ProfilingEngine::Monitor means telemetry-only — no CUPTI at all.
+    // ProfilingEngine::Monitor means telemetry-only - no CUPTI at all.
     // Return no adapter so Monitor never subscribes CUPTI callbacks or
     // enables activity kinds. Monitor::Start/Stop/Shutdown are all
     // null-adapter safe, and the collector thread + NVML telemetry

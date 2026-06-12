@@ -33,7 +33,7 @@ bool isValidEngine(const std::string& e) {
     return false;
 }
 
-// Trim ASCII spaces/tabs from both ends — lets `--passes Trace, SassMetrics`
+// Trim ASCII spaces/tabs from both ends - lets `--passes Trace, SassMetrics`
 // (with spaces after commas) parse the same as the no-space form.
 std::string trim(const std::string& s) {
     const auto b = s.find_first_not_of(" \t");
@@ -46,7 +46,7 @@ std::string trim(const std::string& s) {
 
 const char* topLevelHelp() {
     return
-        "gpufl — GPUFlight launcher\n"
+        "gpufl - GPUFlight launcher\n"
         "\n"
         "USAGE:\n"
         "    gpufl <SUBCOMMAND> [OPTIONS]\n"
@@ -277,7 +277,7 @@ TraceParseResult parseTraceArgs(const std::vector<std::string>& argv) {
 
 const char* uploadHelp() {
     return
-        "gpufl upload — Upload a captured session's NDJSON logs to the backend\n"
+        "gpufl upload - Upload a captured session's NDJSON logs to the backend\n"
         "\n"
         "USAGE:\n"
         "    gpufl upload <LOG_PATH> [OPTIONS]\n"

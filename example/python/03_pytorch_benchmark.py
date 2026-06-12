@@ -73,7 +73,7 @@ def run_stress_test():
         # correlation IDs around every aten dispatch (see
         # python/gpufl/torch/dispatch.py). That means each kernel
         # captured here will surface in the dashboard's Kernels tab
-        # with an accent-blue `op #N` chip showing the framework op id —
+        # with an accent-blue `op #N` chip showing the framework op id -
         # no separate `torch.profiler.profile()` context needed.
 
         # One big scope for the whole benchmark
@@ -97,7 +97,7 @@ def run_stress_test():
         # CUDA Graphs amortize host-side launch overhead by capturing a
         # sequence of CUDA calls once and replaying them as a single
         # launch. CUPTI emits one CUPTI_ACTIVITY_KIND_GRAPH_TRACE record
-        # per replay — repeated replays of the same captured graph all
+        # per replay - repeated replays of the same captured graph all
         # share the same `graph_id`, so the dashboard can aggregate.
         #
         # We run this AFTER the regular loop so users get to see both:
@@ -128,7 +128,7 @@ def run_stress_test():
                 print("Graph replays finished.")
         except Exception as e:
             # CUDA Graph capture is sensitive to PC sampling on some
-            # Blackwell driver builds — log + continue rather than
+            # Blackwell driver builds - log + continue rather than
             # tearing down the whole benchmark.
             print(f"[WARN] CUDA graph demo skipped: {e}")
 
@@ -140,7 +140,7 @@ def run_stress_test():
         gpufl.shutdown()
         gpufl.torch.detach()
 
-        # Deferred upload — runs after shutdown, never during the
+        # Deferred upload - runs after shutdown, never during the
         # workload. Replaces the old `remote_upload=True` live streaming.
         if upload_enabled:
             print("[GPUFL] Uploading session to backend...")
@@ -149,7 +149,7 @@ def run_stress_test():
                 backend_url=backend_url,
                 api_key=api_key,
             )
-            print(f"[GPUFL] Upload: {'OK' if r.success else 'FAILED'} — "
+            print(f"[GPUFL] Upload: {'OK' if r.success else 'FAILED'} - "
                   f"{r.events_uploaded} events in {r.elapsed_ms/1000:.1f}s")
 
             for sid in r.spool_ids:

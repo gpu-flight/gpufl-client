@@ -10,7 +10,7 @@ namespace report {
 std::vector<std::string> computeHints(const FuncProfile& fp) {
     std::vector<std::string> hints;
 
-    // Memory efficiency hint — three-tier fallback:
+    // Memory efficiency hint - three-tier fallback:
     // Tier 1: aggregate ideal (smsp__sass_sectors_mem_global_ideal, sm_120+)
     // Tier 2: sum of per-op ideals (op_ld + op_st, sm_86 fallback)
     // Tier 3: Long Scoreboard proxy when no ideal metric is available at all

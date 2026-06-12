@@ -33,8 +33,8 @@
 // cuBLAS internals), or is it a fundamental CUPTI property reproducible from
 // pure C++? PyTorch's distinguishing trait is (3): hundreds of distinct
 // kernels launched across threads. So this example deliberately recreates (3)
-// in C++ — many distinct __global__ symbols, launched concurrently from a
-// pool of std::threads — and combines it with (1) + (2).
+// in C++ - many distinct __global__ symbols, launched concurrently from a
+// pool of std::threads - and combines it with (1) + (2).
 //
 // ── The defense being validated ─────────────────────────────────────────────
 //
@@ -49,8 +49,8 @@
 //
 // Run it both ways to confirm the defense holds on your hardware:
 //
-//     deep_deadlock_repro                              # safe default — should finish
-//     GPUFL_SASS_ALLOW_FULL_ACTIVITY=1 deep_deadlock_repro   # unsafe — may hang
+//     deep_deadlock_repro                              # safe default - should finish
+//     GPUFL_SASS_ALLOW_FULL_ACTIVITY=1 deep_deadlock_repro   # unsafe - may hang
 //
 // On Windows PowerShell:
 //     $env:GPUFL_SASS_ALLOW_FULL_ACTIVITY=1; .\deep_deadlock_repro.exe
@@ -89,7 +89,7 @@
 //
 // Each GFL_KERNEL(i) is a separate __global__ symbol, so nvcc emits a
 // distinct cubin entry point per index. CUPTI therefore sees 32 distinct PC
-// ranges that each need first-launch module finalization + SASS patching —
+// ranges that each need first-launch module finalization + SASS patching -
 // the diversity that makes the concurrent first-launch race possible. The
 // body carries a unique constant `K` so the compiler can't merge them, and
 // loops enough to give the scheduler a real window to interleave launches.
@@ -134,7 +134,7 @@ static constexpr int kNumDistinctKernels =
 // is inside the driver's launch enqueue at a time. Tests the "SASS Safe-Lock"
 // mitigation: if the hang is concurrent cuLaunchKernel threads tangling the
 // driver launch rwlock, serializing the host-side enqueue should break it
-// (GPU execution still overlaps — only the dispatch is serialized). Set in
+// (GPU execution still overlaps - only the dispatch is serialized). Set in
 // main() before any launcher thread is spawned, then read-only.
 static std::mutex g_launchSerializeMu;
 static bool g_serializeLaunches = false;
@@ -242,7 +242,7 @@ int main(int argc, char** argv) {
     // Experiment knob: serially first-launch every distinct kernel inside the
     // SASS-armed scope BEFORE releasing the concurrent threads. Tests the
     // hypothesis that the hang is CUPTI's lazy SASS patching of modules loaded
-    // after arm — done serially (no concurrency) it should patch each module
+    // after arm - done serially (no concurrency) it should patch each module
     // without the launch-rwlock ↔ CUPTI-lock AB-BA.
     const bool prewarm   = hasFlag(argc, argv, "prewarm");
     // SASS Safe-Lock experiment: serialize host-side kernel-launch enqueue.
@@ -261,9 +261,9 @@ int main(int argc, char** argv) {
               << "  distinct kernels: " << kNumDistinctKernels << "\n"
               << "  scope-wrapped   : " << (useScope ? "yes" : "no (control)") << "\n"
               << "  prewarm modules : " << (prewarm ? "yes (serial first-launch before concurrency)" : "no") << "\n"
-              << "  serialize launch: " << (g_serializeLaunches ? "yes (global launch mutex — SASS Safe-Lock)" : "no") << "\n"
+              << "  serialize launch: " << (g_serializeLaunches ? "yes (global launch mutex - SASS Safe-Lock)" : "no") << "\n"
               << "  CUPTI activity  : "
-              << (unsafeMode ? "FULL (GPUFL_SASS_ALLOW_FULL_ACTIVITY=1 — UNSAFE, may hang)"
+              << (unsafeMode ? "FULL (GPUFL_SASS_ALLOW_FULL_ACTIVITY=1 - UNSAFE, may hang)"
                             : "safe (default defense)")
               << "\n"
               << "  watchdog        : " << timeoutSec << "s\n"
@@ -273,7 +273,7 @@ int main(int argc, char** argv) {
     if (unsafeMode) {
         std::cout << "[!] Unsafe full-activity mode requested. On an affected\n"
                      "    GPU/driver this is expected to DEADLOCK inside the\n"
-                     "    launch loop — the watchdog will force-exit.\n"
+                     "    launch loop - the watchdog will force-exit.\n"
                   << std::flush;
     }
 
@@ -305,13 +305,13 @@ int main(int argc, char** argv) {
             if (std::chrono::steady_clock::now() > deadline) {
                 std::cerr
                     << "\n========================================================\n"
-                       "[WATCHDOG] No progress for " << timeoutSec << "s — DEADLOCK.\n"
+                       "[WATCHDOG] No progress for " << timeoutSec << "s - DEADLOCK.\n"
                        "  This reproduces the PyTorch Deep-mode hang in pure C++.\n"
                        "  Trigger present: SASS armed + concurrent distinct\n"
                        "  first-launches"
                     << (unsafeMode ? " + FULL CUPTI activity bundle.\n"
                                   : " (unexpected with the safe default!).\n")
-                    << "  A hung CUPTI/driver lock cannot be unwound — forcing exit.\n"
+                    << "  A hung CUPTI/driver lock cannot be unwound - forcing exit.\n"
                        "========================================================\n"
                     << std::flush;
                 std::_Exit(42);  // distinctive code: "watchdog killed a hang"
@@ -347,7 +347,7 @@ int main(int argc, char** argv) {
                 }
                 cudaFree(d);
             }
-            std::cout << "[prewarm] done — modules patched serially.\n" << std::flush;
+            std::cout << "[prewarm] done - modules patched serially.\n" << std::flush;
         }
         for (int t = 0; t < numThreads; ++t)
             launchers.emplace_back(launcherThread, t, steps, std::ref(go),
@@ -359,7 +359,7 @@ int main(int argc, char** argv) {
 
     auto t0 = std::chrono::steady_clock::now();
     if (useScope) {
-        // SASS arms on scope entry — this is the window the deadlock needs.
+        // SASS arms on scope entry - this is the window the deadlock needs.
         GFL_SCOPE("train_epoch") {
             runWorkload();
         }
@@ -375,9 +375,9 @@ int main(int argc, char** argv) {
 
     const double secs =
         std::chrono::duration<double>(t1 - t0).count();
-    std::cout << "\n[OK] Workload completed in " << secs << "s — NO deadlock.\n";
+    std::cout << "\n[OK] Workload completed in " << secs << "s - NO deadlock.\n";
     if (unsafeMode) {
-        std::cout << "     (Full-activity mode did NOT hang on this GPU/driver —\n"
+        std::cout << "     (Full-activity mode did NOT hang on this GPU/driver -\n"
                      "      either this hardware is unaffected, or the window was\n"
                      "      not hit this run. Try more threads= / steps=.)\n";
     } else {

@@ -10,7 +10,7 @@
 
 namespace gpufl::model {
 
-/// Alias for backward compatibility — delegates to gpufl::json::escape().
+/// Alias for backward compatibility - delegates to gpufl::json::escape().
 inline std::string jsonEscape(const std::string& s) {
     return gpufl::json::escape(s);
 }

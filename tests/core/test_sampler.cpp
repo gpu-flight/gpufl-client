@@ -1,7 +1,7 @@
 // Unit tests for Sampler's ref-counted activation model.
 //
 // These tests cover the mechanics of activate() / deactivate() / shutdown()
-// directly — they do NOT exercise the full gpufl::init / GFL_SCOPE flow
+// directly - they do NOT exercise the full gpufl::init / GFL_SCOPE flow
 // (those are integration concerns and require CUDA/CUPTI). The goal here
 // is to verify:
 //
@@ -46,7 +46,7 @@ class CountingNullCollector
     std::atomic<int> calls_{0};
 };
 
-// Logger doesn't need to be opened — with zero sinks attached, write()
+// Logger doesn't need to be opened - with zero sinks attached, write()
 // is a no-op. The Sampler still calls write() at flush boundaries, but
 // the model serialization happens on an empty batch and goes nowhere.
 std::shared_ptr<gpufl::Logger> makeUnopenedLogger() {
@@ -105,7 +105,7 @@ TEST(SamplerRefCount, NestedActivationsKeepRunningUntilLastRelease) {
 
 TEST(SamplerRefCount, ActivateBeforeConfigureIsSafe) {
     gpufl::Sampler s;
-    // No configure() — represents calling activate() from a code path
+    // No configure() - represents calling activate() from a code path
     // that races init(). Counter still tracks, but no worker spawns
     // because there's nothing useful to do.
     s.activate();
@@ -119,7 +119,7 @@ TEST(SamplerRefCount, ActivateBeforeConfigureIsSafe) {
 
 TEST(SamplerRefCount, UnbalancedDeactivateClampsAtZero) {
     gpufl::Sampler s;
-    // Caller's bug — deactivate() with no matching activate().
+    // Caller's bug - deactivate() with no matching activate().
     // Must clamp at zero rather than going negative; that lets later
     // activate() calls still work correctly.
     s.deactivate();
@@ -183,7 +183,7 @@ TEST(SamplerRefCount, ReactivationAfterFullReleaseSpawnsFreshWorker) {
     EXPECT_GT(calls_after_first_run, 0);
     EXPECT_FALSE(s.running());
 
-    // Second activation cycle — verifies that std::thread can be
+    // Second activation cycle - verifies that std::thread can be
     // re-spawned after a full join. (The previous implementation reused
     // a single thread handle; the new ref-counted impl moves the handle
     // out before joining and creates a fresh one on the next 0→1.)
