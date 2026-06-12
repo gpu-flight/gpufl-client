@@ -1,4 +1,4 @@
-# gpufl-monitor — Standalone GPU Monitoring Daemon
+# gpufl-monitor - Standalone GPU Monitoring Daemon
 
 `gpufl-monitor` is a **low-overhead, always-on** daemon that continuously samples GPU and host metrics (utilization, memory, temperature, power, CPU, RAM) via NVML (NVIDIA) or ROCm SMI (AMD) and writes them as JSONL event logs. A bundled Java agent (`gpufl-agent`) tails those logs and ships the data to a GPUFlight backend.
 
@@ -46,7 +46,7 @@ docker run --rm --device /dev/kfd --device /dev/dri \
 
 ## Building the image
 
-The build uses multiple stages: a C++ stage (builds `gpufl-monitor`), a JRE stage, and a slim runtime image. The Java agent JAR is pulled automatically from the pre-built `ghcr.io/gpu-flight/gpufl-agent` image — no local checkout of `gpufl-agent` is required.
+The build uses multiple stages: a C++ stage (builds `gpufl-monitor`), a JRE stage, and a slim runtime image. The Java agent JAR is pulled automatically from the pre-built `ghcr.io/gpu-flight/gpufl-agent` image - no local checkout of `gpufl-agent` is required.
 
 ### NVIDIA
 
@@ -161,7 +161,7 @@ The named volume persists the agent's read cursor so it resumes from where it le
 | `GPUFL_MONITOR_LOG_DIR` | `/var/gpufl/monitor/session` | Directory where JSONL log files are written |
 | `GPUFL_MONITOR_INTERVAL_MS` | `5000` | Sampling interval in milliseconds |
 
-### Agent — log source
+### Agent - log source
 
 | Variable | Default | Description |
 |---|---|---|
@@ -170,7 +170,7 @@ The named volume persists the agent's read cursor so it resumes from where it le
 | `GPUFL_LOG_TYPES` | `device,scope,system` | Comma-separated log channels to tail |
 | `GPUFL_CURSOR_FILE` | `/var/gpufl/monitor/cursor.json` | Path to the cursor file for resume-on-restart |
 
-### Agent — HTTP publisher
+### Agent - HTTP publisher
 
 | Variable | Default | Description |
 |---|---|---|
@@ -180,7 +180,7 @@ The named volume persists the agent's read cursor so it resumes from where it le
 | `GPUFL_HTTP_TOKEN` | *(empty)* | Bearer token for the backend API |
 | `GPUFL_HTTP_TIMEOUT_SEC` | `10` | HTTP request timeout in seconds |
 
-### Agent — Kafka publisher (optional)
+### Agent - Kafka publisher (optional)
 
 Set `GPUFL_PUBLISHER_TYPE=kafka` and configure:
 
@@ -224,7 +224,7 @@ docker exec gpufl-monitor-amd rocm-smi
 docker logs -f gpufl-monitor
 ```
 
-5. Open the GPUFlight dashboard — the **Monitoring → Overview** page should show live GPU utilization within one sampling interval.
+5. Open the GPUFlight dashboard - the **Monitoring → Overview** page should show live GPU utilization within one sampling interval.
 
 ---
 
@@ -245,9 +245,9 @@ Each line is a JSON object. The agent reads these files, tracks its position in 
 
 ## Tuning the sampling interval
 
-The default interval is 5 seconds. For higher-resolution monitoring reduce it — but be aware of increased backend ingest load:
+The default interval is 5 seconds. For higher-resolution monitoring reduce it - but be aware of increased backend ingest load:
 
 ```bash
--e GPUFL_MONITOR_INTERVAL_MS=1000   # 1 s — fine-grained
--e GPUFL_MONITOR_INTERVAL_MS=30000  # 30 s — low-overhead fleet monitoring
+-e GPUFL_MONITOR_INTERVAL_MS=1000   # 1 s - fine-grained
+-e GPUFL_MONITOR_INTERVAL_MS=30000  # 30 s - low-overhead fleet monitoring
 ```

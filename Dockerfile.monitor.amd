@@ -1,4 +1,4 @@
-# gpufl-monitor — AMD GPU monitoring daemon + gpufl-agent uploader
+# gpufl-monitor - AMD GPU monitoring daemon + gpufl-agent uploader
 #
 # Build:
 #   docker build -f Dockerfile.monitor.amd -t gpufl/monitor-amd:latest .
@@ -77,7 +77,7 @@ COPY --from=agent-jar /app/gpufl-agent.jar /opt/gpufl-agent/agent.jar
 # supervisord config
 COPY Dockerfile.monitor.supervisord.conf /etc/supervisor/conf.d/gpufl-monitor.conf
 
-# Default values — override with -e flags at runtime
+# Default values - override with -e flags at runtime
 ENV GPUFL_MONITOR_APP=gpufl-monitor
 ENV GPUFL_MONITOR_LOG_DIR=/var/gpufl/monitor/session
 ENV GPUFL_MONITOR_INTERVAL_MS=5000

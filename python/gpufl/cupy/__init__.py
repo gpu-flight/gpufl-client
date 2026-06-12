@@ -1,5 +1,5 @@
 """
-gpufl.cupy — planned CuPy integration (stub during private beta).
+gpufl.cupy - planned CuPy integration (stub during private beta).
 
 CuPy kernels launch via the same CUDA driver path CUPTI already hooks, so
 the C++ client captures their execution transparently. What's not yet
@@ -23,7 +23,7 @@ manually annotate regions of interest with CuPy's built-in NVTX:
 
 GPUFlight captures those NVTX ranges via its CUPTI marker path, so the
 `matmul-batch` region will appear in the dashboard alongside the CUDA
-kernels it covers. No additional library needed — the stub here exists
+kernels it covers. No additional library needed - the stub here exists
 so `import gpufl.cupy` gives a clear message rather than
 `ModuleNotFoundError`.
 

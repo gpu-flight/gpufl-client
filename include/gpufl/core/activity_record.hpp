@@ -100,8 +100,8 @@ struct ActivityRecord {
     // Memory-allocation specific.
     //
     // memory_op: 1 = ALLOC, 2 = FREE. Mirrors CUpti_ActivityMemoryOperationType
-    // (we collapse the variants we don't surface in v1 — release-async
-    // and so on — into the two top-level buckets; the dashboard only
+    // (we collapse the variants we don't surface in v1 - release-async
+    // and so on - into the two top-level buckets; the dashboard only
     // distinguishes alloc-vs-free in its first iteration).
     //
     // memory_kind values mirror CUpti_ActivityMemoryKind:
@@ -119,13 +119,13 @@ struct ActivityRecord {
 
     // Synchronization-event specific.
     //
-    // sync_type encodes which CUPTI synchronization variant fired —
+    // sync_type encodes which CUPTI synchronization variant fired -
     // stored as uint8_t to keep ActivityRecord small. Values mirror
     // CUpti_ActivitySynchronizationType (cupti_activity.h):
     //   0 = UNKNOWN, 1 = EVENT_SYNCHRONIZE, 2 = STREAM_WAIT_EVENT,
     //   3 = STREAM_SYNCHRONIZE, 4 = CONTEXT_SYNCHRONIZE.
     // Mapping to user-readable names happens in SynchronizationEventModel
-    // — backend stores the integer, frontend renders the label.
+    // - backend stores the integer, frontend renders the label.
     //
     // sync_event_id is the CUPTI eventId (cudaEvent_t handle) for
     // EVENT_SYNCHRONIZE / STREAM_WAIT_EVENT records; zero for stream-
@@ -136,7 +136,7 @@ struct ActivityRecord {
     // CUDA context handle the sync executed on. Captured from
     // CUpti_ActivitySynchronization::contextId in the BufferCompleted
     // handler and forwarded to SynchronizationEvent.context_id by
-    // CollectorLoop. (Was previously stashed in scope_depth — that
+    // CollectorLoop. (Was previously stashed in scope_depth - that
     // worked but blocked the legitimate use of scope_depth on
     // SYNCHRONIZATION records and obscured intent for readers.)
     uint32_t context_id = 0;

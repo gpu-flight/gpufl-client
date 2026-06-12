@@ -17,7 +17,7 @@ FROM nvidia/cuda:13.1.0-devel-ubuntu24.04 AS builder
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install build dependencies.
-# libssl-dev is REQUIRED for cpp-httplib HTTPS support — without it, CMake's
+# libssl-dev is REQUIRED for cpp-httplib HTTPS support - without it, CMake's
 # find_package(OpenSSL QUIET) silently fails and the wheel is built HTTP-only.
 # Symptom at runtime: gpufl.upload_logs() to https:// returns a single warning
 # "uploadLogs: failed to construct HTTP client for https://..." because

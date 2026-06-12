@@ -9,7 +9,7 @@
 // has already begun destroying its primary context (cudart registers its own
 // atexit AFTER our injection-time one, so it runs first). Calling
 // cudaDeviceSynchronize(), cuptiActivityFlushAll(), or nvmlShutdown() against
-// that dying context/driver deadlocks in the kernel — the process becomes
+// that dying context/driver deadlocks in the kernel - the process becomes
 // unkillable.
 //
 // The inject lib sets this flag (Windows only) immediately before its atexit

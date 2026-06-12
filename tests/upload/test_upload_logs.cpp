@@ -3,7 +3,7 @@
 // U1 wire model: ONE gzipped NDJSON POST per rotated log file to
 // /api/v1/events/stream, X-GpuFlight-Session-Id in the header, the
 // file's bytes shipped as-is (no client-side chunking or per-line
-// filtering — the backend validates per line). The capture server here
+// filtering - the backend validates per line). The capture server here
 // listens on that single route, decompresses the body, and exposes
 // both per-request and per-line views so tests can assert on either
 // granularity. ("Chunk" in the helper names = one captured request.)
@@ -100,7 +100,7 @@ std::string extractSessionId(const std::string& line) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Capture server — listens on /api/v1/events/stream
+// Capture server - listens on /api/v1/events/stream
 // ─────────────────────────────────────────────────────────────────────
 
 /// Localhost server that captures every chunk POSTed by uploadLogs.
@@ -128,9 +128,9 @@ class CaptureServer {
 
     /// Response shape selector. Lets a single test fixture exercise
     /// both backend lineages:
-    ///   - LegacySync — pre-Phase 3a backend: HTTP 200 with
+    ///   - LegacySync - pre-Phase 3a backend: HTTP 200 with
     ///     `{accepted, rejected, errors}`.
-    ///   - AsyncSpool — Phase 3a+ backend: HTTP 202 with
+    ///   - AsyncSpool - Phase 3a+ backend: HTTP 202 with
     ///     `{accepted_for_processing, spool_id}`.
     /// The body-recording logic is identical for both; only the
     /// response status code + body differ.
@@ -162,7 +162,7 @@ class CaptureServer {
                 // With CPPHTTPLIB_ZLIB_SUPPORT enabled (see top-level
                 // CMakeLists.txt), cpp-httplib's server auto-decompresses
                 // incoming bodies that carry Content-Encoding: gzip
-                // BEFORE the handler runs — req.body is already the raw
+                // BEFORE the handler runs - req.body is already the raw
                 // NDJSON. (Without ZLIB support, the server would have
                 // returned 415 before reaching us.)
                 c.body = req.body;
@@ -191,7 +191,7 @@ class CaptureServer {
                 if (status >= 200 && status < 300) {
                     if (shape_ == ResponseShape::AsyncSpool) {
                         // Phase 3a+ wire shape. spool_id is a synthetic
-                        // sequence — real GcsSpoolBackend uses UUIDs
+                        // sequence - real GcsSpoolBackend uses UUIDs
                         // but tests don't need the entropy.
                         std::ostringstream rsp;
                         rsp << "{\"accepted_for_processing\":true,"
@@ -233,7 +233,7 @@ class CaptureServer {
     }
 
     /// Flatten across all chunks: returns every NDJSON line POSTed, in
-    /// arrival order. The pre-v1.2 tests called this "captures" — keep
+    /// arrival order. The pre-v1.2 tests called this "captures" - keep
     /// the same idea so semantically-equivalent assertions read the
     /// same.
     std::vector<std::string> allLines() {
@@ -286,26 +286,26 @@ void writeLog(const fs::path& path, const std::vector<std::string>& lines,
 
 /// Build a minimal session under the v1.2 per-session-subdirectory
 /// layout. Files live at `<root>/<sid>/<channel>[.N].log[.gz]`. The
-/// returned string is the `log_path` to pass to uploadLogs — in v1.2
+/// returned string is the `log_path` to pass to uploadLogs - in v1.2
 /// that's just the parent directory (root), not a prefix.
 std::string makeMinimalSession(const fs::path& root,
                                const std::string& sid = "s1") {
     const fs::path session_dir = root / sid;
     fs::create_directories(session_dir);
-    // Rotated (older) — device channel only, gzipped. job_start is
+    // Rotated (older) - device channel only, gzipped. job_start is
     // Channel::All in the client, so it heads every channel's oldest
     // file; one copy is enough for the device chain here.
     writeLog(session_dir / "device.1.log.gz", {
         R"({"type":"job_start","session_id":")" + sid + R"(","app":"test","pid":1,"ts_ns":100})",
         R"({"type":"kernel_event_batch","session_id":")" + sid + R"(","batch_id":1,"rows":[[0,1,0,1000,101,0,32,1]]})",
     }, /*gzip=*/true);
-    // Active device .log — newer events. shutdown is Channel::All in
+    // Active device .log - newer events. shutdown is Channel::All in
     // the client: every channel's active file ends with a copy.
     writeLog(session_dir / "device.log", {
         R"({"type":"kernel_event_batch","session_id":")" + sid + R"(","batch_id":2,"rows":[[2000,2,0,1500,102,0,64,1]]})",
         R"({"type":"shutdown","session_id":")" + sid + R"(","app":"test","pid":1,"ts_ns":9999})",
     });
-    // Scope channel, active only — carries its own shutdown copy, like
+    // Scope channel, active only - carries its own shutdown copy, like
     // the real logger writes.
     writeLog(session_dir / "scope.log", {
         R"({"type":"scope_event_batch","session_id":")" + sid + R"(","batch_id":1,"rows":[[0,1,1,0,0],[5000,1,1,1,0]]})",
@@ -343,14 +343,14 @@ TEST(UploadLogs, UploadsAllEventsAcrossChannelsAndRotation) {
     EXPECT_EQ(result.files_processed, 3u);  // device.1.log.gz + device.log + scope.log
     EXPECT_TRUE(result.warnings.empty()) << "Unexpected warnings on happy path";
 
-    // One POST per file — the U1 contract.
+    // One POST per file - the U1 contract.
     EXPECT_EQ(srv.snapshot().size(), 3u);
 
     const auto events = srv.allEvents();
     ASSERT_EQ(events.size(), 6u);
 
     // job_start must arrive first (first line of the oldest file of the
-    // first channel). The last file's last line is its shutdown copy —
+    // first channel). The last file's last line is its shutdown copy -
     // files go (channel asc, rotation desc, active last).
     EXPECT_EQ(events.front().first, "job_start");
     EXPECT_EQ(events.back().first,  "shutdown");
@@ -363,7 +363,7 @@ TEST(UploadLogs, AsyncAccept202_NoEventCounts_SpoolIdsRecorded) {
     // `{accepted_for_processing, spool_id}` and do NOT carry per-line
     // accepted/rejected counts. The client must:
     //   - treat the 202 as success (no warning),
-    //   - leave events_uploaded at 0 (nothing was dispatched yet —
+    //   - leave events_uploaded at 0 (nothing was dispatched yet -
     //     bytes/files are the progress numbers on this path),
     //   - stash spool_id into UploadResult.spool_ids so operators can
     //     correlate with backend logs (one per file POST).
@@ -384,7 +384,7 @@ TEST(UploadLogs, AsyncAccept202_NoEventCounts_SpoolIdsRecorded) {
     EXPECT_TRUE(result.success) << "warnings: "
         << (result.warnings.empty() ? "<none>" : result.warnings.front());
     EXPECT_EQ(result.events_uploaded, 0u)
-        << "Async-accept responses carry no per-line counts — "
+        << "Async-accept responses carry no per-line counts - "
         << "events_uploaded must stay 0 rather than guess.";
     EXPECT_GT(result.bytes_uploaded, 0u);
     EXPECT_EQ(result.files_processed, 3u);
@@ -403,7 +403,7 @@ TEST(UploadLogs, ChunkBodyIsGzippedNdjsonNotEventWrapper) {
     // Regression guard against accidentally falling back to the v1.1
     // per-event EventWrapper format. The new wire format is raw NDJSON
     // (one event per line), gzipped, with the session-id in a header.
-    // No "data" field, no "agentSendingTime" field — just the events
+    // No "data" field, no "agentSendingTime" field - just the events
     // themselves, byte-identical to what's on disk.
     const fs::path tmp = fs::temp_directory_path() / "gpufl_upload_test_ndjson";
     fs::remove_all(tmp);
@@ -427,7 +427,7 @@ TEST(UploadLogs, ChunkBodyIsGzippedNdjsonNotEventWrapper) {
         EXPECT_FALSE(c.session_id.empty())
             << "Every chunk must carry X-GpuFlight-Session-Id.";
         // Body should NOT look like an EventWrapper envelope. The
-        // legacy format started with `{"data":` — the new format
+        // legacy format started with `{"data":` - the new format
         // starts directly with the first event's `{"type":`.
         EXPECT_EQ(c.body.find("\"data\":\""), std::string::npos)
             << "Chunk body should not be EventWrapper-wrapped: " << c.body;
@@ -472,12 +472,12 @@ TEST(UploadLogs, AuthHeaderAndVersionHeadersPresentOnEveryChunk) {
 }
 
 TEST(UploadLogs, FileBodyShipsAsIs_SessionValidationIsServerSide) {
-    // U1 ships the file's bytes verbatim — there is no per-line
+    // U1 ships the file's bytes verbatim - there is no per-line
     // client-side filtering anymore. A corrupted file containing
     // another session's lines therefore reaches the wire as-is; the
     // BACKEND rejects mismatched lines (it has always validated every
     // line's session_id against the X-GpuFlight-Session-Id header).
-    // Normal operation never produces such files — the rotator writes
+    // Normal operation never produces such files - the rotator writes
     // only the active session_id into <sid>/<channel>.log.
     const fs::path tmp = fs::temp_directory_path() / "gpufl_upload_test_filter";
     fs::remove_all(tmp);
@@ -486,7 +486,7 @@ TEST(UploadLogs, FileBodyShipsAsIs_SessionValidationIsServerSide) {
     fs::create_directories(tmp / "s1");
     writeLog(tmp / "s1" / "device.log", {
         R"({"type":"job_start","session_id":"s1","ts_ns":1})",
-        R"({"type":"kernel_event_batch","session_id":"s2","rows":[]})",   // wrong session — server's problem
+        R"({"type":"kernel_event_batch","session_id":"s2","rows":[]})",   // wrong session - server's problem
         R"({"type":"kernel_event_batch","session_id":"s1","rows":[]})",
         R"({"type":"shutdown","session_id":"s1","ts_ns":99})",
     });
@@ -506,7 +506,7 @@ TEST(UploadLogs, FileBodyShipsAsIs_SessionValidationIsServerSide) {
     ASSERT_EQ(chunks.size(), 1u) << "One file → one POST.";
     EXPECT_EQ(chunks.front().session_id, "s1");
     EXPECT_EQ(chunks.front().lines.size(), 4u)
-        << "The body is the file verbatim — including the s2 line the "
+        << "The body is the file verbatim - including the s2 line the "
         << "backend will reject per-line.";
 
     fs::remove_all(tmp);
@@ -598,13 +598,13 @@ TEST(UploadLogs, AuthFailureShortCircuits) {
     EXPECT_FALSE(result.warnings.empty());
     // First chunk returns 401 → abort. No subsequent chunks.
     EXPECT_EQ(srv.snapshot().size(), 1u)
-        << "Auth failure should short-circuit — no further chunks expected";
+        << "Auth failure should short-circuit - no further chunks expected";
 
     fs::remove_all(tmp);
 }
 
 TEST(UploadLogs, OldBackend404SurfacesMigrationWarning) {
-    // Backend predates v1.2 — /events/stream doesn't exist. We expect
+    // Backend predates v1.2 - /events/stream doesn't exist. We expect
     // a single 404, no retries, and a clear migration-hint warning.
     const fs::path tmp = fs::temp_directory_path() / "gpufl_upload_test_404";
     fs::remove_all(tmp);
@@ -623,7 +623,7 @@ TEST(UploadLogs, OldBackend404SurfacesMigrationWarning) {
     EXPECT_FALSE(result.success);
     EXPECT_EQ(result.events_uploaded, 0u);
     ASSERT_FALSE(result.warnings.empty());
-    // Look for the migration hint anywhere in the warnings — exact
+    // Look for the migration hint anywhere in the warnings - exact
     // wording can drift but the marker terms shouldn't.
     bool found_hint = false;
     for (const auto& w : result.warnings) {
@@ -636,7 +636,7 @@ TEST(UploadLogs, OldBackend404SurfacesMigrationWarning) {
     EXPECT_TRUE(found_hint)
         << "Expected a 404 warning mentioning /api/v1/events/stream and backend";
     EXPECT_EQ(srv.snapshot().size(), 1u)
-        << "404 must not trigger retries — every subsequent chunk would 404 too.";
+        << "404 must not trigger retries - every subsequent chunk would 404 too.";
 
     fs::remove_all(tmp);
 }
@@ -697,7 +697,7 @@ TEST(UploadLogs, EmptyLogDirIsSuccessNoOp) {
 }
 
 TEST(UploadLogs, MalformedLinesShipAsIs_ServerJudgesPerLine) {
-    // No client-side line parsing in U1 — a malformed line ships with
+    // No client-side line parsing in U1 - a malformed line ships with
     // its file and the backend records it as a per-line rejection
     // (skip-and-continue; it never reaches SQL). The client neither
     // warns nor drops anything locally.
@@ -889,7 +889,7 @@ TEST(UploadLogs, AllSessionsUploadsEveryDistinctSession) {
     const bool no_interleave =
         (s_old_last < s_new_first) || (s_new_last < s_old_first);
     EXPECT_TRUE(no_interleave)
-        << "Sessions should not interleave at the chunk level — each "
+        << "Sessions should not interleave at the chunk level - each "
         << "session's chunks must be contiguous.";
 
     fs::remove_all(tmp);
@@ -968,22 +968,22 @@ TEST(UploadLogs, JobStartFirstShutdownLast) {
     const auto events = srv.allEvents();
     ASSERT_EQ(events.size(), 4u);
     EXPECT_EQ(events.front().first, "job_start")
-        << "job_start must be the first NDJSON line shipped — it heads "
+        << "job_start must be the first NDJSON line shipped - it heads "
         << "the oldest rotated file, which is POSTed first.";
     EXPECT_EQ(events.back().first, "shutdown")
-        << "shutdown must be the last NDJSON line shipped — it tails "
+        << "shutdown must be the last NDJSON line shipped - it tails "
         << "the active file, which is POSTed last.";
 
     fs::remove_all(tmp);
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// File-unit upload — one POST per file regardless of line count.
+// File-unit upload - one POST per file regardless of line count.
 // ─────────────────────────────────────────────────────────────────────
 
 TEST(UploadLogs, ManyEventsShipInOneRequestPerFile) {
     // U1 regression guard: a file with far more lines than the old
-    // 5000-line chunk cap still ships in exactly ONE request — the
+    // 5000-line chunk cap still ships in exactly ONE request - the
     // rotator's file size is the upload unit now.
     const fs::path tmp = fs::temp_directory_path() / "gpufl_upload_test_chunks";
     fs::remove_all(tmp);
@@ -1015,7 +1015,7 @@ TEST(UploadLogs, ManyEventsShipInOneRequestPerFile) {
 
     const auto chunks = srv.snapshot();
     ASSERT_EQ(chunks.size(), 1u)
-        << "One file must ship as one request — no client-side chunking.";
+        << "One file must ship as one request - no client-side chunking.";
     EXPECT_EQ(chunks.front().lines.size(), static_cast<std::size_t>(kLines + 2));
     EXPECT_EQ(chunks.back().events.back().first, "shutdown");
 

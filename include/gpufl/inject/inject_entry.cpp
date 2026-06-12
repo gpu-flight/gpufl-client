@@ -1,12 +1,12 @@
-// Entry point for libgpufl_inject.so — the shared library the launcher
+// Entry point for libgpufl_inject.so - the shared library the launcher
 // (`gpufl trace`) preloads into the target via LD_PRELOAD and
 // CUDA_INJECTION64_PATH.
 //
 // Two entry paths, both routing through one idempotent init:
-//   1. __attribute__((constructor)) — runs at ld.so dlopen time, before
+//   1. __attribute__((constructor)) - runs at ld.so dlopen time, before
 //      main(). First-chance hook; captures CUDA work that happens
 //      before any framework profiler initializes.
-//   2. extern "C" int InitializeInjection(void*) — NVIDIA's official
+//   2. extern "C" int InitializeInjection(void*) - NVIDIA's official
 //      CUDA injection ABI; libcuda calls this after cuInit. Second
 //      chance, in case the constructor was bypassed (e.g. lib wasn't
 //      LD_PRELOAD'd but only set as CUDA_INJECTION64_PATH).
@@ -411,7 +411,7 @@ void registerShutdownAtexit() {
 }
 
 void doInjectInit() {
-    // Sentinel guard — set by the launcher. Without it, treat the
+    // Sentinel guard - set by the launcher. Without it, treat the
     // preload as accidental (e.g. `LD_PRELOAD=...:libgpufl_inject.so`
     // leaking into a shell) and return silently.
     const char* sentinel = envOrNull(gpufl::env::kInject);
@@ -425,7 +425,7 @@ void doInjectInit() {
         } else if (std::strcmp(p, gpufl::inject::kProfileMonitoringOnly) == 0) {
             opts = gpufl::monitoring_mode_default_options();
         } else {
-            // "comprehensive" (default) — full injection capture (Deep
+            // "comprehensive" (default) - full injection capture (Deep
             // engine + most observability flags on).
             opts = gpufl::injection_mode_default_options();
         }
@@ -433,7 +433,7 @@ void doInjectInit() {
         opts = gpufl::injection_mode_default_options();
     }
 
-    // Layered overrides — env vars beat preset defaults but lose to
+    // Layered overrides - env vars beat preset defaults but lose to
     // gpufl::init()'s own remote-config / programmatic tuning that
     // happens downstream of this struct.
     if (const char* v = envOrNull(gpufl::env::kAppName)) {
@@ -445,6 +445,9 @@ void doInjectInit() {
         // --output dir should be used as-is.
         opts.log_path = std::string(v);
     }
+    if (const char* v = envOrNull(gpufl::env::kDebugOutput)) {
+        opts.enable_debug_output = std::strcmp(v, "1") == 0;
+    }
 #ifdef _WIN32
     // Windows CUDA injection can leave the process through CRT/driver teardown
     // paths where the final logger close is not reliable. Keep each NDJSON line
@@ -452,7 +455,7 @@ void doInjectInit() {
     opts.flush_logs_always = true;
 #endif
     // gpufl::init() reads the rest of the GPUFL_* env vars itself,
-    // including GPUFL_PROFILING_ENGINE — it is the single string->enum
+    // including GPUFL_PROFILING_ENGINE - it is the single string->enum
     // engine parser (see gpufl.cpp). It also reads backend_url, api_key,
     // api_path, config_name. No need to plumb any of them through here.
 
@@ -552,12 +555,12 @@ GPUFL_INJECT_EXPORT int InitializeInjectionNvtx2(
 // pre-`cuInit` constructor segfaults on no-CUDA targets (the lib is
 // preloaded into `echo`, libcuda is dragged in as a DT_NEEDED, CUPTI
 // subscribe tries to touch driver state that doesn't exist, SIGSEGV).
-// Falling back to `InitializeInjection` only — libcuda calls that
+// Falling back to `InitializeInjection` only - libcuda calls that
 // after `cuInit`, so a no-CUDA target like `echo` never triggers init
 // (target runs clean, empty trace dir, no crash, matching
 // verification 1.12.4).
 //
-// Set `GPUFL_INJECT_USE_CONSTRUCTOR=1` to opt back in — useful for
+// Set `GPUFL_INJECT_USE_CONSTRUCTOR=1` to opt back in - useful for
 // workloads where the first CUDA call happens deep in third-party
 // code we want to catch the lead-up to, and where the toolchain has
 // been verified to tolerate pre-cuInit subscribe.
@@ -567,14 +570,14 @@ GPUFL_INJECT_EXPORT int InitializeInjectionNvtx2(
     if (!opt_in || std::strcmp(opt_in, "1") != 0) return;
     std::call_once(g_init_once, doInjectInit);
 }
-#endif  // !_WIN32 — pre-cuInit constructor path is Linux-only; on Windows
+#endif  // !_WIN32 - pre-cuInit constructor path is Linux-only; on Windows
         // it would run under the loader lock, so we rely on the
         // InitializeInjection ABI path (driver-invoked, lock-safe) instead.
 
 
 // Second-chance entry: NVIDIA's CUDA_INJECTION64_PATH ABI. libcuda
 // loads this lib when cuInit runs, then calls InitializeInjection
-// with a function table (which we ignore — gpufl::init() drives CUPTI
+// with a function table (which we ignore - gpufl::init() drives CUPTI
 // directly via its own subscriber). Returning 0 means "ok, proceed".
 //
 // Idempotent with the constructor via the once_flag, so whichever
@@ -591,8 +594,8 @@ int InitializeInjection(void* /*funcTable*/) {
     // app's CUDA work and its context teardown, and CUPTI/NVML setup deadlocks
     // against the driver lock (observed: init thread wedges, process becomes
     // unkillable). The driver calls InitializeInjection before the app's first
-    // kernel, so initialize SYNCHRONOUSLY here — the standard CUPTI/Nsight
-    // injection pattern — so init fully completes before any kernel runs.
+    // kernel, so initialize SYNCHRONOUSLY here - the standard CUPTI/Nsight
+    // injection pattern - so init fully completes before any kernel runs.
     std::call_once(g_init_once, doInjectInit);
 #else
     startDeferredInjectInit();
@@ -603,7 +606,7 @@ int InitializeInjection(void* /*funcTable*/) {
 #ifndef _WIN32
 // Launch/sync symbol interposition (wait-for-init + forward) is Linux/glibc
 // only: it relies on LD_PRELOAD shadowing libcudart's symbols. Windows has
-// no preload interposition, so these wrappers don't exist there — Windows
+// no preload interposition, so these wrappers don't exist there - Windows
 // injection relies solely on the CUDA injection ABI (InitializeInjection).
 struct GpuflDim3 {
     unsigned int x;
@@ -623,7 +626,7 @@ using CuLaunchKernelFn = int (*)(void*, unsigned int, unsigned int, unsigned int
 // definition shadows libcudart's, and we forward to the real one via
 // dlsym(RTLD_NEXT). The resolved pointer is cached in a function-local
 // `static` (thread-safe magic-static init) so the link-map walk runs
-// ONCE per symbol, not on every kernel launch — a PyTorch hot loop does
+// ONCE per symbol, not on every kernel launch - a PyTorch hot loop does
 // tens of thousands of launches/sec, where a per-call dlsym is real
 // overhead. RTLD_NEXT resolution order is fixed for the process lifetime,
 // so the cache is always valid.

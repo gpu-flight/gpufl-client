@@ -72,7 +72,7 @@ TEST(BatchModels, SynchronizationEventModelEmitsExpectedShape) {
     gpufl::model::SynchronizationEventModel m(ev);
     const std::string json = m.buildJson();
 
-    // Top-level type discriminator — Java backend dispatches on this.
+    // Top-level type discriminator - Java backend dispatches on this.
     EXPECT_NE(json.find("\"type\":\"synchronization_event\""), std::string::npos);
     // Critical fields present.
     EXPECT_NE(json.find("\"sync_type\":3"), std::string::npos);
@@ -84,7 +84,7 @@ TEST(BatchModels, SynchronizationEventModelEmitsExpectedShape) {
 }
 
 // MemoryAllocEventModel emits the wire shape the Java backend
-// dispatches on. Snapshot test — pin the JSON layout so a future
+// dispatches on. Snapshot test - pin the JSON layout so a future
 // rename like "memory_op" → "op" trips the build.
 TEST(BatchModels, MemoryAllocEventModelEmitsExpectedShape) {
     gpufl::MemoryAllocEvent ev;

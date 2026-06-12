@@ -7,7 +7,7 @@ namespace gpufl::test {
  * gather useful data in any profiling engine.
  *
  * Used by the engine-coverage tests. The default iteration count is tuned so
- * the kernel executes in roughly 10 ms on a modern GPU — enough time for PC
+ * the kernel executes in roughly 10 ms on a modern GPU - enough time for PC
  * Sampling to collect a handful of samples and for SASS / Range Profiler
  * replay passes to complete.
  *

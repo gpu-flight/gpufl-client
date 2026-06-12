@@ -1,4 +1,4 @@
-GPUFlight Client (gpufl) — Third-Party Notices
+GPUFlight Client (gpufl) - Third-Party Notices
 ===============================================
 
 The gpufl distribution (the Python wheel and any container image built from
@@ -67,7 +67,7 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ================================================================================
-3. OpenSSL  (libssl, libcrypto — bundled as shared libraries in the wheel)
+3. OpenSSL  (libssl, libcrypto - bundled as shared libraries in the wheel)
    https://www.openssl.org/
 --------------------------------------------------------------------------------
 Copyright 1999-2025 The OpenSSL Project Authors. All Rights Reserved.
@@ -106,7 +106,7 @@ upon the `nvidia/cuda` base image, which is governed by the NVIDIA Deep Learning
 Container License (a copy is included in the image at /NGC-DL-CONTAINER-LICENSE).
 
 ================================================================================
-5. Apache License, Version 2.0  (full text — applies to OpenSSL above and to
+5. Apache License, Version 2.0  (full text - applies to OpenSSL above and to
    gpufl's own source)
 --------------------------------------------------------------------------------
 

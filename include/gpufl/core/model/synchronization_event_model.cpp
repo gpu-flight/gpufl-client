@@ -8,12 +8,12 @@ namespace gpufl::model {
 
 std::string SynchronizationEventModel::buildJson() const {
     // Field set, in order:
-    //   pid, app, session_id  — universal envelope
-    //   start_ns / end_ns     — wall clock; backend partitions on time
-    //   duration_ns           — keep redundant copy (mirrors NvtxMarkerModel)
-    //   sync_type             — integer; backend stores raw, frontend
+    //   pid, app, session_id  - universal envelope
+    //   start_ns / end_ns     - wall clock; backend partitions on time
+    //   duration_ns           - keep redundant copy (mirrors NvtxMarkerModel)
+    //   sync_type             - integer; backend stores raw, frontend
     //                           maps to label (StreamSynchronize / etc.)
-    //   stream_id, event_id, context_id, corr_id — join keys
+    //   stream_id, event_id, context_id, corr_id - join keys
     //
     // Numeric-only fields use no quotes; strings are escaped via
     // jsonEscape (handles backslashes / quotes / control chars).

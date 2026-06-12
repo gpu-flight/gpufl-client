@@ -41,7 +41,7 @@ TEST_F(NvmlCollectorTest, SampleDynamicMetrics) {
         EXPECT_LE(sample.gpu_util, 100);
         EXPECT_LE(sample.mem_util, 100);
 
-        // Clock metrics — may be 0 when GPU is idle (power-saving mode)
+        // Clock metrics - may be 0 when GPU is idle (power-saving mode)
         EXPECT_GE(sample.clock_sm, 0);
         EXPECT_GE(sample.clock_mem, 0);
 

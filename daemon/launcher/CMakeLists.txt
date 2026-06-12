@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.31)
 # The `gpufl` launcher (trace / upload / version) builds on Linux and
 # Windows. `trace` has a per-OS backend: POSIX fork/exec+LD_PRELOAD on
 # Linux, CreateProcess+CUDA_INJECTION64_PATH on Windows. `upload` and
-# `version` are portable. macOS has no CUDA injection path — skip it.
+# `version` are portable. macOS has no CUDA injection path - skip it.
 if(APPLE OR NOT (UNIX OR WIN32))
     return()
 endif()

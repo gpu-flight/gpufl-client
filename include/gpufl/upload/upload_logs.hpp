@@ -3,7 +3,7 @@
 // Deferred bulk upload of a profiling session's NDJSON logs.
 //
 // Replaces the per-batch HttpLogSink streaming model. The C++ client
-// writes everything to local NDJSON files during the session (always —
+// writes everything to local NDJSON files during the session (always -
 // regardless of upload mode); when the user wants to ship data to the
 // backend, they call uploadLogs() AFTER gpufl::shutdown() has returned.
 //
@@ -24,7 +24,7 @@ namespace gpufl {
  *
  * All fields are independent. Callers typically populate at minimum
  * `log_path`, `backend_url`, and `api_key`; the rest have sensible
- * defaults tuned for "dev mode" — short total budget, one quick retry,
+ * defaults tuned for "dev mode" - short total budget, one quick retry,
  * fail loud on auth errors.
  */
 struct UploadOptions {
@@ -59,7 +59,7 @@ struct UploadOptions {
     /**
      * Total wall-clock budget for the entire upload. If the budget
      * expires mid-stream, uploadLogs returns with success=false and a
-     * warning. Default 5 minutes — generous for ~500 MB sessions on a
+     * warning. Default 5 minutes - generous for ~500 MB sessions on a
      * typical home connection, short enough that an unreachable backend
      * doesn't hang the caller indefinitely.
      */
@@ -73,7 +73,7 @@ struct UploadOptions {
 
     /**
      * Number of retries per failing POST. Plan calls for "one quick
-     * retry per POST, then give up" — that catches transient flakes
+     * retry per POST, then give up" - that catches transient flakes
      * without amplifying a sustained outage into a retry storm.
      * Default 1.
      */
@@ -87,7 +87,7 @@ struct UploadOptions {
      * Tracks (a) rotated files that have been successfully uploaded so
      * a re-run resumes rather than re-sending, and (b) the set of
      * `session_id`s that have completed a successful upload at least
-     * once — used by the `force` flag below to refuse accidental
+     * once - used by the `force` flag below to refuse accidental
      * re-uploads.
      *
      * Schema is auto-migrated: a v1 cursor file (just `uploaded_files`)
@@ -107,11 +107,11 @@ struct UploadOptions {
 
     /**
      * Upload only the session whose `session_id` matches this value.
-     * Empty (default) means "no explicit filter — fall through to
+     * Empty (default) means "no explicit filter - fall through to
      * latest-by-default or all_sessions". If non-empty AND the session
      * isn't found in any discovered file, uploadLogs() returns
      * success=false with a warning. Mutually exclusive with
-     * `all_sessions` — setting both is rejected with success=false.
+     * `all_sessions` - setting both is rejected with success=false.
      */
     std::string session_id_filter;
 
@@ -123,7 +123,7 @@ struct UploadOptions {
      * processed oldest-first by `job_start.ts_ns`.
      *
      * Sessions already listed in the cursor's `completed_sessions`
-     * map are silently skipped (unless `force=true`) — batch
+     * map are silently skipped (unless `force=true`) - batch
      * semantics imply "do what's still pending."
      *
      * Mutually exclusive with `session_id_filter`.
@@ -158,7 +158,7 @@ struct UploadResult {
      * True iff every event from every discovered file was acknowledged
      * by the backend with a 2xx response inside the total wall budget.
      * False on:
-     *   - any 401/403 (auth error) — short-circuits remaining work
+     *   - any 401/403 (auth error) - short-circuits remaining work
      *   - total_timeout_ms exhausted
      *   - log_path's directory missing
      *   - cursor file unreadable AND unrepairable
@@ -176,7 +176,7 @@ struct UploadResult {
      * Number of NDJSON events the backend acknowledged synchronously.
      * Only legacy (pre-Phase 3a) backends report per-line counts at
      * POST time; against an async-accept backend (202 + spool_id) this
-     * stays 0 — use {@code bytes_uploaded}/{@code files_processed} for
+     * stays 0 - use {@code bytes_uploaded}/{@code files_processed} for
      * progress reporting instead.
      */
     std::size_t events_uploaded = 0;
@@ -203,7 +203,7 @@ struct UploadResult {
      * <p>The client doesn't poll these (`uploadLogs` is fire-and-
      * forget: it considers a 202 with a spool_id to be "all-sent-
      * assumed-accepted"). They're exposed here for operator
-     * debugging — when an upload returns success but the dashboard
+     * debugging - when an upload returns success but the dashboard
      * never shows the data, grepping the backend's structured log
      * by spool id pinpoints whether (a) the chunk reached spool
      * storage, (b) the worker claimed it, and (c) the per-line
@@ -213,7 +213,7 @@ struct UploadResult {
 };
 
 /**
- * Synchronous bulk upload. Never throws — all errors flow through
+ * Synchronous bulk upload. Never throws - all errors flow through
  * `UploadResult.warnings` and the `success` flag. Safe to call from any
  * thread, but typically called from the caller's main thread after
  * `gpufl::shutdown()` has returned.
@@ -228,7 +228,7 @@ struct UploadResult {
  * single request with its bytes as-is (no decompress/re-chunk pass).
  * Files go in (channel, rotation-index DESC, active-last) order, so
  * `job_start` (first line of the oldest file) is POSTed first and
- * `shutdown` (last line of the active file) last — arrival order per
+ * `shutdown` (last line of the active file) last - arrival order per
  * session is preserved before any subsequent session begins.
  *
  * Cursor file:

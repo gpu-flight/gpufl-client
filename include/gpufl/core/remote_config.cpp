@@ -1,7 +1,7 @@
 // Include httplib.h FIRST so its winsock2.h pull-in wins on Windows,
 // before anything else could drag in <windows.h> (which would bring in
 // legacy <winsock.h> and collide with winsock2). This TU intentionally
-// does NOT include <windows.h> — any Windows-specific code stays in
+// does NOT include <windows.h> - any Windows-specific code stays in
 // gpufl.cpp, which calls into this file via remote_config.hpp.
 #include <httplib.h>
 
@@ -20,7 +20,7 @@ namespace {
 /**
  * Parse a backend base URL (e.g. "https://api.gpuflight.com" or
  * "http://localhost:8080") into (scheme, host, port). Mirrors the same
- * logic used by gpufl::uploadLogs — kept local because the duplication
+ * logic used by gpufl::uploadLogs - kept local because the duplication
  * is ~20 lines and sharing would require a public header that neither
  * consumer needs to export.
  */
@@ -54,7 +54,7 @@ bool parseBackendBaseUrl(const std::string& url,
 
 }  // namespace
 
-// Best-effort version-discovery probe — see remote_config.hpp doc.
+// Best-effort version-discovery probe - see remote_config.hpp doc.
 // Must never throw, never block beyond ~4s (2s connect + 2s read), and
 // never disable the agent on failure. Called from a detached thread in
 // gpufl::init().
@@ -63,7 +63,7 @@ void probeBackendVersion(const std::string& base_url,
     std::string scheme, host;
     int port = -1;
     if (!parseBackendBaseUrl(base_url, scheme, host, port)) {
-        return;  // bad URL — silent: the main config path will log it
+        return;  // bad URL - silent: the main config path will log it
     }
 #if !GPUFL_HTTPLIB_TLS
     if (scheme == "https") return;  // can't probe TLS without OpenSSL
@@ -77,7 +77,7 @@ void probeBackendVersion(const std::string& base_url,
     const std::string ap = api_path.empty() ? std::string(kDefaultApiPath)
                                             : api_path;
     const std::string path = ap + "/info/version";
-    // Per-call headers — cpp-httplib auto-injects its own User-Agent on
+    // Per-call headers - cpp-httplib auto-injects its own User-Agent on
     // send and that beats set_default_headers in the merge order, so
     // per-call wins reliably across cpp-httplib versions.
     httplib::Headers headers = {
@@ -87,7 +87,7 @@ void probeBackendVersion(const std::string& base_url,
     };
     auto res = cli.Get(path.c_str(), headers);
     if (!res || res->status < 200 || res->status >= 300) {
-        return;  // 404 / network error / older backend — silent
+        return;  // 404 / network error / older backend - silent
     }
     json::JsonValue resp = json::parseJson(res->body);
     if (!resp.is_object() || !resp.contains("supported")) return;
@@ -107,7 +107,7 @@ void probeBackendVersion(const std::string& base_url,
         GFL_LOG_ERROR(
             "[gpufl] client wire-version=", kWireVersion,
             " not in backend supported=[", supported_joined,
-            "] — uploads may fail. Upgrade the agent or the backend.");
+            "] - uploads may fail. Upgrade the agent or the backend.");
     } else {
         GFL_LOG_DEBUG(
             "[probeBackendVersion] OK: wire=", kWireVersion,

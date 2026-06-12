@@ -5,11 +5,11 @@
 namespace gpufl::core {
 
 /**
- * A captured call stack as raw return addresses only — NO symbol resolution.
+ * A captured call stack as raw return addresses only - NO symbol resolution.
  * Capturing addresses (CaptureStackBackTrace / backtrace) is cheap and safe to
  * do on a hot path (e.g. inside a CUPTI launch callback). Turning addresses
- * into symbol names (SymFromAddr / backtrace_symbols) is expensive — dbghelp
- * serializes globally — so that step is deferred to ResolveCallStack(), run off
+ * into symbol names (SymFromAddr / backtrace_symbols) is expensive - dbghelp
+ * serializes globally - so that step is deferred to ResolveCallStack(), run off
  * the hot path on the collector/worker thread.
  */
 struct RawStack {
@@ -21,7 +21,7 @@ struct RawStack {
 /**
  * Cheap: walk the current call stack and store raw return addresses only.
  * `skipFrames` top frames (this function + immediate wrappers) are dropped.
- * No symbolization, no dbghelp lock — safe on the per-launch hot path.
+ * No symbolization, no dbghelp lock - safe on the per-launch hot path.
  */
 RawStack CaptureCallStackRaw(int skipFrames = 1);
 

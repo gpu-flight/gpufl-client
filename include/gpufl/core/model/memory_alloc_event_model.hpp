@@ -8,13 +8,13 @@ namespace gpufl::model {
 /**
  * JSON serializer for MemoryAllocEvent.
  *
- * Per-event JSON, Scope channel — same rationale as the sync event
+ * Per-event JSON, Scope channel - same rationale as the sync event
  * model: mid-volume, semantically scope-like (a discrete event on the
  * timeline), and reusing an existing channel keeps the backend
  * ingestor's subscription set small.
  *
  * Wire shape mirrors SynchronizationEventModel intentionally so the
- * Java backend can dispatch on `"type"` cheaply — see
+ * Java backend can dispatch on `"type"` cheaply - see
  * "memory_alloc_event" handler.
  */
 struct MemoryAllocEventModel final : IJsonSerializable {

@@ -18,13 +18,13 @@ namespace gpufl {
  *   callback (fired on the user's CPU thread) and join it back to the
  *   activity record by correlationId.
  *
- *   Mirrors KernelLaunchHandler's approach exactly — same callback /
+ *   Mirrors KernelLaunchHandler's approach exactly - same callback /
  *   activity-join split, same StackRegistry interning, same
  *   {@code enable_stack_trace} opt-in. Only the CBID set differs.
  *
  * Storage (Step 4c):
  *   The captured stack_id (interned via StackRegistry) is pushed as a
- *   SYNC_META record to the lock-free monitor ring — NO mutex. The
+ *   SYNC_META record to the lock-free monitor ring - NO mutex. The
  *   collector thread stashes it in its worker-local g_syncStackByCorr
  *   map and joins it onto the matching SYNCHRONIZATION activity record
  *   (translated inline in cupti_backend.cpp's BufferCompleted) by
@@ -33,7 +33,7 @@ namespace gpufl {
  *   SynchronizationEvent.stack_trace.
  *
  * Activity records:
- *   This handler does NOT own a handleActivityRecord() implementation —
+ *   This handler does NOT own a handleActivityRecord() implementation -
  *   sync activity processing stays in cupti_backend.cpp's
  *   BufferCompleted. The handler interface requires the override, so
  *   it returns false (= not handled) for any record.

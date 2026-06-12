@@ -18,7 +18,7 @@
 //   40 distinct kernel functions (each is a separate __global__ symbol,
 //   so CUPTI sees 40 distinct PC ranges per step). The kernel bodies
 //   share a common compute shape but each carries a unique constant so
-//   nvcc emits 40 separate cubin entry points — symbol distinctness is
+//   nvcc emits 40 separate cubin entry points - symbol distinctness is
 //   guaranteed by C++ regardless. The 8 -> 40 jump is the key knob:
 //   prior runs with 8 kernels showed only +32% PC Sampling overhead,
 //   well below PyTorch's +657%; if overhead is driven by *unique*
@@ -28,7 +28,7 @@
 //   (cuDNN/cuBLAS heuristics, CUDA Graphs, multi-stream sync).
 //
 //   Default: 100 steps × 5 runs × 40 kernels = 4000 launches per run
-//   (same total launch count as the prior 8-kernel × 500-step test —
+//   (same total launch count as the prior 8-kernel × 500-step test -
 //   apples-to-apples comparison; only the diversity varies).
 //
 // Usage:
@@ -37,20 +37,20 @@
 //                                           #   tests kernel-duration as PyTorch's amplifier
 //   manykernel_benchmark noscope            # all 4 modes, large, no scope wrapping
 //                                           #   measures the unattributed-PC-sampling case
-//   manykernel_benchmark short noscope      # compounds — short kernels, no scope
+//   manykernel_benchmark short noscope      # compounds - short kernels, no scope
 //   manykernel_benchmark pc_sampling short  # PC Sampling only, short kernels
 //   manykernel_benchmark deep               # gpufl init w/ PcSamplingWithSass (bails to
 //                                           #   PC Sampling only on Blackwell sm_120)
 //
 // CLI args are order-independent and positional. Recognized:
-//   short / long                — kernel size (default: long)
-//   noscope / scope             — wrap measurements in gpufl::ScopedMonitor (default: scope)
-//   memset=N                    — N cudaMemsetAsync per step. Tests whether memset
+//   short / long                - kernel size (default: long)
+//   noscope / scope             - wrap measurements in gpufl::ScopedMonitor (default: scope)
+//   memset=N                    - N cudaMemsetAsync per step. Tests whether memset
 //                                 records in the CUPTI activity stream amplify PC
 //                                 Sampling overhead. PyTorch MiniGPT's memset share
 //                                 was 4.5% (600/13406 launches); use memset=2 to
 //                                 match that ratio. Default 0.
-//   baseline / monitoring /     — mode (default: run all four)
+//   baseline / monitoring /     - mode (default: run all four)
 //   pc_sampling / deep
 //
 // Example: manykernel_benchmark memset=2     # PyTorch-like memset ratio
@@ -81,7 +81,7 @@
 // Each is a separate __global__ symbol so CUPTI sees them as 40 distinct
 // PC ranges. Bumped from 8 to 40 to test the diversity hypothesis: an
 // 8-kernel many-launch workload showed only +32% PC Sampling overhead,
-// vs PyTorch's +657% — but PyTorch launches hundreds of distinct
+// vs PyTorch's +657% - but PyTorch launches hundreds of distinct
 // cuBLAS/cuDNN kernels per step. If overhead scales with the *unique*
 // kernel count rather than total launches, 40 variants here should land
 // roughly midway and confirm the diversity-as-amplifier hypothesis.
@@ -106,7 +106,7 @@
             const float coeff = static_cast<float>(NUM) * 0.0125f + 1.0f; \
             float x = a[i];                                               \
             float y = b[i];                                               \
-            /* nontrivial work — roughly matches the old kernels' */      \
+            /* nontrivial work - roughly matches the old kernels' */      \
             /* per-element cost so total run time stays comparable */     \
             c[i] = x * coeff + y * (1.0f - coeff) + x * x * 0.5f;         \
         }                                                                 \
@@ -165,10 +165,10 @@ static void free_bufs(DeviceBufs& b) {
 }
 
 // One "step" = 40 distinct kernel launches (one per variant) + an
-// optional `memset_count` cudaMemsetAsync calls. Returns nothing —
+// optional `memset_count` cudaMemsetAsync calls. Returns nothing -
 // caller times the loop around `steps_per_run` calls.
 // Each kernel writes c[] from a[]/b[]; the result of variant N is
-// overwritten by variant N+1. That's fine for benchmarking — we only
+// overwritten by variant N+1. That's fine for benchmarking - we only
 // care about CUPTI's cost per launch, not correctness of the output.
 //
 // memsets are appended at the end of each step rather than interleaved
@@ -200,7 +200,7 @@ static std::pair<float, float> measure_run(const DeviceBufs& b, int steps,
     // actually adopt gpufl: a `with gpufl.Scope(...)` block around a
     // training step or batch. Without the scope, PC samples accumulate
     // unattributed (no scope_event begin/end pair to bracket them) and
-    // the analysis pipeline downstream can't slice by code section —
+    // the analysis pipeline downstream can't slice by code section -
     // so a no-scope benchmark measures something users won't really
     // run in production.
     //
@@ -208,7 +208,7 @@ static std::pair<float, float> measure_run(const DeviceBufs& b, int steps,
     // return, AFTER wall_end. That isolates the measurement to the
     // pure in-scope kernel work: per-launch CUPTI overhead inside a
     // scope. The scope-end PC sampling drain happens in the destructor,
-    // outside the measurement — matches the question we're actually
+    // outside the measurement - matches the question we're actually
     // asking ("what does each step cost while PC sampling is on?")
     // rather than mixing in one-time post-step bookkeeping.
     std::unique_ptr<gpufl::ScopedMonitor> scope;
@@ -234,7 +234,7 @@ static std::pair<float, float> measure_run(const DeviceBufs& b, int steps,
     cudaEventDestroy(start_ev);
     cudaEventDestroy(stop_ev);
     return {wall_ms, gpu_ms};
-    // scope destructs here on return — drain stays out of the measurement
+    // scope destructs here on return - drain stays out of the measurement
 }
 
 // ---- mode plumbing -------------------------------------------------------
@@ -260,7 +260,7 @@ static const char* mode_short(Mode m) {
     return "unknown";
 }
 
-// Table-friendly label — mirrors run_benchmark.py's column header text
+// Table-friendly label - mirrors run_benchmark.py's column header text
 // so it's easy to compare the two outputs side-by-side.
 static const char* mode_label(Mode m) {
     switch (m) {
@@ -288,11 +288,11 @@ static bool gpufl_init_for(Mode m) {
     gpufl::InitOptions opts;
     opts.app_name = "manykernel_benchmark";
     opts.log_path = "manykernel_logs";
-    opts.system_sample_rate_ms = 0;       // off — we're not measuring monitoring volume
+    opts.system_sample_rate_ms = 0;       // off - we're not measuring monitoring volume
     opts.continuous_system_sampling = false;
     // MUST stay false for benchmarks. Setting true caused stderr-bound
     // GFL_LOG_DEBUG calls per kernel activity record (1200+ writes per
-    // run × Windows console rendering) to dominate the measurement —
+    // run × Windows console rendering) to dominate the measurement -
     // Monitoring overhead jumped from ~89% to ~1415% solely from debug
     // log spam, completely masking the real per-kernel CUPTI cost. If
     // you need samplingPeriod-verification, do that in a separate
@@ -315,7 +315,7 @@ static bool gpufl_init_for(Mode m) {
         default:
             // The benchmark's "Monitoring" mode measures kernel-event
             // capture overhead, so it maps to gpufl Trace (activity
-            // records, no sampling) — NOT gpufl Monitor, which disables
+            // records, no sampling) - NOT gpufl Monitor, which disables
             // CUPTI entirely and would capture no kernels to measure.
             opts.profiling_engine = gpufl::ProfilingEngine::Trace;
             break;
@@ -340,13 +340,13 @@ static RunResult run_mode(Mode m, int n, int threads, int steps_per_run,
 
     DeviceBufs b = allocate(n, threads);
 
-    // warmup — first launch carries CUDA context creation / module load
+    // warmup - first launch carries CUDA context creation / module load
     // costs that aren't part of steady-state per-kernel overhead, so we
     // throw the first iteration away.
     run_step(b, memset_count);
     cudaDeviceSynchronize();
 
-    // Scope only makes sense when gpufl is initialized — Baseline has
+    // Scope only makes sense when gpufl is initialized - Baseline has
     // no runtime to attach to. ScopedMonitor without an active runtime
     // is harmless (it short-circuits), but skipping the construction
     // entirely makes the no-gpufl path cleaner.
@@ -381,7 +381,7 @@ static RunResult run_mode(Mode m, int n, int threads, int steps_per_run,
 static void print_summary(const std::vector<RunResult>& results,
                           int steps_per_run) {
     // Find baseline mean (if present) for overhead calc. Absent baseline
-    // (single-mode invocation) → "—" in the overhead column.
+    // (single-mode invocation) → "-" in the overhead column.
     float baseline_wall = -1.0f;
     for (const auto& r : results) {
         if (r.ok && r.mode == Mode::Baseline) {
@@ -426,7 +426,7 @@ static void print_summary(const std::vector<RunResult>& results,
         std::printf("]\n");
     }
 
-    // Pull out the PC Sampling overhead as the headline number — it's
+    // Pull out the PC Sampling overhead as the headline number - it's
     // the diagnostic we actually care about (does many-kernel C++ show
     // the same +650% PyTorch did, or is it dramatically lower?).
     for (const auto& r : results) {
@@ -477,7 +477,7 @@ int main(int argc, char** argv) {
     // the pure-compute baseline; 2 matches the PyTorch MiniGPT ratio
     // (4.5% memset share = 2 memsets per 40 compute kernels). Test
     // whether the presence of memset records in the CUPTI activity
-    // stream amplifies PC Sampling overhead — our profile_pytorch_via_gpufl
+    // stream amplifies PC Sampling overhead - our profile_pytorch_via_gpufl
     // data showed cudaMemsetAsync was 57% of PyTorch's total CUDA time.
     int memset_count = 0;
     const char* mode_arg = nullptr;
@@ -526,17 +526,17 @@ int main(int argc, char** argv) {
 
     std::vector<RunResult> results;
     if (mode_arg) {
-        // Single-mode invocation — cleanest CUPTI state, recommended
+        // Single-mode invocation - cleanest CUPTI state, recommended
         // for any apples-to-apples comparison if back-to-back mode
         // numbers look suspicious.
         results.push_back(run_mode(parse_mode(mode_arg), n, threads, steps_per_run, runs, use_scope, memset_count));
     } else {
         // Convenience: all four modes back-to-back in one process.
-        // CUPTI may leak state between init/shutdown cycles — if the
+        // CUPTI may leak state between init/shutdown cycles - if the
         // numbers look funny, re-run each mode in its own invocation
         // and compare across invocations instead.
         // Deep (PcSamplingWithSass) bails to PC Sampling only on
-        // Blackwell sm_120 — see SassMetricsEngine partial-failure
+        // Blackwell sm_120 - see SassMetricsEngine partial-failure
         // bailout. We still record the row for the data point.
         results.push_back(run_mode(Mode::Baseline,           n, threads, steps_per_run, runs, use_scope, memset_count));
         results.push_back(run_mode(Mode::Monitoring,         n, threads, steps_per_run, runs, use_scope, memset_count));

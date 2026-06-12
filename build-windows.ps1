@@ -22,15 +22,28 @@ if ([string]::IsNullOrWhiteSpace($WheelDir)) {
 }
 
 function Resolve-CudaPath {
-    param([string]$RequestedPath)
+    param([string]$RequestedPath, [bool]$Explicit)
 
-    $candidates = @(
-        $RequestedPath,
-        $env:CUDA_HOME,
+    # Prefer the NEWEST installed toolkit: CUPTI's profiler/counter
+    # subsystem must be at least as new as the display driver, or
+    # cuptiProfilerInitialize fails (CUPTI_ERROR_NOT_INITIALIZED) and
+    # cuptiPCSamplingGetNumStallReasons "succeeds" with ZERO stall reasons —
+    # the PcSampling pass then silently collects nothing (verified live on
+    # driver 592.01: CUPTI 13.2 = 0 stall reasons, CUPTI 13.3 = 36).
+    #
+    # The curated list outranks ambient CUDA_PATH/CUDA_HOME unless the
+    # caller passed -CudaPath explicitly, so a stale env var can't silently
+    # downgrade the toolkit.
+    $curated = @(
+        "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3",
         "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2",
         "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1",
         "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0"
-    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    )
+    $ambient = @($RequestedPath, $env:CUDA_HOME)
+    $candidates = $(if ($Explicit) { @($RequestedPath) + $curated + @($env:CUDA_HOME) }
+                    else { $curated + $ambient }) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 
     foreach ($candidate in $candidates) {
         $nvcc = Join-Path $candidate "bin\nvcc.exe"
@@ -68,7 +81,8 @@ function Import-VcVars64 {
     }
 }
 
-$CudaPath = Resolve-CudaPath -RequestedPath $CudaPath
+$CudaPath = Resolve-CudaPath -RequestedPath $CudaPath `
+    -Explicit ($PSBoundParameters.ContainsKey('CudaPath'))
 if (-not $NoVcVars) {
     Import-VcVars64
 }
@@ -102,7 +116,7 @@ if ($Mode -eq "wheel") {
     & $Python -m pip wheel $RootDir -w $WheelDir --no-deps -v @commonConfig
 } elseif ($Mode -eq "trace") {
     # Native injection-mode tooling: the `gpufl` launcher (gpufl trace/upload/
-    # version) + gpufl_inject.dll. These are NOT part of the Python wheel — a
+    # version) + gpufl_inject.dll. These are NOT part of the Python wheel - a
     # plain CMake build into build-windows\. CUDAToolkit_ROOT is pinned to the
     # same $CudaPath used everywhere here, so the inject DLL links and the
     # copied cupti64*.dll come from ONE toolkit (avoids the version skew that
@@ -139,6 +153,9 @@ if ($Mode -eq "wheel") {
     Write-Host "  (gpufl_inject.dll + cupti64*/nvperf_* are colocated next to it)"
     Write-Host ""
     Write-Host "Run:  & `"$exe`" trace --engine Trace -- <python.exe> <script.py>"
+    Write-Host "      & `"$exe`" trace --passes=PcSampling -- <python.exe> <script.py>"
+    Write-Host "      (PcSampling needs an elevated shell for stall-reason access;"
+    Write-Host "       unprivileged runs report 'skipped / no_stall_reasons')"
 } else {
     & $Python -m pip install $RootDir -v @commonConfig
 }

@@ -1,5 +1,5 @@
 """
-CUDA GEMM benchmark — measures raw GPU compute overhead.
+CUDA GEMM benchmark - measures raw GPU compute overhead.
 Uses torch.mm() (cuBLAS SGEMM) for a pure compute workload.
 Returns (wall_ms, gpu_ms) for the timed region.
 """

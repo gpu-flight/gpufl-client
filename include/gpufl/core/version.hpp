@@ -9,7 +9,7 @@
  * via target_compile_definitions in the top-level CMakeLists.txt. The
  * fallback `"0.0.0-dev"` only kicks in when the library is consumed
  * outside the CMake build (header-only inclusion in a foreign build
- * system) — production builds always go through CMake and stamp the
+ * system) - production builds always go through CMake and stamp the
  * real version.
  *
  * `kWireVersion` is the schema version of the JSON payloads this
@@ -19,7 +19,7 @@
  *
  * `kDefaultApiPath` is the URL prefix this client expects on the
  * backend. Hardcoded here because the client library version IS the
- * API version it speaks — letting users override the prefix is fine
+ * API version it speaks - letting users override the prefix is fine
  * (proxy/reverse-mount cases) but letting them pick a different
  * version would just produce parse errors. The override field is
  * `InitOptions.api_path`; this is the default applied when that's

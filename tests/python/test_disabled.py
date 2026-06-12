@@ -5,7 +5,7 @@ Two equivalent kill-switches:
   * gpufl.init(..., enabled=False)
   * GPUFL_DISABLED env var (1/true/yes/on)
 
-Env wins over kwarg — set via env, you can disable gpufl in someone
+Env wins over kwarg - set via env, you can disable gpufl in someone
 else's code without editing it. When disabled, every public entry point
 must be a true no-op: no daemon spawn, no C++ runtime, no network calls,
 no log files, no atexit handler.
@@ -51,9 +51,9 @@ class TestEnabledKwarg:
         assert gpufl._disabled is True
 
     def test_enabled_true_is_default(self):
-        """enabled=True is the default — same shape as the original init."""
+        """enabled=True is the default - same shape as the original init."""
         # In stub mode the return is False (no GPU), but the disabled
-        # flag must NOT be set — that path is reserved for the toggle.
+        # flag must NOT be set - that path is reserved for the toggle.
         gpufl.init("normal_app")
         assert gpufl._disabled is False
 
@@ -134,7 +134,7 @@ class TestNoOpSurfaces:
         """Regression test for the production crash on GPUFL_DISABLED=1.
 
         The C++ binding's :class:`UploadResult` has no exposed
-        ``py::init<>()`` and all its fields are ``def_readonly`` — so
+        ``py::init<>()`` and all its fields are ``def_readonly`` - so
         constructing it from Python and assigning to its fields throws.
         The disabled path MUST therefore avoid touching that class and
         return a pure-Python stand-in instead.
@@ -149,20 +149,20 @@ class TestNoOpSurfaces:
             backend_url="https://anywhere.invalid",
             api_key="x",
         )
-        # The disabled path uses _NoopUploadResult — a private class
+        # The disabled path uses _NoopUploadResult - a private class
         # whose only purpose is to not BE the C++ binding.
         assert isinstance(result, gpufl._NoopUploadResult), (
             f"disabled upload_logs returned a {type(result).__name__}; "
             "this likely means the disabled path is constructing the "
             "C++ UploadResult binding, which crashes in non-stub mode."
         )
-        # Round-trip every field the binding exposes — if a future C++
+        # Round-trip every field the binding exposes - if a future C++
         # change adds a field, the stub class must keep parity.
         for field in ("success", "files_processed", "files_skipped_by_cursor",
                       "events_uploaded", "bytes_uploaded", "elapsed_ms",
                       "warnings", "spool_ids"):
             assert hasattr(result, field), (
-                f"_NoopUploadResult missing '{field}' — the C++ binding "
+                f"_NoopUploadResult missing '{field}' - the C++ binding "
                 "exposes it, so callers depending on duck-typing parity "
                 "will break.")
 

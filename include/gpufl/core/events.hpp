@@ -72,7 +72,7 @@ struct InitEvent {
     HostSample host;
     std::vector<DeviceSample> devices;
     std::vector<GpuStaticDeviceInfo> gpu_static_device_infos;
-    // session_kind     : "trace" | "monitor" — vendor-agnostic.
+    // session_kind     : "trace" | "monitor" - vendor-agnostic.
     //                    Pre-Phase-A this drove a Traces / Monitor-
     //                    streams tab split on the frontend; the split
     //                    was removed in May 2026 (the kernel-data
@@ -84,12 +84,12 @@ struct InitEvent {
     // profiling_engine : vendor-namespaced detail like
     //                    "nvidia.pc_sampling" / "nvidia.sass_metrics"
     //                    / "nvidia.none" (the latter is what
-    //                    ProfilingEngine::Monitor — telemetry only —
+    //                    ProfilingEngine::Monitor - telemetry only -
     //                    emits). Stored verbatim by the backend.
     //                    The "nvidia.none" string lets the backend
     //                    distinguish "user explicitly disabled
     //                    profiling" from "pre-V40 client that omitted
-    //                    the field" — both used to collapse to NULL.
+    //                    the field" - both used to collapse to NULL.
     // Both populated in gpufl::init() from the resolved
     // MonitorOptions::profiling_engine. The C++ enum → string mapping
     // lives next to the InitEvent build site (gpufl.cpp).
@@ -102,7 +102,7 @@ struct InitEvent {
     // The launcher's multi-pass driver sets GPUFL_ANALYSIS_ID/PASS_INDEX/
     // PASS_COUNT in each child; gpufl::init() reads them into these fields.
     //   analysis_id : stable id shared by every pass of one analysis
-    //                 (empty for an ordinary single-pass run — then
+    //                 (empty for an ordinary single-pass run - then
     //                 pass_index/pass_count are NOT emitted).
     //   pass_index  : 0-based position of this pass within the analysis.
     //   pass_count  : total passes planned for the analysis (lets the
@@ -131,7 +131,7 @@ struct SassConfigEvent {
 };
 
 // Per-scope Execution Signature (P2 multi-pass determinism guard input).
-// Accumulated from KERNEL_LAUNCH_META — which fires in EVERY engine mode, so
+// Accumulated from KERNEL_LAUNCH_META - which fires in EVERY engine mode, so
 // every isolated pass (even SASS, where kernel-activity is off) has the full
 // per-launch inventory. `signature` hashes the sorted MULTISET of
 // (mangled kernel name, grid, block, dyn_smem) -> launch count within the scope
@@ -354,7 +354,7 @@ struct SystemStopEvent {
 
 // ── Batch row types (used by BatchBuffer, no heap strings) ────────────────
 
-// One synchronization API call — `cudaStreamSynchronize` /
+// One synchronization API call - `cudaStreamSynchronize` /
 // `cudaDeviceSynchronize` / `cudaEventSynchronize` / `cuStreamWaitEvent`.
 // Replaces the per-event `SynchronizationEvent` JSON with a packed row
 // inside `synchronization_event_batch`. Cuts wire bytes ~14× on real
@@ -376,14 +376,14 @@ struct SynchronizationEventBatchRow {
     uint32_t function_id = 0;   // DictionaryManager::internFunction(stack_trace); 0 = no stack
 };
 
-// One CUPTI MEMORY2 record — `cudaMalloc` / `cudaFree` / `cudaMallocAsync` /
+// One CUPTI MEMORY2 record - `cudaMalloc` / `cudaFree` / `cudaMallocAsync` /
 // etc. Replaces per-event `memory_alloc_event` JSON with a packed row
 // inside `memory_alloc_event_batch`. Pure-numeric fields → no dictionary
 // encoding, just envelope amortization. Saves ~85% on alloc-heavy
 // workloads.
 struct MemoryAllocEventBatchRow {
     int64_t  start_ns    = 0;
-    int64_t  duration_ns = 0;   // 0 in v1 — CUPTI doesn't emit alloc duration
+    int64_t  duration_ns = 0;   // 0 in v1 - CUPTI doesn't emit alloc duration
     uint8_t  memory_op   = 0;   // 1=ALLOC, 2=FREE
     uint8_t  memory_kind = 0;   // CUpti_ActivityMemoryKind
     uint64_t address     = 0;   // GPU virtual address
@@ -485,7 +485,7 @@ struct ScopeBatchRow {
     int      depth             = 0;
 
     // Optional benchmark metadata set on the BEGIN row only (0 on END).
-    // Populated when the scope was opened with iteration metadata —
+    // Populated when the scope was opened with iteration metadata -
     // e.g. Python's `for _ in gpufl.Scope(name, repeat=N, warmup=K)`.
     // 0 on either field means "not provided" and the row serializes
     // the same as before (analyzer / backend simply skip the metric).
@@ -604,15 +604,15 @@ struct NvtxMarkerEvent {
  * This event tells the dashboard that a chunk of GPU work happened
  * as a fused graph rather than as N independent kernel launches.
  *
- * Per-event JSON. Volume is very low — even an inference loop that
+ * Per-event JSON. Volume is very low - even an inference loop that
  * launches a graph per request typically yields fewer events than
  * any other CUPTI stream we capture. Channel::Scope
  *
  * `corr_id` matches the driver-API call that issued the launch
- * (cuGraphLaunch). It does NOT match the per-node kernel records —
+ * (cuGraphLaunch). It does NOT match the per-node kernel records -
  * each kernel inside the graph keeps its own correlationId. To pair
  * "kernel K was part of graph G", the backend (or dashboard) needs
- * a temporal join on [start_ns, end_ns] + same stream — that's
+ * a temporal join on [start_ns, end_ns] + same stream - that's
  * deliberate v2 work, out of scope here.
  */
 struct GraphLaunchEvent {
@@ -636,13 +636,13 @@ struct GraphLaunchEvent {
  * cudaMallocManaged / cudaMallocHost (and their driver-API cousins).
  * One event per call. Note that cudaMallocAsync is associated with a
  * stream and the reported {@code start_ns} is the host call time
- * (not the GPU completion time) — the host-side cost is what users
+ * (not the GPU completion time) - the host-side cost is what users
  * actually pay for in their python/c++ code.
  *
  * Per-event JSON. Volume in PyTorch workloads is typically <1k events
  * per session because torch's caching allocator absorbs most python-
  * level allocations; only large-block CUDA-level mallocs reach this
- * stream. TensorFlow eager mode is the high-volume edge case — if it
+ * stream. TensorFlow eager mode is the high-volume edge case - if it
  * becomes a problem the gating flag {@code enable_memory_tracking}
  * lets users opt out without losing other CUPTI streams.
  *
@@ -672,13 +672,13 @@ struct MemoryAllocEvent {
  * One event per cudaStreamSynchronize / cudaDeviceSynchronize /
  * cudaEventSynchronize / cuStreamWaitEvent call (and their driver-API
  * cousins). The wall-clock duration here is the CPU-side time the
- * thread was blocked — which is the exact metric that explains GPU
+ * thread was blocked - which is the exact metric that explains GPU
  * underutilization on workloads that interleave host-side python with
  * synchronous waits (PyTorch's `torch.cuda.synchronize()` between
  * forward / backward; eager-mode TF; manual debugging code).
  *
  * Per-event JSON (not batched). Volume is hundreds-to-thousands per
- * session in typical workloads — well within per-event capacity. If a
+ * session in typical workloads - well within per-event capacity. If a
  * user runs a stress test that produces millions of syncs, switching
  * to a batched columnar format is a one-file change (mirrors the
  * KernelEventBatch pattern).
@@ -689,7 +689,7 @@ struct MemoryAllocEvent {
  *
  * `corr_id` joins to KernelEvent.corr_id, letting the dashboard
  * answer questions like "this matmul kernel finished at T1; the
- * `cudaStreamSynchronize` waiting for it returned at T2 — that
+ * `cudaStreamSynchronize` waiting for it returned at T2 - that
  * (T2 - kernel_end) gap is host-side overhead, not GPU work."
  */
 struct SynchronizationEvent {
@@ -707,7 +707,7 @@ struct SynchronizationEvent {
     // User call stack at the moment cudaStreamSynchronize / etc. fired.
     // Captured by SynchronizationHandler on the API_ENTER callback when
     // opts.enable_stack_trace is on, joined to the activity record by
-    // correlationId. Mirrors KernelEvent.stack_trace — same string
+    // correlationId. Mirrors KernelEvent.stack_trace - same string
     // format, same downstream wiring (backend stores as inline VARCHAR).
     // Empty when stack capture is disabled OR the launch API isn't in
     // SynchronizationHandler's CBID set.

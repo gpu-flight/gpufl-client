@@ -11,7 +11,7 @@ Built on CUPTI for NVIDIA GPUs and rocprofiler-sdk for AMD GPUs, GPUFlight is de
 ## Project Status: 1.1.0
 
 GPUFlight is published to PyPI; the current release is
-`v1.1.0`. **Breaking changes vs 1.0.x** — `remote_upload` /
+`v1.1.0`. **Breaking changes vs 1.0.x** - `remote_upload` /
 `HttpLogSink` removed (upload moves to a post-shutdown step), and
 `sampling_auto_start` renamed to `continuous_system_sampling`. See
 [CHANGELOG.md](./CHANGELOG.md) for the full migration notes. Pin an
@@ -24,7 +24,7 @@ To keep the initial design coherent, **we are not currently accepting major feat
 
 ## Live Demo
 
-Try the portal with real session data — no sign-up required:
+Try the portal with real session data - no sign-up required:
 
 **[Demo Link](https://demo.gpuflight.com)**
 
@@ -37,7 +37,7 @@ Try the portal with real session data — no sign-up required:
 - **Profiling Passes**: Use `gpufl trace --passes` for Trace, PC Sampling, SASS Metrics, PM Sampling, or Range Profiler captures; launcher mode can run isolated passes and merge them later.
 - **System Monitoring**: Collects GPU utilization, VRAM, temperature, power, and clock speeds via NVML.
 - **Sidecar Ready**: Outputs structured NDJSON logs with automatic rotation and gzip compression.
-- **Deferred Upload**: After a session ends, ship its NDJSON files to the GPUFlight backend with one call (`gpufl.upload_logs(...)`) or the orchestrated `with gpufl.session(backend_url=..., api_key=...):` context manager. All HTTP happens post-shutdown, so transient network failures cannot affect your GPU workload. Ideal for local dev, SSH, and Jupyter — no sidecar needed.
+- **Deferred Upload**: After a session ends, ship its NDJSON files to the GPUFlight backend with one call (`gpufl.upload_logs(...)`) or the orchestrated `with gpufl.session(backend_url=..., api_key=...):` context manager. All HTTP happens post-shutdown, so transient network failures cannot affect your GPU workload. Ideal for local dev, SSH, and Jupyter - no sidecar needed.
 - **Vendor Agnostic Design**: Architecture ready for AMD (ROCm) support.
 
 ---
@@ -141,7 +141,7 @@ include(FetchContent)
 FetchContent_Declare(
     gpufl
     GIT_REPOSITORY https://github.com/gpu-flight/gpufl-client.git
-    GIT_TAG        v1.1.0   # pin a release tag — see the Releases page for the latest
+    GIT_TAG        v1.1.0   # pin a release tag - see the Releases page for the latest
 )
 FetchContent_MakeAvailable(gpufl)
 
@@ -280,7 +280,7 @@ When multiple sources set the same field, higher beats lower:
 1. Built-in defaults                                    ← lowest
 ```
 
-### Quick start — orchestrated
+### Quick start - orchestrated
 
 ```python
 import gpufl
@@ -292,10 +292,10 @@ with gpufl.session(
     api_key="gpfl_xxxxxxxxxxxx",
 ):
     train_one_epoch()
-# On __exit__: gpufl.shutdown() runs, then gpufl.upload_logs() — automatically.
+# On __exit__: gpufl.shutdown() runs, then gpufl.upload_logs() - automatically.
 ```
 
-### Quick start — explicit
+### Quick start - explicit
 
 ```python
 import gpufl
@@ -317,7 +317,7 @@ if not result.success:
         print(f"WARN: {w}")
 ```
 
-### CLI — `gpufl upload`
+### CLI - `gpufl upload`
 
 `upload` is a subcommand of the native `gpufl` binary (the same tool as
 `gpufl trace`). For post-mortem recovery or one-off ad-hoc shipping:
@@ -354,7 +354,7 @@ the flags.
 
 ### Upload mechanics
 
-- The client writes NDJSON to disk during the session — that's the
+- The client writes NDJSON to disk during the session - that's the
   source of truth. **No HTTP runs during the workload.**
 - `gpufl.upload_logs(...)` streams the files, POSTs each event to
   `/api/v1/events/<type>`, and writes a cursor file
@@ -363,10 +363,10 @@ the flags.
   unless `force=True` (CLI: `--force`).
 - Failure handling: one quick retry per POST, total 5-minute budget
   by default. Returns a `UploadResult` with `.success` and any
-  `.warnings` — never throws on network errors.
+  `.warnings` - never throws on network errors.
 
 For production fleets, the standalone `gpufl-agent` JVM service tails
-the same NDJSON files and uploads in compressed batches — it's the
+the same NDJSON files and uploads in compressed batches - it's the
 recommended path when many GPUs are emitting concurrently.
 
 ---
@@ -415,31 +415,31 @@ viz.show()
 
 ## Report Generation
 
-For a quick, shareable text summary of a session — session metadata, kernel
-hotspots, duration percentiles, and system metrics — generate a **text report**.
+For a quick, shareable text summary of a session - session metadata, kernel
+hotspots, duration percentiles, and system metrics - generate a **text report**.
 It's the fastest way to see "what happened" without opening the dashboard, and
 it drops cleanly into CI logs, PR comments, or a plain terminal.
 
 ![Text report example](images/Screenshot2.png)
 
 The report includes:
-- **Session Summary** — app name, session ID, duration, GPU device + SM count.
-- **Capture Capabilities** — requested/selected engine and per-feature status,
+- **Session Summary** - app name, session ID, duration, GPU device + SM count.
+- **Capture Capabilities** - requested/selected engine and per-feature status,
   including `on, no data` when PM Sampling or another requested feature was
   enabled but produced no rows.
-- **Kernel Execution Summary** — total / unique kernels, GPU-busy %, and
+- **Kernel Execution Summary** - total / unique kernels, GPU-busy %, and
   duration statistics (avg / median / P90 / P99 / min / max). When a SASS
   profiling engine was active, kernel durations include instrumentation
   overhead and the report labels them accordingly.
-- **Top kernels by total GPU time** — with per-kernel call counts.
-- **Per-kernel details** — grid/block dimensions, occupancy, registers,
+- **Top kernels by total GPU time** - with per-kernel call counts.
+- **Per-kernel details** - grid/block dimensions, occupancy, registers,
   shared memory (static + dynamic), register spills, and Waves/SM.
-- **PM Sampling Summary** — total samples, metric averages/peaks, and top
+- **PM Sampling Summary** - total samples, metric averages/peaks, and top
   scopes when `pm_sample_batch` rows are present.
 
 ### From C++
 
-Call `generateReport()` after `shutdown()` — it reads the NDJSON logs written
+Call `generateReport()` after `shutdown()` - it reads the NDJSON logs written
 during the session:
 
 ```cpp
@@ -456,7 +456,7 @@ gpufl::generateReport("report.txt");   // or save to a file
 ```python
 from gpufl.report import generate_report
 
-# Print the report — wrap in print() so newlines render. In a Jupyter
+# Print the report - wrap in print() so newlines render. In a Jupyter
 # notebook this also keeps the table columns aligned (stdout renders in
 # a monospace font). A bare `generate_report(...)` as a cell's last
 # expression shows an escaped one-line string, so always print() it.
@@ -467,7 +467,7 @@ print(text)
 generate_report("./logs", log_prefix="my_app", top_n=10, output_path="report.txt")
 ```
 
-The Python version reads the same NDJSON logs the analyzer uses — no GPU
+The Python version reads the same NDJSON logs the analyzer uses - no GPU
 required, so you can generate reports from logs copied off another machine.
 
 ---
@@ -475,7 +475,7 @@ required, so you can generate reports from logs copied off another machine.
 ## Testing
 
 ### C++ Tests
-The C++ tests use GoogleTest and are hardware-aware — NVIDIA-specific tests skip automatically if no compatible GPU is detected.
+The C++ tests use GoogleTest and are hardware-aware - NVIDIA-specific tests skip automatically if no compatible GPU is detected.
 
 ```bash
 cmake --build cmake-build-debug --target gpufl_tests

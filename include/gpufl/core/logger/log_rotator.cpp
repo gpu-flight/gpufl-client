@@ -69,7 +69,7 @@ void LogFileRotator::rotate() const {
 }
 
 void LogFileRotator::compressActive() const {
-    // Defensive guards. Each branch is a no-op rather than an error —
+    // Defensive guards. Each branch is a no-op rather than an error -
     // compress-on-shutdown is best-effort: a session that crashed
     // before opening any channel, or that opted out of compression,
     // is still a valid session and shouldn't surface failure.

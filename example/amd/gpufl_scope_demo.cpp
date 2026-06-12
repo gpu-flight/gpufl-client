@@ -13,7 +13,7 @@ static bool checkHip(const hipError_t status, const char* what) {
 }
 
 // ---------------------------------------------------------------------------
-// Kernel 1: Simple vector add — baseline, 100% occupancy expected
+// Kernel 1: Simple vector add - baseline, 100% occupancy expected
 // ---------------------------------------------------------------------------
 __global__ void vectorAddKernel(const int* a, const int* b, int* c, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -23,7 +23,7 @@ __global__ void vectorAddKernel(const int* a, const int* b, int* c, int n) {
 }
 
 // ---------------------------------------------------------------------------
-// Kernel 2: Shared-memory reduction — exercises LDS, register pressure from
+// Kernel 2: Shared-memory reduction - exercises LDS, register pressure from
 // large block, and demonstrates < 100% occupancy via shared memory limit.
 // Uses 32 KB shared memory per block to force occupancy below 100%.
 // ---------------------------------------------------------------------------
@@ -60,7 +60,7 @@ __global__ void sharedMemReduceKernel(const int* __restrict__ input,
 }
 
 // ---------------------------------------------------------------------------
-// Kernel 3: Register-heavy computation — unrolled multiply chain uses many
+// Kernel 3: Register-heavy computation - unrolled multiply chain uses many
 // VGPRs, pushing register occupancy below 100%.
 // Private (local) array forces scratch memory usage.
 // ---------------------------------------------------------------------------
@@ -100,7 +100,7 @@ __global__ void registerHeavyKernel(float* __restrict__ data, int n) {
 }
 
 // ---------------------------------------------------------------------------
-// Kernel 4: Dynamic shared memory — demonstrates runtime-specified shared mem
+// Kernel 4: Dynamic shared memory - demonstrates runtime-specified shared mem
 // ---------------------------------------------------------------------------
 __global__ void dynamicSharedKernel(const float* __restrict__ input,
                                     float* __restrict__ output,
@@ -179,7 +179,7 @@ int main() {
     checkHip(hipMemcpy(d_f, h_f, float_bytes, hipMemcpyHostToDevice), "H2D f");
 
     // ── Kernel 1: Vector add (baseline) ─────────────────────────────────
-    std::cout << "  [1/4] vectorAdd — simple, full occupancy\n";
+    std::cout << "  [1/4] vectorAdd - simple, full occupancy\n";
     GFL_SCOPE("vector_add") {
         const dim3 block(256);
         const dim3 grid((n + block.x - 1) / block.x);
@@ -188,7 +188,7 @@ int main() {
     }
 
     // ── Kernel 2: Shared-memory reduction (LDS-limited occupancy) ───────
-    std::cout << "  [2/4] sharedMemReduce — 32KB shared mem, LDS-limited\n";
+    std::cout << "  [2/4] sharedMemReduce - 32KB shared mem, LDS-limited\n";
     GFL_SCOPE("shared_mem_reduce") {
         const int reduce_blocks = (n + kSharedInts - 1) / kSharedInts;
         for (int iter = 0; iter < 10; ++iter) {
@@ -200,7 +200,7 @@ int main() {
     }
 
     // ── Kernel 3: Register-heavy (register-limited occupancy) ───────────
-    std::cout << "  [3/4] registerHeavy — many VGPRs + scratch, reg-limited\n";
+    std::cout << "  [3/4] registerHeavy - many VGPRs + scratch, reg-limited\n";
     GFL_SCOPE("register_heavy") {
         const dim3 block(kHeavyBlockSize);
         const dim3 grid((n + block.x - 1) / block.x);
@@ -211,7 +211,7 @@ int main() {
     }
 
     // ── Kernel 4: Dynamic shared memory ─────────────────────────────────
-    std::cout << "  [4/4] dynamicShared — runtime shared mem allocation\n";
+    std::cout << "  [4/4] dynamicShared - runtime shared mem allocation\n";
     GFL_SCOPE("dynamic_shared") {
         const dim3 block(256);
         const dim3 grid((n + block.x - 1) / block.x);

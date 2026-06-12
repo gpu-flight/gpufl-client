@@ -24,7 +24,7 @@ struct EngineContext {
     uint32_t  device_id  = 0;
     std::string chip_name;
 
-    // Cubin map — written by ResourceHandler, read by PC Sampling / SASS
+    // Cubin map - written by ResourceHandler, read by PC Sampling / SASS
     // Metrics for source-correlation look-ups.
     std::mutex*                               cubin_mu     = nullptr;
     std::unordered_map<uint64_t, CubinInfo>*  cubin_by_crc = nullptr;
@@ -71,6 +71,15 @@ class IProfilingEngine {
      */
     virtual void flushBeforeCudaTeardown(const char* /*reason*/) {}
 
+    /**
+     * @brief Cheap per-kernel-launch tick, called from the launch API_ENTER
+     * callback on the app thread. PC sampling uses it as its periodic
+     * collection beat (internally throttled): the app thread is the only
+     * reliably scheduled, context-current place to run a mid-session
+     * stop→collect→re-arm on Windows-injected targets.
+     */
+    virtual void onLaunchTick() {}
+
     // ---- Perf-scope hooks (Range Profiler / Perfworks) ----
     virtual void onPerfScopeStart(const char* /*name*/) {}
     virtual void onPerfScopeStop(const char* /*name*/) {}
@@ -106,6 +115,14 @@ class IProfilingEngine {
     virtual bool hasInsufficientPrivileges() const { return false; }
 
     /**
+     * @brief True when the driver exposed zero PC sampling stall reasons
+     * (cuptiPCSamplingGetNumStallReasons returned 0) - sampling data
+     * collection is unavailable on this GPU/driver even though
+     * cuptiPCSamplingEnable succeeds. Default: false.
+     */
+    virtual bool stallReasonsUnavailable() const { return false; }
+
+    /**
      * @brief True if this engine started successfully and is producing
      * data. False if start() was skipped, failed, or the engine is None.
      */
@@ -113,7 +130,7 @@ class IProfilingEngine {
 
     /**
      * @brief True if this engine actually emitted at least one profiling
-     * record/sample this session — not merely armed. Lets the capability
+     * record/sample this session - not merely armed. Lets the capability
      * report distinguish "collected" from "enabled but produced 0 data"
      * (e.g. SASS / PC sampling armed but the kernels were too short, or CUPTI
      * returned nothing). Default false; engines that emit data override it.

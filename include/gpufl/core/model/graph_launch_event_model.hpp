@@ -8,7 +8,7 @@ namespace gpufl::model {
 /**
  * JSON serializer for GraphLaunchEvent.
  *
- * Per-event JSON, Scope channel — low volume,
+ * Per-event JSON, Scope channel - low volume,
  * scope-like timing. Wire shape mirrors the memory event pattern
  * intentionally so the Java backend can dispatch on `"type"` cheaply.
  */

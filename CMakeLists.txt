@@ -32,7 +32,7 @@ option(GPUFL_ENABLE_AMD_ROCPROFILER "Enable AMD rocprofiler-sdk tracing backend 
 
 option(BUILD_GPUFL_EXAMPLE "Build gpufl example application" ON)
 option(BUILD_GPUFL_MONITOR "Build gpufl-monitor standalone daemon" ON)
-# Injection-mode launcher + shared library — Linux + NVIDIA only for v1.
+# Injection-mode launcher + shared library - Linux + NVIDIA only for v1.
 # Disabled by default off-Linux because LD_PRELOAD / __attribute__((constructor))
 # / fork+execvp don't apply there.
 if(UNIX AND NOT APPLE)
@@ -64,8 +64,8 @@ target_compile_features(gpufl INTERFACE cxx_std_17)
 # Single source of truth = the project() VERSION line at the top of
 # this file. See include/gpufl/core/version.hpp.
 #
-# PUBLIC (not PRIVATE) so consumers of gpufl — gpufl_tests, daemon/monitor,
-# example apps, and any downstream library user — see the same macro
+# PUBLIC (not PRIVATE) so consumers of gpufl - gpufl_tests, daemon/monitor,
+# example apps, and any downstream library user - see the same macro
 # value when compiling against gpufl/core/version.hpp. With PRIVATE, the
 # library's TUs see "0.1.0" but consumer TUs fall back to "0.0.0-dev",
 # causing an ODR-style runtime mismatch (the constexpr inline char*
@@ -126,14 +126,14 @@ set(GPUFL_HAS_HIP 0)
 set(GPUFL_HAS_ROCPROFILER_SDK 0)
 set(GPUFL_HAS_CUPTI 0)
 set(GPUFL_HAS_PERFWORKS 0)
-# ZLIB — try system install first, fall back to FetchContent so every platform
+# ZLIB - try system install first, fall back to FetchContent so every platform
 # (including Windows CI) always gets compression support and .gz output.
 find_package(ZLIB QUIET)
 if(ZLIB_FOUND)
     message(STATUS "Found system ZLIB: ${ZLIB_LIBRARIES}")
     target_link_libraries(gpufl PRIVATE ZLIB::ZLIB)
 else()
-    message(STATUS "ZLIB not found on system — fetching via FetchContent")
+    message(STATUS "ZLIB not found on system - fetching via FetchContent")
     include(FetchContent)
     # Suppress zlib's own example / test targets to keep the build clean
     set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -144,7 +144,7 @@ else()
     )
     FetchContent_MakeAvailable(zlib)
     # zlib.h lives in the source dir; zconf.h is generated in the binary dir.
-    # Add both privately to gpufl — consumers never include zlib headers directly.
+    # Add both privately to gpufl - consumers never include zlib headers directly.
     target_link_libraries(gpufl PRIVATE zlibstatic)
     target_include_directories(gpufl PRIVATE
         ${zlib_SOURCE_DIR}
@@ -154,7 +154,7 @@ else()
     # build-directory paths, which CMake forbids in install exports.  Clear them:
     # gpufl already propagates the paths privately, so consumers don't need them.
     set_target_properties(zlibstatic PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "")
-    # zlibstatic must be in the same export set as gpufl — static lib consumers
+    # zlibstatic must be in the same export set as gpufl - static lib consumers
     # need to link it transitively, so CMake requires it to be exported too.
     install(TARGETS zlibstatic
         EXPORT   gpufl_clientTargets
@@ -165,13 +165,13 @@ target_sources(gpufl PRIVATE include/gpufl/core/logger/file_compressor.cpp)
 
 
 # -----------------------
-# cpp-httplib — HTTP client used by gpufl::uploadLogs (deferred upload
+# cpp-httplib - HTTP client used by gpufl::uploadLogs (deferred upload
 # of session NDJSON files to the backend, called after gpufl::shutdown).
 # Also used by remote_config.cpp for the post-init version probe.
 #
 # Single-header library. Fetched once via FetchContent so every build gets
 # the same version regardless of the host system. HTTPS support is gated
-# on OpenSSL availability (optional) — without OpenSSL we compile HTTP-only
+# on OpenSSL availability (optional) - without OpenSSL we compile HTTP-only
 # and log a warning so the user knows HTTPS endpoints will fail.
 # -----------------------
 include(FetchContent)
@@ -187,13 +187,13 @@ FetchContent_MakeAvailable(httplib)
 
 find_package(OpenSSL QUIET)
 if(OpenSSL_FOUND)
-    message(STATUS "Found OpenSSL: ${OPENSSL_VERSION} — HTTPS upload enabled")
+    message(STATUS "Found OpenSSL: ${OPENSSL_VERSION} - HTTPS upload enabled")
     target_compile_definitions(gpufl PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT=1)
     target_link_libraries(gpufl PRIVATE OpenSSL::SSL OpenSSL::Crypto)
     set(GPUFL_HTTPLIB_TLS 1)
 else()
     message(WARNING
-        "OpenSSL not found — gpufl::uploadLogs will support HTTP only. "
+        "OpenSSL not found - gpufl::uploadLogs will support HTTP only. "
         "Pointing backend_url at an https:// endpoint will fail to verify. "
         "Install OpenSSL (apt: libssl-dev, vcpkg: openssl, brew: openssl) "
         "to enable TLS.")
@@ -202,7 +202,7 @@ endif()
 target_compile_definitions(gpufl PRIVATE GPUFL_HTTPLIB_TLS=${GPUFL_HTTPLIB_TLS})
 # Enable cpp-httplib's gzip path. PUBLIC so any consumer that includes
 # httplib.h via gpufl's headers (notably the test target's embedded
-# httplib::Server) gets the same wire-format support — without this,
+# httplib::Server) gets the same wire-format support - without this,
 # server::Post handlers return 415 on incoming Content-Encoding: gzip
 # requests, which is exactly what uploadLogs sends in v1.2+.
 #
@@ -214,7 +214,7 @@ target_compile_definitions(gpufl PRIVATE GPUFL_HTTPLIB_TLS=${GPUFL_HTTPLIB_TLS})
 #     (no current need, but a free optimization if we ever want it).
 #   - It propagates to tests, which is the immediate motivation.
 #
-# ZLIB is already linked above — file_compressor.cpp uses it to gzip
+# ZLIB is already linked above - file_compressor.cpp uses it to gzip
 # rotated NDJSON files, and upload_logs.cpp uses it both to read those
 # files back and to gzip outgoing stream-chunks.
 target_compile_definitions(gpufl PUBLIC CPPHTTPLIB_ZLIB_SUPPORT=1)
@@ -294,7 +294,7 @@ if(GPUFL_ENABLE_NVIDIA)
             endif()
 
             # --------------------------------------------------------
-            # NVTX (NVIDIA Tools Extension) — lets GFL_SCOPE emit ranges
+            # NVTX (NVIDIA Tools Extension) - lets GFL_SCOPE emit ranges
             # visible to Nsight Systems and captured via CUPTI marker
             # activity, plus lets the PyTorch integration (gpufl.torch)
             # bridge dispatch events into the profiling pipeline.
@@ -305,7 +305,7 @@ if(GPUFL_ENABLE_NVIDIA)
             #      links the legacy nvToolsExt DLL/SO. Use it.
             #   2. CUDA 13+: NVTX is header-only under `include/nvtx3/`.
             #      The CUDAToolkit include dir is propagated via CUDA::cudart
-            #      (already linked above), so the header is findable — just
+            #      (already linked above), so the header is findable - just
             #      define GPUFL_HAS_NVTX=1 and let `#include <nvtx3/nvToolsExt.h>`
             #      resolve through cudart's transitive include.
             #   3. Fallback find_path as a last resort for unusual layouts.
@@ -357,7 +357,7 @@ if(GPUFL_ENABLE_NVIDIA)
                 message(STATUS "Found NVPERF: ${NVPERF_HOST_LIBRARY}")
             else()
                 set(GPUFL_HAS_PERFWORKS 0)
-                message(WARNING "NVPERF not found — GFL_PERF_SCOPE disabled at runtime")
+                message(WARNING "NVPERF not found - GFL_PERF_SCOPE disabled at runtime")
             endif()
         endif()
     endif()
@@ -392,7 +392,7 @@ if(GPUFL_ENABLE_NVIDIA)
         # NVML stub library lives under the CUDA toolkit. We search both
         # the versioned path (cuda-13.1, cuda-12.x, ...) AND the unversioned
         # /usr/local/cuda symlink that the nvidia/cuda:*-devel base images
-        # ship — earlier this only listed the versioned path, which silently
+        # ship - earlier this only listed the versioned path, which silently
         # missed NVML when find_package(CUDAToolkit) failed to populate
         # CUDAToolkit_ROOT inside scikit-build-core's isolated build env.
         find_library(NVML_LIBRARY NAMES nvidia-ml
@@ -412,7 +412,7 @@ if(GPUFL_ENABLE_NVIDIA)
             message(STATUS "Found NVML (Linux): ${NVML_LIBRARY}")
         else()
             # Fail loudly. A silent fallback ships a wheel with no GPU
-            # telemetry — job_start emits "devices": [] at runtime and the
+            # telemetry - job_start emits "devices": [] at runtime and the
             # user has no idea NVML was missing at build time. Force the
             # caller to either fix the path (-DNVML_LIBRARY=...) or
             # explicitly opt out (-DGPUFL_ENABLE_NVIDIA=OFF). This trade-off
@@ -453,7 +453,7 @@ if(GPUFL_ENABLE_NVIDIA)
             PATH_SUFFIXES amd64 x64 lib/x64)
 
         # 2) Otherwise fetch the MIT-licensed open-source SDK (headers + the
-        #    prebuilt amd64/nvapi64.lib stub) into build/_deps. Pinned by SHA —
+        #    prebuilt amd64/nvapi64.lib stub) into build/_deps. Pinned by SHA -
         #    the repo publishes no tags.
         if(NOT (NVAPI_INCLUDE_DIR AND NVAPI_LIBRARY))
             include(FetchContent)
@@ -605,7 +605,7 @@ target_compile_definitions(gpufl PUBLIC
 )
 
 # -----------------------
-# gpufl_inject — injection-mode shared library (Linux .so + Windows .dll).
+# gpufl_inject - injection-mode shared library (Linux .so + Windows .dll).
 #
 # Loaded into a target process by `gpufl trace`: on Linux via LD_PRELOAD +
 # CUDA_INJECTION64_PATH; on Windows via CUDA_INJECTION64_PATH only (no
@@ -677,7 +677,12 @@ function(gpufl_copy_runtime_dlls TARGET_NAME)
             file(GLOB _ALL_DLLS
                 "${_DIR}/cupti64*.dll"
                 "${_DIR}/nvperf_host*.dll"
-                "${_DIR}/nvperf_target*.dll")
+                "${_DIR}/nvperf_target*.dll"
+                # PC sampling loads pcsamplingutil by versionless name at
+                # runtime; it must travel with our cupti64 so the in-process
+                # PerfWorks preload can pin the MATCHING copy (a stale one on
+                # the loader path would mismatch, like torch's nvperf_host).
+                "${_DIR}/pcsamplingutil*.dll")
             foreach(_DLL ${_ALL_DLLS})
                 add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
                     COMMAND ${CMAKE_COMMAND} -E copy_if_different

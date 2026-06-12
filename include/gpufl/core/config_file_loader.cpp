@@ -52,7 +52,7 @@ void ConfigFileLoader::apply(InitOptions& opts, const std::string& path) {
         opts.enable_stack_trace = cfg.value<bool>("enable_stack_trace", opts.enable_stack_trace);
     // Backward compat: silently ignore "enable_kernel_details" if a
     // legacy config file still sets it. Kernel details are now always
-    // captured — see gpufl.hpp. Old configs continue to load cleanly
+    // captured - see gpufl.hpp. Old configs continue to load cleanly
     // without erroring on the unknown key.
     if (cfg.contains("enable_source_collection"))
         opts.enable_source_collection = cfg.value<bool>("enable_source_collection", opts.enable_source_collection);

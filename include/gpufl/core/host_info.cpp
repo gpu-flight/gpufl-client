@@ -2,7 +2,7 @@
 //
 // Encapsulates the per-platform `gethostname()` plumbing in a single
 // TU so callers don't have to deal with winsock2 vs <unistd.h>
-// differences. We also keep <windows.h> out of this file — pulling it
+// differences. We also keep <windows.h> out of this file - pulling it
 // in would re-create the winsock1 vs winsock2 ordering footgun we
 // already fixed for the HTTP path. winsock2 functions are accessed
 // directly via <winsock2.h>.
@@ -52,12 +52,12 @@ std::string getLocalIpAddr() {
     //
     //   1. Create a UDP socket.
     //   2. `connect()` it to any routable external address (we use
-    //      8.8.8.8:53 — Google DNS, always reachable in routing tables).
+    //      8.8.8.8:53 - Google DNS, always reachable in routing tables).
     //      For UDP, `connect()` does NOT send a packet; it just records
     //      the destination so the kernel can pick a source address via
     //      its routing table.
     //   3. `getsockname()` then returns the local IP the kernel would
-    //      use for traffic to that destination — i.e. the machine's
+    //      use for traffic to that destination - i.e. the machine's
     //      primary outbound IP.
     //
     // This is preferable to iterating `GetAdaptersAddresses` /
@@ -66,12 +66,12 @@ std::string getLocalIpAddr() {
     // actually use, even on hosts with multiple interfaces (LAN + VPN
     // + WSL bridge + Hyper-V virtual switches, etc.).
     //
-    // IPv4 only for now — most dashboards display v4. If the host is
+    // IPv4 only for now - most dashboards display v4. If the host is
     // pure-IPv6 the call returns empty (acceptable starting point).
     //
     // Cached: routing tables can change at runtime (VPN connect /
     // disconnect), but session-level labels don't need to follow
-    // that — capture once and stick with it for the session.
+    // that - capture once and stick with it for the session.
     static const std::string cached = []() -> std::string {
 #ifdef _WIN32
         WSADATA wsa;

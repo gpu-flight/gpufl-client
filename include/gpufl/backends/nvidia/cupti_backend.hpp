@@ -57,7 +57,7 @@ class CuptiBackend : public IMonitorBackend {
     bool AllowSassKernelActivity() const {
         return resolved_plan_.allow_sass_kernel_activity;
     }
-    // True when an engine combo (GPUFL_ENGINE_COMBO) is active — the backend
+    // True when an engine combo (GPUFL_ENGINE_COMBO) is active - the backend
     // runs a CompositeEngine over an arbitrary engine list instead of a single
     // engine. Used to measure the compatibility matrix and back the redefined
     // Deep (the maximal validated-compatible set).
@@ -113,6 +113,10 @@ class CuptiBackend : public IMonitorBackend {
         kernel_launch_callback_seen_.store(true, std::memory_order_release);
         last_cleanup_flush_ns_.store(0, std::memory_order_release);
     }
+    // Per-launch engine tick from the launch API_ENTER callback (app
+    // thread). PC sampling's periodic collection beat; see
+    // IProfilingEngine::onLaunchTick.
+    void EngineLaunchTick();
     void NoteMemoryActivityEmitted() {
         memory_activity_emitted_.fetch_add(1, std::memory_order_relaxed);
     }
@@ -129,7 +133,7 @@ class CuptiBackend : public IMonitorBackend {
     //      SassMetrics read cubin_by_crc_ to correlate samples).
     // Trace (activity records only) and RangeProfiler (scope-level HW
     // counters) need neither, so we skip cubin capture/disassembly
-    // entirely for them — there's no per-instruction data to attach it
+    // entirely for them - there's no per-instruction data to attach it
     // to. (ProfilingEngine::Monitor never constructs a CuptiBackend at
     // all, so it doesn't reach this method.)
     bool NeedsCubinCapture() const { return resolved_plan_.needs_cubin_capture; }
@@ -140,14 +144,14 @@ class CuptiBackend : public IMonitorBackend {
     const MonitorOptions& GetOptions() const { return opts_; }
 
     // Drain CUPTI activity buffers from the CUPTI_CBID_RESOURCE_CONTEXT_
-    // DESTROY_STARTING callback — i.e. while the context is still alive, just
+    // DESTROY_STARTING callback - i.e. while the context is still alive, just
     // before the driver tears it down. Complementary safety net for contexts
     // destroyed mid-process (an explicit cudaDeviceReset()/cuCtxDestroy, or
     // multi-context apps): our at-exit shutdown() skips cuptiActivityFlushAll
     // (it would deadlock against a dying context, see teardown_flag.hpp), so a
     // flush here captures that context's records first. NOTE: on Windows
     // process exit cudart does NOT proactively destroy the context (it's left
-    // to driver DLL-detach), so this callback does NOT fire there — the final
+    // to driver DLL-detach), so this callback does NOT fire there - the final
     // kernel records on Windows-exit are instead recovered by Monitor::Shutdown's
     // post-join drain (see monitor.cpp). Invoked synchronously by ResourceHandler.
     void FlushOnContextDestroy();
@@ -191,6 +195,22 @@ class CuptiBackend : public IMonitorBackend {
     static void EnableNvtxMarkerActivity_(const char* phase);
     static void LogNvtxMarkerActivityDisabled_(const char* phase);
 
+    // Deferred engine start - Windows injection runs InitializeInjection
+    // during cuInit, BEFORE the app creates any CUDA context, and the
+    // context-bound engines (PC sampling, SASS, PM, Range) can't start
+    // without one. Instead of dropping the engine (the old behavior, which
+    // made a `gpufl trace --passes PcSampling` session collect zero
+    // samples), start() flags the engine as pending and the CONTEXT_CREATED
+    // resource callback completes the start synchronously on the context-
+    // creating app thread (NVIDIA's pc_sampling_continuous pattern; it also
+    // keeps cuptiPCSamplingStart/Stop on one thread). Only CUPTI + driver-
+    // API calls are made there - cudart (GetSMProps) stays lazy.
+    void RequestDeferredEngineStart(CUcontext ctx);
+    void FinishDeferredEngineStart_();
+    // Activity kinds that engines reset during their start - re-enabled
+    // both on the normal start() path and after a deferred engine start.
+    void ReenableActivityAfterEngineStart_();
+
     friend class ResourceHandler;
     friend class KernelLaunchHandler;
     friend class MemTransferHandler;
@@ -215,7 +235,7 @@ class CuptiBackend : public IMonitorBackend {
     ResolvedProfilingPlan resolved_plan_;
 
     // Non-empty when GPUFL_ENGINE_COMBO selected a CompositeEngine: the ordered
-    // list of sub-engines (teardown-safe order — PcSampling last). Empty =
+    // list of sub-engines (teardown-safe order - PcSampling last). Empty =
     // single-engine mode via opts_.profiling_engine.
     std::vector<ProfilingEngine> combo_;
 
@@ -228,7 +248,7 @@ class CuptiBackend : public IMonitorBackend {
 
     // Per-session clock anchor mapping CUPTI activity timestamps
     // (cuptiGetTimestamp domain) to wall-clock ns. Captured fresh in start()
-    // so re-init sessions re-anchor — the previous function-static anchor in
+    // so re-init sessions re-anchor - the previous function-static anchor in
     // BufferCompleted persisted process-wide and skewed timestamps across
     // init/shutdown cycles. Written once in start() before any activity record
     // can arrive; read on the (serial) BufferCompleted thread.
@@ -241,19 +261,19 @@ class CuptiBackend : public IMonitorBackend {
     std::string cached_device_name_ = "Unknown Device";
     CUcontext ctx_ = nullptr;
 
-    // Cubin map — written by ResourceHandler, read by engines.
+    // Cubin map - written by ResourceHandler, read by engines.
     // seen_cubin_ptrs_ caches raw pointers so MODULE_PROFILED callbacks
     // (which fire on every kernel launch) are skipped after the first hit.
     std::mutex cubin_mu_;
     std::unordered_map<uint64_t, CubinInfo> cubin_by_crc_;
     std::unordered_set<const void*> seen_cubin_ptrs_;
 
-    // Registered once in initialize() via RegisterHandler — BEFORE the CUPTI
-    // subscriber + activity callbacks are enabled — and never modified for the
+    // Registered once in initialize() via RegisterHandler - BEFORE the CUPTI
+    // subscriber + activity callbacks are enabled - and never modified for the
     // rest of the backend's lifetime (a fresh CuptiBackend is created per
     // session; see Monitor::Shutdown's adapter.reset() + Initialize). It is
     // therefore IMMUTABLE while any callback can run, so GflCallback /
-    // BufferCompleted (and start()/stop()) read it lock-free — no handler_mu_,
+    // BufferCompleted (and start()/stop()) read it lock-free - no handler_mu_,
     // and the per-callback vector copy is gone (zero-alloc dispatch). Do NOT
     // call RegisterHandler after initialize() has enabled callbacks.
     std::vector<std::shared_ptr<ICuptiHandler>> handlers_;
@@ -282,7 +302,12 @@ class CuptiBackend : public IMonitorBackend {
     uint32_t device_id_ = 0;
     std::string chip_name_;
 
-    // Active profiling engine — exactly one (or nullptr for monitoring only)
+    // Deferred-engine-start state (see RequestDeferredEngineStart).
+    std::atomic<bool> engine_start_pending_{false};
+    std::atomic<CUcontext> deferred_ctx_{nullptr};
+    std::mutex deferred_start_mu_;
+
+    // Active profiling engine - exactly one (or nullptr for monitoring only)
     std::unique_ptr<IProfilingEngine> engine_;
 };
 

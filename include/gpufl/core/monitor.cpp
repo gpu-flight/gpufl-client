@@ -41,7 +41,7 @@ static std::thread g_collectorThread;
 static std::atomic g_collectorRunning{false};
 static thread_local std::stack<void*> g_rangeStack;
 
-// Batch state — kernel/memcpy accessed only from CollectorLoop thread;
+// Batch state - kernel/memcpy accessed only from CollectorLoop thread;
 // scope/profile may be pushed from any thread (guarded by their own mutex)
 static DictionaryManager      g_dictManager;
 static BatchBuffer<KernelBatchRow>  g_kernelBatch;
@@ -52,7 +52,7 @@ static uint64_t g_memcpyBatchId = 0;
 // Worker-local kernel-name demangle cache (Step 4a). Demangling moved off the
 // CUPTI callback/activity threads to here. collectorProcessNext runs only on
 // the collector thread (and on the main thread AFTER the collector is joined
-// at shutdown), never concurrently — so no lock is needed (the old
+// at shutdown), never concurrently - so no lock is needed (the old
 // callback-side cache used demangle_mu_).
 static std::unordered_map<std::string, std::string> g_kernelNameDemangleCache;
 static const std::string& DemangleKernelNameCached(const char* raw) {
@@ -68,12 +68,12 @@ static const std::string& DemangleKernelNameCached(const char* raw) {
 // Collector-thread cache for demangling the "name@source" function keys that
 // PC sampling interns. The PC_SAMPLE branch in collectorProcessNext runs only
 // on the collector thread (and on the main thread after the collector joins at
-// shutdown) — the same single-consumer contract as g_kernelNameDemangleCache,
+// shutdown) - the same single-consumer contract as g_kernelNameDemangleCache,
 // so no lock. CUPTI hands PC/SASS function names MANGLED; demangling here gives
 // every engine ONE canonical kernel identity (matching Trace's already-
 // demangled kernel_dict) that the backend multi-pass merge can join on. NOTE:
 // SASS interns on the USER thread (PushProfileSamples) and uses its OWN burst-
-// local cache so this map stays single-threaded — do not share it from there.
+// local cache so this map stays single-threaded - do not share it from there.
 static std::unordered_map<std::string, std::string> g_functionKeyDemangleCache;
 static const std::string& DemangleFunctionKeyCached(const std::string& key) {
     auto it = g_functionKeyDemangleCache.find(key);
@@ -82,7 +82,7 @@ static const std::string& DemangleFunctionKeyCached(const std::string& key) {
         key, gpufl::core::DemangleFunctionKey(key));
     return ins->second;
 }
-// Deferred kernel detail rows — written after the kernel batch so the
+// Deferred kernel detail rows - written after the kernel batch so the
 // backend's UPDATE (match by corr_id) always finds the INSERT first.
 static std::vector<KernelDetailRow> g_pendingDetails;
 
@@ -153,7 +153,7 @@ static void flushBatches(Logger& logger, const std::string& session_id) {
     // and disassembly (which also reference dict IDs but are rare), and
     // again immediately before each batch emission. This closes a race
     // where the app thread could intern a new scope name AFTER the
-    // initial flushDictionary call but BEFORE the batch flush — the
+    // initial flushDictionary call but BEFORE the batch flush - the
     // new name would be pushed into g_scopeBatch but remain dirty in
     // the dict, producing an ordering bug where scope_event_batch
     // references name_ids 2-5 before their dict_update is emitted.
@@ -188,7 +188,7 @@ static void flushBatches(Logger& logger, const std::string& session_id) {
         g_syncBatch.clear();
     }
     if (!g_memAllocBatch.empty()) {
-        // Pure-numeric rows — no dictionary references.
+        // Pure-numeric rows - no dictionary references.
         logger.write(model::MemoryAllocEventBatchModel(
             g_memAllocBatch, session_id, ++g_memAllocBatchId));
         g_memAllocBatch.clear();
@@ -230,14 +230,14 @@ static void flushBatches(Logger& logger, const std::string& session_id) {
 // under CuptiBackend::meta_mu_ on the CUPTI callback + BufferCompleted threads
 // now happens here, on the single collector thread, so NO lock is needed (same
 // threading model as g_kernelNameDemangleCache: written only by the collector,
-// and by the main thread AFTER the collector is joined at shutdown — never
+// and by the main thread AFTER the collector is joined at shutdown - never
 // concurrently). Keyed by CUPTI correlationId. Populated by KERNEL_LAUNCH_META
 // records (API_ENTER), api_exit_ns patched by KERNEL_API_EXIT records
 // (API_EXIT), consumed + erased when the matching KERNEL / MEMCPY / MEMSET
 // activity record is processed. Entries still present at shutdown are launches
 // CUPTI never delivered an activity record for; drainSyntheticKernels() flushes
 // them as synthetic kernels (replacing CuptiBackend::FlushPendingKernels).
-// Stores the whole KERNEL_LAUNCH_META ActivityRecord — it already carries every
+// Stores the whole KERNEL_LAUNCH_META ActivityRecord - it already carries every
 // field the join and the synthetic-kernel path need, so no parallel struct.
 static std::unordered_map<uint64_t, ActivityRecord> g_launchMetaByCorr;
 static std::unordered_set<uint64_t> g_emittedKernelCorrIds;
@@ -245,10 +245,10 @@ static std::unordered_set<uint64_t> g_emittedKernelCorrIds;
 // ── Execution Signature (P2 multi-pass determinism guard) ──────────────────
 // Per-scope multiset of (mangled kernel name + launch dims) -> launch count,
 // built from the KERNEL_LAUNCH_META records below (which fire in EVERY engine
-// mode, so every isolated pass — even SASS, where kernel-activity is off — has
+// mode, so every isolated pass - even SASS, where kernel-activity is off - has
 // the full launch inventory). Collector-thread-only: accumulated as launch
 // metas are consumed from the ring and emitted at session end after the
-// collector joins — same single-consumer contract as g_launchMetaByCorr, no
+// collector joins - same single-consumer contract as g_launchMetaByCorr, no
 // lock. std::map keeps keys sorted so the hash is order-independent (the
 // MULTISET property: benign async launch reordering must not change it). Scope
 // key = full user_scope path ("" = global); perf-scope reconciliation is the
@@ -268,7 +268,7 @@ static uint64_t Fnv1a64(const std::string& s) {
 
 // Accumulate one kernel launch into its scope's signature multiset. `rec` is a
 // KERNEL_LAUNCH_META carrying final launch dims (has_details). The key uses the
-// MANGLED name — byte-identical across passes, so no demangle is needed for the
+// MANGLED name - byte-identical across passes, so no demangle is needed for the
 // cross-pass comparison. \x1f separates fields (never appears in names/dims).
 static void accumulateExecSignature(const ActivityRecord& rec) {
     std::string key = rec.name;
@@ -289,7 +289,7 @@ static void accumulateExecSignature(const ActivityRecord& rec) {
 // under CuptiBackend::sync_meta_mu_ in BufferCompleted now happens here on the
 // single collector thread, lock-free. Populated by SYNC_META records (sync
 // API_ENTER), consumed + erased when the matching SYNCHRONIZATION activity
-// record is processed. Only the stack_id is carried/joined — the old SyncMeta
+// record is processed. Only the stack_id is carried/joined - the old SyncMeta
 // also held an api_enter_ns that nothing downstream ever read, so it's dropped.
 // No synthetic drain: sync activity records are 1:1 with the API call, and
 // orphans (e.g. sub-100ns syncs filtered in BufferCompleted) are simply dropped,
@@ -300,7 +300,7 @@ static std::unordered_map<uint64_t, size_t> g_syncStackByCorr;
 // bank size) from the worker-local meta map onto an activity record, then erase
 // the entry. The activity record supplies everything else (kernel timing / dims
 // / occupancy from CUpti_ActivityKernel11; bytes / kind for mem ops). Best-
-// effort: if no meta arrived for this corr the record is left untouched — same
+// effort: if no meta arrived for this corr the record is left untouched - same
 // as the old meta_mu_ join missing (e.g. the API_ENTER push lost to ring
 // backpressure, or an activity record that arrived before its launch callback).
 static void joinLaunchMeta(ActivityRecord& rec) {
@@ -317,13 +317,13 @@ static void joinLaunchMeta(ActivityRecord& rec) {
 }
 
 // Emit one fully-joined KERNEL record: intern the (demangled) name, push the
-// kernel batch row, and — when detailed — the deferred detail row; flush if the
+// kernel batch row, and - when detailed - the deferred detail row; flush if the
 // batch filled. Extracted from collectorProcessNext's KERNEL branch (Step 4b-2)
 // so drainSyntheticKernels can reuse the exact same emission path. `rec` must
 // already carry the joined scope/stack metadata and resolved `stack_trace`.
 static void emitKernelRecord(const ActivityRecord& rec,
                              const std::string& stack_trace, Runtime* rt) {
-    // Demangle on the collector thread (Step 4a) — rec.name holds the RAW
+    // Demangle on the collector thread (Step 4a) - rec.name holds the RAW
     // mangled name pushed by the CUPTI callback/activity path.
     const uint32_t kernel_id =
         g_dictManager.internKernel(DemangleKernelNameCached(rec.name).c_str());
@@ -381,7 +381,7 @@ static void emitKernelRecord(const ActivityRecord& rec,
 }
 
 // Flush launch metas that never got a CUPTI activity record as synthetic
-// kernels (Step 4b-2 — replaces CuptiBackend::FlushPendingKernels). Runs on the
+// kernels (Step 4b-2 - replaces CuptiBackend::FlushPendingKernels). Runs on the
 // collector thread AFTER the ring is fully drained, so g_launchMetaByCorr holds
 // exactly the orphaned launches (every kernel with an activity record has
 // already joined + erased its entry). Common in PC Sampling / SASS safe modes,
@@ -390,12 +390,12 @@ static void emitKernelRecord(const ActivityRecord& rec,
 //
 // CUPTI gave us no GPU timestamps for these, so duration is approximated as the
 // gap to the next launch's dispatch (kernels run sequentially on the default
-// stream of single-stream workloads) — or `flushNs` for the last one. The
+// stream of single-stream workloads) - or `flushNs` for the last one. The
 // simplified occupancy was precomputed on the launch callback (it has the
 // nvidia-only SM properties this core TU must not reach for); we just carry it.
 // Idempotent: clears the map, so the second call from Monitor::Shutdown's
 // post-join drain is a no-op.
-// Set by the active backend at start() — see SetSuppressOrphanSyntheticKernels
+// Set by the active backend at start() - see SetSuppressOrphanSyntheticKernels
 // in monitor.hpp. Engines where kernel-activity is intentionally off (SASS safe
 // mode) set this so we don't emit misleading synthetic kernel rows.
 static bool g_suppressOrphanSyntheticKernels = false;
@@ -408,7 +408,7 @@ static void drainSyntheticKernels(Runtime* rt) {
     if (g_suppressOrphanSyntheticKernels) {
         // SASS safe mode: kernel-activity is OFF (it deadlocks), so EVERY launch is
         // orphaned here. A synthetic row's only "duration" would be the host-dispatch
-        // interval between consecutive launches — meaningless as GPU time — so drop
+        // interval between consecutive launches - meaningless as GPU time - so drop
         // them rather than emit misleading kernel rows. The Execution Signature was
         // already accumulated from these metas during processing, so merge is unaffected.
         g_launchMetaByCorr.clear();
@@ -459,7 +459,7 @@ static void drainSyntheticKernels(Runtime* rt) {
     g_launchMetaByCorr.clear();
 }
 
-// Emit one execution_signature record per scope at session end — runs after the
+// Emit one execution_signature record per scope at session end - runs after the
 // ring is fully drained (every KERNEL_LAUNCH_META accumulated). Called on the
 // collector thread (post-loop) and again from Shutdown's post-join drain;
 // idempotent via clear(). std::map iteration is sorted, so the hash is a stable
@@ -505,7 +505,7 @@ static bool collectorProcessNext() {
 
         // Launch-meta control records (Step 4b-2): collector-thread-only join-
         // map maintenance, never emitted. Handled before the runtime/logger
-        // check — they carry no output, only the join state that later KERNEL /
+        // check - they carry no output, only the join state that later KERNEL /
         // MEMCPY / MEMSET activity records read.
         if (rec.type == TraceType::KERNEL_LAUNCH_META) {
             // Merge into the worker-local join map. Keep-first-unless-upgrade: a
@@ -514,19 +514,19 @@ static bool collectorProcessNext() {
             // details and a later record supplies them. Mirrors the merge the old
             // KernelLaunchHandler::handle did under meta_mu_. (MemTransferHandler
             // metas always have has_details=false, so duplicate-corr mem callbacks
-            // resolve to the first/runtime one — its user-facing scope label.)
+            // resolve to the first/runtime one - its user-facing scope label.)
             auto it = g_launchMetaByCorr.find(rec.corr_id);
             bool countForSignature = false;
             if (it == g_launchMetaByCorr.end()) {
                 g_launchMetaByCorr.emplace(rec.corr_id, rec);
-                // First record for this launch — count it once for the exec
+                // First record for this launch - count it once for the exec
                 // signature IF it already carries grid/block (a kernel launch).
                 // Dim-less metas (e.g. memcpy) are not kernel launches and are
                 // never counted.
                 countForSignature = rec.has_details;
             } else if (!it->second.has_details && rec.has_details) {
                 it->second = rec;
-                // Details arrived on the launch's 2nd callback (same corr) —
+                // Details arrived on the launch's 2nd callback (same corr) -
                 // count now; the emplace above skipped it for lack of dims.
                 countForSignature = true;
             }
@@ -552,7 +552,7 @@ static bool collectorProcessNext() {
         Runtime* rt = runtime();
         if (!(rt && rt->logger)) {
             GFL_LOG_DEBUG("[CollectorLoop] DROP rec type=", (int)rec.type,
-                          " — runtime/logger null");
+                          " - runtime/logger null");
             return true;
         }
         if (rec.type == TraceType::KERNEL || rec.type == TraceType::MEMCPY ||
@@ -560,7 +560,7 @@ static bool collectorProcessNext() {
             // Join launch-callback metadata recorded at API_ENTER (Step 4b-2).
             // Before the cutover the producing handler did this under meta_mu_;
             // now the raw activity record arrives with empty scope/stack and we
-            // fill it here from the worker-local map (lock-free — single
+            // fill it here from the worker-local map (lock-free - single
             // consumer). No-op while the map is empty (scaffolding / cache miss).
             joinLaunchMeta(rec);
             const std::string stack_trace =
@@ -593,7 +593,7 @@ static bool collectorProcessNext() {
                 }
 
             } else {
-                // MEMSET — infrequent, keep as immediate verbose write
+                // MEMSET - infrequent, keep as immediate verbose write
                 MemsetEvent be;
                 be.platform    = platform;
                 be.device_id   = rec.device_id;
@@ -699,7 +699,7 @@ static bool collectorProcessNext() {
             }
         } else if (rec.type == TraceType::NVTX_MARKER) {
             // NVTX range captured via CUPTI_ACTIVITY_KIND_MARKER. Emitted
-            // directly as a single event (not batched) — NVTX traffic at
+            // directly as a single event (not batched) - NVTX traffic at
             // scale is primarily from PyTorch and framework internals,
             // which we're comfortable serializing per-event for now.
             // Consider batching if volume becomes a problem.
@@ -732,7 +732,7 @@ static bool collectorProcessNext() {
             rt->logger->write(model::GraphLaunchEventModel(ev));
         } else if (rec.type == TraceType::MEMORY_ALLOC) {
             // cudaMalloc / cudaFree / cudaMallocAsync / etc.
-            // Batched into memory_alloc_event_batch — per-event JSON
+            // Batched into memory_alloc_event_batch - per-event JSON
             // dropped because the envelope (type/pid/app/session_id)
             // amortizes far better across a 512-row batch. Pure-
             // numeric row → no dictionary lookup needed.
@@ -753,10 +753,10 @@ static bool collectorProcessNext() {
             // stack captured by SynchronizationHandler on API_ENTER
             // (PR-B) gets interned via the existing function_dict so
             // hot loops with identical stacks ship the string exactly
-            // once via dictionary_update — ~14× wire compression on
+            // once via dictionary_update - ~14× wire compression on
             // the canonical "sync inside a loop" workload.
             //
-            // Join the API_ENTER call stack here (Step 4c) — moved off the
+            // Join the API_ENTER call stack here (Step 4c) - moved off the
             // BufferCompleted thread / sync_meta_mu_ onto this single consumer.
             // 1:1 with the API call, so erase on join. Best-effort: a missing
             // SYNC_META (dropped to ring backpressure) leaves stack_id 0.
@@ -887,8 +887,8 @@ void Monitor::Shutdown() {
 
     // Belt-and-suspenders post-join drain. On Windows process-exit the collector
     // thread can be torn down before running its own post-loop drain, stranding
-    // late records — notably the synthetic kernels CuptiBackend::stop() pushes
-    // during adapter->stop() above — in the ring buffer. Re-drain here on the
+    // late records - notably the synthetic kernels CuptiBackend::stop() pushes
+    // during adapter->stop() above - in the ring buffer. Re-drain here on the
     // MAIN thread: it's guaranteed alive, the collector is joined (so we are the
     // sole consumer), and g_adapter + the logger are still valid (reset below).
     // No-op on Linux, where the collector already drained everything itself.
@@ -899,7 +899,7 @@ void Monitor::Shutdown() {
         if (Runtime* rt = runtime(); rt && rt->logger) {
             // Emit any launch metas the collector's own drain didn't reach
             // (Windows process-exit can tear the collector down early). No-op
-            // when CollectorLoop already drained them — the map is cleared.
+            // when CollectorLoop already drained them - the map is cleared.
             drainSyntheticKernels(rt);
             emitExecutionSignatures(rt);
             flushBatches(*rt->logger, rt->session_id);
@@ -1016,7 +1016,7 @@ void Monitor::PushProfileSamples(
     // set to the correct ID for these samples.
     const uint32_t scope_name_id =
         g_activeScopeNameId.load(std::memory_order_relaxed);
-    // Single lock acquisition for the entire burst — replaces what was
+    // Single lock acquisition for the entire burst - replaces what was
     // previously thousands of g_monitorBuffer.Push() calls per scope drain.
     // DO NOT call flushBatches() from inside this lock: flushBatches itself
     // takes g_scopeBatchMu (via lock_guard, not recursive), so re-entry

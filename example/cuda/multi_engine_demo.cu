@@ -1,7 +1,7 @@
 // multi_engine_demo.cu
 //
 // Runs MULTIPLE profiling engines in ONE process via the generalized
-// CompositeEngine — to measure the engine-compatibility matrix (which engines can
+// CompositeEngine - to measure the engine-compatibility matrix (which engines can
 // coexist) and to exercise the redefined Deep (= the maximal coexisting set).
 //
 // ── HOW TO SELECT ENGINES ────────────────────────────────────────────────────
@@ -19,12 +19,12 @@
 //     $env:GPUFL_ENGINE_COMBO = "Trace,PcSampling,PmSampling,RangeProfiler"
 //     gpufl.exe trace --passes=Trace -- python train.py
 //
-// Combos to try — Trace gives REAL kernel timings; the rest enrich the same run:
+// Combos to try - Trace gives REAL kernel timings; the rest enrich the same run:
 //     Trace,PcSampling             PC stall-reason sampling + real kernels
 //     Trace,PmSampling             time-series SM / mem / tensor utilization
 //     Trace,RangeProfiler          HW throughput counters (collected per scope)
 //     Trace,PcSampling,PmSampling  a triple (if both pairs pass on your GPU)
-//   (Trace,SassMetrics DEADLOCKS — SASS + kernel activity is an NVIDIA driver bug.)
+//   (Trace,SassMetrics DEADLOCKS - SASS + kernel activity is an NVIDIA driver bug.)
 //
 // ── RUN AS ADMINISTRATOR ─────────────────────────────────────────────────────
 // PerfWorks engines (PmSampling / RangeProfiler) call cuptiProfilerInitialize,
@@ -35,7 +35,7 @@
 //
 // ── WHY THE SCOPES MATTER ────────────────────────────────────────────────────
 // PC / PM / Range collect PER gpufl scope (GFL_SCOPE / GFL_BENCH). Without a scope
-// they arm but produce nothing — the final drain races CUDA context teardown.
+// they arm but produce nothing - the final drain races CUDA context teardown.
 // Every measured region below is wrapped in a scope so the samplers collect while
 // the context is alive.
 //
@@ -159,7 +159,7 @@ int main() {
     }
 
     // Measured region 1: compute-bound, repeated so the samplers accumulate.
-    std::cout << "  [1/3] compute_heavy — 3 warmup + 12 measured" << std::endl;
+    std::cout << "  [1/3] compute_heavy - 3 warmup + 12 measured" << std::endl;
     GFL_BENCH("1_compute_heavy",
               gpufl::ScopeMeta{}.setRepeat(12).setWarmup(3)) {
         computeHeavy<<<grid, block>>>(d_out, d_in, n, 2048);
@@ -168,7 +168,7 @@ int main() {
     CHECK_CUDA(cudaGetLastError());
 
     // Measured region 2: memory-bound.
-    std::cout << "  [2/3] memory_stride — 3 warmup + 12 measured" << std::endl;
+    std::cout << "  [2/3] memory_stride - 3 warmup + 12 measured" << std::endl;
     GFL_BENCH("2_memory_stride",
               gpufl::ScopeMeta{}.setRepeat(12).setWarmup(3)) {
         memoryStride<<<grid, block>>>(d_out, d_in, n, 97);
@@ -176,8 +176,8 @@ int main() {
     };
     CHECK_CUDA(cudaGetLastError());
 
-    // Measured region 3: mixed — both kernels in one scope.
-    std::cout << "  [3/3] mixed — both kernels" << std::endl;
+    // Measured region 3: mixed - both kernels in one scope.
+    std::cout << "  [3/3] mixed - both kernels" << std::endl;
     GFL_SCOPE("3_mixed") {
         computeHeavy<<<grid, block>>>(d_out, d_in, n, 1024);
         memoryStride<<<grid, block>>>(d_out, d_in, n, 53);

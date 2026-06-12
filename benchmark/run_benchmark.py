@@ -139,7 +139,7 @@ def print_table(title: str, results: list[dict]):
 
     for r in results:
         overhead = ((r['wall_ms'] - baseline_wall) / baseline_wall) * 100 if baseline_wall > 0 else 0
-        overhead_str = '—' if r['name'].startswith('Baseline') else f"+{overhead:.1f}%"
+        overhead_str = '-' if r['name'].startswith('Baseline') else f"+{overhead:.1f}%"
         print(f"  {r['name']:<25} {r['wall_ms']:>10.1f} {r['gpu_ms']:>10.1f} {overhead_str:>10}")
 
     # Also print individual run details
@@ -199,7 +199,7 @@ def main():
         print(f"GPUFlight: available (v{getattr(gpufl, '__version__', '?')})")
     except ImportError:
         gpufl_available = False
-        print("GPUFlight: NOT available — will only run baseline")
+        print("GPUFlight: NOT available - will only run baseline")
 
     print(f"Runs per config: {args.runs}")
     print(f"{'=' * 60}")

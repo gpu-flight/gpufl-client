@@ -1,5 +1,5 @@
 """
-gpufl.jax — planned JAX integration (stub during private beta).
+gpufl.jax - planned JAX integration (stub during private beta).
 
 JAX compiles Python code to XLA kernels, which are then dispatched as
 CUDA kernels. GPUFlight's C++ client captures those CUDA kernels via
@@ -11,7 +11,7 @@ op-level attribution. This is more involved than the PyTorch integration
 because XLA flattens the trace rather than dispatching op-by-op at
 runtime.
 
-For now, you can manually annotate regions with NVTX — JAX doesn't have
+For now, you can manually annotate regions with NVTX - JAX doesn't have
 a built-in NVTX API, so use GPUFlight's GFL_SCOPE macro (via
 `gpufl.Scope`) at the boundaries of the jitted functions you care about:
 

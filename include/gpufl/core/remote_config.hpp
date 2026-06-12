@@ -29,7 +29,7 @@ namespace gpufl {
  *
  * On any error (network timeout, non-2xx status, malformed JSON, the
  * endpoint not yet existing on an older backend) this function is a
- * silent no-op — it must NEVER block or fail the agent. Designed to
+ * silent no-op - it must NEVER block or fail the agent. Designed to
  * be called from a detached std::thread; the httplib timeouts are
  * the only bound on its lifetime.
  */

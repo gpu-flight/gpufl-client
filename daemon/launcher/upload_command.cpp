@@ -1,11 +1,11 @@
 // Implements `gpufl upload <log_path> [opts]`.
 //
-// A thin front-end over gpufl::uploadLogs() — the same C++ core the
+// A thin front-end over gpufl::uploadLogs() - the same C++ core the
 // Python `gpufl.upload_logs()` binding calls. Consolidating it here means
 // one native `gpufl` binary owns trace + upload + version, replacing the
 // separate Python `gpufl` console-script (which collided on the name).
 //
-// Portable C++ (no POSIX) — but it's compiled into the launcher binary,
+// Portable C++ (no POSIX) - but it's compiled into the launcher binary,
 // which is Linux-gated in CMake, so this only ships on Linux. Cross-
 // platform callers use the gpufl.upload_logs() Python API instead.
 

@@ -12,7 +12,7 @@ bool Logger::open(const Options& opt) {
     close();
     opt_ = opt;
     if (opt_.base_path.empty()) return false;
-    // The default sink is always the FileLogSink — preserving the
+    // The default sink is always the FileLogSink - preserving the
     // durable on-disk NDJSON contract every consumer depends on
     // (gpufl::uploadLogs deferred upload, gpufl-agent, Python analyzer,
     // text_report). The historical HttpLogSink (live streaming) was
@@ -25,7 +25,7 @@ bool Logger::open(const Options& opt) {
     // previous container build), the sink would otherwise silently
     // drop every write and downstream init steps (Monitor::Initialize,
     // CUPTI start, sampler thread) would proceed against a logger
-    // that can't persist anything — eventually deref'ing broken state
+    // that can't persist anything - eventually deref'ing broken state
     // and killing the Python kernel. Returning false here lets
     // gpufl::init() surface the failure cleanly as a False return to
     // the caller, with the underlying fs error already on stderr.

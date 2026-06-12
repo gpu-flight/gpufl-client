@@ -1,4 +1,4 @@
-// Itanium ABI demangler — focused implementation for CUDA kernel names.
+// Itanium ABI demangler - focused implementation for CUDA kernel names.
 //
 // See itanium_demangle.hpp for the rationale and scope. This file is
 // the implementation. The parser is a single-pass recursive-descent
@@ -37,14 +37,14 @@ private:
     const char* p_;
     const char* end_;
 
-    // Substitution table — every "useful" type the parser consumes
+    // Substitution table - every "useful" type the parser consumes
     // gets appended here. Later refs `S_`, `S0_`, `S1_`, … look up
     // by 0-based index. Per the spec, S_ == subs_[0], S0_ == subs_[1],
     // S1_ == subs_[2], etc. (Yes, off-by-one. The naked `S_` is index 0;
     // subsequent S<n>_ are index n+1.)
     std::vector<std::string> subs_;
 
-    // Template parameter table — populated by parseTemplateArgs() so
+    // Template parameter table - populated by parseTemplateArgs() so
     // later references like `T_`, `T0_` resolve back into the captured
     // arg's rendered string. Same off-by-one convention as subs_:
     // T_ == templates_[0], T0_ == templates_[1], …
@@ -52,7 +52,7 @@ private:
 
     // Was the last name we parsed a template instantiation? If yes,
     // the next type in the bare-function-type is the RETURN type
-    // (Itanium spec quirk — ordinary names omit the return type from
+    // (Itanium spec quirk - ordinary names omit the return type from
     // mangling, templated names include it because overload resolution
     // depends on it).
     bool lastNameWasTemplate_ = false;
@@ -100,7 +100,7 @@ private:
             try {
                 returnType = parseType();
             } catch (const ParseError&) {
-                // Couldn't parse the return type — emit the name alone.
+                // Couldn't parse the return type - emit the name alone.
                 return name;
             }
         }
@@ -140,7 +140,7 @@ private:
         char c = peek();
         if (c == 'N') return parseNestedName();
         if (c == 'S') {
-            // Substitution at the start of a name — rare for CUDA
+            // Substitution at the start of a name - rare for CUDA
             // kernels; substitution refers back to a previously seen
             // type/name. Most kernel symbols start with an explicit
             // nested name `N…E` or a bare source name.
@@ -182,7 +182,7 @@ private:
         // Skip CV qualifiers; we don't render them on nested-name
         // wrappers because for kernel names they're decorative.
         while (peek() == 'K' || peek() == 'V' || peek() == 'r') ++p_;
-        // Reference qualifiers (R / O) on member functions — also skip.
+        // Reference qualifiers (R / O) on member functions - also skip.
         while (peek() == 'R' || peek() == 'O') ++p_;
 
         std::vector<std::string> parts;
@@ -206,7 +206,7 @@ private:
                 std::string sub = parseSubstitution();
                 parts.push_back(sub);
             } else if (c == 'T') {
-                // Template parameter as a name component — rare but
+                // Template parameter as a name component - rare but
                 // valid (`N…T_…E`). Resolve and append.
                 std::string tp = parseTemplateParam();
                 parts.push_back(tp);
@@ -221,7 +221,7 @@ private:
         }
         // Normally the nested name must close with 'E'. If a truncated
         // abi-tag ate the rest of the buffer (incl. the 'E'), accept the
-        // implicit end — we already have all the real name components.
+        // implicit end - we already have all the real name components.
         if (!consume('E') && !truncated_) throw ParseError();
 
         std::string joined = joinScope(parts);
@@ -240,8 +240,8 @@ private:
     }
 
     // <unqualified_name> ::= <source_name>
-    //                      | <operator_name>      (not handled — falls back)
-    //                      | <ctor_dtor_name>     (not handled — falls back)
+    //                      | <operator_name>      (not handled - falls back)
+    //                      | <ctor_dtor_name>     (not handled - falls back)
     std::string parseUnqualifiedName() {
         // For our scope: always a source_name (length-prefixed).
         // Anonymous-namespace markers like "_GLOBAL__N_…" are still
@@ -264,13 +264,13 @@ private:
     //
     // Abi-tags decorate an unqualified-name. The case that brought us
     // here: Numba/NVVM CUDA kernels encode the lowered type signature as
-    // a long hashed abi-tag —
+    // a long hashed abi-tag -
     //   _ZN8__main__13matmul_kernel B2v1 B102<102-char hash> E
     // The standard demangler renders these as `name[abi:tag]`, but for
     // our purpose (readable kernel names + the frontend's regex
     // op-categorization) the tag is pure noise, and Numba's 100+ char
     // hash would overflow the name buffer anyway. So we CONSUME and
-    // DISCARD them — a tagged name demangles to the bare name. Without
+    // DISCARD them - a tagged name demangles to the bare name. Without
     // this the loop hit the 'B', tried to read it as a source-name
     // (which must start with a digit), threw ParseError, and the whole
     // demangle fell back to the raw mangled string.
@@ -289,7 +289,7 @@ private:
                 // names in bounded char arrays, and Numba's hashed tag is
                 // 100+ chars). The tag is discardable and we've already
                 // captured the real name, so consume what's left and flag
-                // truncation — the nested-name parser then finishes
+                // truncation - the nested-name parser then finishes
                 // gracefully instead of failing the whole demangle and
                 // falling back to the raw mangled string.
                 p_ = end_;
@@ -303,7 +303,7 @@ private:
     // <template_args> ::= "I" <template_arg>+ "E"
     // <template_arg>  ::= <type>
     //                   | "X" <expression> "E"     (skip expression)
-    //                   | "L" <type> <value> "E"   (literal — best-effort)
+    //                   | "L" <type> <value> "E"   (literal - best-effort)
     //                   | "J" <template_arg>* "E"  (parameter pack)
     std::string parseTemplateArgs() {
         if (!consume('I')) throw ParseError();
@@ -361,7 +361,7 @@ private:
     }
 
     // <type> ::= <builtin_type>
-    //          | <function_type>     (subset — function pointers)
+    //          | <function_type>     (subset - function pointers)
     //          | <class_enum_type>   (== <name>)
     //          | <array_type>
     //          | <pointer_to_member_type>
@@ -409,7 +409,7 @@ private:
 
         if (c == 'T') return parseTemplateParam();
         if (c == 'S') {
-            // A substitution can be the start of a TYPE — and that
+            // A substitution can be the start of a TYPE - and that
             // type may carry template args. E.g. `St5arrayIPcLy1EE`
             // is `std::array<char*, 1>`: parseSubstitution consumes
             // `St5array` and returns `std::array`; the following
@@ -449,7 +449,7 @@ private:
             return parseType();
         }
 
-        // Anything else we don't recognize — bail out.
+        // Anything else we don't recognize - bail out.
         throw ParseError();
     }
 
@@ -518,7 +518,7 @@ private:
             // together so the caller sees one type, not "std" plus a
             // dangling source name. Without this, template-arg
             // parsing dies on the unconsumed digits and the whole
-            // demangle falls back to the mangled string — which is
+            // demangle falls back to the mangled string - which is
             // the regression we hit on the ATen
             // `vectorized_elementwise_kernel` Windows traces.
             if (!eof() && peek() >= '0' && peek() <= '9') {

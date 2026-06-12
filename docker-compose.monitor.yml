@@ -12,12 +12,12 @@ services:
       GPUFL_MONITOR_LOG_DIR: ${GPUFL_MONITOR_LOG_DIR:-/var/gpufl/monitor/session}
       GPUFL_MONITOR_INTERVAL_MS: ${GPUFL_MONITOR_INTERVAL_MS:-5000}
 
-      # Java agent — source folders (auto-discovers all log prefixes)
+      # Java agent - source folders (auto-discovers all log prefixes)
       GPUFL_SOURCE_FOLDERS: ${GPUFL_SOURCE_FOLDERS:-/var/gpufl/monitor/session}
       GPUFL_LOG_TYPES: ${GPUFL_LOG_TYPES:-system}
       GPUFL_CURSOR_FILE: ${GPUFL_CURSOR_FILE:-/var/gpufl/monitor/cursor.json}
 
-      # Java agent — publisher (HTTP). Set GPUFL_HTTP_HOST to just the
+      # Java agent - publisher (HTTP). Set GPUFL_HTTP_HOST to just the
       # scheme+host (e.g. https://api.gpuflight.com); the agent builds
       # the /api/{version}/events/<type> path itself. Override the
       # version via GPUFL_HTTP_API_VERSION when the backend bumps to v2.
@@ -27,7 +27,7 @@ services:
       GPUFL_HTTP_TOKEN: ${GPUFL_HTTP_TOKEN:-}
       GPUFL_HTTP_TIMEOUT_SEC: ${GPUFL_HTTP_TIMEOUT_SEC:-10}
 
-      # Java agent — publisher (Kafka, optional)
+      # Java agent - publisher (Kafka, optional)
       GPUFL_KAFKA_BROKERS: ${GPUFL_KAFKA_BROKERS:-}
       GPUFL_KAFKA_TOPIC_PREFIX: ${GPUFL_KAFKA_TOPIC_PREFIX:-gpu-trace}
       GPUFL_KAFKA_COMPRESSION: ${GPUFL_KAFKA_COMPRESSION:-snappy}

@@ -25,7 +25,7 @@ FileLogSink::FileChannel::FileChannel(std::string name, Logger::Options opt)
     rotator_ = std::make_unique<LogFileRotator>(r, compressor_.get());
 
     // v1.2+ requires a session_id. Without it the rotator would write
-    // to "<base>/<empty>/channel.log" — a path with an empty path
+    // to "<base>/<empty>/channel.log" - a path with an empty path
     // component, which `fs::create_directories` would happily make as
     // just "<base>/", landing files at parent level. The uploader
     // would then flag the parent-level files as the legacy flat
@@ -68,7 +68,7 @@ void FileLogSink::FileChannel::closeLocked() {
     // disabled, so it's safe to call unconditionally here.
     //
     // On crash (process killed without a clean Logger::close()), this
-    // path doesn't run — the uploader's lazy crash-repair branch
+    // path doesn't run - the uploader's lazy crash-repair branch
     // gzips the orphan .log on first read instead. That keeps the
     // on-wire format uniform regardless of whether shutdown ran.
     if (rotator_) {
@@ -103,7 +103,7 @@ void FileLogSink::FileChannel::ensureOpenLocked() {
                 "': ", ec.message(), " (error code ", ec.value(), "). ",
                 "Common causes: directory exists with restrictive "
                 "permissions (e.g. a Docker volume mount from a "
-                "previous container image — chown the path to the "
+                "previous container image - chown the path to the "
                 "current container's UID, or delete the directory "
                 "and let gpufl recreate it), read-only filesystem, "
                 "out of inodes.");
@@ -157,7 +157,7 @@ void FileLogSink::FileChannel::write(std::string_view line) {
     // Write line + newline. Per-write flush is gated behind
     // Options::flush_always (wired from InitOptions::flush_logs_always)
     // because it's a real syscall in the hot path and matters under
-    // high event volume — SASS-heavy PyTorch sessions can push tens of
+    // high event volume - SASS-heavy PyTorch sessions can push tens of
     // thousands of batched lines per second across channels, at which
     // point the fsync cost dominates.
     //
@@ -165,7 +165,7 @@ void FileLogSink::FileChannel::write(std::string_view line) {
     // OS page cache. Rotation (rotateLocked, above) and shutdown
     // (closeLocked) explicitly flush, so the .log → .log.gz pipeline
     // and the uploader's lazy crash-repair path both still see complete
-    // data. Worst case on SIGKILL: a few buffered NDJSON lines lost —
+    // data. Worst case on SIGKILL: a few buffered NDJSON lines lost -
     // acceptable for profiling data.
     //
     // When ON: flush at every line boundary so a live tailer (the agent's

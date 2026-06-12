@@ -1,4 +1,4 @@
-# gpufl-monitor — standalone GPU monitoring daemon + gpufl-agent uploader
+# gpufl-monitor - standalone GPU monitoring daemon + gpufl-agent uploader
 #
 # Build:
 #   docker build -f Dockerfile.monitor -t gpufl/monitor:latest .
@@ -62,7 +62,7 @@ FROM nvidia/cuda:13.1.0-base-ubuntu24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # supervisor runs the daemon + agent. ca-certificates + libssl3 are required by
-# the HTTPS publisher (TLS handshake + CA validation against the backend) —
+# the HTTPS publisher (TLS handshake + CA validation against the backend) -
 # the '-base' image omits both, whereas '-runtime' happened to include them.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         supervisor \
@@ -70,7 +70,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the only CUDA libs the daemon needs from the devel build stage — the
+# Copy the only CUDA libs the daemon needs from the devel build stage - the
 # '-base' runtime image ships neither. cudart = the CUDA runtime the daemon
 # links; cupti = the profiling library (not in any runtime apt repo).
 COPY --from=builder-cpp /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
@@ -91,7 +91,7 @@ COPY --from=agent-jar /app/gpufl-agent.jar /opt/gpufl-agent/agent.jar
 # supervisord config
 COPY Dockerfile.monitor.supervisord.conf /etc/supervisor/conf.d/gpufl-monitor.conf
 
-# Default values — override with -e flags at runtime
+# Default values - override with -e flags at runtime
 ENV GPUFL_MONITOR_APP=gpufl-monitor
 ENV GPUFL_MONITOR_LOG_DIR=/var/gpufl/monitor/session
 ENV GPUFL_MONITOR_INTERVAL_MS=5000

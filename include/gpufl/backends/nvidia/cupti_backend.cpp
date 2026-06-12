@@ -2,6 +2,7 @@
 #include "gpufl/backends/nvidia/cuda_cleanup_handler.hpp"
 
 #include <cupti_pcsampling.h>
+#include <cupti_profiler_target.h>
 
 #include <algorithm>
 #include <atomic>
@@ -20,6 +21,14 @@
 
 #if defined(__linux__)
 #include <dlfcn.h>
+#elif defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #endif
 
 #include "gpufl/backends/nvidia/cuda_collector.hpp"
@@ -101,7 +110,7 @@ std::unordered_map<uint32_t, NvtxOpen> g_nvtxOpen;
 //
 // If a kernel arrives BEFORE its external correlation record (rare; would
 // require CUPTI to deliver records out of generation order), we miss the
-// stamp for that one launch — emit external_id == 0, treated by the
+// stamp for that one launch - emit external_id == 0, treated by the
 // dashboard as "no framework attribution." Acceptable best-effort.
 struct ExternalCorrInfo {
     uint8_t  kind = 0;
@@ -132,19 +141,19 @@ bool LookupAndPopExternalCorrelation(uint32_t corr_id,
 
 // F1 active push: thin wrappers over CUPTI's correlation stack. The
 // caller (e.g. `gpufl.torch.attach()`) calls these around a code region
-// — every kernel launched in between gets the (kind, id) emitted as an
+// - every kernel launched in between gets the (kind, id) emitted as an
 // EXTERNAL_CORRELATION record, which our BufferCompleted path then
 // stamps onto the matching kernel's row. This is what makes F1 useful
 // without requiring a framework profiler to be running.
 //
 // Both operations are pure CUPTI library calls; they don't need a
 // CuptiBackend instance to exist (the stack is per-thread inside CUPTI
-// itself). Safe to call before init / after shutdown — CUPTI returns
+// itself). Safe to call before init / after shutdown - CUPTI returns
 // CUPTI_ERROR_NOT_INITIALIZED which we silently ignore.
 //
 // Diagnostic: count pushes + log the first few + log any error result.
 // "Pushes happen with OK return but no EXTERNAL_CORRELATION records"
-// is a distinct failure mode from "pushes never happen" — these logs
+// is a distinct failure mode from "pushes never happen" - these logs
 // distinguish them. Also log the OS thread id; if pushes happen on a
 // different thread than the kernel launches, CUPTI's per-thread stack
 // won't bracket the launch.
@@ -196,15 +205,15 @@ void LogCuptiIfUnexpected(const char* scope, const char* op, CUptiResult res) {
 
 #if defined(__linux__)
 // CUPTI loads PerfWorks by soname the first time a profiling feature
-// runs — cuptiPCSamplingEnable (PC sampling) and cuptiProfilerInitialize
+// runs - cuptiPCSamplingEnable (PC sampling) and cuptiProfilerInitialize
 // (SASS / Range / Deep) both do. PerfWorks is NOT one library: the host
-// API (libnvperf_host.so) pulls in companions — libnvperf_target.so (the
+// API (libnvperf_host.so) pulls in companions - libnvperf_target.so (the
 // driver-side counterpart that NVPW_CUDA_LoadDriver initializes) and, for
 // PC sampling, libpcsamplingutil.so. ALL of them must come from the SAME
 // CUDA install as the libcupti we're bound to. If the dynamic loader
 // resolves ANY of them from a DIFFERENT install (classic case: a pip
 // `nvidia-cu13` CUPTI inside a venv + the system /usr/local/cuda nvperf),
-// NVPW_CUDA_LoadDriver SEGFAULTs on the version mismatch — the crash that
+// NVPW_CUDA_LoadDriver SEGFAULTs on the version mismatch - the crash that
 // killed BOTH Deep and PcSampling in PyTorch venvs.
 //
 // Putting the matching directory on LD_LIBRARY_PATH fixes it because that
@@ -216,7 +225,7 @@ void LogCuptiIfUnexpected(const char* scope, const char* op, CUptiResult res) {
 // dependency order (target before host). The loader tracks shared objects
 // by SONAME, so once these are resident CUPTI's later internal dlopen()s
 // return THESE regardless of LD_LIBRARY_PATH ordering. Best-effort:
-// anything missing is logged and skipped — CUPTI falls back to the
+// anything missing is logged and skipped - CUPTI falls back to the
 // loader's choice (prior behavior).
 void PreloadMatchingPerfWorks() {
     Dl_info info{};
@@ -251,7 +260,7 @@ void PreloadMatchingPerfWorks() {
 
     // Bucket the companion libs in our CUPTI's directory. Load order
     // matters: dependencies before dependents. libnvperf_target.so (driver
-    // side) and other helpers go first, libnvperf_host.so last — otherwise
+    // side) and other helpers go first, libnvperf_host.so last - otherwise
     // host's DT_NEEDED on the target soname resolves to the system copy
     // BEFORE we make the matching one resident, and soname-dedup then locks
     // in the wrong target.
@@ -272,7 +281,7 @@ void PreloadMatchingPerfWorks() {
 
     if (targets.empty() && hosts.empty() && others.empty()) {
         GFL_LOG_DEBUG("[CuptiBackend] No PerfWorks libs found next to our "
-                      "CUPTI in ", dir.string(), " — CUPTI will use the "
+                      "CUPTI in ", dir.string(), " - CUPTI will use the "
                       "loader's choice, which may mismatch and crash in "
                       "NVPW_CUDA_LoadDriver on split CUDA installs.");
         return;
@@ -282,10 +291,48 @@ void PreloadMatchingPerfWorks() {
     for (const auto& p : others) tryLoad(p);   // pcsamplingutil, etc.
     for (const auto& p : hosts) tryLoad(p);     // host API last
 }
+#elif defined(_WIN32)
+// Windows variant of the same fix. PyTorch wheels ship a versionless
+// nvperf_host.dll (CUDA 12.x) in torch\lib, so our cupti64's by-name load
+// of "nvperf_host.dll" can resolve torch's mismatched copy. Preload the
+// PerfWorks set next to OUR cupti64 by absolute path — once resident, later
+// by-name loads return it. Load order mirrors Linux (target, util, host).
+void PreloadMatchingPerfWorks() {
+    HMODULE cuptiMod = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(&cuptiSubscribe),
+                            &cuptiMod) ||
+        !cuptiMod) {
+        GFL_LOG_DEBUG("[CuptiBackend] PerfWorks preload: couldn't locate our "
+                      "cupti64 module; skipping (CUPTI will use the loader's "
+                      "PerfWorks DLLs).");
+        return;
+    }
+    wchar_t buf[MAX_PATH] = {};
+    if (!GetModuleFileNameW(cuptiMod, buf, MAX_PATH)) {
+        GFL_LOG_DEBUG("[CuptiBackend] PerfWorks preload: couldn't resolve our "
+                      "cupti64 module path; skipping.");
+        return;
+    }
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::path(buf).parent_path();
+
+    auto tryLoad = [](const fs::path& p) {
+        if (LoadLibraryW(p.wstring().c_str())) {
+            GFL_LOG_DEBUG("[CuptiBackend] Preloaded PerfWorks lib: ",
+                          p.string());
+        } else {
+            GFL_LOG_DEBUG("[CuptiBackend] PerfWorks preload skipped ",
+                          p.string(), " (error ", GetLastError(), ")");
+        }
+    };
+
+    tryLoad(dir / L"nvperf_target.dll");
+    tryLoad(dir / L"pcsamplingutil.dll");
+    tryLoad(dir / L"nvperf_host.dll");
+}
 #else
-// Non-Linux: the same split-install hazard exists on Windows
-// (cupti64_*.dll loading a mismatched nvperf_host.dll) but isn't wired
-// up yet — Windows users typically run a single consistent CUDA toolkit.
 inline void PreloadMatchingPerfWorks() {}
 #endif
 }  // namespace
@@ -635,14 +682,14 @@ void CuptiBackend::initialize(const MonitorOptions& opts) {
             // so the composite collects one or the other: SASS metrics on
             // Blackwell+ (where lazy patching is safe), PC sampling on older
             // GPUs (SASS lazy patching deadlocks against concurrent kernel
-            // launches there — observed on Ampere sm_86). The engine logs
+            // launches there - observed on Ampere sm_86). The engine logs
             // which path it selected in initialize().
             engine_ = std::make_unique<PcSamplingWithSassEngine>();
             GFL_LOG_DEBUG("[CuptiBackend] Engine: Deep");
             break;
         case ProfilingEngine::Trace:
         default:
-            // No sampling engine — activity records only (kernels, memcpy,
+            // No sampling engine - activity records only (kernels, memcpy,
             // sync). ProfilingEngine::Monitor never reaches here:
             // CreateMonitorAdapter returns nullptr for it, so no
             // CuptiBackend is created at all.
@@ -658,6 +705,18 @@ void CuptiBackend::initialize(const MonitorOptions& opts) {
     // PerfWorks, so we skip the preload there.
     if (engine_) {
         PreloadMatchingPerfWorks();
+        // Initialize the Profiler API here — before any CUDA context exists
+        // and outside any CUPTI callback. Both matter on r590+ Windows
+        // drivers (verified): from a callback or after the target's context
+        // exists it returns CUPTI_ERROR_UNKNOWN, and without it PC sampling
+        // enumerates zero stall reasons. NVIDIA's pc_sampling sample uses
+        // the same position. Non-fatal: engines degrade and report why.
+        CUpti_Profiler_Initialize_Params profInit = {
+            CUpti_Profiler_Initialize_Params_STRUCT_SIZE};
+        const CUptiResult profRes = cuptiProfilerInitialize(&profInit);
+        GFL_LOG_DEBUG("[CuptiBackend] cuptiProfilerInitialize (pre-context): ",
+                      profRes == CUPTI_SUCCESS ? "OK" : "FAILED",
+                      " (CUptiResult=", static_cast<int>(profRes), ")");
     }
 
     g_activeBackend.store(this, std::memory_order_release);
@@ -710,6 +769,10 @@ void CuptiBackend::shutdown() {
     if (active_.load(std::memory_order_relaxed)) {
         stop();
     }
+    // stop() already waited out an in-flight deferred start, but cover the
+    // !active_ path too before tearing the engine down.
+    engine_start_pending_.store(false, std::memory_order_release);
+    { std::lock_guard lk(deferred_start_mu_); }
 
     // Delegate engine teardown first
     if (engine_) {
@@ -724,7 +787,7 @@ void CuptiBackend::shutdown() {
     // PcSamplingEngine enables on the PC-sampling paths (no-op for engines
     // that never enabled them). The final flush
     // guarantees every BufferCompleted callback has returned before
-    // we null g_activeBackend below — without this, late deliveries
+    // we null g_activeBackend below - without this, late deliveries
     // raced the pointer-clear and surfaced as "No active backend!"
     // noise on benchmarks that init/shutdown gpufl repeatedly in a
     // single process (run_benchmark.py).
@@ -755,13 +818,13 @@ void CuptiBackend::start() {
     if (!initialized_) return;
     // SASS / PC sampling don't get trustworthy kernel timing: SASS safe mode keeps
     // kernel-activity OFF (it deadlocks), so its launches would be flushed as
-    // synthetic kernels whose "duration" is just the host-dispatch interval —
+    // synthetic kernels whose "duration" is just the host-dispatch interval -
     // meaningless. Suppress that synthetic fallback so these sessions show no
     // misleading kernel rows. PC additionally enables CONCURRENT_KERNEL in its engine
     // (pc_sampling_engine.cpp), so if REAL kernel records flow on this GPU they are
-    // joined + emitted normally — suppress only drops the un-joined orphans, never
+    // joined + emitted normally - suppress only drops the un-joined orphans, never
     // real rows. So PC shows real kernels when coexistence works, nothing when it
-    // doesn't — never fake. KERNEL_LAUNCH_META still flows for the per-scope
+    // doesn't - never fake. KERNEL_LAUNCH_META still flows for the per-scope
     // Execution Signature, so a multi-pass merge is unaffected.
     SetSuppressOrphanSyntheticKernels(
         opts_.profiling_engine == ProfilingEngine::SassMetrics ||
@@ -782,7 +845,7 @@ void CuptiBackend::start() {
 
     // Reset the BufferCompleted companion maps for a clean per-session slate
     // (Step 5). These persist across BufferCompleted calls *within* a session
-    // but were never cleared *between* sessions — across an init/shutdown cycle
+    // but were never cleared *between* sessions - across an init/shutdown cycle
     // CUPTI reuses sourceLocator / function / marker ids, so a stale entry from
     // a prior session could mis-attribute a PC sample or NVTX range. Safe to do
     // here: start() runs before any activity kind is enabled below, so no
@@ -838,11 +901,16 @@ void CuptiBackend::start() {
     }
 
     if (WindowsInjectedProcess() && !haveCudaContext && engine_) {
+        // Don't drop the engine - injection init runs during cuInit, before
+        // the target creates any context, so this is the NORMAL case for an
+        // injected `gpufl trace` run (it used to silently disable PC/SASS
+        // sampling for every such session). The CONTEXT_CREATED resource
+        // callback completes the start once the target's context exists.
         GFL_LOG_DEBUG(
             "[CuptiBackend] No CUDA context is current during Windows "
-            "injection init; disabling context-bound profiling engine but "
-            "keeping activity trace callbacks enabled.");
-        engine_.reset();
+            "injection init; deferring engine start until the target "
+            "creates one (CONTEXT_CREATED).");
+        engine_start_pending_.store(true, std::memory_order_release);
     } else if (WindowsInjectedProcess() && !haveCudaContext) {
         GFL_LOG_DEBUG(
             "[CuptiBackend] No CUDA context is current during Windows "
@@ -862,8 +930,8 @@ void CuptiBackend::start() {
     // g_functionNameMap, read solely by the CUPTI_ACTIVITY_KIND_PC_SAMPLING
     // handler). PcSamplingEngine now enables them on the path that consumes
     // them (both on the ActivityAPI branch; SOURCE_LOCATOR also on the
-    // SamplingAPI branch), so engines that don't PC-sample — SassMetrics,
-    // RangeProfiler, Trace — no longer emit records nothing reads, and
+    // SamplingAPI branch), so engines that don't PC-sample - SassMetrics,
+    // RangeProfiler, Trace - no longer emit records nothing reads, and
     // PcSampling stops enabling them when it falls back to the new SamplingAPI
     // on CUDA 13.x.
     // MARKER records capture NVTX push/pop ranges. NVTX is an annotation
@@ -904,7 +972,7 @@ void CuptiBackend::start() {
     // validate overhead in the field.
     //
     // Soft-fail on enable: older CUPTI versions (CUDA 11) shipped
-    // without MEMORY2 — they had MEMORY (deprecated) which has a
+    // without MEMORY2 - they had MEMORY (deprecated) which has a
     // different record shape. We don't try to fall back; if MEMORY2
     // isn't available we log and continue without F3 attribution.
     if (timelineActivity && opts_.enable_memory_tracking && AllowSassMemory2Activity()) {
@@ -920,7 +988,7 @@ void CuptiBackend::start() {
     // GRAPH_TRACE captures cudaGraphLaunch with aggregate timing
     // (one record per launch, not per node). **Default-off** in v1
     // because some Blackwell driver builds reset PC sampling on first
-    // graph launch — the planning doc has the full risk note. Soft-
+    // graph launch - the planning doc has the full risk note. Soft-
     // fail on enable so older CUPTI without the kind keeps working.
     if (timelineActivity && opts_.enable_cuda_graphs_tracking && AllowSassGraphActivity()) {
         const CUptiResult res_g =
@@ -943,7 +1011,7 @@ void CuptiBackend::start() {
     //
     // We enable RUNTIME alongside EXTERNAL_CORRELATION as the smallest
     // sufficient anchor. RUNTIME captures cudaLaunchKernel / cudaMemcpy
-    // / etc. as CUpti_ActivityAPI records — high volume in tight loops,
+    // / etc. as CUpti_ActivityAPI records - high volume in tight loops,
     // but we don't dispatch them anywhere; they fall through the
     // BufferCompleted handler chain and get freed with the buffer.
     // The cost is per-API-call activity record allocation in the CUPTI
@@ -952,7 +1020,7 @@ void CuptiBackend::start() {
     // (DRIVER kind is RUNTIME's lower-level cousin. We choose RUNTIME
     // because PyTorch / TF / JAX call cudaLaunchKernel via the runtime
     // API, not the driver API directly. If a workload only uses cuLaunch
-    // we may need DRIVER too — defer until we see a session that needs
+    // we may need DRIVER too - defer until we see a session that needs
     // it.)
     const bool enableExternalCorrelation =
         timelineActivity && opts_.enable_external_correlation &&
@@ -1026,12 +1094,22 @@ void CuptiBackend::start() {
         engine_->start();
     }
 
+    ReenableActivityAfterEngineStart_();
+
+    active_.store(true);
+    StartActivityFlushThreadIfNeeded_();
+    GFL_LOG_DEBUG("Backend started.");
+}
+
+void CuptiBackend::ReenableActivityAfterEngineStart_() {
     // Re-enable activity kinds after engine start. Some engines call
     // cuptiProfilerInitialize() or cuptiSassMetricsEnable(), which on some
     // systems (e.g. insufficient profiler privileges) can internally reset or
     // disable previously-enabled activity kinds including
     // CUPTI_ACTIVITY_KIND_KERNEL.  Re-enabling here is idempotent and ensures
     // kernel activity records are produced regardless of engine type.
+    // Runs on the normal start() path AND after a deferred engine start
+    // (the gating policies below are recomputed, not captured).
     {
         std::set<CUpti_ActivityKind> kinds;
         for (const auto& h : handlers_)
@@ -1049,14 +1127,19 @@ void CuptiBackend::start() {
         LogNvtxMarkerActivityDisabled_("post-engine-selected");
     }
 
+    const bool timelineActivity = collectsKernelEvents();
+    const bool enableExternalCorrelation =
+        timelineActivity && opts_.enable_external_correlation &&
+        AllowSassExternalCorrelation();
+
     // also re-enable EXTERNAL_CORRELATION + RUNTIME after engine
     // start. The engines above (PcSampling, SassMetrics, RangeProfiler)
     // reset ALL activity-kind subscriptions, not just kernel-related
     // ones. Neither kind is tied to any handler, so they get dropped
-    // from the re-enable set — this block restores them.
+    // from the re-enable set - this block restores them.
     //
     // RUNTIME is the anchor that makes EXTERNAL_CORRELATION actually
-    // emit records (see the start-of-start() block for the rationale).
+    // emit records (see the pre-engine block in start() for the rationale).
     if (enableExternalCorrelation) {
         const CUptiResult ec_res =
             cuptiActivityEnable(CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION);
@@ -1080,7 +1163,7 @@ void CuptiBackend::start() {
             "no F1 attribution will be captured");
     }
 
-    // F2: re-enable SYNCHRONIZATION post-engine for the same reason —
+    // F2: re-enable SYNCHRONIZATION post-engine for the same reason -
     // engines reset all activity-kind subscriptions during their
     // initialize() phase. Idempotent; CUPTI ignores the second enable
     // when the kind is already on. SYNCHRONIZATION isn't tied to any
@@ -1113,10 +1196,94 @@ void CuptiBackend::start() {
             (g_res == CUPTI_SUCCESS ? "OK" : "FAILED"),
             " (CUptiResult=", static_cast<int>(g_res), ")");
     }
+}
 
-    active_.store(true);
-    StartActivityFlushThreadIfNeeded_();
-    GFL_LOG_DEBUG("Backend started.");
+void CuptiBackend::RequestDeferredEngineStart(CUcontext ctx) {
+    if (!engine_start_pending_.load(std::memory_order_acquire)) return;
+    if (!ctx) return;
+    // First context wins - the engines are single-context by design
+    // (EngineContext carries one CUcontext).
+    CUcontext expected = nullptr;
+    if (!deferred_ctx_.compare_exchange_strong(expected, ctx,
+                                               std::memory_order_acq_rel)) {
+        return;
+    }
+    // Runs SYNCHRONOUSLY in the CONTEXT_CREATED callback, on the app thread
+    // that created the context - the same pattern NVIDIA's
+    // pc_sampling_continuous injection uses, and crucially the same thread
+    // that will later run gpufl shutdown's cuptiPCSamplingStop (an earlier
+    // worker-thread variant produced CUPTI_ERROR_UNKNOWN at stop). Only
+    // CUPTI + driver-API calls are made here; cudart-based device facts
+    // (GetSMProps) are left to their lazy call sites - cudart can re-enter
+    // the driver if initialized from inside this callback.
+    FinishDeferredEngineStart_();
+}
+
+void CuptiBackend::FinishDeferredEngineStart_() {
+    std::lock_guard lk(deferred_start_mu_);
+    if (!engine_start_pending_.load(std::memory_order_acquire)) return;
+    if (!engine_) {
+        engine_start_pending_.store(false, std::memory_order_release);
+        return;
+    }
+    const CUcontext ctx = deferred_ctx_.load(std::memory_order_acquire);
+    if (!ctx) return;
+
+    // The engines' start paths guard on IsContextValid() = "current on the
+    // calling thread". During CONTEXT_CREATED the new context may not be
+    // bound yet - bind it, do the work, restore whatever was there.
+    CUcontext prev = nullptr;
+    cuCtxGetCurrent(&prev);
+    if (prev != ctx && cuCtxSetCurrent(ctx) != CUDA_SUCCESS) {
+        GFL_LOG_ERROR(
+            "[CuptiBackend] Deferred engine start: cuCtxSetCurrent failed; "
+            "engine stays disabled.");
+        return;
+    }
+    ctx_ = ctx;
+
+    // Device facts via CUPTI + driver API only (no cudart - see
+    // RequestDeferredEngineStart).
+    cuptiGetDeviceId(ctx_, &device_id_);
+    chip_name_ = getChipName(device_id_);
+    {
+        CUdevice dev{};
+        if (cuDeviceGet(&dev, static_cast<int>(device_id_)) == CUDA_SUCCESS) {
+            char name[256]{};
+            if (cuDeviceGetName(name, sizeof(name), dev) == CUDA_SUCCESS) {
+                cached_device_name_ = name;
+            }
+            int cc_major = 0;
+            int cc_minor = 0;
+            cuDeviceGetAttribute(&cc_major,
+                                 CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
+                                 dev);
+            cuDeviceGetAttribute(&cc_minor,
+                                 CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR,
+                                 dev);
+            device_facts_.compute_major = cc_major;
+            device_facts_.compute_minor = cc_minor;
+        }
+    }
+    device_facts_.cupti_version = GetCuptiVersion();
+    resolved_plan_ = NvidiaProfilingPolicy::Resolve(
+        profiling_request_, device_facts_, EnvOverrides::FromProcess());
+    ApplyComboPlanOverrides(resolved_plan_, combo_);
+
+    EngineContext ectx{ctx_, device_id_, chip_name_, &cubin_mu_,
+                       &cubin_by_crc_};
+    engine_->initialize(opts_, ectx);
+    engine_->start();
+    ReenableActivityAfterEngineStart_();
+
+    if (prev != ctx) {
+        cuCtxSetCurrent(prev);
+    }
+
+    engine_start_pending_.store(false, std::memory_order_release);
+    GFL_LOG_DEBUG(
+        "[CuptiBackend] Deferred engine start complete (device=", device_id_,
+        ", chip=", chip_name_, ").");
 }
 
 
@@ -1128,7 +1295,7 @@ bool CuptiBackend::collectsKernelEvents() const {
         return BuildEngineRequestSet(opts_.profiling_engine, combo_)
             .ownsTimelineActivity();
     }
-    // Single engine — preserve prior behavior exactly:
+    // Single engine - preserve prior behavior exactly:
     //   PcSampling -> off; SASS / Deep -> off unless AllowSassKernelActivity;
     //   Trace / PmSampling / RangeProfiler -> on.
     if (opts_.profiling_engine == ProfilingEngine::PcSampling) return false;
@@ -1368,6 +1535,34 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
                             ? "SASS metrics were collected for this session."
                             : "SASS metrics were enabled but produced no instruction-level samples this session (e.g. kernels too short, or CUPTI replay returned no data).")
                       : "SASS metrics were not collected for this session.");
+    // Distinguish WHY PC sampling ended up inactive - "skipped" alone sent
+    // earlier sessions on a wild goose chase (the real cause was the engine
+    // never getting a CUDA context under Windows injection).
+    const bool pcPrivBlocked = engine_ && engine_->hasInsufficientPrivileges();
+    const bool pcNoStallReasons = engine_ && engine_->stallReasonsUnavailable();
+    const bool pcNoContext =
+        engine_start_pending_.load(std::memory_order_acquire);
+    const char* pcInactiveReason =
+        pcPrivBlocked      ? "insufficient_privilege"
+        : pcNoStallReasons ? "no_stall_reasons"
+        : pcNoContext      ? "no_cuda_context"
+                           : "not_selected_or_not_operational";
+    const char* pcInactiveMessage =
+        pcPrivBlocked
+            ? "PC sampling was blocked by GPU profiling permissions - enable "
+              "\"GPU performance counters for all users\" in the NVIDIA "
+              "Control Panel or run elevated."
+        : pcNoStallReasons
+            ? "The driver exposed no PC sampling stall reasons "
+              "(cuptiPCSamplingGetNumStallReasons returned 0). This usually "
+              "means the CUPTI runtime bundled with gpufl is older than the "
+              "installed display driver supports - update gpufl (or the "
+              "CUDA toolkit it was built with) to match the driver "
+              "generation."
+        : pcNoContext
+            ? "PC sampling never started because the target process did not "
+              "create a CUDA context."
+            : "PC sampling was not collected for this session.";
     AddCapability(evt, "pc_sampling",
                   requests.pc,
                   engineState.pc.active
@@ -1382,14 +1577,14 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
                       ? "mutually_exclusive_with_sass_metrics" :
                     (engineState.pc.active
                          ? (engineState.pc.has_data ? "" : "enabled_but_no_samples")
-                         : "not_selected_or_not_operational"),
+                         : pcInactiveReason),
                   opts_.profiling_engine == ProfilingEngine::Deep &&
                           engineState.sass.active
                       ? "Deep selected SASS metrics; PC sampling was skipped because SASS metrics and PC sampling are mutually exclusive in one run."
                       : (engineState.pc.active ? (engineState.pc.has_data
                             ? "PC sampling was collected for this session."
                             : "PC sampling was enabled but produced no stall samples this session (e.g. kernels too short for the sampling period).")
-                                  : "PC sampling was not collected for this session."));
+                                  : pcInactiveMessage));
     AddCapability(evt, "pm_sampling",
                   requests.pm,
                   engineState.pm.active
@@ -1507,6 +1702,11 @@ void CuptiBackend::FlushProfilingDataBeforeCudaTeardown(const char* reason) {
     engine_->flushBeforeCudaTeardown(reason);
 }
 
+void CuptiBackend::EngineLaunchTick() {
+    if (!initialized_ || !active_.load(std::memory_order_relaxed)) return;
+    if (engine_) engine_->onLaunchTick();
+}
+
 void CuptiBackend::DrainProfilingData() {
     if (!initialized_ || !active_.load(std::memory_order_relaxed)) return;
     if (engine_) {
@@ -1555,10 +1755,15 @@ void CuptiBackend::StopActivityFlushThread_() {
 void CuptiBackend::stop() {
     if (!initialized_) return;
     active_.store(false);
+    // A CONTEXT_CREATED callback on another app thread may be inside
+    // FinishDeferredEngineStart_ - clear the pending flag and wait it out
+    // so engine_->stop() below can't race engine_->start().
+    engine_start_pending_.store(false, std::memory_order_release);
+    { std::lock_guard lk(deferred_start_mu_); }
     StopActivityFlushThread_();
 
     // Stop the engine BEFORE flushing activity records.  PcSamplingEngine::stop()
-    // disables the SamplingAPI session — while it's armed, cuptiActivityFlushAll
+    // disables the SamplingAPI session - while it's armed, cuptiActivityFlushAll
     // returns zero kernel records on driver 590+.
     if (engine_) {
         engine_->stop();
@@ -1579,7 +1784,7 @@ void CuptiBackend::stop() {
     // shutdown() had cleared g_activeBackend, firing the noisy
     // "[CUPTI] BufferCompleted: No active backend!" log and (worse)
     // leaking activity into the next session's measurement on
-    // benchmarks that init/shutdown gpufl repeatedly in one process —
+    // benchmarks that init/shutdown gpufl repeatedly in one process -
     // run_benchmark.py's GEMM→PyTorch transition is the canonical
     // case where this surfaced (RTX 3090 + Linux). Disabling first
     // closes the queue so the subsequent flush truly drains
@@ -1596,7 +1801,7 @@ void CuptiBackend::stop() {
     }
 
     // Matching tear-down of the same anchor / supplementary kinds
-    // start() enables. Same disable-before-flush rationale — keeps
+    // start() enables. Same disable-before-flush rationale - keeps
     // the activity queue fully closed before drain.
     if (opts_.enable_external_correlation) {
         cuptiActivityDisable(CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION);
@@ -1621,7 +1826,7 @@ void CuptiBackend::stop() {
         // Windows injection at-exit: the CUDA context is being destroyed by
         // cudart (its atexit runs before ours), so cudaDeviceSynchronize() and
         // cuptiActivityFlushAll(1) deadlock against the dying driver (the
-        // process becomes unkillable). Skip both — activity records delivered
+        // process becomes unkillable). Skip both - activity records delivered
         // during the run via BufferCompleted are already drained; only the
         // final partial buffer is dropped. See gpufl/core/teardown_flag.hpp.
         GFL_LOG_DEBUG("CuptiBackend::stop: skip sync+flush (process-exit teardown)");
@@ -1634,7 +1839,7 @@ void CuptiBackend::stop() {
     // Synthetic kernels (launches CUPTI delivered no activity record for) are
     // now flushed by the collector thread from its worker-local meta map once
     // the ring is fully drained (drainSyntheticKernels in monitor.cpp, invoked
-    // at CollectorLoop teardown + Monitor::Shutdown's post-join drain) — see
+    // at CollectorLoop teardown + Monitor::Shutdown's post-join drain) - see
     // Step 4b-2. This used to call FlushPendingKernels() here on the stop
     // thread. The summary counters below therefore now reflect real activity
     // records only; synthetic rows are counted/emitted later by the collector.
@@ -1665,7 +1870,7 @@ void CuptiBackend::FlushOnContextDestroy() {
 
     // Skip when a profiling engine is active (PC sampling / SASS / Deep). While
     // the SamplingAPI is armed, cuptiActivityFlushAll returns zero kernel records
-    // and can permanently kill the subscriber callback (driver 590+) — the same
+    // and can permanently kill the subscriber callback (driver 590+) - the same
     // reason stop() disables the engine BEFORE flushing. We can't safely stop the
     // engine from inside a context-destroy callback, so for engine modes we leave
     // the flush to the normal stop()/shutdown() path. This context-destroy flush
@@ -1690,7 +1895,7 @@ void CuptiBackend::FlushOnContextDestroy() {
     // MID-PROCESS (an explicit cudaDeviceReset/cuCtxDestroy, or multi-context
     // apps), where our at-exit shutdown() skips cuptiActivityFlushAll (it would
     // deadlock against a dying context; see teardown_flag.hpp). It does NOT fire
-    // on Windows process exit — cudart leaves context teardown to driver
+    // on Windows process exit - cudart leaves context teardown to driver
     // DLL-detach there, so no callback arrives; the final kernel records on
     // Windows-exit are recovered by Monitor::Shutdown's post-join drain instead.
     //
@@ -1735,7 +1940,7 @@ void CUPTIAPI CuptiBackend::BufferCompleted(CUcontext context,
     const int64_t baseCpuNs = backend->base_cpu_ns_;
     const uint64_t baseCuptiTs = backend->base_cupti_ts_;
 
-    // handlers_ is immutable after initialize() (see its declaration) — iterate
+    // handlers_ is immutable after initialize() (see its declaration) - iterate
     // it directly: no handler_mu_, no per-buffer vector copy.
     const auto& handlers = backend->handlers_;
 
@@ -1746,7 +1951,7 @@ void CUPTIAPI CuptiBackend::BufferCompleted(CUcontext context,
         // Within a single CUPTI buffer flush, KERNEL records and
         // EXTERNAL_CORRELATION records arrive interleaved. The handler
         // chain stamps a kernel's external_kind/external_id by looking
-        // up its correlationId in g_extCorrMap — but if the matching
+        // up its correlationId in g_extCorrMap - but if the matching
         // EXTERNAL_CORRELATION record is later in the same buffer and
         // hasn't been processed yet, the lookup misses and the kernel
         // ships with no framework attribution.
@@ -1759,7 +1964,7 @@ void CUPTIAPI CuptiBackend::BufferCompleted(CUcontext context,
         // since it's already processed).
         //
         // cuptiActivityGetNextRecord uses the `record` pointer as
-        // iteration state — passing nullptr starts a fresh walk from
+        // iteration state - passing nullptr starts a fresh walk from
         // the beginning of the buffer, so calling it twice with a
         // reset pointer is the correct CUPTI idiom.
         // ----------------------------------------------------------------
@@ -1806,7 +2011,7 @@ void CUPTIAPI CuptiBackend::BufferCompleted(CUcontext context,
             const CUptiResult st =
                 cuptiActivityGetNextRecord(buffer, validSize, &record);
             if (st == CUPTI_SUCCESS) {
-                // Skip EXTERNAL_CORRELATION — already stored by pass 1.
+                // Skip EXTERNAL_CORRELATION - already stored by pass 1.
                 if (record->kind ==
                     CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION) {
                     continue;
@@ -1944,7 +2149,7 @@ void CUPTIAPI CuptiBackend::BufferCompleted(CUcontext context,
                                CUPTI_ACTIVITY_KIND_GRAPH_TRACE) {
                         // F4: cudaGraphLaunch with aggregate timing.
                         // CUPTI gives one record per launch. start/end
-                        // are in CUPTI's clock domain — convert to
+                        // are in CUPTI's clock domain - convert to
                         // wall using the same baseCpuNs/baseCuptiTs
                         // delta the rest of BufferCompleted uses.
                         // start == end == 0 is a valid CUPTI signal
@@ -1983,7 +2188,7 @@ void CUPTIAPI CuptiBackend::BufferCompleted(CUcontext context,
                         // F3: cudaMalloc / cudaFree / cudaMallocAsync /
                         // cudaMallocManaged / cudaMallocHost. CUPTI's
                         // CUpti_ActivityMemory4 carries one timestamp
-                        // (the host call ts) but no end timestamp —
+                        // (the host call ts) but no end timestamp -
                         // duration_ns is left at 0 in v1; if users
                         // need host-side cost we'd correlate against
                         // the matching cuptiActivity API record (DEFER).
@@ -2013,7 +2218,7 @@ void CUPTIAPI CuptiBackend::BufferCompleted(CUcontext context,
                         // / cudaEventSynchronize / cuStreamWaitEvent timing.
                         // CUPTI delivers exactly one record per call, with
                         // wall-clock start/end already converted to ns.
-                        // We push directly to the monitor ring buffer —
+                        // We push directly to the monitor ring buffer -
                         // CollectorLoop translates the ActivityRecord
                         // into a SynchronizationEvent and emits the JSON.
                         auto* s = reinterpret_cast<
@@ -2048,14 +2253,14 @@ void CUPTIAPI CuptiBackend::BufferCompleted(CUcontext context,
                         out.context_id    = s->contextId;
                         // The user call stack captured by SynchronizationHandler
                         // at API_ENTER is joined on the collector thread now
-                        // (g_syncStackByCorr in monitor.cpp, keyed by corr_id) —
+                        // (g_syncStackByCorr in monitor.cpp, keyed by corr_id) -
                         // no sync_meta_mu_ here. out.stack_id stays 0; the
                         // collector fills it. (Step 4c.)
                         g_monitorBuffer.Push(out);
                         backend->sync_activity_emitted_.fetch_add(
                             1, std::memory_order_relaxed);
                     }
-                    // (EXTERNAL_CORRELATION handled in pass 1 above —
+                    // (EXTERNAL_CORRELATION handled in pass 1 above -
                     //  the early `continue` at the top of this loop
                     //  ensures we never reach the fall-through chain
                     //  for that kind.)
@@ -2080,7 +2285,7 @@ void CuptiBackend::GflCallback(void* userdata, CUpti_CallbackDomain domain,
     auto* backend = static_cast<CuptiBackend*>(userdata);
     if (!backend) return;
 
-    // handlers_ is immutable after initialize() (see its declaration) — iterate
+    // handlers_ is immutable after initialize() (see its declaration) - iterate
     // it directly on this per-callback hot path: no handler_mu_, no copy/alloc.
     const auto& handlers = backend->handlers_;
 

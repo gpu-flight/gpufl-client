@@ -1,10 +1,10 @@
-"""gpufl Python uploader — `python -m gpufl.cli upload <logdir>`.
+"""gpufl Python uploader - `python -m gpufl.cli upload <logdir>`.
 
 NOTE: this is no longer installed as the `gpufl` console-script. The single
 native `gpufl` binary (the launcher) now owns that name and provides
 `gpufl upload` directly, so there's only one `gpufl` command. This module
-stays as the **cross-platform** Python uploader — handy on Windows/macOS
-where the Linux launcher binary isn't available — and is a thin wrapper
+stays as the **cross-platform** Python uploader - handy on Windows/macOS
+where the Linux launcher binary isn't available - and is a thin wrapper
 over the same `gpufl.upload_logs()` API. Invoke it explicitly:
 
     python -m gpufl.cli upload <logdir> [--backend-url … --api-key …]
@@ -21,7 +21,7 @@ from typing import List, Optional
 import gpufl
 
 
-# Exit codes — chosen for shell pipeline use:
+# Exit codes - chosen for shell pipeline use:
 #   0 = success (every event uploaded)
 #   1 = partial success (some warnings, but events were uploaded)
 #   2 = full failure (auth error, missing dir, timeout, etc.)
@@ -148,7 +148,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # next two flags override that:
     #   --session-id <id>   only upload that specific session
     #   --all-sessions      upload every session in the dir
-    # They're mutually exclusive — passing both is an error.
+    # They're mutually exclusive - passing both is an error.
     up.add_argument(
         "--session-id", default=None,
         help=("Upload only the session with this session_id. Mutually "

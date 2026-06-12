@@ -21,7 +21,7 @@ set(GPUFL_TEST_SOURCES
     core/test_itanium_demangle.cpp
     core/test_sampler.cpp
     upload/test_upload_logs.cpp
-    # Launcher CLI parser test — portable (no CUDA / no POSIX).
+    # Launcher CLI parser test - portable (no CUDA / no POSIX).
     # cli_parse.cpp is compiled directly into the test binary so we don't
     # need to depend on the launcher target (which is Linux-only).
     launcher/test_cli_parse.cpp
@@ -108,7 +108,7 @@ if(TARGET httplib::httplib)
     target_link_libraries(gpufl_tests PRIVATE httplib::httplib)
 endif()
 
-# zlib for the same test file — test_upload_logs.cpp writes mock
+# zlib for the same test file - test_upload_logs.cpp writes mock
 # rotated `.log.gz` fixtures via gzopen/gzwrite/gzclose to exercise
 # the uploadLogs gzip-streaming path. zlib is PRIVATE on the main
 # `gpufl` target so its includes don't propagate to consumers; surface
@@ -133,7 +133,7 @@ endif()
 # The CUPTI runtime ships with `cupti64_*.dll` *and* `nvperf_host.dll`
 # (Range Profiler / PerfWorks backend). Both live in
 # `extras/CUPTI/lib64/`, both are required at load time for the test
-# exe — if `nvperf_host.dll` is absent the loader fails with
+# exe - if `nvperf_host.dll` is absent the loader fails with
 # STATUS_DLL_NOT_FOUND (0xC0000135) before main() runs, and gtest
 # produces zero output, making it look like the tests don't exist.
 # Glob both patterns from whichever strategy resolves first.

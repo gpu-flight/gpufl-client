@@ -45,11 +45,11 @@ enum class MonitorBackendKind {
  *
  *   PcSampling   + SassMetrics   → Deep (shipping). PC sampling uses
  *                                  hardware counters; SASS metrics uses
- *                                  software lazy cubin patching — disjoint
+ *                                  software lazy cubin patching - disjoint
  *                                  mechanisms, can coexist.
  *
  *   SassMetrics  + RangeProfiler → Possible in principle (no resource
- *                                  conflict — SASS is software-patching,
+ *                                  conflict - SASS is software-patching,
  *                                  Range uses hardware counters). Not yet
  *                                  implemented; see prior plan notes for
  *                                  the composite-engine sketch.
@@ -61,7 +61,7 @@ enum class MonitorBackendKind {
  *                                  the other, and the loser fails with
  *                                  CUPTI_ERROR_INVALID_OPERATION or
  *                                  CUPTI_ERROR_NOT_INITIALIZED. No
- *                                  client-side fix — would require NVIDIA
+ *                                  client-side fix - would require NVIDIA
  *                                  to expose a counter-multiplexing API.
  *
  *   By extension: Deep + RangeProfiler is also impossible (the
@@ -73,17 +73,17 @@ enum class MonitorBackendKind {
  */
 enum class ProfilingEngine {
     // A monotonic ladder of increasing capture depth + cost. One name
-    // per level, no aliases — the names are chosen so the option list
+    // per level, no aliases - the names are chosen so the option list
     // reads clearly to someone who isn't a CUPTI expert. The plain
     // intent is in each comment; the precise CUPTI mechanism is named
     // where it's the real, doc-searchable term (PC sampling, SASS).
-    Monitor,        // No CUPTI at all — GPU/host health metrics only
+    Monitor,        // No CUPTI at all - GPU/host health metrics only
                     // (util, mem, temp, power). Lowest overhead and immune
                     // to every CUPTI kernel-path failure mode (per-launch
                     // cost, the CUDA 13.1 symbolName segfault, activity
                     // buffer leakage). "Just watch my GPU." The default.
     Trace,          // + Activity trace: every kernel, memcpy/memset, and
-                    // sync — name, duration, stream, grid/block. NOT
+                    // sync - name, duration, stream, grid/block. NOT
                     // kernel-exclusive (hence "Trace", not "KernelTrace").
                     // "What ran and how long."
     PcSampling,     // + PC stall-reason sampling: where in each kernel the
@@ -96,7 +96,7 @@ enum class ProfilingEngine {
                     // utilization, L1/L2 hit rates, DRAM bandwidth.
                     // (CUPTI Range Profiler; requires GPUFL_HAS_PERFWORKS)
     RangeProfilerKernelReplay,  // Kernel-owned counters via AutoRange + KernelReplay.
-    Deep,           // PcSampling + SassMetrics in a single run — the
+    Deep,           // PcSampling + SassMetrics in a single run - the
                     // deepest single-session profile. (Was PcSamplingWithSass.)
 };
 
@@ -141,7 +141,7 @@ struct MonitorOptions {
     bool enable_external_correlation = true;
     // Gate for CUPTI_ACTIVITY_KIND_SYNCHRONIZATION. Mirror of
     // InitOptions::enable_synchronization. Backend honors this in
-    // CuptiBackend::start() — flag false means we never call
+    // CuptiBackend::start() - flag false means we never call
     // cuptiActivityEnable for the kind, so zero overhead.
     bool enable_synchronization = true;
     // Gate for CUPTI_ACTIVITY_KIND_MEMORY2. Mirror of
@@ -158,7 +158,7 @@ struct MonitorOptions {
     // contributing ~700% overhead on benchmark/run_benchmark.py's
     // MiniGPT case (vs ~1% on the GEMM case, which has narrow SM
     // occupancy and one PC range). 65536 cycles cuts sample volume
-    // 16× with no meaningful loss for hotspot analysis — the
+    // 16× with no meaningful loss for hotspot analysis - the
     // statistical signal for "which PCs dominate" needs maybe 10⁴
     // samples per hot range, not 10⁶. Users doing fine-grained stall
     // attribution can lower this back via InitOptions.
@@ -186,7 +186,7 @@ struct MonitorOptions {
  * @brief Input shape for Monitor::PushProfileSamples.
  *
  * Mirrors the field set produced by the CollectorLoop's PC_SAMPLE branch
- * when translating an ActivityRecord into a ProfileSampleBatchRow — the
+ * when translating an ActivityRecord into a ProfileSampleBatchRow - the
  * dictionary interns (function, metric, source_file) happen inside
  * PushProfileSamples so callers don't need access to the dict manager.
  */
@@ -215,7 +215,7 @@ struct PmSampleInput {
 // Session-level switch (set by the active backend at start): when true the
 // collector DROPS orphaned launch metas at shutdown instead of emitting them as
 // synthetic kernel rows. Used for engines where kernel-activity is intentionally
-// off and the synthetic host-dispatch durations would mislead — SASS safe mode,
+// off and the synthetic host-dispatch durations would mislead - SASS safe mode,
 // where real kernel activity deadlocks (NVIDIA CUPTI/driver bug). The Execution
 // Signature is accumulated separately, so a multi-pass merge is unaffected.
 // Default false: normal / PC modes keep best-effort synthesis.
@@ -309,7 +309,7 @@ class Monitor {
      * @brief Bulk-push profile samples (SASS metric rows, etc.) directly
      * into the profile batch buffer.
      *
-     * Bypasses the lock-free g_monitorBuffer ring — intended for producers
+     * Bypasses the lock-free g_monitorBuffer ring - intended for producers
      * that run on the user's app thread (inside onScopeStop) and emit
      * thousands of samples in a tight loop.  Routing those bursts through
      * the ring buffer overruns it and silently drops later activity records

@@ -2,10 +2,10 @@
 
 The C++ client emits two flavors of records into the .log files:
 
-  1. **Lifecycle / one-off events** — `job_start`, `shutdown`, `sass_config`,
+  1. **Lifecycle / one-off events** - `job_start`, `shutdown`, `sass_config`,
      `dictionary_update`. One record = one event.
 
-  2. **Columnar batch events** — `device_metric_batch`,
+  2. **Columnar batch events** - `device_metric_batch`,
      `host_metric_batch`, `scope_event_batch`, `kernel_event_batch`,
      `memcpy_event_batch`, `profile_sample_batch`,
      `synchronization_event_batch`, `memory_alloc_event_batch`. Each
@@ -24,7 +24,7 @@ The visualization layer wants flat per-sample dicts with absolute
     sees human-readable strings.
 
 Pre-v1.0.0 this file did none of the above and silently dropped every
-batch row — which is why the legacy `gpufl.viz` plots looked empty.
+batch row - which is why the legacy `gpufl.viz` plots looked empty.
 """
 
 import glob
@@ -81,7 +81,7 @@ def _build_dictionaries(raw_events: List[dict]) -> Dict[str, Dict[int, str]]:
     for evt in raw_events:
         if evt.get("type") != "dictionary_update":
             continue
-        # Dictionary keys are JSON strings — coerce to int for lookup.
+        # Dictionary keys are JSON strings - coerce to int for lookup.
         for src, dst in (
             ("scope_name_dict", scope_names),
             ("kernel_dict",     kernel_names),
@@ -206,7 +206,7 @@ def read_events(file_pattern: str) -> List[dict]:
     files = _gather_files(file_pattern)
 
     # Pass 1: parse every line. We have to buffer to do dictionary
-    # resolution in pass 2 — `dictionary_update` events are usually
+    # resolution in pass 2 - `dictionary_update` events are usually
     # emitted before the batches that reference them, but a defensive
     # two-pass approach handles any out-of-order edge case.
     raw_events: List[dict] = []

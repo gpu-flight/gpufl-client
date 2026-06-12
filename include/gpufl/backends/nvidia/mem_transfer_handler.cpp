@@ -202,7 +202,7 @@ void MemTransferHandler::handle(CUpti_CallbackDomain domain,
 
         if (backend_->GetOptions().enable_stack_trace) {
             // Raw addresses only; symbolization deferred to the collector
-            // thread (StackRegistry::get()) — off this per-call CUPTI callback.
+            // thread (StackRegistry::get()) - off this per-call CUPTI callback.
             metaRec.stack_id = gpufl::StackRegistry::instance().getOrRegister(
                 gpufl::core::CaptureCallStackRaw(2));
         } else {
@@ -259,7 +259,7 @@ bool MemTransferHandler::handleActivityRecord(const CUpti_Activity* record,
         out.dst_kind = m->dstKind;
         std::snprintf(out.name, sizeof(out.name), "memcpy");
         // Scope/stack/API-timestamp join runs on the collector thread now
-        // (joinLaunchMeta in monitor.cpp, keyed by corr_id) — no meta_mu_ here.
+        // (joinLaunchMeta in monitor.cpp, keyed by corr_id) - no meta_mu_ here.
         // (Step 4b-2.)
         g_monitorBuffer.Push(out);
         backend_->NoteMemTransferActivityEmitted();
@@ -279,7 +279,7 @@ bool MemTransferHandler::handleActivityRecord(const CUpti_Activity* record,
         out.bytes = m->bytes;
         std::snprintf(out.name, sizeof(out.name), "memset");
         // Scope/stack/API-timestamp join runs on the collector thread now
-        // (joinLaunchMeta in monitor.cpp, keyed by corr_id) — no meta_mu_ here.
+        // (joinLaunchMeta in monitor.cpp, keyed by corr_id) - no meta_mu_ here.
         // (Step 4b-2.)
         g_monitorBuffer.Push(out);
         backend_->NoteMemTransferActivityEmitted();

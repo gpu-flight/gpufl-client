@@ -28,7 +28,7 @@ void CUPTIAPI CallbackHandler(void *userData, CUpti_CallbackDomain domain,
             }
             break;
         case CUPTI_CB_DOMAIN_RESOURCE: {
-            // For resource domain, cbdata is CUpti_ResourceData — NOT
+            // For resource domain, cbdata is CUpti_ResourceData - NOT
             // CUpti_CallbackData
             const auto *resourceData =
                 reinterpret_cast<const CUpti_ResourceData *>(callbackData);
@@ -45,7 +45,7 @@ void CUPTIAPI CallbackHandler(void *userData, CUpti_CallbackDomain domain,
 
                 if (modData) {
                     printf(
-                        "modData is available — moduleId=%u  cubinSize=%zu\n",
+                        "modData is available - moduleId=%u  cubinSize=%zu\n",
                         modData->moduleId, modData->cubinSize);
 
                     // modData->pCubin contains the raw cubin bytes

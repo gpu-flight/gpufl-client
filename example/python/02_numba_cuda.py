@@ -35,11 +35,11 @@ def run_benchmark():
 
     print("[GPUFL] Initializing...")
     if UPLOAD_ENABLED:
-        print(f"[GPUFL] Deferred upload ON — will ship to {BACKEND_URL} "
+        print(f"[GPUFL] Deferred upload ON - will ship to {BACKEND_URL} "
               f"after shutdown.")
     else:
         print("[GPUFL] Upload OFF (set GPUFL_API_KEY to enable). Local "
-              "files only — run `python -m gpufl.cli upload <log_path>` "
+              "files only - run `python -m gpufl.cli upload <log_path>` "
               "(or the `gpufl upload` binary on Linux) later to ship them.")
 
     gfl.init(
@@ -101,7 +101,7 @@ def run_benchmark():
 
         # --- 5b. Deferred upload (replaces the old remote_upload=True
         # live-streaming flag). Upload runs AFTER shutdown, never during
-        # the workload — so network failures here can't affect the GPU
+        # the workload - so network failures here can't affect the GPU
         # job's exit code or performance. Skipped if no API key is set;
         # the local NDJSON files remain on disk and can be uploaded
         # later via `gpufl upload <LOG_PATH>`.
@@ -113,17 +113,17 @@ def run_benchmark():
                 api_key=API_KEY,
             )
             if r.success:
-                print(f"[GPUFL] Upload OK — {r.events_uploaded} events, "
+                print(f"[GPUFL] Upload OK - {r.events_uploaded} events, "
                       f"{r.elapsed_ms / 1000:.1f}s")
             else:
-                print(f"[GPUFL] Upload FAILED — {len(r.warnings)} warning(s):")
+                print(f"[GPUFL] Upload FAILED - {len(r.warnings)} warning(s):")
                 for w in r.warnings:
                     print(f"  - {w}")
 
         # --- 6. Generate a text report from the logs we just wrote ---
         # shutdown() above flushes and closes the NDJSON channels, so the
         # report reflects the full session. generate_report reads the same
-        # logs the analyzer uses — no GPU required for this step. We split
+        # logs the analyzer uses - no GPU required for this step. We split
         # LOG_PATH into (dir, prefix) the way GpuFlightSession expects:
         #   "./gfl_logs" -> dir=".", prefix="gfl_logs"
         #                -> reads ./gfl_logs.{device,scope,system}.log

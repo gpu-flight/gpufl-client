@@ -45,7 +45,7 @@ def _shorten_kernel_name(name: str) -> tuple[str, str]:
     return short_func, name
 
 
-# CUPTI CUpti_ActivityPCSamplingStallReason — skip 0 (invalid) and 1 (none)
+# CUPTI CUpti_ActivityPCSamplingStallReason - skip 0 (invalid) and 1 (none)
 _STALL_NAMES: dict[int, str] = {
     2:  "Instruction Fetch",
     3:  "Execution Dependency",
@@ -92,7 +92,7 @@ class GpuFlightSession:
             scope_df  = self._filter_session(scope_df, session_id)
             system_df = self._filter_session(system_df, session_id)
 
-        # 2. Extract session boundaries — supports both job_start (new) and init (old)
+        # 2. Extract session boundaries - supports both job_start (new) and init (old)
         self.session_start_ns = None
         self.session_end_ns   = None
         self.static_devices   = []
@@ -126,7 +126,7 @@ class GpuFlightSession:
             if not shut.empty and 'ts_ns' in shut.columns and self.session_end_ns is None:
                 self.session_end_ns = pd.to_numeric(shut.iloc[-1]['ts_ns'], errors='coerce')
 
-        # 2b. Capture capabilities — what was actually collected vs. enabled
+        # 2b. Capture capabilities - what was actually collected vs. enabled
         # but empty vs. skipped. Emitted once at shutdown (type
         # 'capture_capabilities'), routed to all channels.
         self.requested_engine = None
@@ -228,7 +228,7 @@ class GpuFlightSession:
 
         If the caller named one, honor it. Otherwise default to the MOST
         RECENT session in the logs (by job_start ts_ns) and warn when more
-        than one is present — aggregating multiple runs from an un-cleared
+        than one is present - aggregating multiple runs from an un-cleared
         log file is almost never intended and corrupts the timing totals.
         Returns None only when there are no job_start markers (legacy logs),
         in which case the data is left unfiltered.
@@ -286,7 +286,7 @@ class GpuFlightSession:
         except (OSError, FileNotFoundError):
             subs = []
         if not subs:
-            return self.log_dir  # nothing found — _load_log() no-ops gracefully
+            return self.log_dir  # nothing found - _load_log() no-ops gracefully
         if session_id:
             exact = [p for p in subs if p.name == session_id]
             if exact:
@@ -405,7 +405,7 @@ class GpuFlightSession:
                     })
         kernels_df = pd.DataFrame(kernel_rows)
 
-        # ── kernel_detail — merge into kernels via corr_id ───────────────────
+        # ── kernel_detail - merge into kernels via corr_id ───────────────────
         if not kernels_df.empty and not device_df.empty and 'type' in device_df.columns:
             detail_rows = []
             for _, det in device_df[device_df['type'] == 'kernel_detail'].iterrows():
@@ -577,7 +577,7 @@ class GpuFlightSession:
                     })
         host_metrics_df = pd.DataFrame(hm_rows)
 
-        # ── scope_event_batch (scope log) — begin/end pairs ──────────────────
+        # ── scope_event_batch (scope log) - begin/end pairs ──────────────────
         scope_event_rows = []
         if not scope_df.empty and 'type' in scope_df.columns:
             for _, batch in scope_df[scope_df['type'] == 'scope_event_batch'].iterrows():
@@ -843,7 +843,7 @@ class GpuFlightSession:
         def safe_mode(x):
             return x.mode()[0] if not x.empty else ''
 
-        # Build agg_dict — only include columns that are actually present
+        # Build agg_dict - only include columns that are actually present
         k = self.kernels
         agg_dict = dict(
             count=('name', 'count'),
@@ -943,7 +943,7 @@ class GpuFlightSession:
             # Shared memory: `static` is compile-time __shared__ arrays;
             # `dyn` is the third launch arg <<<grid,block,dyn_shared>>>.
             # Both live in the same physical SM shared-memory space and
-            # together drive smem_occupancy — so we display the SUM as
+            # together drive smem_occupancy - so we display the SUM as
             # `SMem` (matching what the occupancy % is computed against)
             # with the static/dyn breakdown in parentheses for users
             # tuning either piece. Previously this row showed two
@@ -981,7 +981,7 @@ class GpuFlightSession:
         accounts for in the hottest kernels.
         """
         if self.scopes.empty or 'type' not in self.scopes.columns:
-            self.console.print("[yellow]No PC sampling data found — enable PC sampling at session init.[/yellow]")
+            self.console.print("[yellow]No PC sampling data found - enable PC sampling at session init.[/yellow]")
             return
 
         samples = self.scopes[self.scopes['type'] == 'profile_sample'].copy()
@@ -990,7 +990,7 @@ class GpuFlightSession:
         elif 'metric_name' in samples.columns:
             samples = samples[samples['metric_name'].isna()].copy()
         if samples.empty:
-            self.console.print("[yellow]No profile_sample events found — enable PC sampling at init.[/yellow]")
+            self.console.print("[yellow]No profile_sample events found - enable PC sampling at init.[/yellow]")
             return
 
         required = {'corr_id', 'reason_name', 'sample_count'}
@@ -1031,7 +1031,7 @@ class GpuFlightSession:
 
         stall_cols = [c for c in pivot.columns if c not in ('name', 'total_samples')]
 
-        table = Table(title=f"Stall Distribution — Top {top_n} Kernels (PC Sampling)")
+        table = Table(title=f"Stall Distribution - Top {top_n} Kernels (PC Sampling)")
         table.add_column("Kernel", style="cyan", no_wrap=False)
         table.add_column("Samples", justify="right")
         for col in stall_cols:
@@ -1104,7 +1104,7 @@ class GpuFlightSession:
                 .head(top_n)
             )
 
-            reason_table = Table(title=f"PC Sampling Reasons — Top {top_n}")
+            reason_table = Table(title=f"PC Sampling Reasons - Top {top_n}")
             reason_table.add_column("Reason", style="cyan")
             reason_table.add_column("Samples", justify="right")
             total_samples = float(pc_samples['sample_count'].sum()) or 1.0
@@ -1138,7 +1138,7 @@ class GpuFlightSession:
                 kernel_samples['name'] = kernel_samples['name'].fillna('unknown')
                 kernel_samples = kernel_samples.sort_values('sample_count', ascending=False).head(top_n)
 
-                kernel_table = Table(title=f"PC Sampling Kernels — Top {top_n}")
+                kernel_table = Table(title=f"PC Sampling Kernels - Top {top_n}")
                 kernel_table.add_column("Kernel", style="cyan")
                 kernel_table.add_column("Samples", justify="right")
                 for _, row in kernel_samples.iterrows():
@@ -1169,7 +1169,7 @@ class GpuFlightSession:
                 .sort_values(ascending=False)
                 .head(top_n)
             )
-            metric_table = Table(title=f"SASS Metrics — Top {top_n}")
+            metric_table = Table(title=f"SASS Metrics - Top {top_n}")
             metric_table.add_column("Metric", style="cyan")
             metric_table.add_column("Total Value", justify="right")
             for metric, value in by_metric.items():
@@ -1182,7 +1182,7 @@ class GpuFlightSession:
                 .sort_values(ascending=False)
                 .head(top_n)
             )
-            func_table = Table(title=f"SASS Functions — Top {top_n}")
+            func_table = Table(title=f"SASS Functions - Top {top_n}")
             func_table.add_column("Function", style="cyan")
             func_table.add_column("Metric Sum", justify="right")
             for fn, value in by_func.items():
@@ -1199,7 +1199,7 @@ class GpuFlightSession:
             def _ev(series, name):
                 return float(series[name]) if name in series.index else 0.0
 
-            eff_table = Table(title="SASS Efficiency — per function")
+            eff_table = Table(title="SASS Efficiency - per function")
             eff_table.add_column("Function", style="cyan")
             eff_table.add_column("Warp Eff", justify="right")
             eff_table.add_column("Mem Eff", justify="right")
@@ -1334,7 +1334,7 @@ class GpuFlightSession:
         self.console.print(table)
 
     # ------------------------------------------------------------------
-    # Empty-state hints — printed when one of the inspect_* methods has
+    # Empty-state hints - printed when one of the inspect_* methods has
     # nothing to show. The methods themselves are correct; the data
     # simply isn't in the logs because the session wasn't configured to
     # collect it (wrong engine, no scopes, build missing the relevant
@@ -1352,7 +1352,7 @@ class GpuFlightSession:
             "[cyan]ProfilingEngine.Deep[/cyan] to "
             "[cyan]gpufl.init()[/cyan].\n"
             "    2. [bold]Scopes required[/bold]: wrap GPU work in "
-            "[cyan]with gpufl.Scope(\"name\"):[/cyan] blocks — sample "
+            "[cyan]with gpufl.Scope(\"name\"):[/cyan] blocks - sample "
             "buffers flush only on scope close.\n"
             "    3. [bold]Hardware[/bold]: PC sampling needs compute "
             "capability ≥ 7.0 (Volta+); SASS metrics need ≥ 7.5 "
@@ -1370,13 +1370,13 @@ class GpuFlightSession:
             "[cyan]ProfilingEngine.RangeProfilerKernelReplay[/cyan] to "
             "[cyan]gpufl.init()[/cyan].\n"
             "    2. [bold]Scopes[/bold]: RangeProfiler emits on scope close; wrap GPU work in "
-            "[cyan]with gpufl.Scope(\"name\"):[/cyan] blocks — perf "
+            "[cyan]with gpufl.Scope(\"name\"):[/cyan] blocks - perf "
             "metrics emit on scope close. Kernel replay emits per replayed kernel range.\n"
             "    3. [bold]Mutually exclusive with PC sampling[/bold]: "
             "RangeProfiler and PcSampling both use hardware perf "
             "counters; pick one per session.\n"
             "    4. [bold]Build[/bold]: wheel must have "
-            "[cyan]GPUFL_HAS_PERFWORKS=1[/cyan] — requires the full "
+            "[cyan]GPUFL_HAS_PERFWORKS=1[/cyan] - requires the full "
             "CUPTI/Perfworks SDK (nvperf_host + nvperf_target) at "
             "CMake configure time.\n"
             "    5. [bold]Hardware[/bold]: Volta+ for SM throughput / "

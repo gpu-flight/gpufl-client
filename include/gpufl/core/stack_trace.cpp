@@ -20,7 +20,7 @@ std::string DemangleName(const char* mangled) {
     // CUDA device-side kernel names use Itanium ABI mangling regardless
     // of host OS (NVCC always emits `_Z…`). MSVC's UnDecorateSymbolName
     // only understands its own `?…` mangling, so we delegate `_Z`-prefix
-    // names to our portable Itanium demangler — without this, Windows
+    // names to our portable Itanium demangler - without this, Windows
     // builds shipped raw mangled kernel names that broke the frontend's
     // regex-based op-catalog classification (no GEMM / ELEMENTWISE
     // chips on Windows traces).
@@ -207,7 +207,7 @@ namespace core {
 std::string DemangleFunctionKey(const std::string& function_key) {
     const std::string::size_type at = function_key.find('@');
     if (at == std::string::npos) {
-        // No "@source" tail — demangle the whole key.
+        // No "@source" tail - demangle the whole key.
         return DemangleName(function_key.c_str());
     }
     // Demangle only the name part; re-attach the "@source_file" tail verbatim

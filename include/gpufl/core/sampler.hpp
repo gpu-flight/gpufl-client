@@ -32,10 +32,10 @@ class ISystemCollector {
  * worker thread starts on the 0→1 transition. `deactivate()` decrements;
  * the thread stops on the 1→0 transition. Multiple overlapping
  * activators (auto-start baseline + GFL_SCOPE entry + explicit
- * systemStart) all coexist correctly — the sampler runs while any
+ * systemStart) all coexist correctly - the sampler runs while any
  * activation is in flight and idles when the counter returns to zero.
  *
- * `shutdown()` is the final teardown — called from gpufl::shutdown() to
+ * `shutdown()` is the final teardown - called from gpufl::shutdown() to
  * zero the counter and join the worker regardless of remaining
  * activations (defends against leaked scopes / missed deactivations).
  */
@@ -59,7 +59,7 @@ class Sampler {
 
     /**
      * Increment the activation counter. On 0→1, spawn the worker
-     * thread. Safe to call before configure() — silently no-ops until
+     * thread. Safe to call before configure() - silently no-ops until
      * configured (intervalMs > 0 and collector set).
      */
     void activate();
@@ -68,12 +68,12 @@ class Sampler {
      * Decrement the activation counter. On 1→0, stop and join the
      * worker. Calls that would push the counter below zero clamp at
      * zero and log a one-shot warning (indicates a programming error
-     * — unbalanced activate/deactivate).
+     * - unbalanced activate/deactivate).
      */
     void deactivate();
 
     /**
-     * Final teardown — zero the counter, stop the worker. Called from
+     * Final teardown - zero the counter, stop the worker. Called from
      * gpufl::shutdown(). Idempotent.
      */
     void shutdown();

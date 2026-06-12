@@ -57,20 +57,20 @@ bool PcSamplingWithSassEngine::initialize(const MonitorOptions& opts,
     pm_->initialize(opts, ctx);
 
     // Decide once whether Deep should try SASS this session. Only construct
-    // the SASS sub-engine when it will — otherwise Deep touches no
+    // the SASS sub-engine when it will - otherwise Deep touches no
     // Profiler-API state and behaves as a PC sampling engine.
     sass_gate_open_ = ShouldAttemptSassInDeep();
     if (sass_gate_open_) {
         sass_ = std::make_unique<SassMetricsEngine>();
         sass_->initialize(opts, ctx);
         GFL_LOG_DEBUG(
-            "[PcSamplingWithSass] eager module loading active — Deep will "
+            "[PcSamplingWithSass] eager module loading active - Deep will "
             "attempt SASS metrics (PC sampling is the fallback; the two are "
             "mutually exclusive, so Deep collects one or the other).");
     } else {
         GFL_LOG_DEBUG(
             "[PcSamplingWithSass] SASS not attempted (CUDA_MODULE_LOADING is "
-            "not EAGER, or GPUFL_DEEP_PC_ONLY set) — Deep runs PC sampling "
+            "not EAGER, or GPUFL_DEEP_PC_ONLY set) - Deep runs PC sampling "
             "only, which avoids the lazy-patching deadlock.");
     }
     // sass_ok_ is finalized in start() once we know whether
@@ -84,7 +84,7 @@ void PcSamplingWithSassEngine::start() {
     // Deep attempts SASS only where ShouldAttemptSassInDeep() allowed it
     // (eager module loading in effect, unless GPUFL_DEEP_PC_ONLY is set).
     // Otherwise sass_ was never constructed and we go straight to PC
-    // sampling — no Profiler API, no lazy patching, no deadlock.
+    // sampling - no Profiler API, no lazy patching, no deadlock.
     if (sass_gate_open_ && sass_) {
         sass_->start();
         sass_ok_ = sass_->isEnabled();
@@ -94,7 +94,7 @@ void PcSamplingWithSassEngine::start() {
 
     if (sass_ok_) {
         // SASS armed. PC sampling and the Profiler API have been mutually
-        // exclusive on every driver we've tested — BUT that was only ever
+        // exclusive on every driver we've tested - BUT that was only ever
         // observed under lazy module loading, tangled up with the now-fixed
         // deadlock. GPUFL_DEEP_TRY_BOTH=1 tests whether they can COEXIST
         // under eager loading: try arming PC sampling alongside SASS and keep
@@ -109,7 +109,7 @@ void PcSamplingWithSassEngine::start() {
         if (tryBoth && pc_) {
             pc_->start();
             if (pc_->isOperational()) {
-                // Coexistence — keep BOTH sub-engines. Logged at error level
+                // Coexistence - keep BOTH sub-engines. Logged at error level
                 // (always visible) because it would overturn the long-standing
                 // mutual-exclusion assumption and warrants verification.
                 GFL_LOG_ERROR(
@@ -120,13 +120,13 @@ void PcSamplingWithSassEngine::start() {
             } else {
                 GFL_LOG_DEBUG(
                     "[PcSamplingWithSass] GPUFL_DEEP_TRY_BOTH: PC sampling did "
-                    "not arm alongside SASS (still mutually exclusive) — "
+                    "not arm alongside SASS (still mutually exclusive) - "
                     "keeping SASS only.");
                 pc_.reset();  // enable rejected; nothing armed to disable
             }
         } else {
             GFL_LOG_DEBUG(
-                "[PcSamplingWithSass] SASS active — skipping PC sampling "
+                "[PcSamplingWithSass] SASS active - skipping PC sampling "
                 "(mutually exclusive with Profiler API). Deep = SASS metrics "
                 "this session.");
             pc_.reset();
@@ -134,7 +134,7 @@ void PcSamplingWithSassEngine::start() {
     } else {
         pc_->start();
         // Expected Deep behavior when SASS isn't attempted (eager loading
-        // not in effect) or SASS declined to arm — not an error.
+        // not in effect) or SASS declined to arm - not an error.
         GFL_LOG_DEBUG(
             "[PcSamplingWithSass] Deep mode: PC sampling active (stall-reason "
             "data, drains on the collector thread).");
@@ -144,11 +144,11 @@ void PcSamplingWithSassEngine::start() {
 void PcSamplingWithSassEngine::stop() {
     // Tear SASS down BEFORE PC sampling. cuptiPCSamplingDisable is unsafe
     // while another CUPTI API (the Profiler API, which SASS uses) is still
-    // initialized — it can hang. When only one sub-engine is active the
+    // initialized - it can hang. When only one sub-engine is active the
     // other call is a no-op, so this order is safe in every case, and it's
     // required for the GPUFL_DEEP_TRY_BOTH path where both are armed.
     //
-    // SassMetricsEngine::stop() also performs a final drain — important for
+    // SassMetricsEngine::stop() also performs a final drain - important for
     // workloads that don't wrap kernels in a gpufl.Scope (e.g. a PyTorch
     // training loop), which would otherwise lose all pending SASS data
     // because nothing pulls CUPTI's buffer into g_profileBatch before
@@ -183,18 +183,18 @@ void PcSamplingWithSassEngine::onScopeStop(const char* name) {
 void PcSamplingWithSassEngine::drainData() {
     // CRITICAL: forward the collector thread's periodic (250 ms),
     // non-blocking drain to the PC sampling sub-engine. PC sampling runs
-    // in CONTINUOUS mode — CUPTI fills a sampling buffer as kernels execute
+    // in CONTINUOUS mode - CUPTI fills a sampling buffer as kernels execute
     // and we MUST call cuptiPCSamplingGetData regularly to empty it. The
     // base IProfilingEngine::drainData() is a no-op, so before this
     // override Deep mode never drained mid-run: on a long scope (e.g. a
     // whole training epoch wrapped in one gpufl.Scope) the buffer filled,
     // the driver back-pressured sample collection, and a CUPTI helper
-    // thread blocked on a driver rwlock — freezing the whole process.
+    // thread blocked on a driver rwlock - freezing the whole process.
     // (Plain PcSampling mode was unaffected because PcSamplingEngine
     // exposes the real drainData() directly.)
     //
     // pc_ is null when SASS won the session (the two are mutually
-    // exclusive on current drivers — see start()); on that path SASS
+    // exclusive on current drivers - see start()); on that path SASS
     // flushes at scope stop, so this is correctly a no-op.
     if (pc_) pc_->drainData();
 }

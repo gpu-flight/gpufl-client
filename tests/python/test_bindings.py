@@ -66,7 +66,7 @@ class TestInitOptions:
 # ---------------------------------------------------------------------------
 
 EXPECTED_PROFILING_ENGINES = [
-    "Monitor",       # no CUPTI — telemetry only (the safe default)
+    "Monitor",       # no CUPTI - telemetry only (the safe default)
     "Trace",         # activity trace (kernels + memcpy + sync), no sampling
     "PcSampling",
     "SassMetrics",
@@ -92,7 +92,7 @@ class TestEnums:
             )
 
     def test_profiling_engine_no_legacy_aliases(self):
-        """The pre-1.1 names are gone — clean six-value enum only."""
+        """The pre-1.1 names are gone - clean six-value enum only."""
         for gone in ("None_", "None", "Off", "KernelTrace",
                      "Continuous", "Range", "PcSamplingWithSass"):
             assert not hasattr(gpufl.ProfilingEngine, gone), (

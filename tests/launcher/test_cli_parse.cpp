@@ -1,4 +1,4 @@
-// Tests for the launcher CLI parser. CPU-only — runs on any platform
+// Tests for the launcher CLI parser. CPU-only - runs on any platform
 // where gpufl_tests builds (Linux/macOS/Windows). The launcher binary
 // itself is Linux-gated, but the parser source is portable.
 

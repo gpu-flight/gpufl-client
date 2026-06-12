@@ -57,7 +57,7 @@ class SassMetricsEngine final : public IProfilingEngine {
      * profiler in the "initialized" state after a partial SASS setup
      * permanently disables CUPTI's PC Sampling API for the rest of the
      * session, causing PcSamplingWithSass to hang on the next sample
-     * drain. Idempotent — safe to call when never initialized or after
+     * drain. Idempotent - safe to call when never initialized or after
      * already deinited.
      */
     void DeInitProfilerIfNeeded_();

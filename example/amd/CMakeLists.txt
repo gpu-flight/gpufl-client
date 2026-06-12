@@ -40,7 +40,7 @@ find_package(hip QUIET CONFIG)
 # Include device debug info (-g) so gpufl can correlate ISA instructions
 # back to source lines (similar to NVIDIA's -lineinfo for SASS).
 # This embeds DWARF metadata in the GPU code object but does NOT affect
-# runtime performance — the GPU executes identical instructions.
+# runtime performance - the GPU executes identical instructions.
 # Only binary size increases. Recommended for profiling; omit in production
 # builds to reduce binary size.
 list(APPEND HIP_HIPCC_FLAGS "-g")

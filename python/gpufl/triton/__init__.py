@@ -1,9 +1,9 @@
 """
-gpufl.triton — planned Triton integration (stub during private beta).
+gpufl.triton - planned Triton integration (stub during private beta).
 
 Triton is a Python DSL for writing custom GPU kernels. When a Triton
 kernel runs, GPUFlight's C++ client captures the CUDA launch via CUPTI
-as usual — so you already see execution time, occupancy, and SASS for
+as usual - so you already see execution time, occupancy, and SASS for
 Triton kernels. What's not yet available is mapping the generated kernel
 back to the Triton source function and line that authored it.
 

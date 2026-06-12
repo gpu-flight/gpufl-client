@@ -17,10 +17,10 @@ class StackRegistry {
         //
         // A function-local `static StackRegistry inst;` registers its destructor
         // via atexit at FIRST USE. On Windows, first use happens during the run
-        // — AFTER the injection library registered its own shutdown atexit at
+        // - AFTER the injection library registered its own shutdown atexit at
         // init. atexit runs LIFO, so the registry would be destroyed BEFORE
         // gpufl::shutdown()'s teardown drain runs, and get()/getOrRegister()
-        // would then touch a destroyed unordered_map (access violation —
+        // would then touch a destroyed unordered_map (access violation -
         // observed as the Windows trace teardown crash that dropped all kernel
         // rows). Leaking the object keeps it valid for the whole process
         // lifetime; the OS reclaims the memory at exit regardless.
@@ -29,7 +29,7 @@ class StackRegistry {
     }
 
     // Hot path (CUPTI callback / launch thread): register a captured RawStack
-    // (return addresses only). NO symbolization happens here — resolution is
+    // (return addresses only). NO symbolization happens here - resolution is
     // deferred to get(), which runs on the collector/worker thread. This keeps
     // dbghelp's SymFromAddr (a process-global lock) off the per-launch path.
     size_t getOrRegister(const core::RawStack& raw) {

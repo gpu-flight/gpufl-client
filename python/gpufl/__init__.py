@@ -7,7 +7,7 @@ from contextlib import contextmanager
 # loaded and conflict during profiling (crash in cubin callback).
 # Detect torch already being imported and warn if we loaded before it.
 if os.name == 'nt' and 'torch' not in sys.modules:
-    # torch not yet imported — emit a one-time advisory.  We don't raise
+    # torch not yet imported - emit a one-time advisory.  We don't raise
     # here because headless / CPU-only code should still work.
     import warnings
     warnings.warn(
@@ -22,7 +22,7 @@ if os.name == 'nt' and 'torch' not in sys.modules:
     )
     del warnings
 
-# 1. Windows DLL Handling — ensure CUDA and CUPTI DLLs are findable.
+# 1. Windows DLL Handling - ensure CUDA and CUPTI DLLs are findable.
 # os.add_dll_directory() alone is insufficient for some Python builds;
 # we also prepend to PATH as a belt-and-suspenders approach.
 if os.name == 'nt':
@@ -61,15 +61,15 @@ if os.name == 'nt':
 # 1b. Linux: preload the MATCHING PerfWorks libraries before the C extension.
 #
 # gpufl's _gpufl_client.so links libnvperf_host.so / libnvperf_target.so
-# DIRECTLY (DT_NEEDED — see the NVPERF block in CMakeLists.txt), so the
+# DIRECTLY (DT_NEEDED - see the NVPERF block in CMakeLists.txt), so the
 # dynamic loader resolves them the instant the extension is imported,
 # long before any of our initialize() code runs. In a PyTorch venv the
 # recommended import order is `torch` THEN `gpufl`; by the time gpufl
-# imports, torch has already loaded the pip `nvidia-cuXX` libcupti.so —
+# imports, torch has already loaded the pip `nvidia-cuXX` libcupti.so -
 # but NOT nvperf (torch doesn't touch PerfWorks at import). So our NEEDED
 # libnvperf_host.so has nothing resident to dedupe against, and the
 # loader finds the SYSTEM copy via ldconfig (/usr/local/cuda/.../
-# libnvperf_host.so). The result is venv CUPTI + system PerfWorks — a
+# libnvperf_host.so). The result is venv CUPTI + system PerfWorks - a
 # split install that SEGFAULTS in NVPW_CUDA_LoadDriver the first time PC
 # sampling (PcSampling) or the Profiler API (SassMetrics / RangeProfiler
 # / Deep) runs. It "sometimes works" only when something happened to make
@@ -89,7 +89,7 @@ def _preload_matching_perfworks():
     import ctypes
     import glob as _glob
 
-    # RTLD_LAZY|RTLD_GLOBAL — same flags the C++ side uses. GLOBAL so the
+    # RTLD_LAZY|RTLD_GLOBAL - same flags the C++ side uses. GLOBAL so the
     # symbols/soname win subsequent NEEDED resolutions; LAZY so we don't
     # force-bind symbols that depend on libs not resident yet at import.
     _mode = os.RTLD_LAZY | os.RTLD_GLOBAL
@@ -123,7 +123,7 @@ def _preload_matching_perfworks():
     #     Appended AFTER the libcupti dirs (which are preferred because
     #     they're version-matched), so it covers (a) gpufl imported before
     #     torch / pure-gpufl processes, and (b) torch bundling its libcupti
-    #     in a dir that has no sibling nvperf (e.g. torch/lib) — the loop
+    #     in a dir that has no sibling nvperf (e.g. torch/lib) - the loop
     #     below skips dirs without the PerfWorks set and falls through here.
     roots = []
     try:
@@ -144,7 +144,7 @@ def _preload_matching_perfworks():
                 candidate_dirs.append(d)
 
     # A heavy pipeline (torch + torchvision + other CUDA extensions) can
-    # have MORE THAN ONE libcupti resident — e.g. the pip venv copy AND a
+    # have MORE THAN ONE libcupti resident - e.g. the pip venv copy AND a
     # system /usr/local/cuda copy. /proc/self/maps order is by address, not
     # load order, so "first seen" is arbitrary and could point at the
     # system dir while gpufl actually binds the venv CUPTI (→ we'd preload
@@ -216,7 +216,7 @@ except ImportError as e:
         None_ = "None"
 
     class ProfilingEngine:
-        # Six canonical names, no aliases — mirrors the C++ enum.
+        # Six canonical names, no aliases - mirrors the C++ enum.
         Monitor       = "Monitor"
         Trace         = "Trace"
         PcSampling    = "PcSampling"
@@ -257,7 +257,7 @@ except ImportError as e:
         def __enter__(self): return self
         def __exit__(self, *args): pass
 
-    # Stub UploadResult — mirror the C++ binding's field set so calling
+    # Stub UploadResult - mirror the C++ binding's field set so calling
     # code can introspect even in no-GPU mode without AttributeError.
     class UploadResult:
         def __init__(self):
@@ -267,7 +267,7 @@ except ImportError as e:
             self.events_uploaded = 0
             self.bytes_uploaded = 0
             self.elapsed_ms = 0
-            self.warnings = ["gpufl C++ extension not loaded — upload is a no-op in stub mode"]
+            self.warnings = ["gpufl C++ extension not loaded - upload is a no-op in stub mode"]
 
     class UploadOptions:
         def __init__(self):
@@ -287,7 +287,7 @@ except ImportError as e:
             self.force = False
 
     def _c_upload_logs(*args, **kwargs):  # type: ignore[no-redef]
-        print("[GPUFL] upload_logs called in stub mode — returning empty result.",
+        print("[GPUFL] upload_logs called in stub mode - returning empty result.",
               file=sys.stderr)
         return UploadResult()
     # --- FIX END ---
@@ -309,7 +309,7 @@ __version__ = "1.1.0"
 # `gpufl.upload_logs(...)` after `gpufl.shutdown()`, or wrap the whole
 # thing in `with gpufl.session(backend_url=..., api_key=...):` to have
 # it run automatically. The legacy `remote_upload=True` kwarg on init()
-# is gone — passing it raises TypeError (see the check inside init()).
+# is gone - passing it raises TypeError (see the check inside init()).
 #
 # (Historical note: a `config_name` kwarg used to trigger a remote
 # named-config fetch from the backend before init completed. That
@@ -332,7 +332,7 @@ _last_app_name = None
 # upload_logs, Scope) becomes a no-op. Set by either:
 #   * gpufl.init(..., enabled=False)
 #   * the GPUFL_DISABLED env var (1/true/yes/on)
-# Env wins — it lets users force-off without editing code (handy for CI,
+# Env wins - it lets users force-off without editing code (handy for CI,
 # debugging, or comparing runs with vs. without instrumentation).
 _disabled = False
 
@@ -347,16 +347,16 @@ class _NoopUploadResult:
     """Stand-in returned by :func:`upload_logs` when gpufl is disabled.
 
     The real :class:`UploadResult` is the C++ binding from pybind11 and
-    cannot be default-constructed or mutated from Python — its fields
+    cannot be default-constructed or mutated from Python - its fields
     are all ``def_readonly`` and there's no exposed ``py::init<>()``.
     Trying to do ``r = UploadResult(); r.success = True`` from the
     disabled-mode no-op path therefore crashes in production (in stub
-    mode the pure-Python class above masks the bug — same name, very
+    mode the pure-Python class above masks the bug - same name, very
     different shape).
 
     This class mirrors the binding's public field set so existing caller
-    code — ``r.success``, ``r.events_uploaded``, ``isinstance(...)``-free
-    duck typing — keeps working unchanged. If you add a field to the
+    code - ``r.success``, ``r.events_uploaded``, ``isinstance(...)``-free
+    duck typing - keeps working unchanged. If you add a field to the
     C++ ``UploadResult``, add it here too (and to the stub-mode class
     above).
     """
@@ -367,7 +367,7 @@ class _NoopUploadResult:
         self.events_uploaded = 0
         self.bytes_uploaded = 0
         self.elapsed_ms = 0
-        self.warnings = ["gpufl is disabled — upload_logs is a no-op"]
+        self.warnings = ["gpufl is disabled - upload_logs is a no-op"]
         self.spool_ids = []
 
     def __repr__(self):
@@ -375,7 +375,7 @@ class _NoopUploadResult:
                 "warnings=1 spool_ids=0 elapsed_ms=0 (disabled)>")
 
 def _apply_eager_module_loading(profiling_engine):
-    """Optionally set CUDA_MODULE_LOADING=EAGER — opt-in only.
+    """Optionally set CUDA_MODULE_LOADING=EAGER - opt-in only.
 
     EAGER is now OPT-IN. By default gpufl leaves CUDA on its normal LAZY
     module loading. The per-architecture SASS exclusion gate
@@ -411,7 +411,7 @@ def _apply_eager_module_loading(profiling_engine):
         return  # respect a value the user set themselves
 
     # If CUDA is already up, the env is read-at-context-creation, so setting
-    # it now is a no-op — warn instead of silently doing nothing. Only peek
+    # it now is a no-op - warn instead of silently doing nothing. Only peek
     # at torch if it's already imported (never import it here).
     _torch = sys.modules.get('torch')
     if _torch is not None:
@@ -455,13 +455,13 @@ def init(*args, backend_url=None, api_key=None, remote_upload=None,
             (e.g. "https://api.gpuflight.com"). Stored on InitOptions
             so gpufl.upload_logs() / gpufl.session() can read it back
             after shutdown without the caller having to re-supply it.
-            On its own it does nothing — upload is a separate step,
-            never live during the workload. **Planned removal v1.2** —
+            On its own it does nothing - upload is a separate step,
+            never live during the workload. **Planned removal v1.2** -
             see DEPRECATION NOTE on InitOptions.backend_url in
             include/gpufl/gpufl.hpp.
         api_key: API key for log upload. Same purpose / lifecycle as
             backend_url. **Planned removal v1.2.**
-        remote_upload: DEPRECATED (v1.1) — used to enable live HTTP
+        remote_upload: DEPRECATED (v1.1) - used to enable live HTTP
             streaming via HttpLogSink. That mechanism is gone. Setting
             True here still works for one release: emits a
             DeprecationWarning and registers an atexit handler that
@@ -470,13 +470,13 @@ def init(*args, backend_url=None, api_key=None, remote_upload=None,
             `with gpufl.session(backend_url=..., api_key=...):` (auto-
             orchestrated) or call gpufl.upload_logs(...) explicitly
             after shutdown. **Removed in v1.2.** Env: `GPUFL_REMOTE_UPLOAD=1`.
-        enabled: When False, init becomes a no-op — no daemon spawn, no
+        enabled: When False, init becomes a no-op - no daemon spawn, no
             NVML probe, no log files, no atexit handler. Subsequent
             gpufl calls (Scope, shutdown, upload_logs, system_start/stop)
             also no-op for the rest of the process. Useful for toggling
             instrumentation on/off without removing the call. The
             ``GPUFL_DISABLED`` env var (set to ``1``/``true``/``yes``/
-            ``on``) forces the same behavior regardless of this kwarg —
+            ``on``) forces the same behavior regardless of this kwarg -
             that way you can disable gpufl for a one-off run without
             editing code: ``GPUFL_DISABLED=1 python train.py``.
         analysis_id: Tag this run as one pass of a multi-pass "analysis
@@ -491,7 +491,7 @@ def init(*args, backend_url=None, api_key=None, remote_upload=None,
 
             Note: CUPTI allows only ONE profiling engine per process, so a
             multi-engine deep-dive is several runs (one engine each),
-            NOT one process — bound each run to the hot region (e.g. break
+            NOT one process - bound each run to the hot region (e.g. break
             the loop after a few iterations, or load a checkpoint) so a
             long job isn't re-run end to end.
         pass_index: 0-based position of this run within the analysis group.
@@ -508,7 +508,7 @@ def init(*args, backend_url=None, api_key=None, remote_upload=None,
         ``if not gpufl.init(...): ...``.
     """
     # ── disable check ───────────────────────────────────────────────────
-    # Env var wins over the kwarg — it's the "force off without editing
+    # Env var wins over the kwarg - it's the "force off without editing
     # code" knob. Set early so every downstream gpufl call sees it.
     global _disabled
     if _env_disabled() or not enabled:
@@ -522,7 +522,7 @@ def init(*args, backend_url=None, api_key=None, remote_upload=None,
     # EAGER module loading is OPT-IN (default: CUDA's normal LAZY). The
     # per-architecture SASS exclusion gate (GPUFL_SASS_EXCLUDE_ARCHS) is the
     # default guard for the CUPTI lazy-patching deadlock. Set
-    # GPUFL_EAGER_MODULE_LOADING=1 to force EAGER for this run instead — must
+    # GPUFL_EAGER_MODULE_LOADING=1 to force EAGER for this run instead - must
     # happen before the training loop creates the CUDA context, hence here.
     _apply_eager_module_loading(kwargs.get('profiling_engine'))
 
@@ -536,7 +536,7 @@ def init(*args, backend_url=None, api_key=None, remote_upload=None,
         if 'continuous_system_sampling' in kwargs:
             raise TypeError(
                 "init() got both 'sampling_auto_start' (deprecated) and "
-                "'continuous_system_sampling' — pass only the new name.")
+                "'continuous_system_sampling' - pass only the new name.")
         import warnings
         warnings.warn(
             "'sampling_auto_start' is deprecated; use "
@@ -578,7 +578,7 @@ def init(*args, backend_url=None, api_key=None, remote_upload=None,
         remote_upload = env_upload in ('1', 'true', 'yes', 'on')
 
     # Forward backend creds to the underlying C++ init via the pybind11
-    # binding. These are needed by gpufl::uploadLogs() at shutdown — they
+    # binding. These are needed by gpufl::uploadLogs() at shutdown - they
     # live on InitOptions so the deferred-upload path can read them back
     # without the caller having to re-supply them.
     if backend_url and 'backend_url' not in kwargs:
@@ -601,11 +601,11 @@ def init(*args, backend_url=None, api_key=None, remote_upload=None,
     # upload_logs() at interpreter exit. Customer code keeps working
     # unchanged.
     #
-    # Why atexit (not "call upload_logs from the shutdown wrapper") —
+    # Why atexit (not "call upload_logs from the shutdown wrapper") -
     # many existing customers don't call gpufl.shutdown() explicitly
     # and rely on the interpreter exiting to flush everything. Hooking
     # atexit preserves that pattern. For callers that DO call shutdown()
-    # explicitly, the atexit fires after shutdown() returns — still
+    # explicitly, the atexit fires after shutdown() returns - still
     # correct, just a small delay.
     #
     # Removed in v1.2. New code should use `gpufl.session()` or call
@@ -614,10 +614,10 @@ def init(*args, backend_url=None, api_key=None, remote_upload=None,
         import warnings
         warnings.warn(
             "remote_upload=True is deprecated. Live HTTP streaming "
-            "was removed in v1.1 — upload now happens after the "
+            "was removed in v1.1 - upload now happens after the "
             "session ends. For automated upload, use "
             "`with gpufl.session(backend_url=..., api_key=...):`. "
-            "Your existing code keeps working — gpufl scheduled an "
+            "Your existing code keeps working - gpufl scheduled an "
             "atexit handler that calls upload_logs() at interpreter "
             "shutdown. The remote_upload kwarg, plus backend_url and "
             "api_key on InitOptions, will be removed in v1.2.",
@@ -650,7 +650,7 @@ def init(*args, backend_url=None, api_key=None, remote_upload=None,
                     api_path=_deferred_api_path,
                 )
             except Exception as e:
-                # atexit handlers must not raise — Python prints a
+                # atexit handlers must not raise - Python prints a
                 # traceback otherwise, which is confusing for users
                 # who didn't know upload was happening. Log + swallow.
                 print(f"[gpufl] atexit upload_logs failed: {e}",
@@ -717,7 +717,7 @@ def upload_logs(*, log_path=None, backend_url=None, api_key=None,
     """Upload a session's NDJSON logs to the GPUFlight backend.
 
     Call this AFTER `gpufl.shutdown()` returns. The local NDJSON files
-    are not deleted — successful uploads only update an internal cursor
+    are not deleted - successful uploads only update an internal cursor
     file (`.gpufl-upload-cursor.json` in the log dir) so subsequent
     invocations don't accidentally re-upload completed sessions.
 
@@ -728,7 +728,7 @@ def upload_logs(*, log_path=None, backend_url=None, api_key=None,
         - all_sessions=True: upload every session found in the dir.
 
     Args:
-        log_path: Same shape as InitOptions.log_path — both the
+        log_path: Same shape as InitOptions.log_path - both the
             directory AND filename-prefix. Defaults to the last
             init()'s log_path. Raises ValueError if neither is set.
         backend_url: Backend base URL. Env: GPUFL_BACKEND_URL.
@@ -750,11 +750,11 @@ def upload_logs(*, log_path=None, backend_url=None, api_key=None,
 
     Returns:
         UploadResult with .success / .events_uploaded / .warnings / etc.
-        Never raises on network errors — inspect .success.
+        Never raises on network errors - inspect .success.
 
     When gpufl is disabled, returns an empty upload-result stand-in
     (``_NoopUploadResult``) with the same field shape as the real
-    :class:`UploadResult` — ``success=True``, ``events_uploaded=0``, a
+    :class:`UploadResult` - ``success=True``, ``events_uploaded=0``, a
     single warning explaining why. No network calls, no disk I/O. Safe
     to call even when ``gpufl.init()`` was never called this process.
     """
@@ -773,7 +773,7 @@ def upload_logs(*, log_path=None, backend_url=None, api_key=None,
     if session_id and all_sessions:
         raise ValueError(
             "upload_logs: session_id and all_sessions are mutually "
-            "exclusive — pass only one.")
+            "exclusive - pass only one.")
     return _c_upload_logs(
         log_path=log_path,
         backend_url=backend_url,
@@ -796,7 +796,7 @@ def upload_logs(*, log_path=None, backend_url=None, api_key=None,
 #
 # Wraps init() + shutdown() + optional upload_logs() so callers don't
 # have to remember the orchestration. The deferred-upload model means
-# nothing reaches the dashboard during the workload — uploading at the
+# nothing reaches the dashboard during the workload - uploading at the
 # end is what makes the session visible. session() handles that:
 #
 #   with gpufl.session(app_name="my_app",
@@ -806,7 +806,7 @@ def upload_logs(*, log_path=None, backend_url=None, api_key=None,
 #   # On exit: shutdown() runs, then upload_logs() if creds were set.
 #
 # Without backend_url + api_key (or the matching env vars), the session
-# stays fully offline — shutdown happens but no upload is attempted.
+# stays fully offline - shutdown happens but no upload is attempted.
 # All kwargs forward verbatim to init().
 @contextmanager
 def session(*args, **kwargs):
@@ -823,7 +823,7 @@ def session(*args, **kwargs):
                 gpufl.upload_logs(...)
 
     Yields:
-        The value returned by `init()` — truthy on success, False in
+        The value returned by `init()` - truthy on success, False in
         stub / no-GPU mode. Lets callers do
         ``with gpufl.session(...) as ok: if not ok: ...``.
     """
@@ -839,12 +839,12 @@ def session(*args, **kwargs):
     try:
         yield result
     finally:
-        # shutdown() is idempotent — safe even when init() failed and
+        # shutdown() is idempotent - safe even when init() failed and
         # no real session was started.
         try:
             shutdown()
         except Exception:
-            # Don't let a shutdown bug suppress the upload — the local
+            # Don't let a shutdown bug suppress the upload - the local
             # NDJSON files are the source of truth and they're already
             # on disk. Log and continue.
             import traceback
@@ -863,7 +863,7 @@ def session(*args, **kwargs):
             except Exception as e:
                 # upload_logs is supposed to never raise on network
                 # errors, but a bad input could (e.g. missing log_path).
-                # Print and swallow — the with-block must not raise
+                # Print and swallow - the with-block must not raise
                 # from cleanup.
                 print(f"[gpufl.session] upload_logs failed: {e}",
                       file=sys.stderr)
@@ -874,7 +874,7 @@ def session(*args, **kwargs):
 # Thin Python wrapper over the C++ `_CScope`. Backward compatible: used as a
 # `with` block it behaves exactly as before. New in 1.0.3 it is also
 # *iterable* when constructed with `repeat=N`, which removes the
-# `with Scope(...): for _ in range(N):` boilerplate and — via `warmup=K` —
+# `with Scope(...): for _ in range(N):` boilerplate and - via `warmup=K` -
 # lets you exclude cold-start iterations (JIT compile, cold caches) from the
 # measured/profiled window without hand-writing two loops.
 class Scope:
@@ -882,7 +882,7 @@ class Scope:
 
     Two usage forms:
 
-    1. Context manager (unchanged) — bracket an arbitrary block::
+    1. Context manager (unchanged) - bracket an arbitrary block::
 
            with gpufl.Scope("inference", "ml"):
                model(x)
@@ -893,7 +893,7 @@ class Scope:
                matmul_kernel[bpg, tpb](A, B, C)
 
        The scope opens once, brackets all ``repeat`` measured iterations,
-       and closes when the loop ends — even if the body raises.
+       and closes when the loop ends - even if the body raises.
 
     Args:
         name:   Scope name shown in the report / dashboard.
@@ -901,7 +901,7 @@ class Scope:
         repeat: If set, the scope becomes iterable and yields this many
                 *measured* iterations (indices ``0 .. repeat-1``). Required
                 to iterate; a ``with`` block ignores it.
-        warmup: Iterations run BEFORE the scope opens — their work executes
+        warmup: Iterations run BEFORE the scope opens - their work executes
                 but is excluded from the scope's timing/profiling. They yield
                 negative indices (``-warmup .. -1``) so ``i >= 0`` marks a
                 measured iteration. Only meaningful together with ``repeat``.
@@ -942,7 +942,7 @@ class Scope:
         if self._repeat is None:
             raise TypeError(
                 "Scope is only iterable when constructed with repeat=N. "
-                "Use it as a context manager — `with gpufl.Scope(...):` — "
+                "Use it as a context manager - `with gpufl.Scope(...):` - "
                 "otherwise."
             )
         return self._iterate()
@@ -959,7 +959,7 @@ class Scope:
             return
         # Warmup: open a "<name>_warmup" sub-scope so the kernel events
         # emitted during warmup are attributed to a separately
-        # identifiable bucket — same convention as the C++ BenchInvoker,
+        # identifiable bucket - same convention as the C++ BenchInvoker,
         # keeps Python and C++ logs interchangeable. The sub-scope's
         # BEGIN row carries repeat=warmup so per-iteration cold-start
         # cost can be computed by the analyzer.
@@ -974,7 +974,7 @@ class Scope:
                 warmup_inner.__exit__(None, None, None)
         # Measured: open the main scope, yield repeat times, always close.
         # Pass repeat/warmup through to the C++ scope so they land on the
-        # BEGIN row of scope_event_batch — the analyzer / backend then
+        # BEGIN row of scope_event_batch - the analyzer / backend then
         # derive per-iteration metrics without the caller doing math.
         self._inner = _CScope(self._name, self._tag,
                               repeat=self._repeat, warmup=self._warmup)
@@ -1007,21 +1007,21 @@ def clean_logs(log_path=None, log_prefix=None, *, dry_run=False):
           callers don't break; remove in v1.3.
 
     Safety:
-        * **Refuses while a session is active in THIS process** — if you've
+        * **Refuses while a session is active in THIS process** - if you've
           called ``init()`` without a matching ``shutdown()`` it raises
           ``RuntimeError`` rather than delete logs you're still writing.
         * **Does NOT detect the ``gpufl-monitor`` sidecar / agent running in
           another process.** On Windows a file the agent has open cannot be
           deleted, so the OS protects you (the file is skipped with a
           warning). On Linux an unlink succeeds even while the agent holds
-          the file open, which can confuse a live tail — **stop the agent
+          the file open, which can confuse a live tail - **stop the agent
           before calling this, or use ``dry_run=True`` first to preview.**
 
     Args:
         log_path:   Directory whose session subdirs to remove. Defaults to
                     the last ``init()``'s location.
         log_prefix: Ignored in v1.2 (kept for backward-compat with v1.1
-                    callers — emits a DeprecationWarning if passed).
+                    callers - emits a DeprecationWarning if passed).
         dry_run:    If True, return the list of matching files WITHOUT
                     deleting anything.
 
@@ -1040,7 +1040,7 @@ def clean_logs(log_path=None, log_prefix=None, *, dry_run=False):
     if log_prefix is not None:
         import warnings as _w
         _w.warn(
-            "clean_logs(log_prefix=...) is deprecated in v1.2 — the new "
+            "clean_logs(log_prefix=...) is deprecated in v1.2 - the new "
             "disk layout has no filename prefix (logs live at "
             "<log_path>/<session_id>/<channel>.log). The argument is "
             "ignored. Pass only log_path=... going forward.",
@@ -1057,7 +1057,7 @@ def clean_logs(log_path=None, log_prefix=None, *, dry_run=False):
         )
 
     # v1.2: log_path is the directory of session subdirs. v1.1 callers
-    # might have passed `<dir>/<prefix>` or `<dir>/<prefix>.log` — strip
+    # might have passed `<dir>/<prefix>` or `<dir>/<prefix>.log` - strip
     # a trailing `.log` so either still resolves to a sensible dir.
     if log_path.endswith(".log"):
         log_path = log_path[:-4]
@@ -1105,7 +1105,7 @@ def clean_logs(log_path=None, log_prefix=None, *, dry_run=False):
             removed.append(p)
         except OSError as e:
             # On Windows an open file (e.g. the sidecar agent tailing it)
-            # raises PermissionError — skipping it IS the safety net against
+            # raises PermissionError - skipping it IS the safety net against
             # deleting a file that's in use. Warn rather than crash.
             warnings.warn(f"[gpufl] clean_logs: could not remove {p}: {e}")
     return removed

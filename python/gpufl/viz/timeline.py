@@ -78,7 +78,7 @@ def _explode_device_samples(df, gpu_id=0):
         "temp_c":       _get("temp_c"),
         "power_mw":     _get("power_mw"),
         "clk_sm_mhz":   _get("clock_sm"),
-        # Combined PCIe bandwidth (RX+TX) — the wire format no longer
+        # Combined PCIe bandwidth (RX+TX) - the wire format no longer
         # splits direction; if absent (base shape, not extended), this
         # stays 0.
         "pcie_gbps":    _get("pcie_bw_bps") / 1e9,
@@ -197,7 +197,7 @@ def _reconstruct_intervals(df, start_type, end_type, name_col="name", fallback_n
 def _scope_intervals(df):
     """Pair `scope_event` begin/end rows into ordered intervals.
 
-    The wire format emits two `scope_event` rows per scope — one with
+    The wire format emits two `scope_event` rows per scope - one with
     `phase=0` (begin) and one with `phase=1` (end), both sharing the
     same `scope_instance_id`. Pairing on the instance id (rather than
     on the scope name) is correct even for nested scopes with the same
@@ -419,7 +419,7 @@ def plot_combined_timeline(df, title="GPUFL Timeline"):
         ax2.set_ylim(bottom=0)
         ax2.legend(loc="upper left", fontsize='x-small')
     else:
-        # No PCIe data — surface the gap so users don't think the
+        # No PCIe data - surface the gap so users don't think the
         # axis is broken. PCIe only appears in the extended-metric
         # batch shape, which requires Blackwell-era or driver-side
         # support for the underlying counters.

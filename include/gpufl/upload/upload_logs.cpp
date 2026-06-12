@@ -1,4 +1,4 @@
-// High-level structure (U1: file-unit upload — one POST per rotated file):
+// High-level structure (U1: file-unit upload - one POST per rotated file):
 //   1. resolve log_path as a v1.2 session-output root, with legacy prefix fallback
 //   2. discover .log / .log.gz files; sort by
 //      (session_id, channel, rotation_index DESC, active-file last)
@@ -12,15 +12,15 @@
 //      The old 5000-line/5 MB client-side chunking is gone: the rotator
 //      already caps files (Logger::kDefaultRotateBytes = 64 MiB raw,
 //      ≈ 4–8 MB gz), the backend accept path just streams the body to
-//      spool/lake storage, and the worker ingest is line-streamed — so
+//      spool/lake storage, and the worker ingest is line-streamed - so
 //      the file IS the natural unit, ~13× fewer round trips / GCS
 //      objects / ingestion jobs per file.
 //   5. lifecycle ordering: job_start lives in the oldest file (POSTed
 //      first) and shutdown in the active file (POSTed last), so arrival
 //      order is preserved without the old extract-and-defer pass. Note
-//      arrival ≠ ingest-completion order under the async queue — the
+//      arrival ≠ ingest-completion order under the async queue - the
 //      ordering chain (upload-plan U3) is the real guarantee.
-//   6. enforce total_timeout_ms across the whole loop — abort + return
+//   6. enforce total_timeout_ms across the whole loop - abort + return
 //      success=false on overrun rather than blocking the host process
 
 #include "gpufl/upload/upload_logs.hpp"
@@ -68,7 +68,7 @@ struct DiscoveredFile {
     bool         compressed;      // true if .log.gz
 };
 
-/// v1.2 disk layout — `log_path` is the directory under which each
+/// v1.2 disk layout - `log_path` is the directory under which each
 /// session lives in its own subdirectory:
 ///
 ///   <log_path>/
@@ -95,11 +95,11 @@ PathParts splitLogPath(const std::string& log_path) {
     return out;
 }
 
-/// Parse a filename like "device.log" or "device.5.log.gz" — the
+/// Parse a filename like "device.log" or "device.5.log.gz" - the
 /// per-channel files inside a session subdirectory. Returns false if
 /// the name doesn't match.
 ///
-/// Note: this is the v1.2 form (no prefix in the filename — the
+/// Note: this is the v1.2 form (no prefix in the filename - the
 /// session_id is the parent directory name). The pre-v1.2 form
 /// `<prefix>.<channel>.log` is handled separately by the legacy-
 /// detection path.
@@ -142,7 +142,7 @@ bool parseLogFilename(const std::string& filename,
     }
 }
 
-/// Detect pre-v1.2 flat layout — files like `<anything>.<device|scope|
+/// Detect pre-v1.2 flat layout - files like `<anything>.<device|scope|
 /// system>.log[.gz]` directly inside `dir`, instead of inside a
 /// session subdirectory. The check is intentionally narrow (only the
 /// three known channel names) to avoid false positives on user files.
@@ -169,7 +169,7 @@ bool detectLegacyLayoutAt(const fs::path& dir) {
 ///       the original .log (repair was unnecessary or failed) or the
 ///       newly-created .log.gz (repair succeeded).
 ///   - Skip:        do NOT add this entry to discovery. Happens when a
-///       .log AND its .log.gz counterpart both exist — we've removed
+///       .log AND its .log.gz counterpart both exist - we've removed
 ///       the stale .log here; the .gz will be discovered separately by
 ///       the directory iterator and added then. Adding the .log would
 ///       duplicate the .gz's events on upload.
@@ -179,7 +179,7 @@ struct RepairResult {
     fs::path path;
 };
 
-/// Lazy crash repair — gzip an orphan `.log` file in place if the
+/// Lazy crash repair - gzip an orphan `.log` file in place if the
 /// session's clean-shutdown compress-on-close never ran.
 ///
 /// Cases:
@@ -198,7 +198,7 @@ RepairResult repairOrphanLogIfNeeded(const fs::path& log_path) {
     if (!fs::exists(log_path, ec)) return {RepairResult::Keep, log_path};
     const fs::path gz_path = fs::path(log_path.string() + ".gz");
     if (fs::exists(gz_path, ec)) {
-        // Both files exist — .log is the stale duplicate from a
+        // Both files exist - .log is the stale duplicate from a
         // failed compress-on-shutdown. Remove it and skip; the .gz
         // entry will be added by the iterator's other pass.
         std::error_code rm_ec;
@@ -246,7 +246,7 @@ std::vector<DiscoveredFile> discoverFiles(const PathParts& parts) {
     if (!fs::exists(parts.directory, ec) || !fs::is_directory(parts.directory, ec)) {
         return out;
     }
-    // v1.2: walk one level of subdirectories — each is a session_id.
+    // v1.2: walk one level of subdirectories - each is a session_id.
     // Inside each subdir, parse channel files. Lazy crash repair runs
     // here so any orphan `.log` files get gzipped on first discovery.
     for (const auto& session_entry : fs::directory_iterator(parts.directory, ec)) {
@@ -257,7 +257,7 @@ std::vector<DiscoveredFile> discoverFiles(const PathParts& parts) {
         for (const auto& entry : fs::directory_iterator(session_entry.path(), ec)) {
             if (!entry.is_regular_file(ec)) continue;
             const std::string fname = entry.path().filename().string();
-            // Dot-files are never session data — notably a leftover
+            // Dot-files are never session data - notably a leftover
             // .gpufl.synthetic-shutdown temp from an interrupted launcher
             // marker append would otherwise parse as a bogus channel and
             // re-upload the whole system log.
@@ -292,7 +292,7 @@ std::vector<DiscoveredFile> discoverFiles(const PathParts& parts) {
     }
 
     // Sort: by (session_id, channel) lexicographic, then by upload
-    // order within a channel — oldest first. Rotation index N=max_files
+    // order within a channel - oldest first. Rotation index N=max_files
     // is the oldest; active (N=0) is newest. So within (sid, channel):
     // descending rotation_index, with active (0) last.
     std::sort(out.begin(), out.end(),
@@ -371,7 +371,7 @@ class NdjsonReader {
 //   }
 //
 // v1 (only `uploaded_files`, no `completed_sessions`) is read
-// transparently — missing keys default to empty collections. The next
+// transparently - missing keys default to empty collections. The next
 // write upgrades the file to v2.
 
 struct CompletedSession {
@@ -453,7 +453,7 @@ bool writeCursor(const fs::path& dir, const std::string& cursor_filename,
     const fs::path cursor_path = dir / cursor_filename;
     const fs::path tmp_path    = dir / (cursor_filename + ".tmp");
 
-    // Build JSON manually — schema is tiny and we don't have a JSON
+    // Build JSON manually - schema is tiny and we don't have a JSON
     // serializer in this project (parser only).
     std::ostringstream oss;
     oss << "{\"schema_version\":2,\"uploaded_files\":[";
@@ -499,7 +499,7 @@ bool writeCursor(const fs::path& dir, const std::string& cursor_filename,
 /// without parsing the whole JSON. Much faster on big batch events,
 /// where a full parse would walk every row.
 ///
-/// Returns empty string if the type field can't be found cheaply — the
+/// Returns empty string if the type field can't be found cheaply - the
 /// caller falls back to a real parse in that case.
 std::string fastExtractType(const std::string& line) {
     static const std::string kKey = "\"type\":\"";
@@ -513,7 +513,7 @@ std::string fastExtractType(const std::string& line) {
 
 /// Pull a numeric `ts_ns` out of an NDJSON line. Used only on
 /// `job_start` events to pick the "latest" session by timestamp.
-/// Returns 0 if the field is missing or unparseable — sorts to the
+/// Returns 0 if the field is missing or unparseable - sorts to the
 /// oldest, which is the safe fallback.
 int64_t fastExtractTsNs(const std::string& line) {
     static const std::string kKey = "\"ts_ns\":";
@@ -612,11 +612,11 @@ std::unique_ptr<httplib::Client> makeClient(const UrlParts& url,
 
 /// Gzip-compress `input` and return the compressed bytes. Uses zlib
 /// directly (deflate with windowBits +16 = gzip wrapper). Throws
-/// nothing — on failure, returns an empty string and the caller
+/// nothing - on failure, returns an empty string and the caller
 /// treats that as a transient failure for the chunk (retry).
 ///
 /// Target compression level 6 is the same default cpp-httplib uses
-/// internally — a reasonable balance of CPU vs ratio for log NDJSON,
+/// internally - a reasonable balance of CPU vs ratio for log NDJSON,
 /// which compresses to roughly 10× smaller on real workloads.
 std::string gzipString(const std::string& input) {
     if (input.empty()) return {};
@@ -661,7 +661,7 @@ std::string readFileBytes(const fs::path& p) {
 /// Decompressed size of a gzip stream from its ISIZE trailer (last 4
 /// bytes, little-endian, mod 2^32). Exact for our single-member files
 /// (the rotator caps them at Logger::kDefaultRotateBytes = 64 MiB, far
-/// under 4 GB) — but GARBAGE for a truncated file (the last 4 bytes are
+/// under 4 GB) - but GARBAGE for a truncated file (the last 4 bytes are
 /// then mid-stream data, not a trailer), so a suspicious hint must be
 /// verified by verifyGzip() before acting on it. 0 = unknown/empty.
 std::size_t gzipDecompressedSizeHint(const std::string& gz) {
@@ -673,7 +673,7 @@ std::size_t gzipDecompressedSizeHint(const std::string& gz) {
            (static_cast<std::size_t>(p[3]) << 24);
 }
 
-/// Outcome of verifyGzip — only consulted when the ISIZE hint exceeds
+/// Outcome of verifyGzip - only consulted when the ISIZE hint exceeds
 /// the size limit, which for our single-member rotated files means
 /// either a genuinely huge file or (far more likely) a TRUNCATED one
 /// from a killed session, whose trailer bytes are garbage.
@@ -718,7 +718,7 @@ GzipVerifyResult verifyGzip(const fs::path& path, std::size_t limit) {
 
 /// Outcome of a single stream-chunk POST. Drives the retry / abort
 /// logic in the main loop. Mirrors the per-event PostOutcome that came
-/// before but adds OldBackend404 — a sentinel for "the /stream endpoint
+/// before but adds OldBackend404 - a sentinel for "the /stream endpoint
 /// is missing, the backend predates v1.2." We don't retry on that; we
 /// abort the whole upload with a migration-hint warning.
 enum class StreamPostOutcome {
@@ -752,7 +752,7 @@ struct StreamLineError {
 ///       `{"accepted_for_processing": true, "spool_id": "..."}`. The
 ///       body was streamed to a spool (local disk or GCS) and a
 ///       background worker drains it asynchronously. There are no
-///       per-line counts to return — the caller trusts the local
+///       per-line counts to return - the caller trusts the local
 ///       `chunk_lines` as the accepted count.</li>
 /// </ul>
 struct StreamPostResult {
@@ -770,7 +770,7 @@ struct StreamPostResult {
 };
 
 /// Parse the backend's stream-endpoint response. Two wire shapes are
-/// recognised — see {@link StreamPostResult} for the full description.
+/// recognised - see {@link StreamPostResult} for the full description.
 /// Tolerant: missing or unrecognised fields leave the corresponding
 /// `out` field at its default; the caller falls back to "all-sent-
 /// assumed-accepted" via the chunk_lines it tracked locally.
@@ -782,7 +782,7 @@ void parseStreamResponse(const std::string& body, StreamPostResult& out) {
         // ── Phase 3a+ async-accept shape ─────────────────────────────
         // The backend streamed our body into a spool (local disk or
         // GCS) and queued it for the SpoolWorker to drain. There's no
-        // per-line accept/reject count to return — completion happens
+        // per-line accept/reject count to return - completion happens
         // out-of-band. We record the spool id so the caller can stash
         // it for operator debugging, and flag async_accepted so the
         // upload loop knows to use chunk_lines as the accepted count
@@ -822,7 +822,7 @@ void parseStreamResponse(const std::string& body, StreamPostResult& out) {
             }
         }
     } catch (...) {
-        // Body wasn't JSON or was unparseable — leave counters at 0,
+        // Body wasn't JSON or was unparseable - leave counters at 0,
         // caller falls back to "all-sent-assumed-accepted" via the
         // line_count it tracked locally. Better than failing the chunk
         // for a malformed response from an otherwise-2xx backend.
@@ -830,7 +830,7 @@ void parseStreamResponse(const std::string& body, StreamPostResult& out) {
 }
 
 /// POST one NDJSON chunk to `/api/v1/events/stream`. The body has
-/// already been gzipped by the caller — we set Content-Encoding here
+/// already been gzipped by the caller - we set Content-Encoding here
 /// to match.
 ///
 /// Returns the parsed outcome. Caller is responsible for retry /
@@ -879,11 +879,11 @@ StreamPostResult postStreamChunk(httplib::Client&         client,
     }
     // 404 is reserved for "endpoint doesn't exist." We treat it as the
     // sentinel for an old backend that pre-dates v1.2's /stream route.
-    // No retry — every subsequent chunk will hit the same 404.
+    // No retry - every subsequent chunk will hit the same 404.
     if (status == 404) {
         out.failure_reason =
             "gpufl client v1.2 requires backend v1.2+. The "
-            "/api/v1/events/stream endpoint is missing (HTTP 404) — "
+            "/api/v1/events/stream endpoint is missing (HTTP 404) - "
             "upgrade your backend or downgrade gpufl-client to v1.1.x.";
         out.outcome = StreamPostOutcome::OldBackend404;
         return out;
@@ -894,12 +894,12 @@ StreamPostResult postStreamChunk(httplib::Client&         client,
         return out;
     }
     if (status == 413) {
-        // Body exceeded the backend's decompressed cap (128 MB) — we
+        // Body exceeded the backend's decompressed cap (128 MB) - we
         // pre-check file sizes against it, so this means the check and
         // the server disagree. Treat as client error (don't retry) so
         // the caller logs + skips the file.
         out.failure_reason =
-            "file exceeded backend body limit (HTTP 413) — rotated log "
+            "file exceeded backend body limit (HTTP 413) - rotated log "
             "larger than the backend's decompressed cap?";
         out.outcome = StreamPostOutcome::ClientError;
         return out;
@@ -931,14 +931,14 @@ struct SessionInfo {
 /// populated on every DiscoveredFile). We still parse the first
 /// `job_start` event to get ts_ns, which drives "default = latest
 /// session" ordering. Sessions with no job_start (interrupted before
-/// init?) get ts_ns=0 — they sort to the oldest position.
+/// init?) get ts_ns=0 - they sort to the oldest position.
 std::vector<SessionInfo> discoverSessions(const std::vector<DiscoveredFile>& files) {
     // Group by session_id (from subdir name), pick earliest ts_ns.
     std::map<std::string, int64_t> seen;  // sid → earliest ts_ns observed
     for (const auto& f : files) {
         if (f.session_id.empty()) continue;
         if (seen.find(f.session_id) == seen.end()) {
-            seen[f.session_id] = 0;  // default — overwritten if we find a job_start below
+            seen[f.session_id] = 0;  // default - overwritten if we find a job_start below
         }
         NdjsonReader reader(f.path, f.compressed);
         if (!reader.ok()) continue;
@@ -994,7 +994,7 @@ UploadResult uploadLogs(const UploadOptions& opts) {
     if (!opts.session_id_filter.empty() && opts.all_sessions) {
         result.warnings.emplace_back(
             "uploadLogs: session_id_filter and all_sessions are mutually "
-            "exclusive — pass only one.");
+            "exclusive - pass only one.");
         return result;
     }
 
@@ -1006,15 +1006,15 @@ UploadResult uploadLogs(const UploadOptions& opts) {
     // of the v1.2 per-session subdirectory layout
     // (`<base>/<session_id>/<channel>.log[.gz]`). Two places to check:
     //
-    //   1. Inside parts.directory itself — the user passed the parent
+    //   1. Inside parts.directory itself - the user passed the parent
     //      dir of a pre-v1.2 install. Files like `myapp.device.log`
     //      sit at the top level alongside session subdirs.
-    //   2. At parts.directory's parent, matching the basename — the
+    //   2. At parts.directory's parent, matching the basename - the
     //      user passed the pre-v1.2 prefix path `/tmp/myapp` while
     //      files are at `/tmp/myapp.device.log` etc.
     //
     // Either case → emit a single warning that points at the migration
-    // path. We DON'T attempt to upload — the on-disk shape doesn't
+    // path. We DON'T attempt to upload - the on-disk shape doesn't
     // match what discovery now walks, and silently uploading nothing
     // is worse than a loud error.
     auto emitLegacyWarning = [&](const fs::path& legacy_at) {
@@ -1070,7 +1070,7 @@ UploadResult uploadLogs(const UploadOptions& opts) {
     if (all_sessions.empty()) {
         result.warnings.emplace_back(
             "uploadLogs: no job_start events found in " + parts.directory.string() +
-            " — the directory has files matching the prefix but none carry "
+            " - the directory has files matching the prefix but none carry "
             "a session header. Was the session aborted before init?");
         result.success = true;  // nothing to upload → not a failure, just a no-op
         result.elapsed_ms = elapsedMs();
@@ -1125,10 +1125,10 @@ UploadResult uploadLogs(const UploadOptions& opts) {
             targets = std::move(remaining);
             if (targets.empty()) {
                 // Every session in the dir is already in the cursor.
-                // No work to do — that's a success, not a failure.
+                // No work to do - that's a success, not a failure.
                 result.success = true;
                 result.elapsed_ms = elapsedMs();
-                GFL_LOG_DEBUG("[uploadLogs] all sessions already in cursor — no-op.");
+                GFL_LOG_DEBUG("[uploadLogs] all sessions already in cursor - no-op.");
                 return result;
             }
         } else {
@@ -1170,15 +1170,15 @@ UploadResult uploadLogs(const UploadOptions& opts) {
         std::string("gpufl-client/") + kClientVersion + " (deferred-upload)";
 
     // Stamped on every chunk so the backend can attribute events to
-    // the originating host. Resolved once per upload — getLocalHostname
+    // the originating host. Resolved once per upload - getLocalHostname
     // caches after first call.
     const std::string envelope_hostname = getLocalHostname();
 
     // File-size guards. The upload unit is one rotated file; these only
     // reject pathological inputs the backend (or its fronting infra)
     // would refuse anyway:
-    //   - compressed: Cloud Run hard-caps a request body at 32 MiB —
-    //     leave headroom. (Infra bound — unrelated to the rotate size.)
+    //   - compressed: Cloud Run hard-caps a request body at 32 MiB -
+    //     leave headroom. (Infra bound - unrelated to the rotate size.)
     //   - decompressed: derived from the rotator's threshold (the file
     //     size IS the rotate setting): 2× covers the one-line overshoot
     //     the rotator allows plus any future modest bump, and matches
@@ -1208,7 +1208,7 @@ UploadResult uploadLogs(const UploadOptions& opts) {
         // sessions for this upload. The pre-v1.2 form was
         // "%zu/%zu session(s)" which read like "F of S sessions
         // complete" but was actually mixing files (numerator) and
-        // sessions (denominator) — fixed by labeling both axes.
+        // sessions (denominator) - fixed by labeling both axes.
         std::fprintf(stderr,
                      "[gpufl::upload] %zu events uploaded (%zu MB), "
                      "%zu file(s), %zu session(s), %llds elapsed\n",
@@ -1239,12 +1239,12 @@ UploadResult uploadLogs(const UploadOptions& opts) {
     // only when the WHOLE upload must abort (auth failure, budget
     // exhausted, or 404 from an old backend that doesn't have /stream).
     //
-    // `session_events` accumulates the per-session accepted count —
+    // `session_events` accumulates the per-session accepted count -
     // only legacy synchronous backends report one; the async-accept
     // path (202 + spool_id) has no per-line counts at POST time.
     //
     // `skipped_out` is set when the file was given up on (4xx, retries
-    // exhausted) but the upload continues — the caller must then NOT
+    // exhausted) but the upload continues - the caller must then NOT
     // mark the session completed, so a re-run retries the hole.
     auto postFile = [&](const std::string& session_id,
                         const std::string& display_name,
@@ -1269,7 +1269,7 @@ UploadResult uploadLogs(const UploadOptions& opts) {
                 bytes_since_last_progress += decompressed_bytes;
                 // Two backend shapes:
                 //   1. async-accept (Phase 3a+): 202 + spool_id, no
-                //      per-line counts — the worker ingests out-of-band.
+                //      per-line counts - the worker ingests out-of-band.
                 //   2. legacy synchronous: explicit accepted/rejected
                 //      counts + per-line errors. Surface partials as
                 //      warnings, trust the server's accepted count.
@@ -1294,7 +1294,7 @@ UploadResult uploadLogs(const UploadOptions& opts) {
                 return true;
             }
             if (r.outcome == StreamPostOutcome::OldBackend404) {
-                // Backend predates the /stream endpoint. No retry —
+                // Backend predates the /stream endpoint. No retry -
                 // every file would hit the same 404. Abort the whole
                 // upload with a migration-hint warning.
                 result.warnings.push_back(r.failure_reason);
@@ -1304,16 +1304,16 @@ UploadResult uploadLogs(const UploadOptions& opts) {
             if (r.outcome == StreamPostOutcome::AuthFailure) {
                 result.warnings.push_back(
                     "POST /events/stream failed: " + r.failure_reason +
-                    " — aborting remaining uploads");
+                    " - aborting remaining uploads");
                 auth_failed = true;
                 return false;
             }
             if (r.outcome == StreamPostOutcome::ClientError) {
                 // 4xx that isn't auth or 404 (e.g. 413/400). Log and
-                // skip the file — retrying won't help.
+                // skip the file - retrying won't help.
                 result.warnings.push_back(
                     "POST /events/stream failed: " + r.failure_reason +
-                    " — skipping " + display_name);
+                    " - skipping " + display_name);
                 skipped_out = true;
                 return true;
             }
@@ -1328,7 +1328,7 @@ UploadResult uploadLogs(const UploadOptions& opts) {
             result.warnings.push_back(
                 "POST /events/stream failed after " +
                 std::to_string(attempt + 1) + " attempt(s): " + fail_reason +
-                " — skipping " + display_name);
+                " - skipping " + display_name);
             skipped_out = true;
             return true;
         }
@@ -1349,7 +1349,7 @@ UploadResult uploadLogs(const UploadOptions& opts) {
     // For each target session: POST each of its files whole, in the
     // discovery order (oldest rotation first, active file last). A
     // file lives in its session's subdirectory, so a file maps to
-    // exactly one session — no per-line filtering needed; the backend
+    // exactly one session - no per-line filtering needed; the backend
     // validates every line's session_id against the header anyway.
     //
     // Lifecycle ordering rides on the file order: job_start is the
@@ -1378,7 +1378,7 @@ UploadResult uploadLogs(const UploadOptions& opts) {
             const std::string basename   = f.path.filename().string();
             const std::string cursor_key = current_sid + "/" + basename;
 
-            // Rotated files are immutable once written — skip the ones
+            // Rotated files are immutable once written - skip the ones
             // a previous run already shipped (crash-resume). The active
             // file (rotation 0) is never cursor-skipped; completed
             // sessions were already filtered out above.
@@ -1390,12 +1390,12 @@ UploadResult uploadLogs(const UploadOptions& opts) {
 
             std::string body = readFileBytes(f.path);
             if (body.empty()) {
-                result.warnings.push_back("Could not read " + basename + " — skipping");
+                result.warnings.push_back("Could not read " + basename + " - skipping");
                 session_had_skips = true;
                 continue;
             }
 
-            // .log.gz goes on the wire AS-IS; a plain .log (rare — the
+            // .log.gz goes on the wire AS-IS; a plain .log (rare - the
             // discovery pass gzips orphans in place) is gzipped here.
             std::size_t decompressed_bytes;
             if (f.compressed) {
@@ -1405,22 +1405,22 @@ UploadResult uploadLogs(const UploadOptions& opts) {
                 body = gzipString(body);
                 if (body.empty()) {
                     result.warnings.push_back(
-                        "gzip compression failed for " + basename + " — skipping");
+                        "gzip compression failed for " + basename + " - skipping");
                     session_had_skips = true;
                     continue;
                 }
             }
-            if (decompressed_bytes == 0) continue;   // empty file — nothing to send
+            if (decompressed_bytes == 0) continue;   // empty file - nothing to send
             if (body.size() > kMaxCompressedPostBytes) {
                 result.warnings.push_back(
                     basename + " exceeds the per-request size limit (" +
-                    std::to_string(body.size()) + " B compressed) — skipping");
+                    std::to_string(body.size()) + " B compressed) - skipping");
                 session_had_skips = true;
                 continue;
             }
             if (decompressed_bytes > kMaxDecompressedFileBytes) {
                 // For a .gz the size came from the ISIZE trailer, which is
-                // garbage on a truncated file (killed session) — verify by
+                // garbage on a truncated file (killed session) - verify by
                 // decompressing before refusing, so the warning tells the
                 // truth about WHICH problem this file has.
                 const GzipVerifyResult v = f.compressed
@@ -1429,13 +1429,13 @@ UploadResult uploadLogs(const UploadOptions& opts) {
                 if (!v.ok) {
                     result.warnings.push_back(v.corrupt
                         ? basename + " is truncated or corrupt (incomplete gzip "
-                          "stream — likely a killed session); cannot upload"
+                          "stream - likely a killed session); cannot upload"
                         : basename + " exceeds the backend's decompressed size "
-                          "limit — skipping");
+                          "limit - skipping");
                     session_had_skips = true;
                     continue;
                 }
-                // Hint was garbage but the stream verifies clean and small —
+                // Hint was garbage but the stream verifies clean and small -
                 // ship it.
             }
 
@@ -1466,7 +1466,7 @@ UploadResult uploadLogs(const UploadOptions& opts) {
         }
 
         // Mark this session as completed in the cursor only when every
-        // file shipped (a skipped file is a hole — leave the session
+        // file shipped (a skipped file is a hole - leave the session
         // incomplete so a re-run retries it). Persisted after each
         // session so a mid-run crash keeps the finished ones skipped.
         if (session_ok && posted_anything && !session_had_skips) {
@@ -1488,7 +1488,7 @@ UploadResult uploadLogs(const UploadOptions& opts) {
     if (budget_aborted) {
         result.warnings.emplace_back(
             "Total timeout (" + std::to_string(opts.total_timeout_ms) +
-            " ms) exceeded — upload aborted");
+            " ms) exceeded - upload aborted");
     }
     // Success = no auth failure, no budget exhaustion, and the backend
     // wasn't an ancient pre-v1.2 one missing the /stream endpoint. The

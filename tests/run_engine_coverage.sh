@@ -62,7 +62,7 @@ for engine in "${engines[@]}"; do
     elif echo "$output" | grep -qE "\[  PASSED  \] [1-9][0-9]* test"; then
         passed+=("$engine")
         if [[ $rc -ne 0 ]]; then
-            echo "[$engine] PASSED (test OK; non-zero exit $rc ignored — likely CUPTI-at-exit crash)"
+            echo "[$engine] PASSED (test OK; non-zero exit $rc ignored - likely CUPTI-at-exit crash)"
         else
             echo "[$engine] PASSED"
         fi

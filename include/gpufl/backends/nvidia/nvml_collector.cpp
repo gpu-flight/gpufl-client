@@ -15,7 +15,7 @@
 #include <windows.h>
 #include <pdh.h>
 #include <pdhmsg.h>
-#include <cwchar>  // wcsstr — PDH engine-instance name filtering
+#include <cwchar>  // wcsstr - PDH engine-instance name filtering
 #pragma comment(lib, "pdh.lib")
 #endif
 
@@ -127,7 +127,7 @@ std::vector<gpufl::DeviceSample> NvmlCollector::sampleAll() {
 #if defined(_WIN32) && GPUFL_HAS_NVAPI
         // On Windows WDDM, NVML's util rates read 0% for CUDA workloads (both
         // gpu and memory). NVAPI's dynamic-pstates GPU/FB domains report
-        // correctly on WDDM — and FB (memory-controller) util has no PDH
+        // correctly on WDDM - and FB (memory-controller) util has no PDH
         // equivalent, so NVAPI is the only source for mem_util here. Only
         // backfill fields NVML left at 0, so correct TCC/datacenter values
         // (where NVML works) stay intact.
@@ -141,7 +141,7 @@ std::vector<gpufl::DeviceSample> NvmlCollector::sampleAll() {
 #endif
 #ifdef _WIN32
         // Last-resort gpu_util fallback: the Windows PDH GPU-engine counter
-        // (reports correctly on WDDM). There is no PDH path for mem_util — no
+        // (reports correctly on WDDM). There is no PDH path for mem_util - no
         // such counter exists on Windows.
         if (s.gpu_util == 0 && pdh_available_) {
             s.gpu_util = sampleGpuUtilPdh_();
@@ -208,7 +208,7 @@ std::vector<gpufl::DeviceSample> NvmlCollector::sampleAll() {
         }
 
         // ---------------------------------------------------------
-        // Extended metrics (silently ignore failures — not all GPUs
+        // Extended metrics (silently ignore failures - not all GPUs
         // support all sensors)
         // ---------------------------------------------------------
 
@@ -217,10 +217,10 @@ std::vector<gpufl::DeviceSample> NvmlCollector::sampleAll() {
         if (nvmlDeviceGetFanSpeed_v2(dev, 0, &fanSpeed) == NVML_SUCCESS)
             s.fan_speed_pct = fanSpeed;
 
-        // Memory temperature — not available via NVML on NVIDIA GPUs
+        // Memory temperature - not available via NVML on NVIDIA GPUs
         // (only NVML_TEMPERATURE_GPU sensor exists). Left at 0.
 
-        // Junction temperature — on NVIDIA, the GPU die sensor IS the
+        // Junction temperature - on NVIDIA, the GPU die sensor IS the
         // junction temp, so mirror temp_c.
         s.temp_junction_c = s.temp_c;
 
@@ -232,7 +232,7 @@ std::vector<gpufl::DeviceSample> NvmlCollector::sampleAll() {
                 s.energy_uj = energyMj * 1000ULL;
         }
 
-        // ECC error counters (only on GPUs with ECC — datacenter cards)
+        // ECC error counters (only on GPUs with ECC - datacenter cards)
         {
             unsigned long long corrected = 0, uncorrected = 0;
             if (nvmlDeviceGetMemoryErrorCounter(
@@ -306,7 +306,7 @@ void NvmlCollector::initPdh_() {
     if (PdhOpenQueryW(nullptr, 0, &query) != ERROR_SUCCESS) return;
 
     PDH_HCOUNTER counter = nullptr;
-    // English counter name — locale-independent.
+    // English counter name - locale-independent.
     // engtype_3D = 3D/Compute engine (CUDA workloads).
     PDH_STATUS st = PdhAddEnglishCounterW(
         query,
@@ -358,7 +358,7 @@ unsigned int NvmlCollector::sampleGpuUtilPdh_() {
     double maxUtil = 0.0;
     for (DWORD i = 0; i < itemCount; ++i) {
         if (items[i].FmtValue.CStatus != PDH_CSTATUS_VALID_DATA) continue;
-        // Count only the 3D/Compute engines — CUDA runs there. Skipping the
+        // Count only the 3D/Compute engines - CUDA runs there. Skipping the
         // Copy/Video/Encode/Decode instances stops background video playback
         // from inflating gpu_util. Instance names look like
         // "pid_1234_..._engtype_3D" / "..._engtype_Compute".

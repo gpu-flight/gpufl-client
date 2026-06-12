@@ -59,7 +59,7 @@ jobs:
           # this, release wheels would ship the tag version in Python metadata
           # but a stale hardcoded version in the compiled client. CMake's
           # project(VERSION ...) only accepts numeric major.minor.patch[.tweak],
-          # so strip any PEP 440 suffix (rc/dev/post) for the CMake value — the
+          # so strip any PEP 440 suffix (rc/dev/post) for the CMake value - the
           # full version still lands in the wheel metadata above.
           m = re.match(r"\d+(?:\.\d+){0,3}", version)
           cmake_version = m.group(0) if m else version
@@ -140,8 +140,8 @@ jobs:
           # as the system default, but cpp-httplib v0.18.5 requires >= 3.0.0
           # (SSL_get1_peer_certificate). We install EL8's `openssl3-devel`
           # compat package (see CIBW_BEFORE_ALL_LINUX) which lays OpenSSL 3.x
-          # down under NON-standard prefixes — headers in /usr/include/openssl3,
-          # dev symlinks in /usr/lib64/openssl3 — so find_package(OpenSSL)
+          # down under NON-standard prefixes - headers in /usr/include/openssl3,
+          # dev symlinks in /usr/lib64/openssl3 - so find_package(OpenSSL)
           # won't see it without these explicit cache vars. The runtime
           # SONAME is still libssl.so.3 in /usr/lib64, so auditwheel bundles
           # it into gpufl.libs/ as before. Verified against the actual
@@ -149,22 +149,22 @@ jobs:
           CIBW_ENVIRONMENT_LINUX: "CUDA_HOME=/usr/local/cuda PATH=/usr/local/cuda/bin:$PATH CMAKE_ARGS='-DGPUFL_ENABLE_NVIDIA=ON -DGPUFL_ENABLE_AMD=OFF -DBUILD_TESTING=OFF -DOPENSSL_INCLUDE_DIR=/usr/include/openssl3 -DOPENSSL_SSL_LIBRARY=/usr/lib64/openssl3/libssl.so -DOPENSSL_CRYPTO_LIBRARY=/usr/lib64/openssl3/libcrypto.so'"
           # Windows build needs the OpenSSL install path so find_package(OpenSSL)
           # in CMakeLists.txt succeeds, otherwise HTTPS upload (gpufl::uploadLogs)
-          # silently falls back to HTTP-only — see openssl-windows.html in the
+          # silently falls back to HTTP-only - see openssl-windows.html in the
           # manual repo for the user-facing story. CIBW_BEFORE_ALL_WINDOWS
           # installs choco's openssl package into this path.
           CIBW_ENVIRONMENT_WINDOWS: >-
             OPENSSL_ROOT_DIR="C:/Program Files/OpenSSL-Win64"
             CMAKE_ARGS="-DGPUFL_ENABLE_NVIDIA=ON -DGPUFL_ENABLE_AMD=OFF -DBUILD_TESTING=OFF"
           # cuda-nvml-devel-13-1 ships the libnvidia-ml.so stub under
-          # targets/x86_64-linux/lib/stubs/ — without it CMake's NVML probe
+          # targets/x86_64-linux/lib/stubs/ - without it CMake's NVML probe
           # finds nothing and (since v0.1.1) fails the build loudly. Every
           # release before v0.1.1 silently shipped wheels without NVML
           # because this package was missing here.
           #
-          # openssl3-devel (NOT openssl-devel — that's 1.1.1 on EL8) provides
+          # openssl3-devel (NOT openssl-devel - that's 1.1.1 on EL8) provides
           # OpenSSL 3.x headers + .so symlinks so cpp-httplib's
           # CPPHTTPLIB_OPENSSL_SUPPORT path compiles (it #errors on < 3.0.0).
-          # It installs under /usr/include/openssl3 + /usr/lib64/openssl3 —
+          # It installs under /usr/include/openssl3 + /usr/lib64/openssl3 -
           # see the OPENSSL_* hints in CIBW_ENVIRONMENT_LINUX. auditwheel
           # bundles the resulting libssl.so.3 / libcrypto.so.3 (from
           # /usr/lib64) into the wheel under gpufl.libs/ automatically
@@ -189,8 +189,8 @@ jobs:
           CIBW_BEFORE_BUILD_WINDOWS: pip install delvewheel
           # Pin a recent manylinux_2_28 image (AlmaLinux 8.10). cibuildwheel
           # 2.22.0's default pin (2024.11.16-1) is an AlmaLinux 8.6 snapshot
-          # whose repos only carry OpenSSL 1.1.1 — there is NO openssl3
-          # package — so the build died with "No match for argument:
+          # whose repos only carry OpenSSL 1.1.1 - there is NO openssl3
+          # package - so the build died with "No match for argument:
           # openssl3-devel". 8.10 ships openssl3 (3.5.5). Same glibc-2.28 /
           # manylinux_2_28 ABI; verified to have cp312+cp313, openssl3-devel,
           # and libssl.so.3 in /usr/lib64 (so auditwheel still bundles it).
@@ -203,10 +203,10 @@ jobs:
           # to bundle, so an un-excluded NVML reference fails the build
           # ("Cannot repair wheel, because required library libnvidia-ml.so.1
           # could not be located"). The toolkit's `libnvidia-ml.so` stub is
-          # only the unversioned link-time placeholder — the versioned
+          # only the unversioned link-time placeholder - the versioned
           # `.so.1` the SONAME chains to lives on the user's machine.
           #
-          # libssl/libcrypto are NOT excluded — auditwheel bundles them
+          # libssl/libcrypto are NOT excluded - auditwheel bundles them
           # under gpufl.libs/ so the wheel ships its own OpenSSL and
           # HTTPS works on user machines without any system install.
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: "auditwheel repair --plat manylinux_2_28_x86_64 --exclude libcuda.so.1 --exclude libnvidia-ml.so.1 -w {dest_dir} {wheel}"
@@ -214,14 +214,14 @@ jobs:
           # We need delvewheel to find the OpenSSL DLLs (libssl-3-x64.dll,
           # libcrypto-3-x64.dll) so it copies them into the wheel. The
           # choco install puts them under C:\Program Files\OpenSSL-Win64\bin\
-          # — give that to delvewheel via --add-path. Without this, the
+          # - give that to delvewheel via --add-path. Without this, the
           # rebuilt wheel imports cleanly on a system that already has
           # OpenSSL on PATH but fails on a clean machine.
           # delvewheel vendors the wheel's DLL deps. We must:
           #  * --add-path the dirs holding the DLLs to bundle. OpenSSL is in
           #    its choco bin; cudart64_*.dll is in CUDA\vX.Y\bin (on PATH, but
           #    listed for safety); cupti64_*.dll lives in CUDA's
-          #    extras\CUPTI\lib64, which is NOT on PATH — without it delvewheel
+          #    extras\CUPTI\lib64, which is NOT on PATH - without it delvewheel
           #    fails with "Unable to find library: cupti64_2025.4.0.dll". We
           #    bundle cudart+cupti so the wheel is self-contained, matching the
           #    Linux wheel (auditwheel bundles libcudart/libcupti). The CUPTI
@@ -292,7 +292,7 @@ jobs:
           # this, release wheels would ship the tag version in Python metadata
           # but a stale hardcoded version in the compiled client. CMake's
           # project(VERSION ...) only accepts numeric major.minor.patch[.tweak],
-          # so strip any PEP 440 suffix (rc/dev/post) for the CMake value — the
+          # so strip any PEP 440 suffix (rc/dev/post) for the CMake value - the
           # full version still lands in the wheel metadata above.
           m = re.match(r"\d+(?:\.\d+){0,3}", version)
           cmake_version = m.group(0) if m else version
@@ -335,7 +335,7 @@ jobs:
 
   # Build + push the Jupyter playground image AFTER the wheels are on PyPI,
   # so its `pip install gpufl==<version>` resolves. This keeps the published
-  # image version-locked to the release and decoupled from the git tag —
+  # image version-locked to the release and decoupled from the git tag -
   # users `docker pull` instead of cloning the repo / checking out a tag.
   build_and_push_docker:
     name: Build & push the Jupyter image
@@ -356,7 +356,7 @@ jobs:
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           image="ghcr.io/gpu-flight/gpufl-jupyter"
           tags="${image}:${version}"
-          # Move :latest only for a stable X.Y.Z tag — never for rc/dev/post.
+          # Move :latest only for a stable X.Y.Z tag - never for rc/dev/post.
           if [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             tags="${tags},${image}:latest"
           fi

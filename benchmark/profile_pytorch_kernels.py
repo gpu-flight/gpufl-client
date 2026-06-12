@@ -1,5 +1,5 @@
 """
-PyTorch kernel-duration ground truth — confirms (or refutes) the
+PyTorch kernel-duration ground truth - confirms (or refutes) the
 hypothesis that PyTorch MiniGPT's +657% PC Sampling overhead comes
 from very short kernels combined with high actual launch count.
 
@@ -7,11 +7,11 @@ Hypothesis (from manykernel_benchmark.cu data):
   - CUPTI per-launch instrumentation cost on Blackwell WDDM ≈ 10-15us
   - Workloads with kernels >> 13us see relative overhead ≤ +50%
   - Workloads with kernels ~1us see relative overhead +150% (our C++ test)
-  - PyTorch MiniGPT saw +657% — which implies (a) kernels are very short
+  - PyTorch MiniGPT saw +657% - which implies (a) kernels are very short
     AND (b) actual kernel count is several times the visible op count
     (cuDNN/cuBLAS internal launches under each torch op)
 
-This script measures (a) and (b) directly using torch.profiler — no
+This script measures (a) and (b) directly using torch.profiler - no
 gpufl, no CUPTI through us, just torch's native kineto-backed kernel
 recording. We then compare the numbers against our hypothesis.
 
@@ -32,7 +32,7 @@ import torch
 import torch.profiler
 import torch.nn.functional as F
 
-# Reuse the exact MiniGPT model from the benchmark — we want kernel
+# Reuse the exact MiniGPT model from the benchmark - we want kernel
 # stats from the *same* workload that produced +657% overhead, not a
 # subtly different one.
 sys.path.insert(0, str(Path(__file__).parent))
@@ -46,7 +46,7 @@ def run_and_profile(steps: int, warmup_steps: int, batch_size: int,
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
     scaler = torch.amp.GradScaler()
 
-    # Same warmup as pytorch_train.py — first-launch costs (CUDA context,
+    # Same warmup as pytorch_train.py - first-launch costs (CUDA context,
     # cuDNN/cuBLAS algo selection, kernel JIT) aren't part of steady-
     # state per-kernel overhead. Drain them outside the profile.
     for _ in range(warmup_steps):
@@ -91,7 +91,7 @@ def run_and_profile(steps: int, warmup_steps: int, batch_size: int,
 
 def summarize(prof, steps: int, top: int):
     # Walk key_averages and split into CPU ops vs CUDA kernel records.
-    # The CUDA kernel records come from kineto's CUPTI activity stream —
+    # The CUDA kernel records come from kineto's CUPTI activity stream -
     # they're true kernel launches (one row per unique kernel name, with
     # `count` aggregating all launches of that kernel). That's exactly
     # the data we need to compute per-kernel average duration.
@@ -109,7 +109,7 @@ def summarize(prof, steps: int, top: int):
         if is_cuda_kernel and cuda_time_us > 0:
             cuda_kernels.append((k.key, count, cuda_time_us))
         elif cuda_time_us > 0:
-            # CPU op that triggered CUDA work — count of underlying
+            # CPU op that triggered CUDA work - count of underlying
             # kernel launches is hidden inside the op. Useful for the
             # "how many cuBLAS/cuDNN kernels does each torch op spawn"
             # multiplier story but doesn't give per-kernel duration.
@@ -127,7 +127,7 @@ def summarize(prof, steps: int, top: int):
     distinct = len(cuda_kernels)
 
     print("=" * 70)
-    print("PyTorch MiniGPT — kernel-level ground truth")
+    print("PyTorch MiniGPT - kernel-level ground truth")
     print("=" * 70)
     print(f"  Steps profiled:                {steps}")
     print(f"  Distinct CUDA kernel symbols:  {distinct}")
@@ -140,7 +140,7 @@ def summarize(prof, steps: int, top: int):
     if avg_us < 3.0:
         verdict_dur = f"✓ confirms 'short kernel' hypothesis (avg < 3us)"
     elif avg_us < 8.0:
-        verdict_dur = "partial — kernels are short-ish (avg 3-8us) but not as tiny as predicted"
+        verdict_dur = "partial - kernels are short-ish (avg 3-8us) but not as tiny as predicted"
     else:
         verdict_dur = f"✗ refutes short-kernel hypothesis (avg = {avg_us:.1f}us)"
     print(f"  Per-kernel duration:           {verdict_dur}")
@@ -148,9 +148,9 @@ def summarize(prof, steps: int, top: int):
     if multiplier > 100:
         verdict_mult = f"✓ confirms 'high actual launch count' (>{multiplier:.0f}/step vs ~20 visible ops)"
     elif multiplier > 50:
-        verdict_mult = f"partial — {multiplier:.0f} launches/step"
+        verdict_mult = f"partial - {multiplier:.0f} launches/step"
     else:
-        verdict_mult = f"unexpected — only {multiplier:.0f} launches/step"
+        verdict_mult = f"unexpected - only {multiplier:.0f} launches/step"
     print(f"  Launches per step:             {verdict_mult}")
     print()
     print(f"Top {top} kernel symbols by total CUDA time:")
@@ -178,7 +178,7 @@ def main():
     args = p.parse_args()
 
     if not torch.cuda.is_available():
-        print("CUDA not available — this script needs a GPU.")
+        print("CUDA not available - this script needs a GPU.")
         sys.exit(1)
 
     print(f"GPU: {torch.cuda.get_device_name()}")

@@ -344,6 +344,18 @@ int ensureTraceCompletionMarkers(const fs::path& output_dir,
     return synthesized;
 }
 
+/// Remove with a short backoff (100/200/400 ms) - a freshly written or
+/// freshly released file is often still held briefly on Windows (AV
+/// scan, indexer, an uploader that just stopped). True on success OR
+/// when the file is already gone.
+bool removeWithRetry(const fs::path& p, std::error_code& ec) {
+    for (int attempt = 0;; ++attempt) {
+        if (fs::remove(p, ec) || !ec) return true;
+        if (attempt >= 2) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100 << attempt));
+    }
+}
+
 int repairUncompressedLogs(const fs::path& root) {
     std::error_code root_ec;
     if (root.empty() || !fs::exists(root, root_ec)) return 0;
@@ -372,7 +384,13 @@ int repairUncompressedLogs(const fs::path& root) {
         std::error_code exists_ec;
         if (fs::exists(gz_path, exists_ec)) {
             std::error_code remove_ec;
-            fs::remove(path, remove_ec);
+            if (!removeWithRetry(path, remove_ec)) {
+                std::fprintf(stderr,
+                             "[gpufl] warning: could not remove stale %s "
+                             "(%s) - its .gz holds the same data\n",
+                             path.string().c_str(),
+                             remove_ec.message().c_str());
+            }
             continue;
         }
 
@@ -381,7 +399,13 @@ int repairUncompressedLogs(const fs::path& root) {
             std::error_code remaining_ec;
             if (fs::exists(path, remaining_ec)) {
                 std::error_code remove_ec;
-                fs::remove(path, remove_ec);
+                if (!removeWithRetry(path, remove_ec)) {
+                    std::fprintf(stderr,
+                                 "[gpufl] warning: could not remove %s after "
+                                 "compressing (%s)\n",
+                                 path.string().c_str(),
+                                 remove_ec.message().c_str());
+                }
             }
         }
     }
