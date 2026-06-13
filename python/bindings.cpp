@@ -324,14 +324,31 @@ PYBIND11_MODULE(_gpufl_client, m) {
     //
     // We expose with a leading underscore to signal "internal API
     // for the gpufl.torch package, not a stable user-facing surface."
+    // push/popExternalCorrelation are thin CUPTI wrappers defined only in the
+    // NVIDIA backend (cupti_backend.cpp), which CMake compiles only when the
+    // CUDA toolkit + CUPTI are present. On a CPU-only / no-CUPTI wheel the
+    // symbols don't exist; the binding must still be callable (gpufl.torch
+    // imports it) but is a no-op since there's no GPU backend to correlate
+    // against. Guard the calls rather than the m.def so the Python surface
+    // stays identical across builds. (Linux .so tolerates the undefined symbol
+    // at link time; a Windows .pyd does not — LNK2001 — so this guard is what
+    // keeps the no-CUDA Windows wheel linking.)
     m.def("_push_external_corr_id",
           [](uint32_t kind, uint64_t id) {
+#if GPUFL_HAS_CUPTI
               gpufl::pushExternalCorrelation(kind, id);
+#else
+              (void)kind; (void)id;
+#endif
           },
           py::arg("kind"), py::arg("id"));
     m.def("_pop_external_corr_id",
           [](uint32_t kind) {
+#if GPUFL_HAS_CUPTI
               gpufl::popExternalCorrelation(kind);
+#else
+              (void)kind;
+#endif
           },
           py::arg("kind"));
 

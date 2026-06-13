@@ -87,6 +87,13 @@ class GpuFlightSession:
         device_df = self._load_logs(self._resolve_log_paths(log_prefix, "device"))
         scope_df  = self._load_logs(self._resolve_log_paths(log_prefix, "scope"))
         system_df = self._load_logs(self._resolve_log_paths(log_prefix, "system"))
+        # SASS artifacts (cubin_disassembly / source_file_content) moved to
+        # their own sass.log channel; fold them back into the device frame so
+        # type-based consumers keep working on old AND new sessions alike.
+        sass_df = self._load_logs(self._resolve_log_paths(log_prefix, "sass"))
+        if not sass_df.empty:
+            device_df = pd.concat([device_df, sass_df], ignore_index=True) \
+                if not device_df.empty else sass_df
 
         # 1.5 Resolve the target session and scope every raw frame to it. The
         # log files are append-only, so re-running into the same prefix leaves
@@ -303,7 +310,7 @@ class GpuFlightSession:
 
     @staticmethod
     def _dir_has_any_channel(d: Path) -> bool:
-        rx = re.compile(r"^(?:.+\.)?(?:device|scope|system)(?:\.\d+)?\.log(?:\.gz)?$")
+        rx = re.compile(r"^(?:.+\.)?(?:device|scope|system|sass)(?:\.\d+)?\.log(?:\.gz)?$")
         try:
             return any(rx.match(p.name) for p in d.iterdir() if p.is_file())
         except (OSError, FileNotFoundError):

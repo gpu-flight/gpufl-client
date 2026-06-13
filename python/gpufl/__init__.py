@@ -1066,8 +1066,8 @@ def clean_logs(log_path=None, log_prefix=None, *, dry_run=False):
     import warnings
 
     # Each session subdir's channel files match this pattern.
-    # device.log / device.log.gz / device.5.log / device.5.log.gz / etc.
-    channel_re = re.compile(r"^(?:device|scope|system)(?:\.\d+)?\.log(?:\.gz)?$")
+    # device.log / device.log.gz / device.5.log / sass.1.log.gz / etc.
+    channel_re = re.compile(r"^(?:device|scope|system|sass)(?:\.\d+)?\.log(?:\.gz)?$")
 
     matched = []
     if os.path.isdir(log_path):

@@ -189,6 +189,7 @@ FileLogSink::FileLogSink(const Logger::Options& opt) {
     chanDevice_ = std::make_unique<FileChannel>("device", opt);
     chanScope_  = std::make_unique<FileChannel>("scope",  opt);
     chanSystem_ = std::make_unique<FileChannel>("system", opt);
+    chanSass_   = std::make_unique<FileChannel>("sass",   opt);
     LogRotationOptions r{};
     r.base_path = opt.base_path;
     r.session_id = opt.session_id;
@@ -200,16 +201,19 @@ FileLogSink::~FileLogSink() { close(); }
 bool FileLogSink::anyChannelOpen() const {
     return (chanDevice_ && chanDevice_->isOpen()) ||
            (chanScope_  && chanScope_->isOpen())  ||
-           (chanSystem_ && chanSystem_->isOpen());
+           (chanSystem_ && chanSystem_->isOpen()) ||
+           (chanSass_   && chanSass_->isOpen());
 }
 
 void FileLogSink::close() {
     if (chanDevice_) chanDevice_->close();
     if (chanScope_)  chanScope_->close();
     if (chanSystem_) chanSystem_->close();
+    if (chanSass_)   chanSass_->close();
     chanDevice_.reset();
     chanScope_.reset();
     chanSystem_.reset();
+    chanSass_.reset();
     // Every channel has exported and dropped its active file - the
     // shared session temp dir can go now (loud on failure, swept by the
     // launcher's salvage pass otherwise).
@@ -240,6 +244,7 @@ FileLogSink::FileChannel* FileLogSink::resolveChannel(Channel ch) const {
         case Channel::Device: return chanDevice_.get();
         case Channel::Scope:  return chanScope_.get();
         case Channel::System: return chanSystem_.get();
+        case Channel::Sass:   return chanSass_.get();
         default:              return nullptr;
     }
 }
@@ -249,6 +254,12 @@ void FileLogSink::write(Channel ch, std::string_view json) {
         if (chanDevice_) chanDevice_->write(json);
         if (chanScope_)  chanScope_->write(json);
         if (chanSystem_) chanSystem_->write(json);
+        // Sass is part of the fan-out so each sass.log is self-ordered:
+        // dictionary_update lines land in the file BEFORE the
+        // source_file_content/cubin_disassembly lines that reference their
+        // IDs - live tailers (agent) read channels independently and have
+        // no cross-file ordering.
+        if (chanSass_) chanSass_->write(json);
     } else {
         if (FileChannel* channel = resolveChannel(ch)) {
             channel->write(json);

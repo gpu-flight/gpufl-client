@@ -135,10 +135,12 @@ private:
     // <name> ::= <nested_name>
     //          | <unscoped_name>
     //          | <unscoped_template_name> <template_args>
+    //          | <local_name>
     //          | <substitution>
     std::string parseName() {
         char c = peek();
         if (c == 'N') return parseNestedName();
+        if (c == 'Z') return parseLocalName();
         if (c == 'S') {
             // Substitution at the start of a name - rare for CUDA
             // kernels; substitution refers back to a previously seen
@@ -240,14 +242,50 @@ private:
     }
 
     // <unqualified_name> ::= <source_name>
-    //                      | <operator_name>      (not handled - falls back)
+    //                      | <operator_name>      (subset - operator())
     //                      | <ctor_dtor_name>     (not handled - falls back)
     std::string parseUnqualifiedName() {
+        std::string op = parseOperatorName();
+        if (!op.empty()) return op;
+
         // For our scope: always a source_name (length-prefixed).
         // Anonymous-namespace markers like "_GLOBAL__N_…" are still
         // length-prefixed identifiers, so they fall through here too.
         if (peek() < '0' || peek() > '9') throw ParseError();
         return parseSourceName();
+    }
+
+    std::string parseOperatorName() {
+        if (p_ + 1 >= end_) return {};
+        if (p_[0] == 'c' && p_[1] == 'l') {
+            p_ += 2;
+            return "operator()";
+        }
+        return {};
+    }
+
+    std::string parseLocalName() {
+        if (!consume('Z')) throw ParseError();
+
+        const std::string context = parseEncoding();
+        if (!consume('E')) throw ParseError();
+
+        std::string entity;
+        if (peek() == 'U' && p_ + 1 < end_ && p_[1] == 'l') {
+            entity = parseClosureType();
+        } else {
+            entity = parseName();
+        }
+
+        // Discriminators do not help frontend matching, so consume and drop.
+        if (peek() == '_') {
+            ++p_;
+            while (!eof() && peek() >= '0' && peek() <= '9') ++p_;
+        }
+
+        if (context.empty()) return entity;
+        if (entity.empty()) return context;
+        return context + "::" + entity;
     }
 
     // <source_name> ::= <positive length number> <identifier>
@@ -433,11 +471,23 @@ private:
             return n;
         }
 
+        if (c == 'Z') {
+            std::string n = parseLocalName();
+            subs_.push_back(n);
+            return n;
+        }
+
         if (c >= '0' && c <= '9') {
             // Source name as a class type, e.g. "5MyClass", optionally
             // abi-tagged.
             std::string n = parseSourceName();
             skipAbiTags();
+            subs_.push_back(n);
+            return n;
+        }
+
+        if (c == 'U' && p_ + 1 < end_ && p_[1] == 'l') {
+            std::string n = parseClosureType();
             subs_.push_back(n);
             return n;
         }
@@ -451,6 +501,30 @@ private:
 
         // Anything else we don't recognize - bail out.
         throw ParseError();
+    }
+
+    std::string parseClosureType() {
+        if (!consume('U')) throw ParseError();
+        if (!consume('l')) throw ParseError();
+
+        std::vector<std::string> params;
+        while (!eof() && peek() != 'E') {
+            params.push_back(parseType());
+        }
+        if (!consume('E')) throw ParseError();
+
+        // Closure ordinal: absent digits means the first closure. The
+        // frontend only needs a stable readable surface, so we drop it.
+        while (!eof() && peek() >= '0' && peek() <= '9') ++p_;
+        if (!consume('_')) throw ParseError();
+
+        std::string out = "lambda(";
+        for (size_t i = 0; i < params.size(); ++i) {
+            if (i) out += ", ";
+            out += params[i];
+        }
+        out += ")";
+        return out;
     }
 
     // Map a single-character builtin code to its display name. Returns
