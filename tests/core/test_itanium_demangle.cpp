@@ -122,6 +122,31 @@ TEST(ItaniumDemangle, AtenVectorizedElementwiseKernel_RealCapture) {
            "namespace-shortcut bug) - got: " << out;
 }
 
+// Additional real CUDA kernel regression: local ATen lambda closure.
+
+TEST(ItaniumDemangle, AtenReduceKernelWithLambdaClosure_RealCapture) {
+    // Captured from a PyTorch PC sampling/SASS run. The template args include
+    // a local lambda closure type (`UlffE_`) inside sum_functor::operator().
+    // Without local-name + closure parsing this fell back to the raw mangled
+    // symbol and showed up unreadable in Source/SASS.
+    const char* mangled =
+        "_ZN2at6native13reduce_kernelILi128ELi4ENS0_8ReduceOpIfNS0_14func_wrapper_t"
+        "IfZNS0_11sum_functorIfffEclERNS_14TensorIteratorEEUlffE_EEjfLi4ELi4EEEEEvT1_";
+    auto out = DemangleItaniumName(mangled);
+
+    EXPECT_NE(out, mangled) << "must not fall back to the raw mangled name";
+    EXPECT_NE(out.find("at::native::reduce_kernel"), std::string::npos)
+        << "missing reducer prefix - got: " << out;
+    EXPECT_NE(out.find("ReduceOp"), std::string::npos)
+        << "missing ReduceOp template arg - got: " << out;
+    EXPECT_NE(out.find("sum_functor"), std::string::npos)
+        << "missing functor context - got: " << out;
+    EXPECT_NE(out.find("operator()"), std::string::npos)
+        << "missing local operator() context - got: " << out;
+    EXPECT_NE(out.find("lambda(float, float)"), std::string::npos)
+        << "missing lambda closure signature - got: " << out;
+}
+
 // ── Failure modes - must always return a non-empty displayable string ─
 
 TEST(ItaniumDemangle, MalformedReturnsOriginal) {

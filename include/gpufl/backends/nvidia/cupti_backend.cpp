@@ -816,19 +816,14 @@ CUptiResult (*CuptiBackend::get_value())(CUpti_ActivityKind) {
 
 void CuptiBackend::start() {
     if (!initialized_) return;
-    // SASS / PC sampling don't get trustworthy kernel timing: SASS safe mode keeps
-    // kernel-activity OFF (it deadlocks), so its launches would be flushed as
-    // synthetic kernels whose "duration" is just the host-dispatch interval -
-    // meaningless. Suppress that synthetic fallback so these sessions show no
-    // misleading kernel rows. PC additionally enables CONCURRENT_KERNEL in its engine
-    // (pc_sampling_engine.cpp), so if REAL kernel records flow on this GPU they are
-    // joined + emitted normally - suppress only drops the un-joined orphans, never
-    // real rows. So PC shows real kernels when coexistence works, nothing when it
-    // doesn't - never fake. KERNEL_LAUNCH_META still flows for the per-scope
-    // Execution Signature, so a multi-pass merge is unaffected.
+    // SASS safe mode keeps kernel-activity OFF (it deadlocks), so orphan launch
+    // metas would become synthetic kernels with host-dispatch timing only. Keep
+    // suppressing that path for SASS. PC sampling intentionally leaves the
+    // synthetic drain enabled so callback-derived kernel rows can be emitted
+    // when kernel activity is unavailable; drainSyntheticKernels filters
+    // non-kernel memcpy/memset API metas before emitting rows.
     SetSuppressOrphanSyntheticKernels(
-        opts_.profiling_engine == ProfilingEngine::SassMetrics ||
-        opts_.profiling_engine == ProfilingEngine::PcSampling);
+        opts_.profiling_engine == ProfilingEngine::SassMetrics);
     kernel_activity_seen_.store(0, std::memory_order_relaxed);
     kernel_activity_emitted_.store(0, std::memory_order_relaxed);
     kernel_activity_throttled_.store(0, std::memory_order_relaxed);
@@ -1313,7 +1308,6 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
     const EngineRequestSet requests =
         BuildEngineRequestSet(opts_.profiling_engine, combo_);
     const bool kernelActivity = collectsKernelEvents();
-    const bool syntheticKernels = !kernelActivity && (requests.sass || requests.pc);
     const bool cubinRequested = requests.needsCubin();
     const bool cubinCapture = NeedsCubinCapture();
     // Capability emission happens after final engine shutdown so the report can
@@ -1345,6 +1339,19 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
     const uint64_t functionRows =
         function_record_seen_.load(std::memory_order_relaxed);
     const bool kernelHasData = kernelRows > 0;
+    // Kernels are "synthetic" (launch-callback duration estimates) ONLY when a
+    // sampling engine ran but emitted no real CUPTI activity records. PcSampling
+    // enables CONCURRENT_KERNEL out-of-band in its engine (pc_sampling_engine
+    // start(), bypassing collectsKernelEvents()), so real activity records with
+    // MEASURED durations flow even though collectsKernelEvents() — the handler-
+    // enable gate — returns false for PC. So decide by what actually flowed
+    // (kernelRows), not by engine type: when real records were emitted, the
+    // kernel_events/names/details capabilities report "collected" with measured
+    // timing, not a stale "estimated from launch callbacks" fallback.
+    // (Detecting a purely-synthetic session when kernelRows==0 would need a
+    // synthetic-emitted counter wired from monitor.cpp — a follow-up.)
+    const bool syntheticKernels =
+        !kernelActivity && (requests.sass || requests.pc) && kernelRows == 0;
     const bool memoryHasData = memoryRows > 0;
     const bool memTransferHasData = memTransferRows > 0;
     const bool syncHasData = syncRows > 0;

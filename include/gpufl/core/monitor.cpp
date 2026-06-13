@@ -411,6 +411,16 @@ void SetSuppressOrphanSyntheticKernels(bool suppress) {
     g_suppressOrphanSyntheticKernels = suppress;
 }
 
+static bool isSyntheticNonKernelLaunchName(const char* name) {
+    if (!name || name[0] == '\0') return false;
+    auto startsWith = [&](const char* prefix) {
+        return std::strncmp(name, prefix, std::strlen(prefix)) == 0;
+    };
+    return startsWith("cudaMemcpy") || startsWith("cuMemcpy") ||
+           startsWith("cudaMemset") || startsWith("cuMemset") ||
+           startsWith("mem_transfer");
+}
+
 static void drainSyntheticKernels(Runtime* rt) {
     if (g_launchMetaByCorr.empty()) return;
     if (g_suppressOrphanSyntheticKernels) {
@@ -439,6 +449,12 @@ static void drainSyntheticKernels(Runtime* rt) {
 
     for (size_t i = 0; i < orderedCorr.size(); ++i) {
         const uint64_t corr = orderedCorr[i];
+        if (isSyntheticNonKernelLaunchName(g_launchMetaByCorr[corr].name)) {
+            GFL_LOG_DEBUG("[drainSyntheticKernels] skip non-kernel synthetic "
+                          "meta corr=", corr,
+                          " name=", g_launchMetaByCorr[corr].name);
+            continue;
+        }
         // Copy the stored meta: it already carries name, device_id, scope,
         // stack, has_details, grid/block/dyn_shared and the precomputed
         // simplified occupancy. We only override the synthetic-specific fields.
