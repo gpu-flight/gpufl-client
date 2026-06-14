@@ -2,6 +2,7 @@
 
 #include "cli_parse.hpp"
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -15,7 +16,19 @@ struct TraceProcessResult {
     bool signaled = false;
     int signal = 0;
     bool launcher_error = false;
+    // The launcher stopped the target at the window deadline (intentional —
+    // not a crash and not a failure). rc/signal reflect the kill, not health.
+    bool window_stopped = false;
     std::string error;
+};
+
+// How long the launcher lets a target run before stopping it. The window is a
+// `gpufl trace`-only mechanism for bounding capture of a process that never
+// exits on its own. run_ms == 0 means "wait for the target's natural exit"
+// (the historical behavior).
+struct RunOptions {
+    int64_t run_ms = 0;            // stop the target after this wall-clock (0 = unbounded)
+    int stop_grace_ms = 5000;     // after the stop signal, hard-kill if still alive
 };
 
 class TracePlatform {
@@ -35,7 +48,8 @@ class TracePlatform {
     virtual bool prepareInjectionEnv(const fs::path& inject_lib,
                                      std::string& error) const = 0;
     virtual TraceProcessResult runProcess(
-            const std::vector<std::string>& command) const = 0;
+            const std::vector<std::string>& command,
+            const RunOptions& opts) const = 0;
 };
 
 int runTraceCommon(const TraceArgs& args, const TracePlatform& platform);

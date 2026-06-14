@@ -121,6 +121,65 @@ TEST(CliParseTrace, InvalidAgentDrainRejected) {
     EXPECT_NE(r.error.find("invalid --agent-drain-ms"), std::string::npos);
 }
 
+// ── gpufl trace bounded window (--warmup / --window / ...) ───────────────────
+
+TEST(CliParseTrace, WindowFlagsDefaultUnset) {
+    auto r = parseTraceArgs(argsFor({"--", "./bin"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    EXPECT_EQ(r.args->warmup_ms, 0);
+    EXPECT_EQ(r.args->window_ms, 0);
+    EXPECT_EQ(r.args->window_timeout_ms, 0);
+    EXPECT_EQ(r.args->after_window, "stop");
+}
+
+TEST(CliParseTrace, WarmupAndWindowDurations) {
+    auto r = parseTraceArgs(
+        argsFor({"--warmup=60s", "--window=5m", "--", "./serve"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    EXPECT_EQ(r.args->warmup_ms, 60000);
+    EXPECT_EQ(r.args->window_ms, 300000);
+}
+
+TEST(CliParseTrace, DurationUnitsMsSecondsBareHours) {
+    auto r = parseTraceArgs(argsFor({
+        "--warmup", "500ms", "--window", "30", "--window-timeout=1h",
+        "--", "./serve"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    EXPECT_EQ(r.args->warmup_ms, 500);       // explicit ms
+    EXPECT_EQ(r.args->window_ms, 30000);     // bare number == seconds
+    EXPECT_EQ(r.args->window_timeout_ms, 3600000);
+}
+
+TEST(CliParseTrace, InvalidWindowDurationRejected) {
+    auto r = parseTraceArgs(argsFor({"--window=abc", "--", "./bin"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("invalid --window"), std::string::npos);
+}
+
+TEST(CliParseTrace, NegativeWindowDurationRejected) {
+    auto r = parseTraceArgs(argsFor({"--warmup=-5s", "--", "./bin"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("invalid --warmup"), std::string::npos);
+}
+
+TEST(CliParseTrace, AfterWindowStopAccepted) {
+    auto r = parseTraceArgs(argsFor({"--after-window=stop", "--", "./bin"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    EXPECT_EQ(r.args->after_window, "stop");
+}
+
+TEST(CliParseTrace, AfterWindowKeepRejectedAsUnimplemented) {
+    auto r = parseTraceArgs(argsFor({"--after-window=keep", "--", "./bin"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("not yet implemented"), std::string::npos);
+}
+
+TEST(CliParseTrace, AfterWindowBogusRejected) {
+    auto r = parseTraceArgs(argsFor({"--after-window=spin", "--", "./bin"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("invalid --after-window"), std::string::npos);
+}
+
 TEST(CliParseTrace, EngineFlagRejectedWithMigrationHint) {
     auto r = parseTraceArgs(argsFor({"--engine=Deep", "--", "./bin"}));
     EXPECT_FALSE(r.args.has_value());
@@ -228,6 +287,56 @@ TEST(CliParseTrace, DeepPresetCannotBeCombined) {
     auto r = parseTraceArgs(argsFor({"--passes=Trace,Deep", "--", "./bin"}));
     EXPECT_FALSE(r.args.has_value());
     EXPECT_NE(r.error.find("cannot be combined"), std::string::npos);
+}
+
+// ── gpufl trace --passes composite ('+') groups ─────────────────────────────
+
+TEST(CliParseTrace, CompositeGroupParsed) {
+    auto r = parseTraceArgs(argsFor({"--passes=Trace+PcSampling", "--", "./bin"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    ASSERT_EQ(r.args->passes.size(), 1u);
+    EXPECT_EQ(r.args->passes[0], "Trace+PcSampling");
+}
+
+TEST(CliParseTrace, CompositeGroupPlusSeparatePass) {
+    auto r = parseTraceArgs(
+        argsFor({"--passes=Trace+PcSampling,SassMetrics", "--", "./bin"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    ASSERT_EQ(r.args->passes.size(), 2u);
+    EXPECT_EQ(r.args->passes[0], "Trace+PcSampling");
+    EXPECT_EQ(r.args->passes[1], "SassMetrics");
+}
+
+TEST(CliParseTrace, CompositeDeepInGroupRejected) {
+    auto r = parseTraceArgs(argsFor({"--passes=Trace+Deep", "--", "./bin"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("Deep cannot be combined"), std::string::npos);
+}
+
+TEST(CliParseTrace, CompositeSassInGroupRejected) {
+    auto r = parseTraceArgs(argsFor({"--passes=Trace+SassMetrics", "--", "./bin"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("its own pass"), std::string::npos);
+}
+
+TEST(CliParseTrace, CompositeEmptyEngineRejected) {
+    auto r = parseTraceArgs(argsFor({"--passes=Trace+", "--", "./bin"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("empty engine"), std::string::npos);
+}
+
+TEST(CliParseTrace, CompositeInvalidEngineRejected) {
+    auto r = parseTraceArgs(argsFor({"--passes=Trace+warpdrive", "--", "./bin"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("invalid --passes"), std::string::npos);
+}
+
+TEST(ResolvePassPlan, CompositeTokenPassesThrough) {
+    TraceArgs a;
+    a.passes = {"Trace+PcSampling"};
+    const auto plan = resolvePassPlan(a);
+    ASSERT_EQ(plan.size(), 1u);
+    EXPECT_EQ(plan[0], "Trace+PcSampling");
 }
 
 TEST(ResolvePassPlan, ExplicitPassesWin) {

@@ -25,6 +25,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -410,6 +411,32 @@ void registerShutdownAtexit() {
     });
 }
 
+#ifdef _WIN32
+// Windows window-end handshake: `gpufl trace --window` passes an inherited
+// auto-reset event handle via GPUFL_STOP_EVENT. A detached thread waits on it;
+// when the launcher signals window-end it runs the clean shutdown (flush +
+// close + optional upload) and exits promptly, so the launcher reaps without
+// having to TerminateProcess. (Linux uses SIGTERM for this; there is no
+// LD_PRELOAD interpose on Windows.)
+void startStopEventListener() {
+    const char* h = envOrNull(gpufl::env::kStopEvent);
+    if (!h) return;
+    char* end = nullptr;
+    const unsigned long long raw = std::strtoull(h, &end, 10);
+    if (!end || end[0] != '\0' || raw == 0) return;
+    HANDLE stop = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(raw));
+
+    std::thread([stop] {
+        if (WaitForSingleObject(stop, INFINITE) != WAIT_OBJECT_0) return;
+        GFL_LOG_DEBUG("inject: stop event signaled -> shutdownAndSignal()");
+        shutdownAndSignal();
+        // Capture is flushed and the window is over; end the process now so the
+        // launcher reaps immediately instead of waiting out its grace timeout.
+        ExitProcess(0);
+    }).detach();
+}
+#endif  // _WIN32
+
 void doInjectInit() {
     // Sentinel guard - set by the launcher. Without it, treat the
     // preload as accidental (e.g. `LD_PRELOAD=...:libgpufl_inject.so`
@@ -471,6 +498,9 @@ void doInjectInit() {
         }
         g_init_ok.store(true, std::memory_order_release);
         registerShutdownAtexit();
+#ifdef _WIN32
+        startStopEventListener();
+#endif
     } else {
         // init() already logs the failure via its own debug logger.
         // Keep injection silent on the user-facing stderr so we don't

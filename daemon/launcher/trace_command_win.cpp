@@ -11,6 +11,7 @@
 #endif
 #include <windows.h>
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -18,6 +19,7 @@
 #include <string>
 #include <vector>
 
+#include "gpufl/core/env_vars.hpp"
 #include "trace_command_common.hpp"
 
 namespace gpufl::launcher {
@@ -143,12 +145,33 @@ class WindowsTracePlatform final : public TracePlatform {
     }
 
     TraceProcessResult runProcess(
-            const std::vector<std::string>& command) const override {
+            const std::vector<std::string>& command,
+            const RunOptions& opts) const override {
         TraceProcessResult out;
 
         std::wstring cmdline = widen(buildCommandLine(command));
         std::vector<wchar_t> cmdbuf(cmdline.begin(), cmdline.end());
         cmdbuf.push_back(L'\0');
+
+        // Bounded window: an inheritable auto-reset event the injected lib
+        // waits on (passed by handle value through the child's inherited env).
+        // At the deadline the launcher signals it so the child flushes + exits
+        // cleanly, instead of a hard TerminateProcess.
+        HANDLE stop_event = nullptr;
+        if (opts.run_ms > 0) {
+            SECURITY_ATTRIBUTES sa{};
+            sa.nLength = sizeof(sa);
+            sa.bInheritHandle = TRUE;
+            stop_event = CreateEventA(&sa, /*bManualReset=*/FALSE,
+                                      /*bInitialState=*/FALSE, nullptr);
+        }
+        if (stop_event) {
+            const unsigned long long v = static_cast<unsigned long long>(
+                    reinterpret_cast<uintptr_t>(stop_event));
+            SetEnvironmentVariableA(env::kStopEvent, std::to_string(v).c_str());
+        } else {
+            SetEnvironmentVariableA(env::kStopEvent, nullptr);
+        }
 
         STARTUPINFOW si{};
         si.cb = sizeof(si);
@@ -175,6 +198,7 @@ class WindowsTracePlatform final : public TracePlatform {
                             /*lpCurrentDirectory=*/nullptr,
                             &si, &pi)) {
             if (job) CloseHandle(job);
+            if (stop_event) CloseHandle(stop_event);
             out.launcher_error = true;
             out.rc = 2;
             out.error = "cannot launch " + command.front() + " (CreateProcess err=" +
@@ -188,13 +212,40 @@ class WindowsTracePlatform final : public TracePlatform {
         }
         ResumeThread(pi.hThread);
 
-        WaitForSingleObject(pi.hProcess, INFINITE);
+        // Unbounded: wait for the target's natural exit. Bounded window: wait
+        // up to the deadline, then stop the target. (No SIGTERM on Windows; a
+        // clean-flush handshake via a named event is a follow-up — for now the
+        // session stays coherent via the launcher's synthetic shutdown marker
+        // + the job's KILL_ON_JOB_CLOSE tree teardown.)
+        DWORD wait_ms = INFINITE;
+        if (opts.run_ms > 0) {
+            wait_ms = opts.run_ms >= static_cast<int64_t>(INFINITE)
+                        ? INFINITE - 1
+                        : static_cast<DWORD>(opts.run_ms);
+        }
+        if (WaitForSingleObject(pi.hProcess, wait_ms) == WAIT_TIMEOUT) {
+            out.window_stopped = true;
+            if (stop_event) {
+                // Ask the injected lib to flush + exit; hard-kill only if it
+                // doesn't finish within the grace.
+                SetEvent(stop_event);
+                if (WaitForSingleObject(pi.hProcess,
+                        static_cast<DWORD>(opts.stop_grace_ms)) == WAIT_TIMEOUT) {
+                    TerminateProcess(pi.hProcess, 1);
+                    WaitForSingleObject(pi.hProcess, INFINITE);
+                }
+            } else {
+                TerminateProcess(pi.hProcess, 1);
+                WaitForSingleObject(pi.hProcess, INFINITE);
+            }
+        }
 
         DWORD exit_code = 1;
         GetExitCodeProcess(pi.hProcess, &exit_code);
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
         if (job) CloseHandle(job);
+        if (stop_event) CloseHandle(stop_event);
 
         out.rc = static_cast<int>(exit_code);
         return out;

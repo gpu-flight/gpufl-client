@@ -3,17 +3,20 @@
 
 #include "trace_command.hpp"
 
+#include <signal.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "gpufl/core/env_vars.hpp"
@@ -85,7 +88,8 @@ class PosixTracePlatform final : public TracePlatform {
     }
 
     TraceProcessResult runProcess(
-            const std::vector<std::string>& command) const override {
+            const std::vector<std::string>& command,
+            const RunOptions& opts) const override {
         TraceProcessResult out;
         pid_t pid = ::fork();
         if (pid < 0) {
@@ -107,24 +111,75 @@ class PosixTracePlatform final : public TracePlatform {
             std::_Exit(127);
         }
 
-        int status = 0;
-        while (::waitpid(pid, &status, 0) < 0) {
-            if (errno == EINTR) continue;
-            out.launcher_error = true;
-            out.rc = 2;
-            out.error = std::string("waitpid failed: ") + std::strerror(errno);
+        auto fillFromStatus = [&out](int status) {
+            if (WIFEXITED(status)) {
+                out.rc = WEXITSTATUS(status);
+            } else if (WIFSIGNALED(status)) {
+                out.signaled = true;
+                out.signal = WTERMSIG(status);
+                out.rc = 128 + out.signal;
+            } else {
+                out.rc = 1;
+            }
+        };
+
+        // Block until the child is reaped (used for unbounded runs and the
+        // final reap after a hard kill).
+        auto reapBlocking = [&]() {
+            int status = 0;
+            while (::waitpid(pid, &status, 0) < 0) {
+                if (errno == EINTR) continue;
+                out.launcher_error = true;
+                out.rc = 2;
+                out.error = std::string("waitpid failed: ") + std::strerror(errno);
+                return;
+            }
+            fillFromStatus(status);
+        };
+
+        if (opts.run_ms <= 0) {
+            reapBlocking();
             return out;
         }
 
-        if (WIFEXITED(status)) {
-            out.rc = WEXITSTATUS(status);
-        } else if (WIFSIGNALED(status)) {
-            out.signaled = true;
-            out.signal = WTERMSIG(status);
-            out.rc = 128 + out.signal;
-        } else {
-            out.rc = 1;
-        }
+        // Bounded window: poll for a natural exit until the deadline, then
+        // stop the child (SIGTERM, escalating to SIGKILL after the grace).
+        constexpr auto poll = std::chrono::milliseconds(50);
+        // reaped: -1 launcher error, 0 still running, 1 exited (out filled).
+        auto pollReap = [&]() -> int {
+            int status = 0;
+            const pid_t r = ::waitpid(pid, &status, WNOHANG);
+            if (r == pid) { fillFromStatus(status); return 1; }
+            if (r == 0) return 0;
+            if (errno == EINTR) return 0;
+            out.launcher_error = true;
+            out.rc = 2;
+            out.error = std::string("waitpid failed: ") + std::strerror(errno);
+            return -1;
+        };
+        auto waitUntil = [&](std::chrono::steady_clock::time_point until) -> int {
+            while (std::chrono::steady_clock::now() < until) {
+                const int r = pollReap();
+                if (r != 0) return r;  // -1 error or 1 exited
+                std::this_thread::sleep_for(poll);
+            }
+            return 0;  // timed out, still running
+        };
+
+        const auto now = std::chrono::steady_clock::now();
+        const int r = waitUntil(now + std::chrono::milliseconds(opts.run_ms));
+        if (r != 0) return out;  // natural exit (or error) before the deadline
+
+        // Deadline reached → stop the target.
+        out.window_stopped = true;
+        ::kill(pid, SIGTERM);
+        const auto grace = std::chrono::steady_clock::now() +
+                           std::chrono::milliseconds(opts.stop_grace_ms);
+        if (waitUntil(grace) != 0) return out;  // exited within the grace
+
+        // Still alive → hard kill and reap.
+        ::kill(pid, SIGKILL);
+        reapBlocking();
         return out;
     }
 };
