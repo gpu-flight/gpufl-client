@@ -152,7 +152,7 @@ if ($Mode -eq "wheel") {
     Write-Host "  launcher:    $exe"
     Write-Host "  (gpufl_inject.dll + cupti64*/nvperf_* are colocated next to it)"
     Write-Host ""
-    Write-Host "Run:  & `"$exe`" trace --engine Trace -- <python.exe> <script.py>"
+    Write-Host "Run:  & `"$exe`" trace --passes=Trace -- <python.exe> <script.py>"
     Write-Host "      & `"$exe`" trace --passes=PcSampling -- <python.exe> <script.py>"
     Write-Host "      (PcSampling needs an elevated shell for stall-reason access;"
     Write-Host "       unprivileged runs report 'skipped / no_stall_reasons')"
