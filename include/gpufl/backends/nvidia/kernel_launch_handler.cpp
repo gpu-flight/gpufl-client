@@ -476,6 +476,20 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
                   " start=", k->start, " end=", k->end,
                   " dur=", k->end - k->start);
 
+    // CUPTI occasionally delivers a kernel activity record with unfilled
+    // timestamps (start == 0, often end == 0 too). A real kernel's CUPTI start
+    // is always nonzero, so start == 0 means "no GPU timing". Converting it
+    // through the wall-clock anchor (baseCpuNs + (0 - baseCuptiTs)) yields a
+    // time at system boot - days before the session - which then sorts to the
+    // very top of the UI's kernel list with a bogus absolute start and 0
+    // duration. Drop these; they carry no usable timeline data.
+    if (k->start == 0 || k->end < k->start) {
+        GFL_LOG_DEBUG("[KernelLaunchHandler] dropping kernel activity with "
+                      "invalid timestamps corr=", k->correlationId,
+                      " start=", k->start, " end=", k->end);
+        return false;
+    }
+
     // NOTE (1.0.1): kernel_sample_rate_ms used to throttle activity-record
     // processing here - skipping records that arrived within a sampling
     // window. That was a serious bug: a throttled (skipped) record left its
