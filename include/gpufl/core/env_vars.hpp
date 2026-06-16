@@ -56,6 +56,12 @@ constexpr const char* kInjectUpload         = "GPUFL_INJECT_UPLOAD";
 // Write end of an inherited pipe; the inject lib writes one byte after
 // shutdown() so the launcher knows uploads drained. Empty = no signal.
 constexpr const char* kInjectCompletionFd   = "GPUFL_INJECT_COMPLETION_FD";
+// Windows window-end handshake. `gpufl trace --window` creates an inheritable
+// auto-reset event and passes its HANDLE value (decimal) here; the inject lib
+// waits on it and, when the launcher signals window-end, runs a clean shutdown
+// (flush + close + optional upload) then exits - so the launcher reaps without
+// a hard TerminateProcess. (Linux drives the same flush via SIGTERM.)
+constexpr const char* kStopEvent            = "GPUFL_STOP_EVENT";
 // Opt-in ("1"): run gpufl::init() from the inject lib's ld.so constructor
 // (before main / cuInit). Off by default - pre-cuInit CUPTI subscribe segfaults
 // on no-CUDA targets; normally InitializeInjection drives init after cuInit.

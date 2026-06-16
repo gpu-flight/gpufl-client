@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -27,6 +28,14 @@ struct TraceArgs {
     std::string agent_cursor;           // --agent-cursor; default <output>/cursor.json
     std::string log_types = "device,scope,system"; // --log-types
     int agent_drain_ms = 3000;          // --agent-drain-ms after target exits
+    // Bounded window profiling (`gpufl trace` only): bound a capture of a
+    // long-running target that never exits on its own. warmup defers the
+    // capture start (via GPUFL_INJECT_INIT_DELAY_MS); window then runs for a
+    // fixed wall-clock before the launcher stops the target. All in ms.
+    int64_t warmup_ms = 0;              // --warmup; 0 = start capturing immediately
+    int64_t window_ms = 0;              // --window; 0 = run to the target's natural exit
+    int64_t window_timeout_ms = 0;      // --window-timeout; hard cap on total runtime (0 = warmup+window)
+    std::string after_window = "stop";  // --after-window; "stop" is the only value today
     std::vector<std::string> command;   // tokens after `--`
 };
 

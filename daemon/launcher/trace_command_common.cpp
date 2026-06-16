@@ -45,6 +45,21 @@ bool setEnvOrPrint(const TracePlatform& platform,
     return false;
 }
 
+// A '+'-joined pass token ("Trace+PcSampling") runs those engines together in
+// one process via GPUFL_ENGINE_COMBO. Returns the comma-joined combo for a
+// composite token, or "" for a single-engine token.
+std::string comboForToken(const std::string& token) {
+    if (token.find('+') == std::string::npos) return {};
+    std::string combo = token;
+    std::replace(combo.begin(), combo.end(), '+', ',');
+    return combo;
+}
+
+std::string firstEngineOfToken(const std::string& token) {
+    const size_t plus = token.find('+');
+    return plus == std::string::npos ? token : token.substr(0, plus);
+}
+
 std::string makeSessionId() {
     static std::mt19937_64 rng{
         static_cast<uint64_t>(
@@ -140,6 +155,7 @@ struct SyntheticShutdownContext {
     int exit_code = 0;
     bool signaled = false;
     int signal = 0;
+    bool window_stopped = false;  // intentional window-end stop, not a crash
 };
 
 void inspectLifecycleLine(const std::string& line, SessionLifecycleInfo& info) {
@@ -186,7 +202,8 @@ bool decompressGzipToFile(const fs::path& gz_path, const fs::path& out_path) {
 std::string syntheticShutdownLine(const std::string& session_id,
                                   const SessionLifecycleInfo& info,
                                   const SyntheticShutdownContext& context) {
-    const bool crashed = context.signaled || context.exit_code != 0;
+    const bool crashed = !context.window_stopped &&
+                         (context.signaled || context.exit_code != 0);
     std::ostringstream os;
     os << "{\"type\":\"shutdown\""
        << ",\"pid\":" << info.pid
@@ -197,6 +214,7 @@ std::string syntheticShutdownLine(const std::string& session_id,
        << ",\"exit_code\":" << context.exit_code
        << ",\"signaled\":" << (context.signaled ? "true" : "false")
        << ",\"signal\":" << context.signal
+       << ",\"window_stopped\":" << (context.window_stopped ? "true" : "false")
        << ",\"crashed\":" << (crashed ? "true" : "false")
        << "}";
     return os.str();
@@ -477,6 +495,26 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
         return 2;
     }
 
+    // Warmup defers the in-child capture start so the window skips cold-start
+    // (autotune / JIT / allocator growth). Reuses the inject init-delay knob.
+    if (args.warmup_ms > 0 &&
+        !setEnvOrPrint(platform, env::kInjectInitDelayMs,
+                       std::to_string(args.warmup_ms))) {
+        return 2;
+    }
+
+    // A bounded window stops the target after warmup+window wall-clock;
+    // run_ms == 0 keeps the historical "run until the target exits" behavior.
+    RunOptions run_opts;
+    if (args.window_ms > 0) {
+        run_opts.run_ms = args.warmup_ms + args.window_ms;
+    }
+    if (args.window_timeout_ms > 0) {
+        run_opts.run_ms = run_opts.run_ms > 0
+                        ? std::min(run_opts.run_ms, args.window_timeout_ms)
+                        : args.window_timeout_ms;
+    }
+
     AgentProcess agent;
     if (args.upload) {
         const fs::path cursor = args.agent_cursor.empty()
@@ -538,8 +576,21 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
     for (size_t i = 0; i < plan.size(); ++i) {
         const std::string& engine = plan[i];
 
-        if (!setEnvOrPrint(platform, env::kProfilingEngine, engine)) {
-            return 2;
+        // A '+'-joined token runs its engines together in one process (combo);
+        // a plain token is a single engine. Set exactly one path and clear the
+        // other so a combo never leaks from a previous pass.
+        const std::string combo = comboForToken(engine);
+        if (combo.empty()) {
+            if (!setEnvOrPrint(platform, env::kProfilingEngine, engine) ||
+                !setEnvOrPrint(platform, env::kEngineCombo, std::string())) {
+                return 2;
+            }
+        } else {
+            if (!setEnvOrPrint(platform, env::kEngineCombo, combo) ||
+                !setEnvOrPrint(platform, env::kProfilingEngine,
+                               firstEngineOfToken(engine))) {
+                return 2;
+            }
         }
         if (multipass &&
             !setEnvOrPrint(platform, env::kPassIndex, std::to_string(i))) {
@@ -553,7 +604,7 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
 
         if (!args.quiet && multipass) {
             std::fprintf(stderr, "\n[gpufl] -- %s --\n", what.c_str());
-            if (engine == "PcSampling") {
+            if (engine.find("PcSampling") != std::string::npos) {
                 std::fprintf(stderr,
                     "[gpufl] note: PcSampling needs admin / NVIDIA CP \"allow GPU "
                     "performance counters to all users\"; this pass reports \"needs "
@@ -563,7 +614,7 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
 
         const int64_t pass_start_ns = nowNs();
         const auto t_start = std::chrono::steady_clock::now();
-        const TraceProcessResult run = platform.runProcess(args.command);
+        const TraceProcessResult run = platform.runProcess(args.command, run_opts);
         const auto t_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - t_start).count();
 
@@ -573,7 +624,11 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
         }
 
         if (!args.quiet) {
-            if (run.signaled) {
+            if (run.window_stopped) {
+                std::fprintf(stderr,
+                             "[gpufl] %s window reached; stopped target in %.2fs\n",
+                             what.c_str(), t_elapsed / 1000.0);
+            } else if (run.signaled) {
                 std::fprintf(stderr, "[gpufl] %s killed by signal %d in %.2fs\n",
                              what.c_str(), run.signal, t_elapsed / 1000.0);
             } else {
@@ -582,12 +637,26 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
             }
         }
 
-        if (run.rc != 0 && overall_rc == 0) overall_rc = run.rc;
+        // An intentional window stop is a successful capture, not a failed pass.
+        if (!run.window_stopped && run.rc != 0 && overall_rc == 0) {
+            overall_rc = run.rc;
+        }
+
+        // A child stopped ungracefully (window stop -> SIGKILL, or a crash)
+        // never ran shutdown, so its logs are still the active files in
+        // <session>/.tmp/ and there is no shutdown record. Publish .tmp into the
+        // session root FIRST so the marker check can see job_start and synthesize
+        // the missing shutdown; otherwise it scans an empty session dir and skips
+        // it (the logs only surface in the post-loop repair, too late). Clean
+        // exits already published + wrote a real shutdown, so this is a no-op
+        // for them. The post-loop repair re-runs salvage harmlessly.
+        (void)salvageSessionTempDirs(output_dir);
 
         SyntheticShutdownContext shutdown_context;
         shutdown_context.exit_code = run.rc;
         shutdown_context.signaled = run.signaled;
         shutdown_context.signal = run.signal;
+        shutdown_context.window_stopped = run.window_stopped;
         const int synthesized = ensureTraceCompletionMarkers(
                 output_dir, pass_start_ns, shutdown_context);
         if (!args.quiet && synthesized > 0) {

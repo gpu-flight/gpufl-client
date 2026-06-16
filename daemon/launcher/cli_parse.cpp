@@ -42,6 +42,64 @@ std::string trim(const std::string& s) {
     return s.substr(b, e - b + 1);
 }
 
+// Parse a duration into milliseconds: "500ms", "30s", "5m", "2h", or a bare
+// number (interpreted as seconds, e.g. "60" == 60s). Rejects garbage and
+// negative values.
+bool parseDurationMs(const std::string& s, int64_t& out_ms) {
+    if (s.empty()) return false;
+    char* end = nullptr;
+    const double v = std::strtod(s.c_str(), &end);
+    if (end == s.c_str() || v < 0) return false;
+    std::string unit = trim(end);
+    double mult_ms;  // value * mult_ms = milliseconds
+    if (unit.empty() || unit == "s") mult_ms = 1000.0;
+    else if (unit == "ms") mult_ms = 1.0;
+    else if (unit == "m") mult_ms = 60.0 * 1000.0;
+    else if (unit == "h") mult_ms = 60.0 * 60.0 * 1000.0;
+    else return false;
+    out_ms = static_cast<int64_t>(v * mult_ms);
+    return true;
+}
+
+// Validate one --passes token. A token may be a single engine ("Trace") or a
+// '+'-joined composite group ("Trace+PcSampling") that runs those engines
+// together in ONE process. Returns "" if valid, else an error message.
+std::string validatePassToken(const std::string& token) {
+    std::vector<std::string> parts;
+    size_t start = 0;
+    while (true) {
+        const size_t plus = token.find('+', start);
+        parts.push_back(trim(token.substr(
+            start, plus == std::string::npos ? std::string::npos : plus - start)));
+        if (plus == std::string::npos) break;
+        start = plus + 1;
+    }
+    const bool composite = parts.size() > 1;
+    for (const std::string& p : parts) {
+        if (p.empty()) {
+            return "empty engine in --passes group '" + token +
+                   "' (expected e.g. Trace+PcSampling)";
+        }
+        if (!isValidEngine(p)) {
+            return "invalid --passes engine: " + p +
+                   " (expected a comma-separated list of: Trace | PcSampling | "
+                   "SassMetrics | PmSampling | RangeProfiler | "
+                   "RangeProfilerKernelReplay | Deep; join engines with + to run "
+                   "them in one process, e.g. Trace+PcSampling)";
+        }
+        if (composite && p == "Deep") {
+            return "Deep cannot be combined in a '+' group (it is a multi-pass "
+                   "preset); list it on its own";
+        }
+        if (composite && p == "SassMetrics") {
+            return "SassMetrics cannot share a process (it deadlocks with kernel "
+                   "tracing); give it its own pass with a comma, e.g. "
+                   "Trace+PcSampling,SassMetrics";
+        }
+    }
+    return "";
+}
+
 }  // namespace
 
 const char* topLevelHelp() {
@@ -74,10 +132,14 @@ const char* traceHelp() {
         "        --passes=<LIST>     Capture pass list: comma-separated values from:\n"
         "                            Trace | PcSampling | SassMetrics | PmSampling |\n"
         "                            RangeProfiler | RangeProfilerKernelReplay | Deep\n"
+        "                            Each comma is a separate pass (relaunch). Join\n"
+        "                            engines with + to run them in ONE process, e.g.\n"
+        "                            Trace+PcSampling (timeline + PC stalls, one run).\n"
         "                            Default: Trace. Deep expands to isolated\n"
         "                            Trace,PcSampling,SassMetrics passes and cannot\n"
-        "                            be combined with other passes. Use gpufl monitor\n"
-        "                            for monitoring-only GPU/host telemetry.\n"
+        "                            be combined with other passes. SassMetrics must\n"
+        "                            be its own pass (deadlocks if shared). Use gpufl\n"
+        "                            monitor for monitoring-only GPU/host telemetry.\n"
         "                            PcSampling / PM / Range passes may need NVIDIA\n"
         "                            performance-counter access.\n"
         "    -q, --quiet             Suppress launcher chatter (errors still printed)\n"
@@ -95,6 +157,15 @@ const char* traceHelp() {
         "        --agent-drain-ms=<MS>\n"
         "                            Wait after target exit before stopping agent.\n"
         "                            Default: 3000\n"
+        "        --warmup=<DUR>      Skip cold start: defer capture by this long\n"
+        "                            (e.g. 30s, 500ms, 5m; bare number = seconds)\n"
+        "        --window=<DUR>      Bounded window: capture this long after warmup,\n"
+        "                            then STOP the target. For servers that never\n"
+        "                            exit. Omit to run to the target's own exit.\n"
+        "        --window-timeout=<DUR>\n"
+        "                            Hard cap on total target runtime (safety).\n"
+        "        --after-window=<WHAT>\n"
+        "                            What to do at window end. Only 'stop' today.\n"
         "    -h, --help              Print this help\n"
         "\n"
         "EXAMPLES:\n"
@@ -102,7 +173,9 @@ const char* traceHelp() {
         "    gpufl trace --name=quantize -- ./inference_server\n"
         "    gpufl trace --passes=Trace,PmSampling -- python train.py\n"
         "    gpufl trace --passes=Deep -- python train.py        # multi-pass\n"
-        "    gpufl trace --passes=Trace,SassMetrics -- ./app     # custom plan\n";
+        "    gpufl trace --passes=Trace,SassMetrics -- ./app     # custom plan\n"
+        "    gpufl trace --passes=Trace+PcSampling -- ./app      # one-process composite\n"
+        "    gpufl trace --passes=Trace+PcSampling --warmup=60s --window=5m -- ./serve\n";
 }
 
 ParsedTopLevel parseTopLevel(int argc, char** argv) {
@@ -194,8 +267,9 @@ TraceParseResult parseTraceArgs(const std::vector<std::string>& argv) {
             std::string v;
             auto err = take_value(v);
             if (!err.empty()) return {std::nullopt, err};
-            // Comma-separated engine list -> one isolated pass each. Every token
-            // must be a canonical engine name.
+            // Comma-separated pass list -> one isolated pass each. A token may
+            // be a single engine, or a '+'-joined group ("Trace+PcSampling")
+            // that runs those engines together in one process (a composite).
             out.passes.clear();
             bool saw_deep = false;
             size_t start = 0;
@@ -205,13 +279,8 @@ TraceParseResult parseTraceArgs(const std::vector<std::string>& argv) {
                     start,
                     comma == std::string::npos ? std::string::npos : comma - start));
                 if (!item.empty()) {
-                    if (!isValidEngine(item)) {
-                        return {std::nullopt,
-                                "invalid --passes engine: " + item +
-                                " (expected a comma-separated list of: Trace | "
-                                "PcSampling | SassMetrics | PmSampling | "
-                                "RangeProfiler | RangeProfilerKernelReplay | Deep)"};
-                    }
+                    const std::string perr = validatePassToken(item);
+                    if (!perr.empty()) return {std::nullopt, perr};
                     saw_deep = saw_deep || item == "Deep";
                     out.passes.push_back(item);
                 }
@@ -255,6 +324,49 @@ TraceParseResult parseTraceArgs(const std::vector<std::string>& argv) {
                 return {std::nullopt,
                         "invalid --agent-drain-ms value: " + v +
                         " (expected a non-negative integer, milliseconds)"};
+            }
+        } else if (key == "--warmup") {
+            std::string v;
+            auto err = take_value(v);
+            if (!err.empty()) return {std::nullopt, err};
+            if (!parseDurationMs(v, out.warmup_ms)) {
+                return {std::nullopt,
+                        "invalid --warmup value: " + v +
+                        " (expected a duration like 30s, 500ms, 5m, 1h, "
+                        "or a bare number of seconds)"};
+            }
+        } else if (key == "--window") {
+            std::string v;
+            auto err = take_value(v);
+            if (!err.empty()) return {std::nullopt, err};
+            if (!parseDurationMs(v, out.window_ms)) {
+                return {std::nullopt,
+                        "invalid --window value: " + v +
+                        " (expected a duration like 30s, 500ms, 5m, 1h, "
+                        "or a bare number of seconds)"};
+            }
+        } else if (key == "--window-timeout") {
+            std::string v;
+            auto err = take_value(v);
+            if (!err.empty()) return {std::nullopt, err};
+            if (!parseDurationMs(v, out.window_timeout_ms)) {
+                return {std::nullopt,
+                        "invalid --window-timeout value: " + v +
+                        " (expected a duration like 30s, 5m, 1h, "
+                        "or a bare number of seconds)"};
+            }
+        } else if (key == "--after-window") {
+            auto err = take_value(out.after_window);
+            if (!err.empty()) return {std::nullopt, err};
+            if (out.after_window == "keep") {
+                return {std::nullopt,
+                        "--after-window=keep is not yet implemented; the launcher "
+                        "stops the target at window end (restart it with a script)"};
+            }
+            if (out.after_window != "stop") {
+                return {std::nullopt,
+                        "invalid --after-window value: " + out.after_window +
+                        " (expected: stop)"};
             }
         } else {
             // A non-flag token before `--` is almost certainly the

@@ -5,6 +5,34 @@ inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows PEP 440 for the Python wheel and semver-style
 `MAJOR.MINOR.PATCH` for the C++ library.
 
+## [1.2.0rc1] - 2026-06-14
+
+### Added
+
+- **Bounded window profiling for `gpufl trace`.** New `--warmup`, `--window`,
+  `--window-timeout`, and `--after-window` flags time-box a capture of a
+  long-running target (e.g. an inference server) that never exits on its own.
+  The launcher runs the target for `warmup + window` wall-clock, then gracefully
+  stops it: POSIX SIGTERM → grace → SIGKILL; Windows signals an inherited
+  stop-event so the injected lib flushes + exits cleanly, falling back to
+  `TerminateProcess` after the grace. Durations accept `30s` / `500ms` / `5m` /
+  `1h` / a bare number of seconds.
+- **Composite passes (`+`).** `--passes Trace+PcSampling` runs the listed engines
+  together in one process (timeline + PC stalls in a single window) via
+  `GPUFL_ENGINE_COMBO`; a comma still means one isolated pass each. `SassMetrics`
+  and `Deep` are rejected inside a `+` group.
+
+### Fixed
+
+- Synthetic shutdown markers are now written for ungracefully-stopped sessions
+  (window stop / SIGKILL / crash): the session's staged `.tmp` logs are published
+  before the completion-marker check, so the missing `shutdown` record is
+  synthesized instead of leaving the session incomplete.
+
+### Removed
+
+- The deprecated `gpufl trace --engine` flag (use `--passes`).
+
 ## [1.1.0] - 2026-06-03
 
 ### Breaking changes
