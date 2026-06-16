@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.31)
 
 project(gpufl_client
-    VERSION 1.1.0
+    VERSION 1.2.0
     LANGUAGES CXX
     DESCRIPTION "Header-only GPU monitoring client library"
 )
@@ -10,7 +10,7 @@ project(gpufl_client
 # pre-release tokens (`rc1`, `a1`, `b1`, …) aren't valid in CMake's
 # `project(... VERSION ...)`, so we layer them on top here. Final releases
 # leave this empty.
-set(GPUFL_VERSION_SUFFIX "")
+set(GPUFL_VERSION_SUFFIX "rc1")
 
 # -----------------------
 # CUDA Architectures (CI Friendly)
