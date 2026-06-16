@@ -642,6 +642,16 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
             overall_rc = run.rc;
         }
 
+        // A child stopped ungracefully (window stop -> SIGKILL, or a crash)
+        // never ran shutdown, so its logs are still the active files in
+        // <session>/.tmp/ and there is no shutdown record. Publish .tmp into the
+        // session root FIRST so the marker check can see job_start and synthesize
+        // the missing shutdown; otherwise it scans an empty session dir and skips
+        // it (the logs only surface in the post-loop repair, too late). Clean
+        // exits already published + wrote a real shutdown, so this is a no-op
+        // for them. The post-loop repair re-runs salvage harmlessly.
+        (void)salvageSessionTempDirs(output_dir);
+
         SyntheticShutdownContext shutdown_context;
         shutdown_context.exit_code = run.rc;
         shutdown_context.signaled = run.signaled;
