@@ -8,9 +8,17 @@ case "$UNAME" in
   Linux*)
     exec "$ROOT_DIR/build-ubuntu.sh" "$@"
     ;;
+  Darwin*)
+    exec "$ROOT_DIR/build-macos.sh" "$@"
+    ;;
   *)
     cat >&2 <<'EOF'
-build.sh is the Ubuntu/Linux entrypoint.
+build.sh supports Linux and macOS.
+
+On macOS, use:
+  ./build-macos.sh
+  ./build-macos.sh --wheel
+  ./build-macos.sh --monitor
 
 On Windows, use:
   powershell -ExecutionPolicy Bypass -File .\build-windows.ps1
