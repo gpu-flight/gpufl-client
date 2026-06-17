@@ -12,6 +12,10 @@
 #include "gpufl/backends/amd/rocm_collector.hpp"
 #endif
 
+#if GPUFL_ENABLE_METAL && GPUFL_HAS_METAL
+#include "gpufl/backends/metal/metal_collector.hpp"
+#endif
+
 namespace gpufl {
 
 #if GPUFL_HAS_CUDA
@@ -70,6 +74,22 @@ BackendCollectors CreateBackendCollectors(const BackendKind backend,
 #endif
     };
 
+    auto tryMetalUnified = [&]() -> std::shared_ptr<IUnifiedGpuCollector> {
+#if GPUFL_ENABLE_METAL && GPUFL_HAS_METAL
+        std::string reason;
+        if (!gpufl::metal::MetalCollector::IsAvailable(&reason)) {
+            setReason("Metal backend unavailable: " + reason);
+            return nullptr;
+        }
+        return std::make_shared<gpufl::metal::MetalCollector>();
+#else
+        setReason(
+            "Metal backend not available (GPUFL_ENABLE_METAL=OFF or Metal "
+            "framework not found).");
+        return nullptr;
+#endif
+    };
+
     switch (backend) {
         case BackendKind::None:
             break;
@@ -99,15 +119,19 @@ BackendCollectors CreateBackendCollectors(const BackendKind backend,
             break;
 
         case BackendKind::Metal:
-#if GPUFL_ENABLE_METAL && GPUFL_HAS_METAL
-            setReason(
-                "Requested backend=metal. Phase-1 Metal backend compiles but "
-                "telemetry/profiling collection is not implemented yet.");
-#else
-            setReason(
-                "Requested backend=metal but Metal support is not enabled in this "
-                "build (set GPUFL_ENABLE_METAL=ON on macOS).");
-#endif
+            out.unified_collector = tryMetalUnified();
+            if (!out.unified_collector) {
+                setReason("Requested backend=metal but Metal is unavailable.");
+            } else {
+                if (out.unified_collector->canSampleTelemetry()) {
+                    out.telemetry_collector = std::static_pointer_cast<
+                        ISystemCollector<DeviceSample>>(out.unified_collector);
+                }
+                if (out.unified_collector->canSampleStaticInfo()) {
+                    out.static_info_collector = std::static_pointer_cast<
+                        IGpuStaticInfoCollector>(out.unified_collector);
+                }
+            }
             break;
 
         case BackendKind::Auto:
@@ -131,9 +155,22 @@ BackendCollectors CreateBackendCollectors(const BackendKind backend,
                 break;
             }
 
+            out.unified_collector = tryMetalUnified();
+            if (out.unified_collector) {
+                if (out.unified_collector->canSampleTelemetry()) {
+                    out.telemetry_collector = std::static_pointer_cast<
+                        ISystemCollector<DeviceSample>>(out.unified_collector);
+                }
+                if (out.unified_collector->canSampleStaticInfo()) {
+                    out.static_info_collector = std::static_pointer_cast<
+                        IGpuStaticInfoCollector>(out.unified_collector);
+                }
+                break;
+            }
+
             if (!out.telemetry_collector) {
                 setReason(
-                    "No GPU backend available (NVML/ROCm not compiled in or "
+                    "No GPU backend available (NVML/ROCm/Metal not compiled in or "
                     "not available).");
             }
             out.static_info_collector = tryNvidiaStatic();

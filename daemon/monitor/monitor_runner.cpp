@@ -37,17 +37,17 @@ bool waitForShutdownSignal() {
 #else
 bool setupSignalHandling() {
     sigset_t set;
-    if (::sigemptyset(&set) != 0) return false;
-    if (::sigaddset(&set, SIGINT) != 0) return false;
-    if (::sigaddset(&set, SIGTERM) != 0) return false;
+    if (sigemptyset(&set) != 0) return false;
+    if (sigaddset(&set, SIGINT) != 0) return false;
+    if (sigaddset(&set, SIGTERM) != 0) return false;
     return ::pthread_sigmask(SIG_BLOCK, &set, nullptr) == 0;
 }
 
 bool waitForShutdownSignal() {
     sigset_t set;
-    if (::sigemptyset(&set) != 0) return false;
-    if (::sigaddset(&set, SIGINT) != 0) return false;
-    if (::sigaddset(&set, SIGTERM) != 0) return false;
+    if (sigemptyset(&set) != 0) return false;
+    if (sigaddset(&set, SIGINT) != 0) return false;
+    if (sigaddset(&set, SIGTERM) != 0) return false;
 
     int sig = 0;
     const int rc = ::sigwait(&set, &sig);
@@ -73,6 +73,7 @@ int runMonitorForeground(const MonitorRunOptions& opts) {
     init.app_name = opts.app_name.empty() ? "gpufl-monitor" : opts.app_name;
     init.log_path = opts.log_path;
     init.profiling_engine = gpufl::ProfilingEngine::Monitor;
+    init.backend = opts.backend;
     init.continuous_system_sampling = true;
     init.system_sample_rate_ms = opts.interval_ms;
     init.enable_debug_output = false;

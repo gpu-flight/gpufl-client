@@ -9,6 +9,7 @@ build/
 build-*/
 build_metal_stub/
 build_tests/
+gpufl-monitor-macos/
 cmake-build-*/
 CMakeFiles/
 CMakeCache.txt
@@ -94,7 +95,8 @@ dist/
 
 *.log
 
-<<<<<<< HEAD
+AGENTS.md
+
 ### Python
 # Byte-compiled / optimized files
 __pycache__/
@@ -119,6 +121,3 @@ coverage.xml
 .venv/
 venv/
 env/
-=======
-AGENTS.md
->>>>>>> 5d127f9 (Add phase 1 Metal backend stub)

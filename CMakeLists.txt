@@ -26,9 +26,17 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # -----------------------
 # Options
 # -----------------------
-option(GPUFL_ENABLE_NVIDIA "Enable NVIDIA backends (CUDA + NVML when available)" ON)
+if(APPLE)
+    set(GPUFL_ENABLE_NVIDIA_DEFAULT OFF)
+    set(GPUFL_ENABLE_METAL_DEFAULT ON)
+else()
+    set(GPUFL_ENABLE_NVIDIA_DEFAULT ON)
+    set(GPUFL_ENABLE_METAL_DEFAULT OFF)
+endif()
+
+option(GPUFL_ENABLE_NVIDIA "Enable NVIDIA backends (CUDA + NVML when available)" ${GPUFL_ENABLE_NVIDIA_DEFAULT})
 option(GPUFL_ENABLE_AMD    "Enable AMD backends (ROCm when available)" OFF)
-option(GPUFL_ENABLE_METAL  "Enable Apple Metal backend (macOS only, phase-1 build stub)" OFF)
+option(GPUFL_ENABLE_METAL  "Enable Apple Metal backend (macOS basic monitoring)" ${GPUFL_ENABLE_METAL_DEFAULT})
 option(GPUFL_ENABLE_AMD_ROCPROFILER "Enable AMD rocprofiler-sdk tracing backend when available" ON)
 # OFF builds the configuration release wheels ship (manylinux has no nvperf),
 # so CI can catch #if GPUFL_HAS_PERFWORKS mistakes.
@@ -742,13 +750,21 @@ endif()
 # -----------------------
 if(GPUFL_ENABLE_METAL)
     if(APPLE)
+        enable_language(OBJCXX)
         find_library(METAL_FRAMEWORK Metal)
-        if(METAL_FRAMEWORK)
+        find_library(FOUNDATION_FRAMEWORK Foundation)
+        if(METAL_FRAMEWORK AND FOUNDATION_FRAMEWORK)
             set(GPUFL_HAS_METAL 1)
-            target_link_libraries(gpufl PRIVATE ${METAL_FRAMEWORK})
+            target_sources(gpufl PRIVATE
+                include/gpufl/backends/metal/metal_collector.mm
+            )
+            target_link_libraries(gpufl PRIVATE
+                ${METAL_FRAMEWORK}
+                ${FOUNDATION_FRAMEWORK}
+            )
             message(STATUS "Found Metal framework: ${METAL_FRAMEWORK}")
         else()
-            message(WARNING "GPUFL_ENABLE_METAL=ON but Metal framework not found; GPUFL_HAS_METAL=0.")
+            message(WARNING "GPUFL_ENABLE_METAL=ON but Metal/Foundation framework not found; GPUFL_HAS_METAL=0.")
         endif()
     else()
         message(WARNING "GPUFL_ENABLE_METAL=ON is only supported on macOS; GPUFL_HAS_METAL=0.")
