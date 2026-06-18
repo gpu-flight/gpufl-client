@@ -39,14 +39,23 @@ class DictionaryManager {
         return id;
     }
 
-    uint32_t internFunction(const std::string& name) {
+    // funcSymbol = the BARE mangled symbol (no @source), recorded once per id in a parallel
+    // dictionary so the backend can compute funcKey = md5(symbol) = md5(functions.name) and the
+    // SASS/source view can join samples -> disassembly by a stable key. Empty = not supplied.
+    uint32_t internFunction(const std::string& name, const std::string& funcSymbol = "") {
         std::lock_guard lk(mu_);
-        if (const auto it = function_dict_.find(name);
-            it != function_dict_.end())
-            return it->second;
-        const uint32_t id = next_function_id_++;
-        function_dict_[name] = id;
-        dirty_functions_[name] = id;
+        uint32_t id;
+        if (const auto it = function_dict_.find(name); it != function_dict_.end()) {
+            id = it->second;
+        } else {
+            id = next_function_id_++;
+            function_dict_[name] = id;
+            dirty_functions_[name] = id;
+        }
+        if (!funcSymbol.empty() && !function_symbol_dict_.count(id)) {
+            function_symbol_dict_[id] = funcSymbol;
+            dirty_function_symbols_[id] = funcSymbol;
+        }
         return id;
     }
 
@@ -89,6 +98,8 @@ class DictionaryManager {
         next_scope_name_id_ = 1;
         function_dict_.clear();
         dirty_functions_.clear();
+        function_symbol_dict_.clear();
+        dirty_function_symbols_.clear();
         next_function_id_ = 1;
         metric_dict_.clear();
         dirty_metrics_.clear();
@@ -113,6 +124,9 @@ class DictionaryManager {
 
     std::unordered_map<std::string, uint32_t> function_dict_;
     std::unordered_map<std::string, uint32_t> dirty_functions_;
+    // id -> BARE mangled symbol, parallel to function_dict_ (which holds demangled "name@source").
+    std::unordered_map<uint32_t, std::string> function_symbol_dict_;
+    std::unordered_map<uint32_t, std::string> dirty_function_symbols_;
     uint32_t next_function_id_ = 1;
 
     std::unordered_map<std::string, uint32_t> metric_dict_;
