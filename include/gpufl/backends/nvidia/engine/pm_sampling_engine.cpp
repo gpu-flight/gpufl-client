@@ -402,6 +402,11 @@ void PmSamplingEngine::DecodeAndEmit_() {
 
         const uint64_t mid = sampleInfo.startTimestamp +
             ((sampleInfo.endTimestamp - sampleInfo.startTimestamp) / 2ull);
+        // Anchor the CUPTI-domain sample timestamp to wall-clock the same way
+        // kernel activity records are anchored, so PM samples share the kernel
+        // time domain and can overlay on the wall-clock timeline.
+        const int64_t mid_wall_ns = ctx_.base_cpu_ns +
+            (static_cast<int64_t>(mid) - static_cast<int64_t>(ctx_.base_cupti_ts));
         for (size_t metric = 0; metric < metrics_.size(); ++metric) {
             // The first sample of a PM-sampling window is a priming sample whose
             // counters haven't accumulated yet, so EvaluateToGpuValues returns a
@@ -411,7 +416,7 @@ void PmSamplingEngine::DecodeAndEmit_() {
             if (!std::isfinite(values[metric])) continue;
             PmSampleInput row;
             row.sample_index = static_cast<uint32_t>(sample);
-            row.ts_ns = static_cast<int64_t>(mid);
+            row.ts_ns = mid_wall_ns;
             row.device_id = ctx_.device_id;
             row.metric_name = metrics_[metric];
             row.value = values[metric];

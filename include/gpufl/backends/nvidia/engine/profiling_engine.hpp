@@ -28,6 +28,13 @@ struct EngineContext {
     // Metrics for source-correlation look-ups.
     std::mutex*                               cubin_mu     = nullptr;
     std::unordered_map<uint64_t, CubinInfo>*  cubin_by_crc = nullptr;
+
+    // Per-session CUPTI->wall-clock anchor, captured in CuptiBackend::start()
+    // before any activity kind is enabled. Lets engines convert CUPTI-domain
+    // sample timestamps to wall-clock the same way kernel activity records do:
+    //   wall_ns = base_cpu_ns + (cupti_ts - base_cupti_ts)
+    int64_t   base_cpu_ns   = 0;   // wall-clock (detail::GetTimestampNs)
+    uint64_t  base_cupti_ts = 0;   // CUPTI clock (cuptiGetTimestamp), same instant
 };
 
 /**
