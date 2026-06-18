@@ -1084,7 +1084,7 @@ void CuptiBackend::start() {
     // Initialize and start the engine (requires CUDA context)
     if (engine_ && haveCudaContext) {
         EngineContext ectx{ctx_, device_id_, chip_name_, &cubin_mu_,
-                           &cubin_by_crc_};
+                           &cubin_by_crc_, base_cpu_ns_, base_cupti_ts_};
         engine_->initialize(opts_, ectx);
         engine_->start();
     }

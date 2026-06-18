@@ -402,16 +402,18 @@ void PmSamplingEngine::DecodeAndEmit_() {
 
         const uint64_t mid = sampleInfo.startTimestamp +
             ((sampleInfo.endTimestamp - sampleInfo.startTimestamp) / 2ull);
+        // CUPTI sample ts -> wall-clock via the kernel anchor, so PM lines up
+        // with the kernel timeline.
+        const int64_t mid_wall_ns = ctx_.base_cpu_ns +
+            (static_cast<int64_t>(mid) - static_cast<int64_t>(ctx_.base_cupti_ts));
+        // Drop the priming sample: its junk ts anchors before session start.
+        if (mid_wall_ns < ctx_.base_cpu_ns) continue;
         for (size_t metric = 0; metric < metrics_.size(); ++metric) {
-            // The first sample of a PM-sampling window is a priming sample whose
-            // counters haven't accumulated yet, so EvaluateToGpuValues returns a
-            // non-finite value (NaN) — paired with a garbage timestamp. Drop it at
-            // the source: a NaN serializes as "-nan(ind)" (MSVC), which is invalid
-            // JSON and makes the agent reject the ENTIRE batch.
+            // Priming sample can also emit NaN -> "-nan(ind)" (MSVC) = bad JSON.
             if (!std::isfinite(values[metric])) continue;
             PmSampleInput row;
             row.sample_index = static_cast<uint32_t>(sample);
-            row.ts_ns = static_cast<int64_t>(mid);
+            row.ts_ns = mid_wall_ns;
             row.device_id = ctx_.device_id;
             row.metric_name = metrics_[metric];
             row.value = values[metric];
