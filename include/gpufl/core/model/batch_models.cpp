@@ -1,5 +1,6 @@
 #include "gpufl/core/model/batch_models.hpp"
 
+#include <cmath>
 #include <sstream>
 
 #include "gpufl/core/host_info.hpp"
@@ -233,6 +234,12 @@ std::string PmSampleBatchModel::buildJson() const {
 
     bool first = true;
     for (const auto& r : rows) {
+        // A non-finite value serializes as "-nan(ind)" / "inf" (platform-
+        // specific) — invalid JSON that makes the agent reject the whole batch.
+        // The PM engine already filters these at the source; this is a
+        // belt-and-suspenders guard. ('value' is the only float column here;
+        // PC/SASS metric_value is an integer.)
+        if (!std::isfinite(r.value)) continue;
         if (!first) oss << ',';
         first = false;
         oss << '[' << r.sample_index << ',' << (r.ts_ns - base) << ','
