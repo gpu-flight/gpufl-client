@@ -676,8 +676,11 @@ static bool collectorProcessNext() {
             // Trace's already-demangled kernel_dict for the cross-pass merge.
             const std::string func_key =
                 std::string(rec.function_name) + "@" + rec.source_file;
+            // rec.function_name is the BARE mangled symbol (== cubin functions.name), captured
+            // here before demangling so the backend can derive funcKey = md5(symbol).
             const uint32_t function_id =
-                g_dictManager.internFunction(DemangleFunctionKeyCached(func_key));
+                g_dictManager.internFunction(DemangleFunctionKeyCached(func_key),
+                                             std::string(rec.function_name));
             // For PC sampling rows metric_name is empty; use reason_name so the
             // stall reason string is interned into metric_dict and reachable via
             // metric_id on the backend.  For SASS rows metric_name is always set.
@@ -1073,7 +1076,9 @@ void Monitor::PushProfileSamples(
         row.ts_ns          = s.ts_ns;
         row.corr_id        = s.corr_id;
         row.device_id      = s.device_id;
-        row.function_id    = g_dictManager.internFunction(demangledKey(s.function_key));
+        // The bare mangled symbol is function_key before '@' (== cubin functions.name).
+        const std::string funcSymbol = s.function_key.substr(0, s.function_key.find('@'));
+        row.function_id    = g_dictManager.internFunction(demangledKey(s.function_key), funcSymbol);
         row.pc_offset      = s.pc_offset;
         row.metric_id      = g_dictManager.internMetric(s.metric_name);
         row.metric_value   = s.metric_value;

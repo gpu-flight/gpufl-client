@@ -617,11 +617,12 @@ void DictionaryManager::flushDisassembly(Logger& logger,
 void DictionaryManager::flushDictionary(Logger& logger,
                                          const std::string& session_id) {
     std::unordered_map<std::string, uint32_t> dk, ds, df, dm, dsf;
+    std::unordered_map<uint32_t, std::string> dfsym;
     {
         std::lock_guard lk(mu_);
         if (dirty_kernels_.empty() && dirty_scope_names_.empty() &&
             dirty_functions_.empty() && dirty_metrics_.empty() &&
-            dirty_source_files_.empty()) {
+            dirty_source_files_.empty() && dirty_function_symbols_.empty()) {
             return;
         }
         dk  = std::move(dirty_kernels_);
@@ -629,6 +630,7 @@ void DictionaryManager::flushDictionary(Logger& logger,
         df  = std::move(dirty_functions_);
         dm  = std::move(dirty_metrics_);
         dsf = std::move(dirty_source_files_);
+        dfsym = std::move(dirty_function_symbols_);
     }
 
     std::ostringstream oss;
@@ -641,6 +643,20 @@ void DictionaryManager::flushDictionary(Logger& logger,
     appendDict(oss, "function_dict",    df,  firstField);
     appendDict(oss, "metric_dict",      dm,  firstField);
     appendDict(oss, "source_file_dict", dsf, firstField);
+    // function_symbol_dict (id -> bare mangled symbol). Custom emit because this map is id-keyed,
+    // so each function id keeps its own symbol; reusing the symbol->id appendDict would drop ids
+    // that share a mangled symbol across source files.
+    if (!dfsym.empty()) {
+        if (!firstField) oss << ',';
+        oss << "\"func_symbol_dict\":{";
+        bool first = true;
+        for (const auto& [id, sym] : dfsym) {
+            if (!first) oss << ',';
+            first = false;
+            oss << '"' << id << "\":\"" << model::jsonEscape(sym) << '"';
+        }
+        oss << '}';
+    }
 
     oss << '}';
     logger.write(DictLine{oss.str()});
