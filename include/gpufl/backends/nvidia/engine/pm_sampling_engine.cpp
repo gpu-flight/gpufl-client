@@ -7,6 +7,7 @@
 #endif
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
@@ -402,6 +403,12 @@ void PmSamplingEngine::DecodeAndEmit_() {
         const uint64_t mid = sampleInfo.startTimestamp +
             ((sampleInfo.endTimestamp - sampleInfo.startTimestamp) / 2ull);
         for (size_t metric = 0; metric < metrics_.size(); ++metric) {
+            // The first sample of a PM-sampling window is a priming sample whose
+            // counters haven't accumulated yet, so EvaluateToGpuValues returns a
+            // non-finite value (NaN) — paired with a garbage timestamp. Drop it at
+            // the source: a NaN serializes as "-nan(ind)" (MSVC), which is invalid
+            // JSON and makes the agent reject the ENTIRE batch.
+            if (!std::isfinite(values[metric])) continue;
             PmSampleInput row;
             row.sample_index = static_cast<uint32_t>(sample);
             row.ts_ns = static_cast<int64_t>(mid);
