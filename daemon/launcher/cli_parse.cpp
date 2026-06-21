@@ -153,7 +153,7 @@ const char* traceHelp() {
         "        --agent-jar=<PATH>  Run agent as `java -jar <PATH>`\n"
         "                            Env fallback: GPUFL_AGENT_JAR\n"
         "        --agent-cursor=<P>  Agent cursor file. Default: <output>/cursor.json\n"
-        "        --log-types=<LIST>  Agent channels to upload. Default: device,scope,system\n"
+        "        --log-types=<LIST>  Agent channels to upload. Default: device,scope,system,sass\n"
         "        --agent-drain-ms=<MS>\n"
         "                            Max wait for the agent to finish uploading before\n"
         "                            stopping it (it exits on its own when done). Default: 60000\n"
