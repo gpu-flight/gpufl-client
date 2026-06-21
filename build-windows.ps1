@@ -55,7 +55,63 @@ function Resolve-CudaPath {
     throw "CUDA nvcc was not found. Pass -CudaPath or set CUDA_PATH/CUDA_HOME."
 }
 
+function Set-UniquePath {
+    param([string[]]$Prepend = @())
+
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $entries = @($Prepend + ($env:Path -split ";")) |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+
+    $unique = foreach ($entry in $entries) {
+        $key = $entry.TrimEnd("\")
+        if ($seen.Add($key)) {
+            $entry
+        }
+    }
+
+    $env:Path = $unique -join ";"
+}
+
+function Test-MsvcEnvReady {
+    return (
+        $env:VSCMD_ARG_TGT_ARCH -eq "x64" -and
+        -not [string]::IsNullOrWhiteSpace($env:VCINSTALLDIR) -and
+        $null -ne (Get-Command cl.exe -ErrorAction SilentlyContinue)
+    )
+}
+
+function Get-PythonBuildInfo {
+    param([string]$PythonExe)
+
+    $code = @(
+        "import sys, sysconfig",
+        "print(sys.executable)",
+        "print(sys.version.split()[0])",
+        "print(sys.implementation.cache_tag.replace('cpython-', 'cp'))",
+        "print(sysconfig.get_platform().replace('-', '_'))"
+    ) -join "; "
+
+    $output = & $PythonExe -c $code
+    if ($LASTEXITCODE -ne 0 -or $output.Count -lt 4) {
+        throw "Unable to query Python compatibility tag from '$PythonExe'."
+    }
+
+    return [PSCustomObject]@{
+        Executable = $output[0]
+        Version = $output[1]
+        AbiTag = $output[2]
+        PlatformTag = $output[3]
+        WheelTag = "$($output[2])-$($output[2])-$($output[3])"
+    }
+}
+
 function Import-VcVars64 {
+    if (Test-MsvcEnvReady) {
+        Write-Host "MSVC x64 environment already loaded."
+        return
+    }
+
     $programFiles = ${env:ProgramFiles}
     $candidates = @(
         "$programFiles\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat",
@@ -71,7 +127,12 @@ function Import-VcVars64 {
     }
 
     Write-Host "Importing MSVC environment from: $vcvars"
-    cmd /d /s /c "call `"$vcvars`" >nul 2>&1 && set" | ForEach-Object {
+    $vcvarsOutput = cmd /d /s /c "call `"$vcvars`" >nul 2>&1 && set"
+    if ($LASTEXITCODE -ne 0) {
+        throw "vcvars64.bat failed. If this shell has been used for repeated builds, open a fresh PowerShell and retry."
+    }
+
+    $vcvarsOutput | ForEach-Object {
         $idx = $_.IndexOf("=")
         if ($idx -gt 0) {
             $name = $_.Substring(0, $idx)
@@ -83,6 +144,7 @@ function Import-VcVars64 {
 
 $CudaPath = Resolve-CudaPath -RequestedPath $CudaPath `
     -Explicit ($PSBoundParameters.ContainsKey('CudaPath'))
+Set-UniquePath
 if (-not $NoVcVars) {
     Import-VcVars64
 }
@@ -93,7 +155,9 @@ $env:CUDACXX = Join-Path $CudaPath "bin\nvcc.exe"
 $env:CMAKE_GENERATOR = "Visual Studio 17 2022"
 $env:CMAKE_GENERATOR_PLATFORM = "x64"
 $env:CMAKE_GENERATOR_TOOLSET = "cuda=$CudaPath"
-$env:Path = "$CudaPath\bin;$CudaPath\extras\CUPTI\lib64;$env:Path"
+Set-UniquePath -Prepend @("$CudaPath\bin", "$CudaPath\extras\CUPTI\lib64")
+
+$PythonInfo = Get-PythonBuildInfo -PythonExe $Python
 
 $commonConfig = @(
     "-C", "cmake.define.BUILD_PYTHON=ON",
@@ -108,12 +172,15 @@ $commonConfig = @(
 
 Write-Host "GPUFlight build"
 Write-Host "  mode:      $Mode"
-Write-Host "  python:    $Python"
+Write-Host "  python:    $($PythonInfo.Executable)"
+Write-Host "  py version: $($PythonInfo.Version)"
+Write-Host "  wheel tag: $($PythonInfo.WheelTag)"
 Write-Host "  cuda path: $CudaPath"
 
 if ($Mode -eq "wheel") {
     New-Item -ItemType Directory -Force -Path $WheelDir | Out-Null
     & $Python -m pip wheel $RootDir -w $WheelDir --no-deps -v @commonConfig
+    if ($LASTEXITCODE -ne 0) { throw "pip wheel failed" }
 } elseif ($Mode -eq "trace") {
     # Native injection-mode tooling: the `gpufl` launcher (gpufl trace/upload/
     # version) + gpufl_inject.dll. These are NOT part of the Python wheel - a
@@ -158,4 +225,5 @@ if ($Mode -eq "wheel") {
     Write-Host "       unprivileged runs report 'skipped / no_stall_reasons')"
 } else {
     & $Python -m pip install $RootDir -v @commonConfig
+    if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
 }
