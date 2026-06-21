@@ -668,15 +668,27 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
     if (!args.quiet) {
         std::fprintf(stderr, "[gpufl] inspect: %s\n", output_dir.string().c_str());
     }
-    if (args.upload && args.agent_drain_ms > 0) {
-        if (!args.quiet) {
-            std::fprintf(stderr, "[gpufl] waiting %.2fs for agent drain\n",
-                         args.agent_drain_ms / 1000.0);
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(args.agent_drain_ms));
-    }
     if (args.upload) {
-        agent.stop();
+        // The agent self-exits once it has uploaded every window of this session
+        // (GPUFL_AGENT_EXIT_WHEN_DRAINED). Wait for that clean finish - up to
+        // --agent-drain-ms as a safety cap - instead of a fixed sleep that used to
+        // hard-kill the agent mid-upload and drop its late windows.
+        const int cap = args.agent_drain_ms;
+        if (!args.quiet) {
+            std::fprintf(stderr, "[gpufl] waiting up to %.1fs for agent to finish uploading\n",
+                         cap / 1000.0);
+        }
+        if (agent.waitForExit(cap)) {
+            if (!args.quiet) std::fprintf(stderr, "[gpufl] agent finished uploading\n");
+        } else {
+            if (!args.quiet) {
+                std::fprintf(stderr,
+                             "[gpufl] agent still running after %.1fs cap - stopping "
+                             "(late windows may need a post-hoc `gpufl upload`)\n",
+                             cap / 1000.0);
+            }
+            agent.stop();
+        }
     }
 
     const int repaired_logs = repairUncompressedLogs(output_dir);
