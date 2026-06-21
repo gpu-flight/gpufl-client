@@ -69,10 +69,21 @@ jobs:
             echo "${CUDA_PATH}/bin" >> $GITHUB_PATH
             echo "${CUDA_PATH}/extras/CUPTI/lib64" >> $GITHUB_PATH
             echo "C:/Program Files/NVIDIA Corporation/NVSMI" >> $GITHUB_PATH
-            echo "CMAKE_GENERATOR=Visual Studio 17 2022" >> $GITHUB_ENV
-            echo "CMAKE_GENERATOR_PLATFORM=x64" >> $GITHUB_ENV
-            echo "CMAKE_GENERATOR_TOOLSET=cuda=${CUDA_PATH}" >> $GITHUB_ENV
+            # Build with Ninja + nvcc + MSVC cl (cl set up by the msvc-dev-cmd step
+            # below). The VS generator with a `cuda=<path>` toolset needs the CUDA
+            # Visual Studio integration installed into VS, which the network CUDA
+            # install omits -> CMake reported "could not find any instance of Visual
+            # Studio" at project(). Ninja + nvcc detects CUDA from PATH instead.
+            echo "CMAKE_GENERATOR=Ninja" >> $GITHUB_ENV
           fi
+
+      # Put MSVC cl/link on PATH so Ninja has a C++ compiler and nvcc has its host
+      # compiler. Must run before the pip build below.
+      - name: Set up MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
 
       - name: Install system dependencies
         if: runner.os == 'Linux'
