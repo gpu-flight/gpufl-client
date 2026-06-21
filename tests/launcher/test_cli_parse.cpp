@@ -84,7 +84,7 @@ TEST(CliParseTrace, UploadFlag) {
     EXPECT_TRUE(r.args->upload);
     EXPECT_EQ(r.args->api_version, "v1");
     EXPECT_EQ(r.args->log_types, "device,scope,system");
-    EXPECT_EQ(r.args->agent_drain_ms, 3000);
+    EXPECT_EQ(r.args->agent_drain_ms, 60000);
 }
 
 TEST(CliParseTrace, UploadDefaultsFalse) {

@@ -29,6 +29,7 @@ public:
 
     bool start(const std::vector<std::string>& command, std::string& error);
     void stop();
+    bool waitForExit(int timeoutMs);
     bool isRunning() const { return running_; }
 
 private:

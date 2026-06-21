@@ -170,11 +170,44 @@ bool AgentProcess::start(const std::vector<std::string>& command,
 #endif
 }
 
+bool AgentProcess::waitForExit(int timeoutMs) {
+    if (!running_) return true;
+#ifdef _WIN32
+    auto process = process_;
+    const DWORD r = WaitForSingleObject(
+        process, timeoutMs < 0 ? INFINITE : static_cast<DWORD>(timeoutMs));
+    if (r == WAIT_OBJECT_0) {
+        CloseHandle(thread_);
+        CloseHandle(process);
+        process_ = nullptr;
+        thread_ = nullptr;
+        running_ = false;
+        return true;
+    }
+    return false;  // timeout/failure - caller falls back to stop()
+#else
+    constexpr int step_ms = 100;
+    int waited = 0;
+    int status = 0;
+    while (timeoutMs < 0 || waited < timeoutMs) {
+        const pid_t rc = ::waitpid(pid_, &status, WNOHANG);
+        if (rc == pid_ || rc < 0) {  // exited, or already reaped / gone
+            running_ = false;
+            pid_ = -1;
+            return true;
+        }
+        usleep(step_ms * 1000);
+        waited += step_ms;
+    }
+    return false;
+#endif
+}
+
 void AgentProcess::stop() {
     if (!running_) return;
 #ifdef _WIN32
-    auto process = static_cast<HANDLE>(process_);
-    auto thread = static_cast<HANDLE>(thread_);
+    const auto process = process_;
+    const auto thread = thread_;
     TerminateProcess(process, 0);
     WaitForSingleObject(process, 5000);
     CloseHandle(thread);
@@ -238,7 +271,10 @@ bool configureAgentEnvironment(const AgentOptions& opts, std::string& error) {
         !setEnv("GPUFL_HTTP_HOST", opts.backend_url) ||
         !setEnv("GPUFL_HTTP_TOKEN", opts.api_key) ||
         !setEnv("GPUFL_HTTP_API_VERSION", opts.api_version) ||
-        !setEnv("GPUFL_AGENT_UPLOAD_MODE", "stream")) {
+        !setEnv("GPUFL_AGENT_UPLOAD_MODE", "stream") ||
+        // One-shot: the agent exits once this trace's session has fully uploaded, so the
+        // launcher can wait for a clean drain (waitForExit) instead of hard-killing it.
+        !setEnv("GPUFL_AGENT_EXIT_WHEN_DRAINED", "1")) {
         error = "failed to configure agent environment";
         return false;
     }
