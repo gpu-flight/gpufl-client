@@ -961,16 +961,18 @@ void CuptiBackend::start() {
 
     // MEMORY2 records capture cudaMalloc / cudaFree /
     // cudaMallocAsync / cudaFreeAsync / cudaMallocManaged with
-    // address, bytes, and memoryKind. **Default-off** in v1 (see
-    // InitOptions::enable_memory_tracking) because TF eager and
-    // similar workloads can produce a high volume; opt-in until we
-    // validate overhead in the field.
+    // address, bytes, and memoryKind. Gated on enable_memory_tracking
+    // (default-off in the base InitOptions; opt-in until we validate
+    // overhead) plus the SASS-safety gate AllowSassMemory2Activity().
+    // NOT tied to kernel/timeline activity - allocation tracking is an
+    // independent CUPTI activity, so it works in SASS / Deep mode too
+    // (where kernel activity is off by default).
     //
     // Soft-fail on enable: older CUPTI versions (CUDA 11) shipped
     // without MEMORY2 - they had MEMORY (deprecated) which has a
     // different record shape. We don't try to fall back; if MEMORY2
-    // isn't available we log and continue without F3 attribution.
-    if (timelineActivity && opts_.enable_memory_tracking && AllowSassMemory2Activity()) {
+    // isn't available we log and continue.
+    if (opts_.enable_memory_tracking && AllowSassMemory2Activity()) {
         const CUptiResult res_mem =
             cuptiActivityEnable(CUPTI_ACTIVITY_KIND_MEMORY2);
         if (res_mem != CUPTI_SUCCESS) {
@@ -1173,7 +1175,7 @@ void CuptiBackend::ReenableActivityAfterEngineStart_() {
     }
 
     // F3: matching post-engine re-enable for MEMORY2.
-    if (timelineActivity && opts_.enable_memory_tracking && AllowSassMemory2Activity()) {
+    if (opts_.enable_memory_tracking && AllowSassMemory2Activity()) {
         const CUptiResult mem_res =
             cuptiActivityEnable(CUPTI_ACTIVITY_KIND_MEMORY2);
         GFL_LOG_DEBUG(
@@ -1659,18 +1661,16 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
                             : "PC sampling source correlation was enabled but emitted no source locator/function records.")
                       : "CUDA source-line correlation was not collected in this session.");
     const bool memoryRequestedAndAllowed =
-        kernelActivity && opts_.enable_memory_tracking && AllowSassMemory2Activity();
+        opts_.enable_memory_tracking && AllowSassMemory2Activity();
     AddCapability(evt, "memory_activity",
-                  kernelActivity && opts_.enable_memory_tracking,
+                  opts_.enable_memory_tracking,
                   memoryRequestedAndAllowed
                       ? (memoryHasData ? "collected" : "enabled_no_data")
-                      : (opts_.enable_memory_tracking
-                            ? (kernelActivity ? "skipped" : "not_requested")
-                            : "not_requested"),
+                      : (opts_.enable_memory_tracking ? "skipped" : "not_requested"),
                   memoryRequestedAndAllowed ? "cupti_memory" : "disabled",
                   memoryRequestedAndAllowed
                       ? (memoryHasData ? "" : "enabled_but_no_records")
-                      : (kernelActivity && opts_.enable_memory_tracking && !AllowSassMemory2Activity()
+                      : (opts_.enable_memory_tracking && !AllowSassMemory2Activity()
                             ? "sass_safe_mode_memory_activity_disabled" : ""),
                   memoryRequestedAndAllowed
                       ? (memoryHasData
@@ -2113,13 +2113,13 @@ void CUPTIAPI CuptiBackend::BufferCompleted(CUcontext context,
                             entry.name     = m->name   ? m->name   : "";
                             entry.domain   = m->domain ? m->domain : "";
                             entry.start_ts = m->timestamp;
-                            std::lock_guard<std::mutex> lk(g_nvtxMu);
+                            std::lock_guard lk(g_nvtxMu);
                             g_nvtxOpen[m->id] = std::move(entry);
                         } else if (isEnd) {
                             NvtxOpen entry;
                             bool found = false;
                             {
-                                std::lock_guard<std::mutex> lk(g_nvtxMu);
+                                std::lock_guard lk(g_nvtxMu);
                                 auto it = g_nvtxOpen.find(m->id);
                                 if (it != g_nvtxOpen.end()) {
                                     entry = std::move(it->second);

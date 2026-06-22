@@ -88,8 +88,8 @@ std::string validatePassToken(const std::string& token) {
                    "them in one process, e.g. Trace+PcSampling)";
         }
         if (composite && p == "Deep") {
-            return "Deep cannot be combined in a '+' group (it is a multi-pass "
-                   "preset); list it on its own";
+            return "Deep cannot be combined in a '+' group (it already runs "
+                   "PcSampling + SassMetrics together); give it its own pass";
         }
         if (composite && p == "SassMetrics") {
             return "SassMetrics cannot share a process (it deadlocks with kernel "
@@ -135,11 +135,12 @@ const char* traceHelp() {
         "                            Each comma is a separate pass (relaunch). Join\n"
         "                            engines with + to run them in ONE process, e.g.\n"
         "                            Trace+PcSampling (timeline + PC stalls, one run).\n"
-        "                            Default: Trace. Deep expands to isolated\n"
-        "                            Trace,PcSampling,SassMetrics passes and cannot\n"
-        "                            be combined with other passes. SassMetrics must\n"
-        "                            be its own pass (deadlocks if shared). Use gpufl\n"
-        "                            monitor for monitoring-only GPU/host telemetry.\n"
+        "                            Default: Trace. Deep runs PcSampling+SassMetrics\n"
+        "                            in one pass (same as the embedded Deep engine);\n"
+        "                            for timeline+stalls+SASS list passes explicitly,\n"
+        "                            e.g. Trace,PcSampling,SassMetrics. SassMetrics\n"
+        "                            must be its own pass (deadlocks if shared). Use\n"
+        "                            gpufl monitor for monitoring-only telemetry.\n"
         "                            PcSampling / PM / Range passes may need NVIDIA\n"
         "                            performance-counter access.\n"
         "    -q, --quiet             Suppress launcher chatter (errors still printed)\n"
@@ -271,7 +272,6 @@ TraceParseResult parseTraceArgs(const std::vector<std::string>& argv) {
             // be a single engine, or a '+'-joined group ("Trace+PcSampling")
             // that runs those engines together in one process (a composite).
             out.passes.clear();
-            bool saw_deep = false;
             size_t start = 0;
             while (true) {
                 const size_t comma = v.find(',', start);
@@ -281,7 +281,6 @@ TraceParseResult parseTraceArgs(const std::vector<std::string>& argv) {
                 if (!item.empty()) {
                     const std::string perr = validatePassToken(item);
                     if (!perr.empty()) return {std::nullopt, perr};
-                    saw_deep = saw_deep || item == "Deep";
                     out.passes.push_back(item);
                 }
                 if (comma == std::string::npos) break;
@@ -289,10 +288,6 @@ TraceParseResult parseTraceArgs(const std::vector<std::string>& argv) {
             }
             if (out.passes.empty()) {
                 return {std::nullopt, "--passes requires at least one engine"};
-            }
-            if (saw_deep && out.passes.size() != 1) {
-                return {std::nullopt,
-                        "--passes=Deep is a preset and cannot be combined with other passes"};
             }
         } else if (key == "--backend-url") {
             auto err = take_value(out.backend_url);
@@ -612,9 +607,6 @@ MonitorParseResult parseMonitorArgs(const std::vector<std::string>& argv) {
 
 std::vector<std::string> resolvePassPlan(const TraceArgs& args) {
     if (args.passes.empty()) return {"Trace"};
-    if (args.passes.size() == 1 && args.passes.front() == "Deep") {
-        return {"Trace", "PcSampling", "SassMetrics"};
-    }
     return args.passes;
 }
 

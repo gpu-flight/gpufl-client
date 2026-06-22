@@ -150,7 +150,7 @@ int main() {
     opts.enable_debug_output = true;
     opts.continuous_system_sampling = true;
     opts.enable_stack_trace = true;
-    opts.profiling_engine = gpufl::ProfilingEngine::RangeProfilerKernelReplay;
+    opts.profiling_engine = gpufl::ProfilingEngine::Trace;
 
     if (!gpufl::init(opts)) {
         std::cerr << "Failed to initialize gpufl" << std::endl;

@@ -5,33 +5,91 @@ inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows PEP 440 for the Python wheel and semver-style
 `MAJOR.MINOR.PATCH` for the C++ library.
 
-## [1.2.0rc1] - 2026-06-14
+## [1.2.0] - 2026-06-21
+
+Headline: **injection-mode profiling** — a native `gpufl` launcher that
+profiles any process (Windows included) with no code changes, plus
+multi-pass capture that runs several engines over one workload and merges
+the results.
 
 ### Added
 
-- **Bounded window profiling for `gpufl trace`.** New `--warmup`, `--window`,
-  `--window-timeout`, and `--after-window` flags time-box a capture of a
-  long-running target (e.g. an inference server) that never exits on its own.
-  The launcher runs the target for `warmup + window` wall-clock, then gracefully
-  stops it: POSIX SIGTERM → grace → SIGKILL; Windows signals an inherited
-  stop-event so the injected lib flushes + exits cleanly, falling back to
-  `TerminateProcess` after the grace. Durations accept `30s` / `500ms` / `5m` /
-  `1h` / a bare number of seconds.
-- **Composite passes (`+`).** `--passes Trace+PcSampling` runs the listed engines
-  together in one process (timeline + PC stalls in a single window) via
+- **`gpufl trace` — injection-mode launcher.** Profile any process by injecting
+  the gpufl library at launch (POSIX `LD_PRELOAD`, Windows-native) — no changes
+  to the target. See [docs/guides/trace-launcher.md](docs/guides/trace-launcher.md).
+- **Multi-pass profiling (`--passes`).** `--passes=Trace,PcSampling,SassMetrics`
+  runs each engine as its own isolated pass and tags them into one **analysis
+  group** (shown as a merged kernel/source view in the dashboard). `--passes=Deep`
+  runs the Deep engine (PcSampling + SassMetrics) in one pass, same as the
+  embedded engine; embedded Python targets can drive multi-pass too.
+  See [docs/guides/multi-pass-profiling.md](docs/guides/multi-pass-profiling.md).
+- **Composite passes (`+`).** `--passes=Trace+PcSampling` runs the listed engines
+  together in one process (timeline + PC stalls in one window) via
   `GPUFL_ENGINE_COMBO`; a comma still means one isolated pass each. `SassMetrics`
   and `Deep` are rejected inside a `+` group.
+- **Bounded-window profiling.** `--warmup` / `--window` / `--window-timeout` /
+  `--after-window` time-box a capture of a target that never exits on its own
+  (e.g. an inference server), then stop it gracefully (POSIX SIGTERM → grace →
+  SIGKILL; Windows stop-event → flush → `TerminateProcess` fallback). Durations
+  accept `30s` / `500ms` / `5m` / `1h` / a bare number of seconds.
+- **`gpufl monitor`.** Monitoring-only telemetry (GPU/host health, no CUPTI) as
+  a standalone command.
+- **`RangeProfilerKernelReplay` engine.** Kernel-owned hardware counters via
+  AutoRange + Kernel Replay.
+- **Windows support.** Native `gpufl trace` injection; NVAPI fallback for
+  GPU/memory utilization on WDDM (where NVML reports 0%); real kernel symbol
+  resolution in Deep mode; PC sampling under Windows injection.
+
+### Changed
+
+- **Lower per-kernel overhead** — stack symbolization, name demangling, and
+  metadata joins moved off the CUPTI callback path onto the collector thread;
+  the per-kernel critical section shrunk and several locks removed.
+- **PC sampling reports measured kernel timings** (no false "estimated" banner),
+  with standalone kernel-collect modes and a split SASS channel.
+- Environment-variable names centralized in `include/gpufl/core/env_vars.hpp`.
+- `enable_memory_tracking` now **defaults to on**. PyTorch's caching allocator
+  generates <1k events/session (negligible overhead); set it false for
+  alloc-heavy workloads (e.g. TensorFlow eager).
 
 ### Fixed
 
-- Synthetic shutdown markers are now written for ungracefully-stopped sessions
-  (window stop / SIGKILL / crash): the session's staged `.tmp` logs are published
-  before the completion-marker check, so the missing `shutdown` record is
-  synthesized instead of leaving the session incomplete.
+- Memory allocation tracking (`enable_memory_tracking`) now works in SASS / Deep
+  mode. CUPTI `MEMORY2` was gated behind kernel-activity collection — off by
+  default in SASS-safe mode — so `gpufl trace` (default Deep) recorded no
+  `cudaMalloc`/`cudaFree` events despite the flag being set. Allocation tracking
+  is now independent of kernel activity (gated only on `enable_memory_tracking`
+  plus the SASS-safety policy), so it collects in every engine.
+- Drop kernel activity with invalid zero CUPTI timestamps (they anchored to
+  system-boot time and sorted to the top of the kernel list).
+- Drop non-finite PM sample values (a priming-sample `NaN` produced `-nan(ind)`
+  that broke ingest); anchor PM samples to wall-clock time.
+- Synthesize a `shutdown` marker for ungracefully-stopped sessions (window stop
+  / SIGKILL / crash), written as an indexed window so the agent uploads it; the
+  launcher waits for the upload to finish instead of hard-killing the agent.
+- The no-CUDA Windows wheel links cleanly (CUPTI-only binding calls are guarded).
 
 ### Removed
 
 - The deprecated `gpufl trace --engine` flag (use `--passes`).
+- **`remote_upload`** — the Python kwarg, the C++ `InitOptions::remote_upload`
+  field, and the `GPUFL_REMOTE_UPLOAD` env var. The v1.1 backward-compat shim
+  (a Python `atexit` handler + the C++ shutdown auto-upload) is gone; passing it
+  now raises. Use `with gpufl.session(backend_url=..., api_key=...):` or call
+  `gpufl.upload_logs()` / `gpufl::uploadLogs()` after shutdown.
+- **`sampling_auto_start`** — the Python kwarg (renamed to
+  `continuous_system_sampling` in v1.1; C++ renamed then). The compatibility
+  shim is removed and the old name now raises `TypeError`.
+- **`InitOptions.backend_url` / `api_key`** — backend credentials no longer live
+  on `InitOptions` (the C++ fields and the Python `init()` kwargs are both gone;
+  `init()` now rejects them). Pass them to `gpufl.upload_logs()` /
+  `gpufl::uploadLogs()` or `gpufl.session(backend_url=..., api_key=...)`; the
+  version-discovery probe reads `GPUFL_BACKEND_URL` from the environment.
+
+### Build
+
+- The Windows wheel builds with Ninja + nvcc + MSVC `cl` (not the Visual Studio
+  CUDA toolset); per-version wheel generation fixed.
 
 ## [1.1.0] - 2026-06-03
 

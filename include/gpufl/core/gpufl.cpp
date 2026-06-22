@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -95,7 +96,7 @@ namespace detail {
 // around the caller's cleanup. `noinline` makes the intent explicit.
 __declspec(noinline) inline int SafeNvtxRangePushA(const char* name) {
     __try {
-        return ::nvtxRangePushA(name);
+        return nvtxRangePushA(name);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         // An AV here means NVTX's injection table has a null entry.
         // Mark NVTX unavailable so the rest of the session skips it.
@@ -276,28 +277,15 @@ bool init(const InitOptions& opts) {
     }
 
     {
-        std::string url  = g_opts.backend_url;
-        std::string key  = g_opts.api_key;
+        // Resolve api_path (InitOptions value or GPUFL_API_PATH) and normalize
+        // once - the version-discovery probe below appends to it. Backend
+        // creds live on UploadOptions now, not InitOptions; the probe reads
+        // GPUFL_BACKEND_URL straight from the environment.
         std::string apiPath = g_opts.api_path;
-        if (url.empty()) {
-            if (const char* e = std::getenv(gpufl::env::kBackendUrl)) url = e;
-            // Legacy name - accept for one release to ease migration.
-            else if (const char* e2 = std::getenv(gpufl::env::kRemoteConfig)) url = e2;
-        }
-        if (key.empty()) {
-            if (const char* e = std::getenv(gpufl::env::kApiKey)) key = e;
-        }
         if (apiPath.empty()) {
             if (const char* e = std::getenv(gpufl::env::kApiPath)) apiPath = e;
         }
-        // Normalize once - every downstream consumer (HttpLogSink wiring
-        // below, the version-discovery probe) just appends after this.
-        apiPath = normalizeApiPath(apiPath);
-        // Reflect env-var-resolved values back onto g_opts so downstream
-        // consumers see consistent values.
-        g_opts.backend_url  = url;
-        g_opts.api_key      = key;
-        g_opts.api_path     = apiPath;
+        g_opts.api_path = normalizeApiPath(apiPath);
     }
 
     DebugLogger::setEnabled(g_opts.enable_debug_output);
@@ -352,33 +340,17 @@ bool init(const InitOptions& opts) {
         return false;
     }
 
-    // `remote_upload` is a backward-compat shim in v1.1: live
-    // HttpLogSink streaming is gone, but to preserve the old "set
-    // one flag and forget" UX, gpufl::shutdown() (below) automatically
-    // invokes gpufl::uploadLogs() with the configured backend_url +
-    // api_key after the file sink is closed. We log a deprecation
-    // notice here at init time so users see they're on the legacy
-    // path. Removed in v1.2 - at which point callers must invoke
-    // uploadLogs() (or gpufl.session() in Python) explicitly.
-    if (g_opts.remote_upload) {
-        GFL_LOG_ERROR(
-            "[DEPRECATED] opts.remote_upload=true is a v1.1 backward-"
-            "compat shim. Live HTTP streaming was removed; "
-            "gpufl::shutdown() will auto-call gpufl::uploadLogs() at "
-            "the end of the session instead. This flag, and "
-            "backend_url / api_key on InitOptions, will be removed "
-            "entirely in v1.2 - switch to passing creds directly to "
-            "UploadOptions / gpufl::uploadLogs() in new code.");
-    }
-
     // Fire-and-forget version-discovery probe. Hits
     // <backend_url><api_path>/info/version with 2s timeouts to detect
     // client/backend version drift early and emit a clear warning.
     // Must NEVER block init - detached, bounded by httplib timeouts.
-    // Skipped when backend_url is empty (offline / file-only mode).
-    if (!g_opts.backend_url.empty()) {
-        std::thread([url = g_opts.backend_url,
-                     ap  = g_opts.api_path] {
+    // Reads GPUFL_BACKEND_URL from the environment (creds live on
+    // UploadOptions now); skipped when unset (offline / file-only mode).
+    std::string probeUrl;
+    if (const char* e = std::getenv(gpufl::env::kBackendUrl)) probeUrl = e;
+    else if (const char* e2 = std::getenv(gpufl::env::kRemoteConfig)) probeUrl = e2;
+    if (!probeUrl.empty()) {
+        std::thread([url = probeUrl, ap = g_opts.api_path] {
             probeBackendVersion(url, ap);
         }).detach();
     }
@@ -690,45 +662,6 @@ void shutdown() {
     rt->logger->close();
     GFL_LOG_DEBUG("Shutdown: logger->close() returned");
 
-    // remote_upload deprecation shim - auto-call uploadLogs() at the
-    // end of shutdown() so pure-C++ callers who set the legacy flag
-    // still get their data shipped. Matches the Python side's atexit
-    // handler. The file sink has been closed above, so all NDJSON
-    // events are guaranteed flushed to disk before uploadLogs reads
-    // them back. Removed in v1.2 along with the field. (See gpufl.hpp.)
-    if (g_opts.remote_upload && !g_opts.backend_url.empty() &&
-        !g_opts.api_key.empty() && !g_opts.log_path.empty()) {
-        GFL_LOG_DEBUG(
-            "[remote_upload shim] running uploadLogs() at shutdown - "
-            "log_path=", g_opts.log_path,
-            " backend_url=", g_opts.backend_url);
-        UploadOptions uopts;
-        uopts.log_path    = g_opts.log_path;
-        uopts.backend_url = g_opts.backend_url;
-        uopts.api_key     = g_opts.api_key;
-        uopts.api_path    = g_opts.api_path;
-        // Use defaults for the rest - timeouts, retries, etc. The
-        // upload runs synchronously here; in the legacy live-streaming
-        // model this work was amortized across the workload, so
-        // total shutdown wall time may now be noticeably longer
-        // (proportional to log volume). Acceptable trade-off - the
-        // alternative was silent data loss.
-        const auto r = uploadLogs(uopts);
-        if (r.success) {
-            GFL_LOG_DEBUG(
-                "[remote_upload shim] uploadLogs OK - ",
-                r.events_uploaded, " event(s), ",
-                r.bytes_uploaded, " bytes, ",
-                r.elapsed_ms, "ms");
-        } else {
-            GFL_LOG_ERROR(
-                "[remote_upload shim] uploadLogs FAILED - ",
-                r.warnings.size(), " warning(s); first: ",
-                r.warnings.empty() ? std::string("(none)") :
-                                     r.warnings.front());
-        }
-    }
-
     set_runtime(nullptr);
 
     GFL_LOG_DEBUG("Shutdown complete!");
@@ -810,26 +743,15 @@ void ScopedMonitor::init_(const ScopeMeta& meta) {
     // (GPUFL_ENGINE_COMBO) is active even with a Trace base - otherwise a
     // Trace+RangeProfiler combo would never trigger Range's perf scope. Harmless
     // no-op for engines that don't use perf scopes (PC / PM).
-    const char* comboEnv = std::getenv(gpufl::env::kEngineCombo);
+    const char* comboEnv = std::getenv(env::kEngineCombo);
     const bool comboActive = comboEnv && comboEnv[0] != '\0';
     if (g_opts.profiling_engine != ProfilingEngine::Monitor &&
         (g_opts.profiling_engine != ProfilingEngine::Trace || comboActive)) {
         Monitor::BeginPerfScope(name_.c_str());
     }
-
-    // Emit an NVTX range alongside the native scope_event. This makes the
-    // scope visible to Nsight Systems and captured uniformly via CUPTI's
-    // marker activity path (same pipeline that picks up PyTorch /
-    // cuDNN / NCCL framework ranges). No-op if NVTX isn't available.
-    GPUFL_NVTX_PUSH(name_.c_str());
 }
 
 ScopedMonitor::~ScopedMonitor() {
-    // Pop the NVTX range first - symmetric with the push in the
-    // constructor. Safe to call even if runtime() is gone; NVTX keeps
-    // its own internal range stack.
-    GPUFL_NVTX_POP();
-
     Runtime* rt = runtime();
     if (!rt || !rt->logger) {
         // Best-effort: if the runtime is already gone but we'd taken a
@@ -853,15 +775,19 @@ ScopedMonitor::~ScopedMonitor() {
     auto& stack = getThreadScopeStack();
     if (!stack.empty()) stack.pop_back();
     const int depth = static_cast<int>(stack.size());
+    const int64_t end_ns = detail::GetTimestampNs();
 
     ScopeBatchRow row;
-    row.ts_ns = detail::GetTimestampNs();
+    row.ts_ns = end_ns;
     row.scope_instance_id = scope_id_;
     row.name_id = Monitor::InternScopeName(name_);
     row.event_type = 1;  // end
     row.depth = depth;
     Monitor::PushScopeRow(row);
 
+    // Scopes are recorded via scope_event only - we no longer echo each
+    // scope as an NVTX marker. That echo duplicated scope_event (the SPA
+    // had to de-dupe it) and only the framework NVTX path remains useful.
     Monitor::EndProfilerScope(name_.c_str());
     const char* comboEnv = std::getenv(gpufl::env::kEngineCombo);
     const bool comboActive = comboEnv && comboEnv[0] != '\0';
@@ -877,7 +803,7 @@ ScopedMonitor::~ScopedMonitor() {
                 pe.session_id = rt->session_id;
                 pe.name = name_;
                 pe.start_ns = start_ns_;
-                pe.end_ns = detail::GetTimestampNs();
+                pe.end_ns = end_ns;
                 rt->logger->write(model::PerfMetricModel(pe));
 
                 GFL_LOG_DEBUG("Log Perf Metric Event");

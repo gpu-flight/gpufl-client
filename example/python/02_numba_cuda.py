@@ -49,8 +49,6 @@ def run_benchmark():
         system_sample_rate_ms=100,
         enable_debug_output=True,
         profiling_engine=gfl.ProfilingEngine.Deep,
-        backend_url=BACKEND_URL,
-        api_key=API_KEY,
     )
 
     try:

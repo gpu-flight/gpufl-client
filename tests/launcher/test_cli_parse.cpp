@@ -258,7 +258,7 @@ TEST(CliParseTrace, PassesTrimsWhitespace) {
     EXPECT_EQ(r.args->passes[1], "SassMetrics");
 }
 
-TEST(CliParseTrace, PassesDeepPresetParsed) {
+TEST(CliParseTrace, PassesDeepParsedAsEngine) {
     auto r = parseTraceArgs(argsFor({"--passes=Deep", "--", "./bin"}));
     ASSERT_TRUE(r.args.has_value()) << r.error;
     ASSERT_EQ(r.args->passes.size(), 1u);
@@ -283,10 +283,12 @@ TEST(CliParseTrace, PassesEmptyRejected) {
     EXPECT_NE(r.error.find("--passes requires"), std::string::npos);
 }
 
-TEST(CliParseTrace, DeepPresetCannotBeCombined) {
+TEST(CliParseTrace, DeepCanBeAPassAlongsideOthers) {
     auto r = parseTraceArgs(argsFor({"--passes=Trace,Deep", "--", "./bin"}));
-    EXPECT_FALSE(r.args.has_value());
-    EXPECT_NE(r.error.find("cannot be combined"), std::string::npos);
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    ASSERT_EQ(r.args->passes.size(), 2u);
+    EXPECT_EQ(r.args->passes[0], "Trace");
+    EXPECT_EQ(r.args->passes[1], "Deep");
 }
 
 // ── gpufl trace --passes composite ('+') groups ─────────────────────────────
@@ -348,14 +350,12 @@ TEST(ResolvePassPlan, ExplicitPassesWin) {
     EXPECT_EQ(plan[1], "SassMetrics");
 }
 
-TEST(ResolvePassPlan, DeepExpandsToDefaultPlan) {
+TEST(ResolvePassPlan, DeepResolvesToSinglePass) {
     TraceArgs a;
     a.passes = {"Deep"};
     const auto plan = resolvePassPlan(a);
-    ASSERT_EQ(plan.size(), 3u);
-    EXPECT_EQ(plan[0], "Trace");
-    EXPECT_EQ(plan[1], "PcSampling");
-    EXPECT_EQ(plan[2], "SassMetrics");
+    ASSERT_EQ(plan.size(), 1u);
+    EXPECT_EQ(plan[0], "Deep");
 }
 
 TEST(ResolvePassPlan, SingleExplicitPassIsOnePass) {

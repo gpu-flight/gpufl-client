@@ -38,14 +38,11 @@ struct InitOptions {
      *           you only care about telemetry during specific phases of
      *           your application (e.g. inside a training-step scope).
      *
-     * Renamed from `sampling_auto_start` in this release. The old name
-     * referred only to init-time auto-start and didn't capture the
-     * scope-bracketing behavior, which was silently broken when the
-     * flag was off. C++ callers must rename to `continuous_system_sampling`;
-     * the compiler will surface this as a "no member named
-     * 'sampling_auto_start'" error pointing at their call site. Python
-     * callers using the old kwarg name keep working for one release
-     * with a DeprecationWarning (see python/gpufl/__init__.py).
+     * Renamed from `sampling_auto_start` (the old name described only
+     * init-time auto-start and missed the scope-bracketing behavior). The
+     * old name is removed in v1.2: C++ hits a "no member named
+     * 'sampling_auto_start'" compile error, Python raises a `TypeError`
+     * pointing at `continuous_system_sampling`.
      */
     bool continuous_system_sampling = false;
     bool enable_debug_output = false;
@@ -74,15 +71,11 @@ struct InitOptions {
     bool enable_synchronization = true;
     // Enable CUPTI_ACTIVITY_KIND_MEMORY2 to capture cudaMalloc /
     // cudaFree / cudaMallocAsync / cudaMallocManaged / cudaMallocHost
-    // with timing, address, size, and kind. **Default-off** in v1
-    // because TensorFlow eager mode and similar can produce a high
-    // record rate, and we want a couple of internal sessions to
-    // validate overhead before flipping it on by default. PyTorch
-    // workloads with the caching allocator typically generate <1k
-    // events per session, so it's safe to enable manually for those
-    // (and that's why we surface the toggle prominently rather than
-    // burying it in a config file).
-    bool enable_memory_tracking = false;
+    // with timing, address, size, and kind. **Default-on**: PyTorch's
+    // caching allocator generates <1k events per session, so the
+    // overhead is negligible. Set false for alloc-heavy workloads
+    // (e.g. TensorFlow eager) where the record rate is high.
+    bool enable_memory_tracking = true;
     // Enable CUPTI_ACTIVITY_KIND_GRAPH_TRACE to capture per-launch
     // timing for cudaGraphLaunch calls. **Default-off** in v1 because
     // CUDA Graphs interact with PC Sampling on some Blackwell driver
@@ -130,31 +123,6 @@ struct InitOptions {
     std::string config_file = "";
 
     /**
-     * GPUFlight backend base URL - e.g. "https://api.gpuflight.com" or
-     * "http://localhost:8080". Host-only; do NOT include the API
-     * prefix (use {@link api_path} for that).
-     *
-     * Read by:
-     *   - the version-discovery probe at init time
-     *   - {@link gpufl::uploadLogs} when you call it post-shutdown
-     *     (stored on InitOptions so the deferred upload path can pick
-     *     it up without the caller having to re-supply it)
-     *
-     * Setting this alone does nothing - no HTTP runs during a session.
-     * Upload is a separate step (`gpufl::uploadLogs`, or the
-     * `gpufl.session()` Python context manager).
-     *
-     * **DEPRECATION NOTE (v1.2 removal)**: this field - together with
-     * {@link api_key} and {@link remote_upload} - is planned for
-     * removal in v1.2. Long-term, all backend creds will be passed
-     * directly to {@link gpufl::uploadLogs} (and the version probe
-     * will read `GPUFL_BACKEND_URL` directly). The fields stay
-     * functional in v1.1 to keep the migration painless; if you're
-     * starting fresh, prefer passing creds straight to `UploadOptions`.
-     */
-    std::string backend_url = "";
-
-    /**
      * Override for the URL path prefix the agent uses when calling
      * the backend. Empty (default) → the client uses the version it
      * was compiled against (currently `/api/v1`, see
@@ -173,49 +141,6 @@ struct InitOptions {
      */
     std::string api_path = "";
 
-    /**
-     * API key for log upload to the GPUFlight backend.
-     * Sent as `Authorization: Bearer <key>` on event POSTs.
-     *
-     * **DEPRECATION NOTE (v1.2 removal)**: planned for removal in v1.2
-     * together with {@link backend_url} and {@link remote_upload}.
-     * Long-term, pass creds directly to {@link gpufl::uploadLogs}.
-     */
-    std::string api_key = "";
-
-    /**
-     * **DEPRECATED - v1.1 backward-compat shim, removed in v1.2.**
-     *
-     * Previously attached an HttpLogSink that POSTed NDJSON events live
-     * during the session. That mechanism is gone in v1.1. To preserve
-     * the old "set one flag and forget" UX, this field now triggers an
-     * **automatic** call to {@link gpufl::uploadLogs} at the end of
-     * {@link gpufl::shutdown}, using {@link backend_url} +
-     * {@link api_key} from this InitOptions.
-     *
-     * Behavior with `remote_upload = true`:
-     *   - **At init()**: logs a deprecation message pointing at the
-     *     new API. No HTTP is opened.
-     *   - **At shutdown()**: after the file sink has flushed and
-     *     closed, `gpufl::uploadLogs(uopts)` is invoked synchronously
-     *     with creds copied from InitOptions. Failures are logged but
-     *     never thrown - the process exits cleanly either way.
-     *   - **In Python**: the wrapper emits a `DeprecationWarning` and
-     *     also schedules upload via `atexit`, so notebook / script
-     *     callers who never explicitly call shutdown() still get the
-     *     same delivery.
-     *
-     * Wall-time impact: the legacy live-streaming model amortized HTTP
-     * work across the session; the new shim does it all at shutdown.
-     * Expect shutdown to take seconds-to-minutes proportional to log
-     * volume. To avoid the wait or to control timing, drop the flag
-     * and call `gpufl::uploadLogs(uopts)` directly when convenient.
-     *
-     * In v1.2 this field - together with {@link backend_url} and
-     * {@link api_key} - is removed; creds move entirely onto
-     * `UploadOptions`. See `include/gpufl/upload/upload_logs.hpp`.
-     */
-    bool remote_upload = false;
 
     /**
      * Global kill switch. When false, {@link gpufl::init} returns false
@@ -299,7 +224,6 @@ inline InitOptions injection_mode_default_options() {
     opts.profiling_engine            = ProfilingEngine::Deep;
     opts.system_sample_rate_ms       = 100;
     opts.kernel_sample_rate_ms       = 1000;
-    opts.remote_upload               = false;
     return opts;
 }
 
@@ -337,7 +261,6 @@ inline InitOptions monitoring_mode_default_options() {
     opts.flush_logs_always           = false;
     opts.profiling_engine            = ProfilingEngine::Monitor;
     opts.system_sample_rate_ms       = 250;
-    opts.remote_upload               = false;
     return opts;
 }
 
@@ -409,9 +332,9 @@ class ScopedMonitor {
 
    private:
     // Shared ctor body - all constructors funnel through this so the
-    // begin-row push, NVTX push, and profiler-scope hooks live in one
-    // place. `meta` defaults to ScopeMeta{} (zeros) for the legacy
-    // overloads, so their wire output is byte-for-byte unchanged.
+    // begin-row push and profiler-scope hooks live in one place. `meta`
+    // defaults to ScopeMeta{} (zeros) for the legacy overloads, so their
+    // wire output is byte-for-byte unchanged.
     void init_(const ScopeMeta& meta);
 
     std::string name_;
