@@ -106,20 +106,6 @@ PYBIND11_MODULE(_gpufl_client, m) {
         .def_readwrite("pm_sampling_metrics", &gpufl::InitOptions::pm_sampling_metrics)
         .def_readwrite("pm_sampling_scope_only", &gpufl::InitOptions::pm_sampling_scope_only)
         .def_readwrite("profiling_engine",      &gpufl::InitOptions::profiling_engine)
-        // Backend interactions - backend_url is the BASE URL of the
-        // GPUFlight backend. Upload is a separate post-shutdown step
-        // via gpufl.upload_logs() / gpufl.session(); nothing on
-        // InitOptions controls upload directly anymore.
-        // (The historical `config_name` / remote-config-fetch binding
-        // was removed along with the backend's ConfigController.)
-        .def_readwrite("backend_url",           &gpufl::InitOptions::backend_url)
-        .def_readwrite("api_key",               &gpufl::InitOptions::api_key)
-        // DEPRECATED in v1.1, planned removal v1.2 alongside
-        // backend_url + api_key. See InitOptions docstring in
-        // gpufl.hpp. Field is a no-op at the C++ level; the Python
-        // wrapper around init() turns remote_upload=True into an
-        // atexit-scheduled upload_logs() call for backward compat.
-        .def_readwrite("remote_upload",         &gpufl::InitOptions::remote_upload)
         // Global kill switch - when false, gpufl::init returns false
         // immediately and every downstream call is a no-op via the
         // null-runtime guards. The high-level Python wrapper
@@ -147,9 +133,6 @@ PYBIND11_MODULE(_gpufl_client, m) {
                      bool enable_source_collection,
                      gpufl::ProfilingEngine profiling_engine,
                      std::string config_file,
-                     std::string backend_url,
-                     std::string api_key,
-                     bool remote_upload,
                      bool enable_external_correlation,
                      bool enable_synchronization,
                      bool enable_memory_tracking,
@@ -174,9 +157,6 @@ PYBIND11_MODULE(_gpufl_client, m) {
         opts.flush_logs_always     = flush_logs_always;
         opts.profiling_engine      = profiling_engine;
         opts.config_file           = config_file;
-        opts.backend_url           = std::move(backend_url);
-        opts.api_key               = std::move(api_key);
-        opts.remote_upload         = remote_upload;
         opts.enable_external_correlation = enable_external_correlation;
         opts.enable_synchronization      = enable_synchronization;
         opts.enable_memory_tracking      = enable_memory_tracking;
@@ -199,12 +179,9 @@ PYBIND11_MODULE(_gpufl_client, m) {
        py::arg("enable_source_collection")    = true,
        py::arg("profiling_engine")            = gpufl::ProfilingEngine::Monitor,
        py::arg("config_file")                 = "",
-       py::arg("backend_url")                 = "",
-       py::arg("api_key")                     = "",
-       py::arg("remote_upload")               = false,
        py::arg("enable_external_correlation") = true,
        py::arg("enable_synchronization")      = true,
-       py::arg("enable_memory_tracking")      = false,
+       py::arg("enable_memory_tracking")      = true,
        py::arg("enable_cuda_graphs_tracking") = false,
        py::arg("pm_sampling_interval_us")     = 100,
        py::arg("pm_sampling_max_samples")     = 4096,

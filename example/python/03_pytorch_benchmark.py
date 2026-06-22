@@ -45,8 +45,6 @@ def run_stress_test():
                # Blackwell driver builds; we've tested it here so
                # it's safe to enable for this benchmark.
                enable_cuda_graphs_tracking=True,
-               api_key=api_key,
-               backend_url=backend_url,
                profiling_engine=gpufl.ProfilingEngine.Deep)
 
     try:

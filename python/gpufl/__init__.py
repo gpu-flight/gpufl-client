@@ -245,9 +245,6 @@ except ImportError as e:
             self.pm_sampling_metrics = []
             self.pm_sampling_scope_only = True
             self.config_file = ""
-            self.backend_url = ""
-            self.api_key = ""
-            self.remote_upload = False  # DEPRECATED v1.1, removed v1.2
             self.enabled = True  # mirror C++ InitOptions::enabled
 
     class _CScope:
@@ -298,7 +295,7 @@ except Exception as e:
     print(f"[FATAL] Unexpected error importing _gpufl_client: {e}", file=sys.stderr)
     raise e
 
-__version__ = "1.2.0rc1"
+__version__ = "1.2.0"
 
 # ── Backend upload ────────────────────────────────────────────────────────────
 #
@@ -432,11 +429,11 @@ def _apply_eager_module_loading(profiling_engine):
     os.environ['CUDA_MODULE_LOADING'] = 'EAGER'
 
 
-# Wrap the C++ init to apply env-var fallbacks for backend_url and
-# api_key, and to reject removed kwargs with a clear TypeError.
+# Wrap the C++ init to apply multi-pass env tagging and to reject removed
+# kwargs (remote_upload / sampling_auto_start / backend_url / api_key).
 _original_init = init
 
-def init(*args, backend_url=None, api_key=None, remote_upload=None,
+def init(*args,
          enabled=True, analysis_id=None, pass_index=None, pass_count=None,
          **kwargs):
     """Initialize GPUFlight.
@@ -446,30 +443,14 @@ def init(*args, backend_url=None, api_key=None, remote_upload=None,
 
       1. InitOptions defaults (built-in).
       2. Local config file (config_file=...).
-      3. Env vars (GPUFL_BACKEND_URL / GPUFL_API_KEY /
-         GPUFL_REMOTE_UPLOAD / GPUFL_PROFILING_ENGINE / GPUFL_CONFIG_FILE).
+      3. Env vars (GPUFL_PROFILING_ENGINE / GPUFL_CONFIG_FILE).
       4. The kwargs you pass to this function.
 
+    Backend credentials are NOT init() arguments - pass them to
+    ``gpufl.upload_logs(backend_url=..., api_key=...)`` or
+    ``with gpufl.session(backend_url=..., api_key=...):`` instead.
+
     Args:
-        backend_url: Base URL of the GPUFlight backend
-            (e.g. "https://api.gpuflight.com"). Stored on InitOptions
-            so gpufl.upload_logs() / gpufl.session() can read it back
-            after shutdown without the caller having to re-supply it.
-            On its own it does nothing - upload is a separate step,
-            never live during the workload. **Planned removal v1.2** -
-            see DEPRECATION NOTE on InitOptions.backend_url in
-            include/gpufl/gpufl.hpp.
-        api_key: API key for log upload. Same purpose / lifecycle as
-            backend_url. **Planned removal v1.2.**
-        remote_upload: DEPRECATED (v1.1) - used to enable live HTTP
-            streaming via HttpLogSink. That mechanism is gone. Setting
-            True here still works for one release: emits a
-            DeprecationWarning and registers an atexit handler that
-            calls gpufl.upload_logs() at interpreter exit, preserving
-            the old "set one flag and forget" UX. Prefer
-            `with gpufl.session(backend_url=..., api_key=...):` (auto-
-            orchestrated) or call gpufl.upload_logs(...) explicitly
-            after shutdown. **Removed in v1.2.** Env: `GPUFL_REMOTE_UPLOAD=1`.
         enabled: When False, init becomes a no-op - no daemon spawn, no
             NVML probe, no log files, no atexit handler. Subsequent
             gpufl calls (Scope, shutdown, upload_logs, system_start/stop)
@@ -519,35 +500,34 @@ def init(*args, backend_url=None, api_key=None, remote_upload=None,
     # disabled-then-enabled tests / notebooks without restarting.
     _disabled = False
 
+    # Removed in v1.2: reject the old kwargs with a clear migration
+    # message instead of a cryptic "unexpected keyword argument" from
+    # the C++ binding.
+    if 'remote_upload' in kwargs:
+        raise TypeError(
+            "init(remote_upload=...) was removed in v1.2. Live HTTP "
+            "streaming is gone; upload happens after the session ends. "
+            "Use `with gpufl.session(backend_url=..., api_key=...):` or "
+            "call gpufl.upload_logs(...) after gpufl.shutdown().")
+    if 'sampling_auto_start' in kwargs:
+        raise TypeError(
+            "init(sampling_auto_start=...) was removed in v1.2; use "
+            "'continuous_system_sampling' instead (False = sample only "
+            "inside GFL_SCOPE / between systemStart/stop; True = sample "
+            "continuously from init to shutdown).")
+    if 'backend_url' in kwargs or 'api_key' in kwargs:
+        raise TypeError(
+            "init(backend_url=...) / init(api_key=...) were removed in v1.2 - "
+            "backend credentials live on the upload path now. Pass them to "
+            "gpufl.upload_logs(backend_url=..., api_key=...) or "
+            "`with gpufl.session(backend_url=..., api_key=...):` instead.")
+
     # EAGER module loading is OPT-IN (default: CUDA's normal LAZY). The
     # per-architecture SASS exclusion gate (GPUFL_SASS_EXCLUDE_ARCHS) is the
     # default guard for the CUPTI lazy-patching deadlock. Set
     # GPUFL_EAGER_MODULE_LOADING=1 to force EAGER for this run instead - must
     # happen before the training loop creates the CUDA context, hence here.
     _apply_eager_module_loading(kwargs.get('profiling_engine'))
-
-    # Backward-compat shim: `sampling_auto_start` was renamed to
-    # `continuous_system_sampling` because the old name only described
-    # init-time auto-start and missed the new scope-bracketing behavior
-    # (off → sample only inside GFL_SCOPE / between systemStart/stop).
-    # We accept the old kwarg for one release with a DeprecationWarning,
-    # forwarding it to the new name. Caller passing both is an error.
-    if 'sampling_auto_start' in kwargs:
-        if 'continuous_system_sampling' in kwargs:
-            raise TypeError(
-                "init() got both 'sampling_auto_start' (deprecated) and "
-                "'continuous_system_sampling' - pass only the new name.")
-        import warnings
-        warnings.warn(
-            "'sampling_auto_start' is deprecated; use "
-            "'continuous_system_sampling' instead. With the new name, "
-            "False enables scope-bracketed sampling (sample only inside "
-            "GFL_SCOPE or between systemStart/stop); True samples "
-            "continuously from init to shutdown. The kwarg will be "
-            "removed in a future release.",
-            DeprecationWarning,
-            stacklevel=2)
-        kwargs['continuous_system_sampling'] = kwargs.pop('sampling_auto_start')
 
     # ── Multi-pass analysis grouping ──────────
     # Let an embedded job self-tag as one pass of an analysis group without
@@ -566,98 +546,11 @@ def init(*args, backend_url=None, api_key=None, remote_upload=None,
         if pass_count is not None:
             os.environ['GPUFL_PASS_COUNT'] = str(int(pass_count))
 
-    # Resolve env-var fallbacks. Doing this in Python lets explicit
-    # kwargs win over env; the C++ layer also does env fallback for
-    # the pure-C++ code path, so either side resolving is sufficient.
-    if not backend_url:
-        backend_url = os.environ.get('GPUFL_BACKEND_URL')
-    if not api_key:
-        api_key = os.environ.get('GPUFL_API_KEY')
-    if remote_upload is None:
-        env_upload = os.environ.get('GPUFL_REMOTE_UPLOAD', '').strip().lower()
-        remote_upload = env_upload in ('1', 'true', 'yes', 'on')
-
-    # Forward backend creds to the underlying C++ init via the pybind11
-    # binding. These are needed by gpufl::uploadLogs() at shutdown - they
-    # live on InitOptions so the deferred-upload path can read them back
-    # without the caller having to re-supply them.
-    if backend_url and 'backend_url' not in kwargs:
-        kwargs['backend_url'] = backend_url
-    if api_key and 'api_key' not in kwargs:
-        kwargs['api_key'] = api_key
-
     # Remember where this session writes its logs so clean_logs() can
     # default to it later, and guard against wiping an active session.
     global _session_active, _last_log_path, _last_app_name
     _last_app_name = kwargs.get('app_name', args[0] if args else None)
     _last_log_path = kwargs.get('log_path', args[1] if len(args) > 1 else None)
-
-    # ── remote_upload deprecation shim ──────────────────────────────────
-    #
-    # The kwarg used to attach a live HttpLogSink that streamed every
-    # NDJSON event to the backend during the workload. That sink is
-    # gone. For backward compat we still accept the kwarg, but route
-    # it to the deferred path: register an `atexit` handler that calls
-    # upload_logs() at interpreter exit. Customer code keeps working
-    # unchanged.
-    #
-    # Why atexit (not "call upload_logs from the shutdown wrapper") -
-    # many existing customers don't call gpufl.shutdown() explicitly
-    # and rely on the interpreter exiting to flush everything. Hooking
-    # atexit preserves that pattern. For callers that DO call shutdown()
-    # explicitly, the atexit fires after shutdown() returns - still
-    # correct, just a small delay.
-    #
-    # Removed in v1.2. New code should use `gpufl.session()` or call
-    # `gpufl.upload_logs()` explicitly.
-    if remote_upload:
-        import warnings
-        warnings.warn(
-            "remote_upload=True is deprecated. Live HTTP streaming "
-            "was removed in v1.1 - upload now happens after the "
-            "session ends. For automated upload, use "
-            "`with gpufl.session(backend_url=..., api_key=...):`. "
-            "Your existing code keeps working - gpufl scheduled an "
-            "atexit handler that calls upload_logs() at interpreter "
-            "shutdown. The remote_upload kwarg, plus backend_url and "
-            "api_key on InitOptions, will be removed in v1.2.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        # Forward to C++ so the C++ side also logs a deprecation
-        # warning (helps pure-C++ callers who hit this via the
-        # ergonomic env-var path).
-        kwargs['remote_upload'] = True
-
-        # Capture creds + log_path NOW. _last_log_path may be reassigned
-        # by a later init() call before the interpreter exits; closing
-        # over current values protects this session's atexit upload.
-        _deferred_url      = backend_url
-        _deferred_key      = api_key
-        _deferred_log_path = (kwargs.get('log_path')
-                              or (args[1] if len(args) > 1 else None)
-                              or _last_log_path)
-        _deferred_api_path = kwargs.get('api_path', '')
-
-        def _atexit_upload():
-            if not _deferred_log_path or not _deferred_url or not _deferred_key:
-                return
-            try:
-                upload_logs(
-                    log_path=_deferred_log_path,
-                    backend_url=_deferred_url,
-                    api_key=_deferred_key,
-                    api_path=_deferred_api_path,
-                )
-            except Exception as e:
-                # atexit handlers must not raise - Python prints a
-                # traceback otherwise, which is confusing for users
-                # who didn't know upload was happening. Log + swallow.
-                print(f"[gpufl] atexit upload_logs failed: {e}",
-                      file=sys.stderr)
-
-        import atexit
-        atexit.register(_atexit_upload)
 
     result = _original_init(*args, **kwargs)
     if result:
@@ -829,11 +722,13 @@ def session(*args, **kwargs):
     """
     # Capture credentials for the post-shutdown upload BEFORE init()
     # mutates kwargs (it pops some of them while resolving env fallbacks).
-    upload_backend_url = (kwargs.get('backend_url')
+    # Pop (not get) the upload creds: they belong to the upload step, and
+    # init() rejects backend_url / api_key / api_path now.
+    upload_backend_url = (kwargs.pop('backend_url', None)
                           or os.environ.get('GPUFL_BACKEND_URL', ''))
-    upload_api_key    = (kwargs.get('api_key')
+    upload_api_key    = (kwargs.pop('api_key', None)
                           or os.environ.get('GPUFL_API_KEY', ''))
-    upload_api_path   = kwargs.get('api_path', '')
+    upload_api_path   = kwargs.pop('api_path', '')
 
     result = init(*args, **kwargs)
     try:

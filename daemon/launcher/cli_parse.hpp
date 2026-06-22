@@ -14,9 +14,10 @@ struct TraceArgs {
     std::string name;                   // --name / -n; default: basename of cmd[0]
     std::string output_dir;             // --output / -o; default: ~/.gpufl/traces/{ts}_{sid}
     // --passes: explicit capture plan: a comma-separated list of engines, one
-    // isolated pass each (e.g. "Trace,PcSampling,SassMetrics"). "--passes=Deep"
-    // is a shorthand for the default deep plan. Empty here means "no explicit
-    // plan"; the launcher runs a single Trace pass.
+    // isolated pass each (e.g. "Trace,PcSampling,SassMetrics"). "Deep" is just
+    // the Deep engine (PcSampling + SassMetrics in one pass), like any other
+    // token. Empty here means "no explicit plan"; the launcher runs a single
+    // Trace pass.
     std::vector<std::string> passes;
     bool verbose = false;               // -v
     bool quiet = false;                 // -q
@@ -102,13 +103,11 @@ TraceParseResult parseTraceArgs(const std::vector<std::string>& argv);
 
 // Resolves the ordered capture plan (one isolated CUPTI engine per pass) from
 // parsed trace args. Precedence:
-//   1. --passes=Deep        -> the default deep plan
-//                             [Trace, PcSampling, SassMetrics];
-//   2. explicit --passes    -> the listed engines, one pass each;
-//   3. otherwise            -> a single Trace pass.
+//   1. explicit --passes    -> the listed engines, one pass each (Deep is the
+//                             Deep engine, not an expansion);
+//   2. otherwise            -> a single Trace pass.
 // A returned size() > 1 is a multi-pass run (the launcher assigns one
-// analysis_id and labels each pass). This is the single source of truth for
-// the default deep plan, shared by the Linux and Windows launchers.
+// analysis_id and labels each pass), shared by the Linux and Windows launchers.
 std::vector<std::string> resolvePassPlan(const TraceArgs& args);
 
 // Parses the args passed to `gpufl upload`. On success returns the

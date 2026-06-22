@@ -571,16 +571,16 @@ struct KernelPerfMetricEvent {
 };
 
 /**
- * NVTX range captured via CUPTI_ACTIVITY_KIND_MARKER. Sources include:
- *   - GFL_SCOPE (which auto-emits nvtxRangePushA/Pop as of the PyTorch
- *     integration work)
+ * NVTX-style named range, captured via CUPTI_ACTIVITY_KIND_MARKER (or
+ * gpufl's NVTX injection under `gpufl trace`). Sources include:
  *   - PyTorch's automatic NVTX annotations (via torch.cuda.nvtx or our
  *     gpufl.torch.TorchDispatchMode wrapping)
  *   - cuDNN / cuBLAS / NCCL / TensorRT which emit NVTX internally
  *   - User-emitted nvtxRangePush / nvtxMarkA calls
  *
- * Paired START/END records from CUPTI are merged in the client before
- * emitting; one NvtxMarkerEvent per completed range.
+ * gpufl's own scopes are NOT emitted here - they are recorded as
+ * scope_event only. Paired START/END records from CUPTI are merged in the
+ * client before emitting; one NvtxMarkerEvent per completed range.
  */
 struct NvtxMarkerEvent {
     int pid = 0;

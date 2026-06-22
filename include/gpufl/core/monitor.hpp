@@ -144,9 +144,8 @@ struct MonitorOptions {
     // CuptiBackend::start() - flag false means we never call
     // cuptiActivityEnable for the kind, so zero overhead.
     bool enable_synchronization = true;
-    // Gate for CUPTI_ACTIVITY_KIND_MEMORY2. Mirror of
-    // InitOptions::enable_memory_tracking. Default-off in v1.
-    bool enable_memory_tracking = false;
+    // Gate for CUPTI_ACTIVITY_KIND_MEMORY2.
+    bool enable_memory_tracking = true;
     // Gate for CUPTI_ACTIVITY_KIND_GRAPH_TRACE. Mirror of
     // InitOptions::enable_cuda_graphs_tracking. Default-off in v1.
     bool enable_cuda_graphs_tracking = false;

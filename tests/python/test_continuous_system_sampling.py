@@ -162,31 +162,28 @@ def test_continuous_false_with_scope_samples_during_scope(tmp_path):
     )
 
 
-def test_sampling_auto_start_kwarg_deprecation_warning(tmp_path):
-    """Old kwarg `sampling_auto_start` still works for one release, with
-    a DeprecationWarning. Removed in the next major.
-    """
-    app = f"test_deprecated_kwarg_{int(time.time_ns())}"
+def test_sampling_auto_start_kwarg_removed(tmp_path):
+    """The old `sampling_auto_start` kwarg was removed in v1.2 - passing it
+    raises a TypeError pointing at the new name (no silent shim)."""
+    app = f"test_removed_kwarg_{int(time.time_ns())}"
     log_prefix = str(tmp_path / app)
-    with pytest.warns(DeprecationWarning, match="continuous_system_sampling"):
-        ok = gpufl.init(
-            app_name=app,
-            log_path=log_prefix,
-            sampling_auto_start=False,  # deprecated name
-            system_sample_rate_ms=SAMPLE_INTERVAL_MS,
-        )
-    if ok:
-        gpufl.shutdown()
-
-
-def test_sampling_auto_start_and_new_name_together_raises(tmp_path):
-    """Passing both old and new kwargs is an error - not a silent winner."""
-    app = f"test_dup_kwarg_{int(time.time_ns())}"
-    log_prefix = str(tmp_path / app)
-    with pytest.raises(TypeError, match="pass only the new name"):
+    with pytest.raises(TypeError, match="continuous_system_sampling"):
         gpufl.init(
             app_name=app,
             log_path=log_prefix,
-            sampling_auto_start=True,
-            continuous_system_sampling=True,
+            sampling_auto_start=False,  # removed in v1.2
+            system_sample_rate_ms=SAMPLE_INTERVAL_MS,
+        )
+
+
+def test_remote_upload_kwarg_removed(tmp_path):
+    """`remote_upload` was removed in v1.2 - passing it raises a TypeError
+    directing the caller to gpufl.session() / gpufl.upload_logs()."""
+    app = f"test_removed_remote_upload_{int(time.time_ns())}"
+    log_prefix = str(tmp_path / app)
+    with pytest.raises(TypeError, match="remote_upload"):
+        gpufl.init(
+            app_name=app,
+            log_path=log_prefix,
+            remote_upload=True,  # removed in v1.2
         )

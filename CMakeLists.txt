@@ -10,7 +10,7 @@ project(gpufl_client
 # pre-release tokens (`rc1`, `a1`, `b1`, …) aren't valid in CMake's
 # `project(... VERSION ...)`, so we layer them on top here. Final releases
 # leave this empty.
-set(GPUFL_VERSION_SUFFIX "rc1")
+set(GPUFL_VERSION_SUFFIX "")
 
 # -----------------------
 # CUDA Architectures (CI Friendly)

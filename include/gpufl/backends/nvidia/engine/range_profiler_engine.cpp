@@ -128,7 +128,7 @@ void RangeProfilerEngine::onPerfScopeStart(const char* name) {
     if (mode_ != Mode::Scope) return;
     attempted_.store(true, std::memory_order_relaxed);
     GFL_LOG_DEBUG("[RangeProfilerEngine] onPerfScopeStart name=",
-                  (name ? name : "(null)"), " active=", perf_session_active_);
+                  name ? name : "(null)", " active=", perf_session_active_);
     if (!perf_session_active_) {
         if (!InitPerfworksSession_(true)) return;
     }

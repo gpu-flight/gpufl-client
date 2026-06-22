@@ -209,9 +209,8 @@ void shutdownAndSignal() {
         gpufl::shutdown();
         GFL_LOG_DEBUG("inject: gpufl::shutdown() returned");
 
-        // --upload: ship the just-written NDJSON to the backend. This is
-        // the forward path (gpufl::uploadLogs), not the deprecated
-        // opts.remote_upload shim. All network I/O happens here, after
+        // --upload: ship the just-written NDJSON to the backend via
+        // gpufl::uploadLogs. All network I/O happens here, after
         // shutdown() flushed the logs and the GPU workload is done, so it
         // can never affect the target's exit code or perf. Best-effort:
         // any failure is reported via gpufl's own debug log, never raised.
