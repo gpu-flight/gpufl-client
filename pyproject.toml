@@ -1,5 +1,8 @@
 [build-system]
-requires = ["scikit-build-core", "pybind11", "cmake", "ninja"]
+requires = [
+    "scikit-build-core",
+    "pybind11",
+]
 build-backend = "scikit_build_core.build"
 
 [project]
@@ -82,10 +85,14 @@ all = [
 ]
 
 [tool.scikit-build]
+# CMake 4.3.x currently fails CUDA compiler-id probing in pip's
+# temporary Visual Studio build tree on Windows. 3.31.6 is available
+# from PyPI and has been locally verified with CUDA 13.3 + VS 2022.
+cmake.version = "==3.31.6"
 cmake.args = ["-DCMAKE_BUILD_TYPE=Release", "--log-level=STATUS"]
 cmake.define = { BUILD_PYTHON = "ON", BUILD_GPUFL_EXAMPLE = "OFF", BUILD_TESTING = "OFF", PYBIND11_FINDPYTHON = "ON" }
 cmake.build-type = "Release"
-cmake.verbose = true
+build.verbose = true
 logging.level = "INFO"
 ninja.make-fallback = true
 wheel.packages = ["python/gpufl"]
@@ -110,5 +117,5 @@ dnf install -y --nogpgcheck cuda-nvcc-13-1 cuda-cudart-devel-13-1 cuda-cupti-13-
 environment = { CMAKE_ARGS="-DGPUFL_ENABLE_NVIDIA=ON -DGPUFL_ENABLE_AMD=OFF -DBUILD_PYTHON=ON", CUDA_HOME="/usr/local/cuda", PATH="/usr/local/cuda/bin:${PATH}" }
 
 [tool.cibuildwheel.windows]
-before-build = "pip install scikit-build-core pybind11 cmake ninja"
-environment = { CMAKE_ARGS="-DGPUFL_ENABLE_NVIDIA=ON -DGPUFL_ENABLE_AMD=OFF -DBUILD_PYTHON=ON" }
+before-build = "pip install scikit-build-core pybind11 cmake==3.31.6 ninja"
+environment = { CMAKE_ARGS="-DGPUFL_ENABLE_NVIDIA=ON -DGPUFL_ENABLE_AMD=OFF -DBUILD_PYTHON=ON", CMAKE_GENERATOR="Visual Studio 17 2022", CMAKE_GENERATOR_PLATFORM="x64" }

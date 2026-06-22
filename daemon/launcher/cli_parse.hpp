@@ -26,7 +26,7 @@ struct TraceArgs {
     std::string api_version = "v1";     // --api-version
     std::string agent_jar;              // --agent-jar; else GPUFL_AGENT_JAR
     std::string agent_cursor;           // --agent-cursor; default <output>/cursor.json
-    std::string log_types = "device,scope,system"; // --log-types
+    std::string log_types = "device,scope,system,sass"; // --log-types (sass carries cubin disassembly + source artifacts)
     int agent_drain_ms = 60000;         // --agent-drain-ms: cap on waiting for the agent to finish uploading
     // Bounded window profiling (`gpufl trace` only): bound a capture of a
     // long-running target that never exits on its own. warmup defers the

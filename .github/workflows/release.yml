@@ -154,6 +154,8 @@ jobs:
           # installs choco's openssl package into this path.
           CIBW_ENVIRONMENT_WINDOWS: >-
             OPENSSL_ROOT_DIR="C:/Program Files/OpenSSL-Win64"
+            CMAKE_GENERATOR="Visual Studio 17 2022"
+            CMAKE_GENERATOR_PLATFORM="x64"
             CMAKE_ARGS="-DGPUFL_ENABLE_NVIDIA=ON -DGPUFL_ENABLE_AMD=OFF -DBUILD_TESTING=OFF"
           # cuda-nvml-devel-13-1 ships the libnvidia-ml.so stub under
           # targets/x86_64-linux/lib/stubs/ - without it CMake's NVML probe

@@ -272,19 +272,43 @@ bool appendLineToGzipLog(const fs::path& gz_path, const std::string& line) {
     return true;
 }
 
+// Highest existing system.<k>.log[.gz] window index under session_dir (0 if none).
+int highestSystemWindowIndex(const fs::path& session_dir) {
+    int max_idx = 0;
+    std::error_code ec;
+    for (const auto& entry : fs::directory_iterator(session_dir, ec)) {
+        if (ec) break;
+        if (!entry.is_regular_file(ec)) continue;
+        std::string name = entry.path().filename().string();
+        if (name.size() > 3 && name.compare(name.size() - 3, 3, ".gz") == 0) {
+            name.resize(name.size() - 3);
+        }
+        if (name.size() <= 4 || name.compare(name.size() - 4, 4, ".log") != 0) continue;
+        name.resize(name.size() - 4);                  // "system" or "system.<k>"
+        if (name.rfind("system.", 0) != 0) continue;   // skip the non-indexed "system"
+        const std::string suffix = name.substr(std::string("system.").size());
+        if (suffix.empty() ||
+            !std::all_of(suffix.begin(), suffix.end(),
+                         [](unsigned char c) { return std::isdigit(c); })) {
+            continue;
+        }
+        try { max_idx = std::max(max_idx, std::stoi(suffix)); } catch (...) {}
+    }
+    return max_idx;
+}
+
 bool appendSyntheticShutdown(const fs::path& session_dir,
                              const std::string& session_id,
                              const SessionLifecycleInfo& info,
                              const SyntheticShutdownContext& context) {
     const std::string line = syntheticShutdownLine(session_id, info, context);
-    const fs::path system_gz = session_dir / "system.log.gz";
-    const fs::path system_log = session_dir / "system.log";
-
+    const std::string base = "system." + std::to_string(highestSystemWindowIndex(session_dir) + 1) + ".log";
+    const fs::path window_gz = session_dir / (base + ".gz");
     std::error_code ec;
-    if (fs::exists(system_gz, ec)) {
-        return appendLineToGzipLog(system_gz, line);
+    if (fs::exists(window_gz, ec)) {
+        return appendLineToGzipLog(window_gz, line);
     }
-    return appendLine(system_log, line);
+    return appendLine(session_dir / base, line);
 }
 
 bool isSystemLog(const fs::path& path) {
