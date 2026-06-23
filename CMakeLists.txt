@@ -246,6 +246,11 @@ if(GPUFL_ENABLE_NVIDIA)
     if(CMAKE_CUDA_COMPILER)
         enable_language(CUDA)
         find_package(CUDAToolkit QUIET)
+        # gpufl targets CUDA 13.x only; CUDA 11.x/12.x are not supported.
+        if(CUDAToolkit_FOUND AND CUDAToolkit_VERSION VERSION_LESS 13)
+            message(FATAL_ERROR
+                "gpufl requires CUDA 13.x or newer; found ${CUDAToolkit_VERSION}.")
+        endif()
         if(CUDAToolkit_FOUND)
             set(GPUFL_HAS_CUDA 1)
             target_sources(gpufl PRIVATE
@@ -299,25 +304,10 @@ if(GPUFL_ENABLE_NVIDIA)
             # visible to Nsight Systems and captured via CUPTI marker
             # activity, plus lets the PyTorch integration (gpufl.torch)
             # bridge dispatch events into the profiling pipeline.
-            # Shipped with the CUDA toolkit; no new external dependency.
             # --------------------------------------------------------
-            # NVTX detection strategy (robust across CUDA 11/12/13):
-            #   1. CUDA 11/12: `CUDA::nvToolsExt` imported target exists and
-            #      links the legacy nvToolsExt DLL/SO. Use it.
-            #   2. CUDA 13+: NVTX is header-only under `include/nvtx3/`.
-            #      The CUDAToolkit include dir is propagated via CUDA::cudart
-            #      (already linked above), so the header is findable - just
-            #      define GPUFL_HAS_NVTX=1 and let `#include <nvtx3/nvToolsExt.h>`
-            #      resolve through cudart's transitive include.
-            #   3. Fallback find_path as a last resort for unusual layouts.
-            # CUDA 11/12 ship the legacy nvToolsExt import lib; link it when
-            # present so the NVTX producer impl resolves at runtime.
-            if (TARGET CUDA::nvToolsExt)
-                target_link_libraries(gpufl PRIVATE CUDA::nvToolsExt)
-                message(STATUS "Found NVTX via CUDAToolkit target (CUDA::nvToolsExt)")
-            endif()
-            # Locate a usable <nvtx3/nvToolsExt.h>. CUDA 13 slim toolkits no
-            # longer ship the NVTX C headers, so vendor the header-only NVTX3
+            # NVTX is header-only (nvtx3/) on CUDA 13. Full toolkits (e.g.
+            # Windows) ship it under the toolkit include; the slim Linux
+            # manylinux CUDA image does not, so vendor the header-only NVTX3
             # distribution as the fallback. NVTX3_INCLUDE_DIR is reused by the
             # gpufl_inject target below, whose hard #include needs the header.
             unset(NVTX3_INCLUDE_DIR CACHE)
