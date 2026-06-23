@@ -32,7 +32,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-22.04, windows-latest]
+        # Pin windows-2022 (VS 2022): windows-latest moved to VS 2026 (Jun
+        # 2026), whose MSVC toolset CUDA 13.x nvcc doesn't support.
+        os: [ubuntu-22.04, windows-2022]
         python-version: ["3.12", "3.13"]
 
     env:
