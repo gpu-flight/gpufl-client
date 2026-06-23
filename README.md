@@ -8,10 +8,12 @@ The goal is to make GPU profiling lighter and more continuous, closer to observa
 
 Built on CUPTI for NVIDIA GPUs and rocprofiler-sdk for AMD GPUs, GPUFlight is designed for always-on monitoring with low overhead in monitoring mode.
 
-## Project Status: 1.2.0
+## Project Status: 1.2.1
 
 GPUFlight is published to PyPI; the current release is
-`v1.2.0`. **New in 1.2.0** - injection-mode `gpufl trace` (profile any
+`v1.2.1`. **New in 1.2.1** - Windows `gpufl trace` now captures real kernel
+details (timing / occupancy / registers) on short runs, and no longer hangs at
+shutdown. **In 1.2.0** - injection-mode `gpufl trace` (profile any
 process, no code changes), multi-pass capture, and Windows support.
 **Breaking** - the v1.1 deprecation shims are removed: `remote_upload`
 (and `GPUFL_REMOTE_UPLOAD`), the old `sampling_auto_start` kwarg, and
