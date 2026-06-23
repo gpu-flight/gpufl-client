@@ -11,6 +11,15 @@
 
 namespace gpufl {
 
+namespace {
+// See SetSmPropsTeardownSafe: when true on this thread, GetSMProps must not call
+// cudart - we're inside a context-destroy flush and re-entering cudart while the
+// driver holds the teardown lock deadlocks.
+thread_local bool t_smprops_teardown_safe = false;
+}  // namespace
+
+void SetSmPropsTeardownSafe(bool enabled) { t_smprops_teardown_safe = enabled; }
+
 SmProps GetSMProps(int deviceId) {
     // Process-lifetime caches avoid teardown-order races with CUPTI/injection
     // shutdown paths that can still query device properties during atexit.
@@ -18,27 +27,33 @@ SmProps GetSMProps(int deviceId) {
     static auto* cache = new std::unordered_map<int, SmProps>;
 
     std::lock_guard lock(*mu);
-    if (cache->find(deviceId) == cache->end()) {
-        cudaDeviceProp prop{};
-        SmProps props{};
-        if (cudaGetDeviceProperties(&prop, deviceId) == cudaSuccess) {
-            props.maxThreadsPerSM = prop.maxThreadsPerMultiProcessor;
-            props.warpSize = prop.warpSize;
-            props.regsPerSM = prop.regsPerMultiprocessor;
-            props.sharedMemPerSM =
-                static_cast<int>(prop.sharedMemPerMultiprocessor);
-            props.maxBlocksPerSM = prop.maxBlocksPerMultiProcessor;
-        } else {
-            // Fallback for modern architectures (Ampere/Hopper)
-            props.maxThreadsPerSM = 2048;
-            props.warpSize = 32;
-            props.regsPerSM = 65536;
-            props.sharedMemPerSM = 49152;
-            props.maxBlocksPerSM = 32;
-        }
-        (*cache)[deviceId] = props;
+    if (const auto it = cache->find(deviceId); it != cache->end()) {
+        return it->second;
     }
-    return (*cache)[deviceId];
+
+    SmProps props{};
+    cudaDeviceProp prop{};
+    if (!t_smprops_teardown_safe &&
+        cudaGetDeviceProperties(&prop, deviceId) == cudaSuccess) {
+        props.maxThreadsPerSM = prop.maxThreadsPerMultiProcessor;
+        props.warpSize = prop.warpSize;
+        props.regsPerSM = prop.regsPerMultiprocessor;
+        props.sharedMemPerSM =
+            static_cast<int>(prop.sharedMemPerMultiprocessor);
+        props.maxBlocksPerSM = prop.maxBlocksPerMultiProcessor;
+    } else {
+        // Fallback for modern architectures (Ampere/Hopper/Blackwell).
+        props.maxThreadsPerSM = 2048;
+        props.warpSize = 32;
+        props.regsPerSM = 65536;
+        props.sharedMemPerSM = 49152;
+        props.maxBlocksPerSM = 32;
+        // Mid-teardown: return the fallback WITHOUT caching, so a later safe
+        // call can still populate the real props for this device.
+        if (t_smprops_teardown_safe) return props;
+    }
+    (*cache)[deviceId] = props;
+    return props;
 }
 
 int GetMaxThreadsPerSM(const int deviceId) {

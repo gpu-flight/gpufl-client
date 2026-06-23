@@ -20,6 +20,17 @@ struct SmProps {
 SmProps GetSMProps(int deviceId);
 
 /**
+ * Teardown-safety switch for GetSMProps() on the current thread. When enabled,
+ * a GetSMProps() cache miss returns fallback values WITHOUT calling
+ * cudaGetDeviceProperties() (and without caching them). CuptiBackend::
+ * FlushOnContextDestroy sets this around its synchronous activity flush so the
+ * kernel-activity handler can't re-enter cudart while the driver holds the
+ * context-teardown lock - that re-entry is a hard deadlock. Thread-local:
+ * cuptiActivityFlushAll drives BufferCompleted on the same calling thread.
+ */
+void SetSmPropsTeardownSafe(bool enabled);
+
+/**
  * CUDA compute capability (e.g. {8, 6} for Ampere RTX 3090, {12, 0} for
  * Blackwell RTX 5060). Used to gate profiling features that have very
  * different overhead characteristics across GPU generations.

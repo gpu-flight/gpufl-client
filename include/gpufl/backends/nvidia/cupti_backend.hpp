@@ -156,6 +156,12 @@ class CuptiBackend : public IMonitorBackend {
     // post-join drain (see monitor.cpp). Invoked synchronously by ResourceHandler.
     void FlushOnContextDestroy();
 
+    // Drain CUPTI activity from a synchronize API_EXIT (kernels done, context
+    // alive). On Windows injection the at-exit flush is skipped and the
+    // context-destroy callback is unreliable, so without this a short run's
+    // kernels are never drained and fall back to synthetic rows. Throttled.
+    void FlushActivityNow();
+
     CUpti_SubscriberHandle GetSubscriber() const { return subscriber_; }
 
     void EmitCaptureCapabilities_() const;
