@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.31)
 
 project(gpufl_client
-    VERSION 1.2.0
+    VERSION 1.2.1
     LANGUAGES CXX
     DESCRIPTION "Header-only GPU monitoring client library"
 )

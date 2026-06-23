@@ -5,6 +5,25 @@ inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows PEP 440 for the Python wheel and semver-style
 `MAJOR.MINOR.PATCH` for the C++ library.
 
+## [1.2.1] - 2026-06-23
+
+Headline: **Windows `gpufl trace` now captures real kernel details** — kernel
+timing, occupancy, and register counts on short runs (previously synthetic
+rows with zeros), and no shutdown hang.
+
+### Fixed
+
+- **Real kernel details on Windows injection.** On short runs the CUPTI activity
+  buffers were never flushed before the target exited, so kernels fell back to
+  synthetic rows with zero occupancy / registers / GPU duration. gpufl now drains
+  activity on a `cudaStreamSynchronize` / `cudaDeviceSynchronize` (kernels done,
+  context still alive), so real kernel timing, occupancy, and register counts are
+  captured.
+- **Shutdown hang on context destroy (Windows injection).** The kernel-occupancy
+  path could re-enter cudart (`cudaGetDeviceProperties`) while the driver held the
+  context-teardown lock, deadlocking at exit. The SM-properties cache is now warmed
+  on the first kernel launch and made teardown-safe.
+
 ## [1.2.0] - 2026-06-21
 
 Headline: **injection-mode profiling** — a native `gpufl` launcher that
