@@ -246,6 +246,11 @@ if(GPUFL_ENABLE_NVIDIA)
     if(CMAKE_CUDA_COMPILER)
         enable_language(CUDA)
         find_package(CUDAToolkit QUIET)
+        # gpufl targets CUDA 13.x only; CUDA 11.x/12.x are not supported.
+        if(CUDAToolkit_FOUND AND CUDAToolkit_VERSION VERSION_LESS 13)
+            message(FATAL_ERROR
+                "gpufl requires CUDA 13.x or newer; found ${CUDAToolkit_VERSION}.")
+        endif()
         if(CUDAToolkit_FOUND)
             set(GPUFL_HAS_CUDA 1)
             target_sources(gpufl PRIVATE
@@ -299,42 +304,43 @@ if(GPUFL_ENABLE_NVIDIA)
             # visible to Nsight Systems and captured via CUPTI marker
             # activity, plus lets the PyTorch integration (gpufl.torch)
             # bridge dispatch events into the profiling pipeline.
-            # Shipped with the CUDA toolkit; no new external dependency.
             # --------------------------------------------------------
-            # NVTX detection strategy (robust across CUDA 11/12/13):
-            #   1. CUDA 11/12: `CUDA::nvToolsExt` imported target exists and
-            #      links the legacy nvToolsExt DLL/SO. Use it.
-            #   2. CUDA 13+: NVTX is header-only under `include/nvtx3/`.
-            #      The CUDAToolkit include dir is propagated via CUDA::cudart
-            #      (already linked above), so the header is findable - just
-            #      define GPUFL_HAS_NVTX=1 and let `#include <nvtx3/nvToolsExt.h>`
-            #      resolve through cudart's transitive include.
-            #   3. Fallback find_path as a last resort for unusual layouts.
-            if (TARGET CUDA::nvToolsExt)
-                target_link_libraries(gpufl PRIVATE CUDA::nvToolsExt)
-                target_compile_definitions(gpufl PRIVATE GPUFL_HAS_NVTX=1)
-                message(STATUS "Found NVTX via CUDAToolkit target (CUDA::nvToolsExt)")
+            # NVTX is header-only (nvtx3/) on CUDA 13. Full toolkits (e.g.
+            # Windows) ship it under the toolkit include; the slim Linux
+            # manylinux CUDA image does not, so vendor the header-only NVTX3
+            # distribution as the fallback. NVTX3_INCLUDE_DIR is reused by the
+            # gpufl_inject target below, whose hard #include needs the header.
+            unset(NVTX3_INCLUDE_DIR CACHE)
+            find_path(NVTX3_INCLUDE_DIR NAMES nvtx3/nvToolsExt.h
+                HINTS "${CUDAToolkit_INCLUDE_DIRS}"
+                      "${CUDAToolkit_ROOT}/include"
+                      "$ENV{CUDA_PATH}/include"
+                NO_DEFAULT_PATH
+            )
+            if(NVTX3_INCLUDE_DIR)
+                message(STATUS "Found NVTX headers at ${NVTX3_INCLUDE_DIR}")
             else()
-                # Force-fresh the search (don't reuse cached NOTFOUND from a prior configure)
-                unset(NVTX3_INCLUDE_DIR CACHE)
-                find_path(NVTX3_INCLUDE_DIR NAMES nvtx3/nvToolsExt.h
-                    HINTS "${CUDAToolkit_INCLUDE_DIRS}"
-                          "${CUDAToolkit_ROOT}/include"
-                          "$ENV{CUDA_PATH}/include"
-                    NO_DEFAULT_PATH
-                )
-                if(NVTX3_INCLUDE_DIR)
-                    target_include_directories(gpufl PRIVATE ${NVTX3_INCLUDE_DIR})
-                    target_compile_definitions(gpufl PRIVATE GPUFL_HAS_NVTX=1)
-                    message(STATUS "Found NVTX headers at ${NVTX3_INCLUDE_DIR}")
-                else()
-                    # Last-resort: if CUDAToolkit is present at all, the header
-                    # is in its include dir via CUDA::cudart's transitive
-                    # propagation. Just define the macro; include will resolve.
-                    target_compile_definitions(gpufl PRIVATE GPUFL_HAS_NVTX=1)
-                    message(STATUS "NVTX: relying on CUDA::cudart transitive include for <nvtx3/nvToolsExt.h>")
+                include(FetchContent)
+                FetchContent_Declare(nvtx
+                    GIT_REPOSITORY https://github.com/NVIDIA/NVTX.git
+                    GIT_TAG        v3.5.0
+                    GIT_SHALLOW    TRUE)
+                # Header-only: download without running NVTX's own CMake. CMP0169
+                # (CMake>=3.30) deprecates bare FetchContent_Populate; OLD keeps
+                # the download-only form usable.
+                if(POLICY CMP0169)
+                    cmake_policy(SET CMP0169 OLD)
                 endif()
+                FetchContent_GetProperties(nvtx)
+                if(NOT nvtx_POPULATED)
+                    FetchContent_Populate(nvtx)
+                endif()
+                set(NVTX3_INCLUDE_DIR "${nvtx_SOURCE_DIR}/c/include"
+                    CACHE PATH "Vendored NVTX3 headers" FORCE)
+                message(STATUS "Vendored NVTX3 headers (v3.5.0) at ${NVTX3_INCLUDE_DIR}")
             endif()
+            target_include_directories(gpufl PRIVATE ${NVTX3_INCLUDE_DIR})
+            target_compile_definitions(gpufl PRIVATE GPUFL_HAS_NVTX=1)
 
             # --------------------------------------------------------
             # NVPERF Support (for GFL_PERF_SCOPE hardware counters)
