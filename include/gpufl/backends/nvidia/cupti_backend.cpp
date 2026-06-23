@@ -1919,10 +1919,33 @@ void CuptiBackend::FlushOnContextDestroy() {
     GFL_LOG_DEBUG(
         "CuptiBackend::FlushOnContextDestroy: flushing activity before context "
         "teardown (context still alive)");
+    // GetSMProps (the occupancy calc in the kernel-activity handler) must not
+    // call cudaGetDeviceProperties while we flush here: the drained kernel
+    // records are processed on THIS thread, and re-entering cudart against the
+    // dying context deadlocks. Warm cache hits are fine; cold misses fall back.
+    SetSmPropsTeardownSafe(true);
     LogCuptiIfUnexpected("ContextDestroy", "cuptiActivityFlushAll",
                          cuptiActivityFlushAll(1));
+    SetSmPropsTeardownSafe(false);
 
     context_destroy_flushing_.store(false, std::memory_order_release);
+}
+
+void CuptiBackend::FlushActivityNow() {
+    if (!initialized_ || !active_.load(std::memory_order_relaxed)) return;
+    // Only the Windows-injection Trace case needs this (same gate as the
+    // periodic flush thread): elsewhere the at-exit flush already drains.
+    if (engine_ || !collectsKernelEvents() || !WindowsInjectedProcess()) return;
+    // Throttle: a sync-heavy app must not force-flush on every synchronize.
+    static std::atomic<int64_t> last_ns{0};
+    const int64_t now = detail::GetTimestampNs();
+    int64_t last = last_ns.load(std::memory_order_relaxed);
+    if (now - last < 50'000'000) return;  // 50 ms
+    if (!last_ns.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
+        return;  // another synchronize raced us; it will flush
+    }
+    LogCuptiIfUnexpected("sync-flush", "cuptiActivityFlushAll",
+                         cuptiActivityFlushAll(CUPTI_ACTIVITY_FLAG_FLUSH_FORCED));
 }
 
 // ---- Static callbacks ------------------------------------------------------

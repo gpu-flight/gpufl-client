@@ -138,6 +138,13 @@ void SynchronizationHandler::handle(CUpti_CallbackDomain /*domain*/,
         GFL_LOG_DEBUG("[SynchronizationHandler] API_ENTER corr=",
                       cbInfo->correlationId, " stack_id=", metaRec.stack_id,
                       " cbid=", cbid);
+    } else if (cbInfo->callbackSite == CUPTI_API_EXIT) {
+        // The sync just completed - kernels are done and the context is alive.
+        // Drain CUPTI activity now so the real kernel records (occupancy /
+        // registers / GPU duration) are captured before exit, instead of
+        // falling back to synthetic rows on short Windows-injection runs.
+        // No-op / throttled unless that case (see CuptiBackend::FlushActivityNow).
+        backend_->FlushActivityNow();
     }
     // Unlike kernels we don't need an API_EXIT recorder - sync wall time is
     // measured by CUPTI directly on the SYNCHRONIZATION activity record

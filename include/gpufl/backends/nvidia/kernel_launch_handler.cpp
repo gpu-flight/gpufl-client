@@ -269,6 +269,17 @@ void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,
 
     if (cbInfo->callbackSite == CUPTI_API_ENTER) {
         backend_->NoteKernelLaunchForCleanupFlush();
+        // Warm the SM-properties cache once, here on the launch callback - a
+        // safe, context-alive point that reliably runs before any context-
+        // destroy flush. Without this, the first GetSMProps for a short run
+        // happens inside FlushOnContextDestroy, where cudaGetDeviceProperties
+        // re-enters cudart mid-teardown and deadlocks. (Synthetic-kernel modes
+        // already call GetSMProps on this callback.)
+        static std::atomic g_smprops_warmed{false};
+        if (!g_smprops_warmed.load(std::memory_order_acquire)) {
+            GetSMProps(static_cast<int>(backend_->device_id_));
+            g_smprops_warmed.store(true, std::memory_order_release);
+        }
         // PC sampling collects on this beat (internally throttled; no-op for
         // other engines) - the app thread at launch ENTER is context-current
         // and, in KERNEL_SERIALIZED mode, all prior kernels have completed.
