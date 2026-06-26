@@ -87,6 +87,21 @@ std::string makeAnalysisId() {
     return buf;
 }
 
+// Filesystem-safe slug for a run-folder name: keep [A-Za-z0-9-_.], turn anything else into '-',
+// trim leading/trailing dashes, cap length. Empty input falls back to "session".
+std::string slugForPath(const std::string& in) {
+    auto safe = [](const char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+               (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.';
+    };
+    std::string out;
+    for (const char c : in) out.push_back(safe(c) ? c : '-');
+    while (!out.empty() && out.front() == '-') out.erase(out.begin());
+    while (!out.empty() && out.back() == '-') out.pop_back();
+    if (out.size() > 48) out.resize(48);
+    return out.empty() ? std::string("session") : out;
+}
+
 int64_t nowNs() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
@@ -485,9 +500,18 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
     const std::string analysis_id = multipass ? makeAnalysisId() : std::string();
     const std::string dir_tag = multipass ? analysis_id : makeSessionId();
 
+    const std::string app_name = args.name.empty()
+                               ? platform.defaultAppName(args.command.front())
+                               : args.name;
+
+    // Each `gpufl trace` run gets its OWN folder so the upload agent picks up ONLY this run's
+    // session(s), not old sessions left over in a reused --output dir. The default output dir is
+    // already per-run (defaultOutputDir(dir_tag)); an explicit --output is a dir the user reuses
+    // across runs, so nest this run under a readable, unique "run-<name>-<id>" folder inside it.
+    const std::string run_folder = "run-" + slugForPath(app_name) + "-" + dir_tag.substr(0, 8);
     const fs::path output_dir = args.output_dir.empty()
                               ? platform.defaultOutputDir(dir_tag)
-                              : fs::path(args.output_dir);
+                              : fs::path(args.output_dir) / run_folder;
 
     std::error_code ec;
     fs::create_directories(output_dir, ec);
@@ -498,10 +522,6 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
     }
     const fs::path agent_output_dir = fs::weakly_canonical(output_dir, ec);
     const fs::path upload_dir = ec ? output_dir : agent_output_dir;
-
-    const std::string app_name = args.name.empty()
-                               ? platform.defaultAppName(args.command.front())
-                               : args.name;
 
     std::string error;
     if (!platform.prepareInjectionEnv(inject_lib, error)) {
