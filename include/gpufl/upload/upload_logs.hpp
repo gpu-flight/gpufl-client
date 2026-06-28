@@ -20,6 +20,23 @@
 namespace gpufl {
 
 /**
+ * Backend communication parameters, used by postSessionComplete and
+ * other low-level signals.
+ */
+struct BackendConfig {
+    /** Backend host, e.g. "https://api.gpuflight.com". No trailing slash. */
+    std::string backend_url;
+
+    /** Bearer token sent as `Authorization: Bearer <api_key>`. */
+    std::string api_key;
+
+    /**
+     * Reverse-proxy path mount. Empty resolves to "/api/v1".
+     */
+    std::string api_path;
+};
+
+/**
  * Configuration for a single uploadLogs() invocation.
  *
  * All fields are independent. Callers typically populate at minimum
@@ -244,5 +261,23 @@ struct UploadResult {
  * Local NDJSON files are NEVER deleted by this call.
  */
 UploadResult uploadLogs(const UploadOptions& opts);
+
+/**
+ * Best-effort "upload finished cleanly" signal for ONE session.
+ *
+ * @param config backend location and credentials.
+ * @param session_id the UUID to signal.
+ */
+bool postSessionComplete(const BackendConfig& config,
+                         const std::string& session_id);
+
+/**
+ * Legacy version of postSessionComplete with individual parameters.
+ * Prefer the BackendConfig version.
+ */
+bool postSessionComplete(const std::string& backend_url,
+                         const std::string& api_path,
+                         const std::string& api_key,
+                         const std::string& session_id);
 
 }  // namespace gpufl
