@@ -337,6 +337,24 @@ inline void PreloadMatchingPerfWorks() {}
 #endif
 }  // namespace
 
+bool CuptiBackend::IsWindowsInjectedPcSampling() const {
+    // Single-engine PC sampling under Windows DLL injection. The cubin worker
+    // keys captured cubins for disassembly + PC source correlation; doing that
+    // with cuptiGetCubinCrc() takes CUPTI's internal global lock, which while
+    // PC sampling is armed under Windows injection disengages the GPU PC sampler
+    // -> zero samples (proven root cause). So the worker uses zlib crc32 here
+    // and disassembles during the run (PC samples join the disassembly by
+    // function name, not by CRC, so the CRC choice is immaterial).
+#if defined(_WIN32)
+    const char* injected = std::getenv(env::kInject);
+    const bool win_inject = injected && std::strcmp(injected, "1") == 0;
+#else
+    const bool win_inject = false;
+#endif
+    return win_inject && combo_.empty() &&
+           opts_.profiling_engine == ProfilingEngine::PcSampling;
+}
+
 bool CuptiBackend::ShouldEnableNvtxMarkerActivityBeforeEngine_() const {
     if (!collectsKernelEvents()) return false;
     if (!IsSassProfilerMode()) return true;

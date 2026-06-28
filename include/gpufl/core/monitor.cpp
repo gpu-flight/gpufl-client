@@ -1015,6 +1015,18 @@ void Monitor::EnqueueCubinForDisassembly(uint64_t crc, const uint8_t* data,
     g_dictManager.enqueueDisassembly(crc, data, size);
 }
 
+void Monitor::FlushDisassemblyNow() {
+    // Disassemble + emit any enqueued cubins immediately, off the normal
+    // shutdown flush. Used by the cubin worker under Windows-injection PC
+    // sampling so nvdisasm runs during the live run rather than during the
+    // process-exit teardown (where it intermittently hangs). flushDisassembly
+    // swaps the pending list under its lock, then runs nvdisasm outside it, so
+    // this is safe to call concurrently with the collector's own flushes.
+    if (Runtime* rt = runtime(); rt && rt->logger) {
+        g_dictManager.flushDisassembly(*rt->logger, rt->session_id);
+    }
+}
+
 void Monitor::PushActivityRecord(const ActivityRecord& rec) {
     g_monitorBuffer.Push(rec);
 }

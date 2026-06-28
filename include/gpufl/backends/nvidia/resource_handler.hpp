@@ -27,6 +27,12 @@ class ResourceHandler : public ICuptiHandler {
 
    private:
     void workerLoop();
+    // Compute the cubin CRC (cuptiGetCubinCrc normally; zlib crc32 under
+    // Windows-injection PC sampling, where the CUPTI call would disengage the
+    // sampler), store it in the backend's cubin map, and enqueue it for
+    // disassembly. Under injection it also disassembles immediately so nvdisasm
+    // runs during the live run, not during the fragile process-exit teardown.
+    void processCubin(std::vector<uint8_t> data);
 
     CuptiBackend* backend_;
 

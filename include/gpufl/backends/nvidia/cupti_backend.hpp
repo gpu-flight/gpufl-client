@@ -138,6 +138,15 @@ class CuptiBackend : public IMonitorBackend {
     // all, so it doesn't reach this method.)
     bool NeedsCubinCapture() const { return resolved_plan_.needs_cubin_capture; }
 
+    /** True for single-engine PC sampling running under Windows DLL injection.
+     *  In that mode the cubin worker must NOT call cuptiGetCubinCrc() (it takes
+     *  CUPTI's internal global lock, which disengages the armed GPU PC sampler —
+     *  the proven root cause of zero-sample PC sampling on Windows); it uses
+     *  zlib crc32 instead and disassembles during the run rather than at the
+     *  fragile process-exit teardown. Defined out-of-line (needs the
+     *  Windows-injection probe). */
+    bool IsWindowsInjectedPcSampling() const;
+
     void RegisterHandler(const std::shared_ptr<ICuptiHandler>& handler);
 
     bool IsActive() const { return active_.load(); }

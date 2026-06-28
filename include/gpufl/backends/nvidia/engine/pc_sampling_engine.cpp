@@ -782,11 +782,15 @@ void PcSamplingEngine::CollectPcSamplingData_() {
                       " droppedSamples=", droppedSamples,
                       " nonUsrKernelsTotalSamples=", nonUsrSamples);
 
+        // CUPTI leaves CUpti_PCSamplingData::totalSamples at 0 in armed-GetData
+        // (KERNEL_SERIALIZED, no Stop) mode, so sum the real per-PC counts.
+        uint64_t samplesThisCollect = 0;
         for (size_t i = 0; i < numPcs; ++i) {
             const CUpti_PCSamplingPCData& pc =
                 pc_sampling_buffers_->data->pPcData[i];
             if (pc.stallReasonCount > 0 && pc.stallReason) {
                 for (uint32_t j = 0; j < pc.stallReasonCount; ++j) {
+                    samplesThisCollect += pc.stallReason[j].samples;
                     if (pc.stallReason[j].samples > 0) {
                         ActivityRecord out{};
                         out.type = TraceType::PC_SAMPLE;
@@ -871,7 +875,13 @@ void PcSamplingEngine::CollectPcSamplingData_() {
             }
         }
 
-        if (!hasMore) break;
+        GFL_LOG_DEBUG("[PC Sampling] collect produced ", samplesThisCollect,
+                      " samples across ", numPcs, " PCs");
+        // Drain fully: GetData returns up to collectNumPcs records per call and
+        // reports remainingNumPcs still buffered. Loop until the buffer is empty;
+        // stop if a call makes no progress (guards against an infinite loop).
+        const size_t remainingNow = pc_sampling_buffers_->data->remainingNumPcs;
+        if (!hasMore && (remainingNow == 0 || numPcs == 0)) break;
     }
 
     // Copies, not field refs - see the packed-field note above.

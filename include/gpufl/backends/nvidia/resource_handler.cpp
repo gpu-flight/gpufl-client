@@ -84,7 +84,7 @@ void ResourceHandler::handle(CUpti_CallbackDomain domain, CUpti_CallbackId cbid,
         // cubin_disassembly bloat seen with PyTorch under None.
         if (!backend_->NeedsCubinCapture()) return;
 
-        auto *modData = static_cast<CUpti_ModuleResourceData *>(
+        const auto *modData = static_cast<CUpti_ModuleResourceData *>(
             resourceData->resourceDescriptor);
         if (modData && modData->pCubin && modData->cubinSize > 0) {
             const void *cubinPtr = modData->pCubin;
@@ -104,12 +104,12 @@ void ResourceHandler::handle(CUpti_CallbackDomain domain, CUpti_CallbackId cbid,
                 backend_->seen_cubin_ptrs_.insert(cubinPtr);
             }
 
-            // Copy the cubin bytes here (safe - no CUPTI calls).
-            // cuptiGetCubinCrc() must NOT be called from this callback:
-            // SASS holds CUPTI-internal locks during cubin patching (even
-            // with enableLazyPatching=0, modules loaded after
-            // cuptiSassMetricsEnable() are still patched lazily). Calling
-            // cuptiGetCubinCrc() here deadlocks. Defer to the worker thread.
+            // Copy the cubin bytes here (safe - no CUPTI calls) and hand off
+            // to the worker thread. cuptiGetCubinCrc() must NOT run from this
+            // callback: SASS holds CUPTI-internal locks during cubin patching
+            // (modules loaded after cuptiSassMetricsEnable() are patched lazily
+            // even with enableLazyPatching=0), so calling it here deadlocks.
+            // The worker computes the CRC off the callback.
             GFL_LOG_DEBUG("Queuing Cubin for CRC at ", cubinPtr,
                           " Size: ", cubinSize);
             std::vector bytes(
@@ -135,55 +135,61 @@ void ResourceHandler::workerLoop() {
             data = std::move(pending_.front());
             pending_.pop();
         }
+        processCubin(std::move(data));
+    }
+}
 
-        // Compute the cubin CRC.  We prefer cuptiGetCubinCrc() because it
-        // returns the exact CRC that CUPTI uses in PC sampling records
-        // (CUpti_PCSamplingPCData::cubinCrc) and activity records.
-        //
-        // cuptiGetCubinCrc() acquires CUPTI's internal global lock, which
-        // can deadlock when called from a CUPTI callback while
-        // cuptiSassMetricsEnable() is patching modules.  However, this
-        // worker thread runs OUTSIDE the callback, so the deadlock does
-        // not apply here.  Fall back to zlib crc32 only if CUPTI fails.
-        GFL_LOG_DEBUG("Computing CRC for cubin copy, size=", data.size());
-        uint64_t cubinCrc = 0;
-        {
-            CUpti_GetCubinCrcParams crcParams = {CUpti_GetCubinCrcParamsSize};
-            crcParams.cubin = data.data();
-            crcParams.cubinSize = data.size();
-            if (cuptiGetCubinCrc(&crcParams) == CUPTI_SUCCESS) {
-                cubinCrc = crcParams.cubinCrc;
-            } else {
-                // Fallback: zlib crc32 (may not match CUPTI's CRC on all
-                // driver versions, but better than nothing).
-                GFL_LOG_DEBUG("cuptiGetCubinCrc failed, falling back to zlib crc32");
-                cubinCrc = crc32(0, data.data(), static_cast<uInt>(data.size()));
-            }
+void ResourceHandler::processCubin(std::vector<uint8_t> data) {
+    // Windows-injection PC sampling can't call cuptiGetCubinCrc at all: it takes
+    // CUPTI's internal global lock, which disengages the armed HW sampler (zero
+    // samples). It uses zlib crc32 instead - harmless because PC samples join
+    // disassembly by FUNCTION NAME, not by cubin CRC (the CRC is only the
+    // cubin_disassembly message's group key). Every other path keeps
+    // cuptiGetCubinCrc, the exact CRC CUPTI puts in its records.
+    const bool inject = backend_->IsWindowsInjectedPcSampling();
+    GFL_LOG_DEBUG("Computing CRC for cubin copy, size=", data.size());
+    uint64_t cubinCrc = 0;
+    if (inject) {
+        cubinCrc = crc32(0, data.data(), static_cast<uInt>(data.size()));
+    } else {
+        CUpti_GetCubinCrcParams crcParams = {CUpti_GetCubinCrcParamsSize};
+        crcParams.cubin = data.data();
+        crcParams.cubinSize = data.size();
+        if (cuptiGetCubinCrc(&crcParams) == CUPTI_SUCCESS) {
+            cubinCrc = crcParams.cubinCrc;
+        } else {
+            GFL_LOG_DEBUG("cuptiGetCubinCrc failed, falling back to zlib crc32");
+            cubinCrc = crc32(0, data.data(), static_cast<uInt>(data.size()));
         }
+    }
 
-        bool isNew = false;
-        const uint8_t *enqueuePtr = nullptr;
-        size_t enqueueSize = 0;
-        {
-            GFL_LOG_DEBUG("Lock here");
-            std::lock_guard lk(backend_->cubin_mu_);
-            GFL_LOG_DEBUG("Lock acquired");
-            if (backend_->cubin_by_crc_.find(cubinCrc) ==
-                backend_->cubin_by_crc_.end()) {
-                auto &[map_data, map_crc] = backend_->cubin_by_crc_[cubinCrc];
+    bool isNew = false;
+    const uint8_t *enqueuePtr = nullptr;
+    size_t enqueueSize = 0;
+    {
+        std::lock_guard lk(backend_->cubin_mu_);
+        if (backend_->cubin_by_crc_.find(cubinCrc) ==
+            backend_->cubin_by_crc_.end()) {
+            auto &[map_data, map_crc] = backend_->cubin_by_crc_[cubinCrc];
 
-                map_crc = cubinCrc;
-                map_data = std::move(data); // Now successfully moves the outer bytes into the map
+            map_crc = cubinCrc;
+            map_data = std::move(data);
 
-                enqueuePtr = map_data.data();
-                enqueueSize = map_data.size(); // Will now be > 0
-                isNew = true;
-            }
+            enqueuePtr = map_data.data();
+            enqueueSize = map_data.size();
+            isNew = true;
         }
-        if (isNew) {
-            Monitor::EnqueueCubinForDisassembly(cubinCrc, enqueuePtr,
-                                                enqueueSize);
-            GFL_LOG_DEBUG("Finished EnqueueCubinForDisassembly!");
+    }
+    if (isNew) {
+        Monitor::EnqueueCubinForDisassembly(cubinCrc, enqueuePtr, enqueueSize);
+        GFL_LOG_DEBUG("Finished EnqueueCubinForDisassembly!");
+        if (inject) {
+            // Disassemble + emit NOW, on this worker thread during the run -
+            // NOT at shutdown. nvdisasm during the Windows-injection process-
+            // exit teardown intermittently hangs (proven); here the GPU is
+            // live and stable. nvdisasm is a subprocess (no CUPTI), so the
+            // armed sampler is unaffected.
+            Monitor::FlushDisassemblyNow();
         }
     }
 }

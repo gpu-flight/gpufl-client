@@ -293,6 +293,13 @@ class Monitor {
                                            size_t size);
 
     /**
+     * Disassemble and emit any enqueued cubins now, instead of waiting for the
+     * shutdown flush. Used by the cubin worker under Windows-injection PC
+     * sampling to keep nvdisasm off the fragile process-exit teardown.
+     */
+    static void FlushDisassemblyNow();
+
+    /**
      * @brief Push a pre-built ScopeBatchRow into the scope batch buffer.
      */
     static void PushScopeRow(const ScopeBatchRow& row);
