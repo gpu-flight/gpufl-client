@@ -842,6 +842,10 @@ void CuptiBackend::start() {
     // non-kernel memcpy/memset API metas before emitting rows.
     SetSuppressOrphanSyntheticKernels(
         opts_.profiling_engine == ProfilingEngine::SassMetrics);
+    // Windows-injection PC sampling loses its final flush to the process-exit
+    // teardown, so emit synthetic kernel rows during the run rather than only at
+    // shutdown (the same reason SASS disassembly runs mid-run for this mode).
+    SetDrainSyntheticKernelsMidRun(IsWindowsInjectedPcSampling());
     kernel_activity_seen_.store(0, std::memory_order_relaxed);
     kernel_activity_emitted_.store(0, std::memory_order_relaxed);
     kernel_activity_throttled_.store(0, std::memory_order_relaxed);

@@ -220,6 +220,13 @@ struct PmSampleInput {
 // Default false: normal / PC modes keep best-effort synthesis.
 void SetSuppressOrphanSyntheticKernels(bool suppress);
 
+// Session-level switch (set by the active backend at start): when true the
+// collector emits orphaned launches as synthetic kernel rows PERIODICALLY during
+// the run, not only at shutdown. Used for Windows-injection PC sampling, whose
+// process-exit teardown drops the final flush - mid-run emission is the only way
+// those kernel rows survive. Default false (other modes emit at shutdown).
+void SetDrainSyntheticKernelsMidRun(bool enable);
+
 /**
  * @brief The central monitoring engine.
  */
