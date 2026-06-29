@@ -238,9 +238,26 @@ class Monitor {
     static void Initialize(const MonitorOptions& opts = {});
 
     /**
-     * @brief Shuts down the monitoring engine.
+     * @brief Shuts down the monitoring engine (clean teardown order: release
+     *        the CUPTI backend, then drain + flush). Used off the normal
+     *        (embedded) exit path.
      */
     static void Shutdown();
+
+    /**
+     * @brief Windows-injection process-exit teardown, phase 1: stop the
+     *        collector, drain the ring, flush all batches, and emit backend
+     *        capabilities WITHOUT touching CUPTI. Leaves all run data in the
+     *        logger so the caller can close it before the fragile release.
+     */
+    static void DrainAndFinalizeForExit();
+
+    /**
+     * @brief Windows-injection process-exit teardown, phase 2: the fragile
+     *        CUPTI release (cuptiPCSamplingStop/Disable). Call LAST, after the
+     *        logs are flushed + closed, so a hang/crash here can't lose data.
+     */
+    static void ReleaseBackendForExit();
 
     /**
      * @brief Starts global collection.

@@ -263,6 +263,12 @@ void PcSamplingEngine::stop() {
     // the correct order (before flush) - ensures cuptiActivityFlushAll
     // delivers real kernel activity records with correct GPU durations.
     StopCycleThread_();   // join BEFORE the lock - the cycle takes it too
+    // Windows-injection process exit: cudart already tore the context down (its
+    // atexit runs before ours), so cuptiPCSamplingStop/Disable below crash
+    // (0xC0000005) against the dying driver. The cycle thread is joined above
+    // and the OS reclaims the sampler at process exit, so skip the fragile CUPTI
+    // release - by here the run's data is already flushed + closed.
+    if (detail::isProcessExitTeardown()) return;
     std::lock_guard lk(sampling_lifecycle_mu_);
     if (pc_sampling_method_ == Method::SamplingAPI &&
         sampling_api_ready_.load() && ctx_.cuda_ctx) {
@@ -279,6 +285,10 @@ void PcSamplingEngine::stop() {
 }
 
 void PcSamplingEngine::drainData() {
+    // Once process-exit teardown begins, cudart is destroying the CUDA context;
+    // stop issuing CUPTI data-retrieval calls (GetData/Stop) so the cycle thread
+    // can't fault against the dying driver while shutdown flushes + joins it.
+    if (detail::isProcessExitTeardown()) return;
     // Periodic collection on the engine's cycle thread (deferring all of it to
     // session stop loses the session to process-exit teardown). Two paths by
     // kernel_collect_: light = armed GetData (no Stop; KERNEL_SERIALIZED still
@@ -348,6 +358,10 @@ void PcSamplingEngine::DrainKernelsAndCollect_() {
 
 void PcSamplingEngine::shutdown() {
     StopCycleThread_();   // join BEFORE the lock - the cycle takes it too
+    // Windows-injection process exit: skip the fragile cuptiPCSamplingDisable
+    // (crashes against the context cudart already destroyed). Threads are joined
+    // above; the OS reclaims CUPTI state at exit. See stop() for the full note.
+    if (gpufl::detail::isProcessExitTeardown()) return;
     std::lock_guard lk(sampling_lifecycle_mu_);
     // Collect a still-active SamplingAPI session before teardown.
     if (sampling_api_started_.load() &&

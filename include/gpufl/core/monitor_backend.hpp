@@ -29,6 +29,15 @@ class IMonitorBackend {
     virtual void shutdown() = 0;
 
     /**
+     * @brief Emit the capture-capabilities report (what was actually
+     *        collected) to the logger, without releasing any backend
+     *        resources. Used by the Windows-injection process-exit path to
+     *        write capabilities BEFORE the fragile CUPTI release. Idempotent;
+     *        a no-op for backends that report no capabilities.
+     */
+    virtual void emitCapabilities() {}
+
+    /**
      * @brief start active monitoring/tracing.
      */
     virtual void start() = 0;

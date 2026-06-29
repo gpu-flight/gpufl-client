@@ -718,6 +718,42 @@ void Monitor::Shutdown() {
     g_state.adapter.reset();
 }
 
+void Monitor::DrainAndFinalizeForExit() {
+    if (!g_state.initialized.exchange(false)) return;
+
+    // The backend's PC sampling cycle thread stops issuing CUPTI reads as soon
+    // as process-exit teardown is flagged (PcSamplingEngine::drainData), so it
+    // sits idle here and can't fault mid-flush. We deliberately do NOT join it
+    // yet - the join (and the fragile CUPTI release) is deferred to
+    // ReleaseBackendForExit, which runs AFTER the logger is closed, so a stuck
+    // join can't cost the run's data. The collector stop below is a flag + join;
+    // the drain/flush/capabilities read already-captured state.
+    g_state.collectorRunning.store(false);
+    if (g_state.collectorThread.joinable()) g_state.collectorThread.join();
+
+    while (RecordProcessor::processNext()) {}
+    if (Runtime* rt = runtime(); rt && rt->logger) {
+        drainSyntheticKernels(rt);
+        g_state.metadata.emitSignatures(rt);
+        g_state.batches.flushAll(*rt->logger, rt->session_id, BatchManager::FlushMode::Full);
+    }
+
+    // Emit capabilities while the engine state is intact and the logger is
+    // still open - ReleaseBackendForExit runs after the logger closes.
+    if (g_state.adapter) {
+        if (IMonitorBackend* b = g_state.adapter->backend()) b->emitCapabilities();
+    }
+}
+
+void Monitor::ReleaseBackendForExit() {
+    if (g_state.adapter) {
+        g_state.adapter->stop();
+        g_state.adapter->shutdown();
+    }
+    g_monitorBuffer.resetDroppedCount();
+    g_state.adapter.reset();
+}
+
 void Monitor::Start() { if (g_state.adapter) g_state.adapter->start(); }
 void Monitor::Stop() { if (g_state.adapter) g_state.adapter->stop(); }
 
