@@ -25,6 +25,7 @@
 #include <windows.h>
 #endif
 
+#include "gpufl/backends/nvidia/cupti_activity_state.hpp"
 #include "gpufl/backends/nvidia/cuda_feature_guards.hpp"
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
 #include "gpufl/core/activity_record.hpp"

@@ -94,6 +94,10 @@ if(CUPTI_INCLUDE_DIR)
     target_include_directories(gpufl_tests PRIVATE ${CUPTI_INCLUDE_DIR})
 endif()
 
+if(NVAPI_INCLUDE_DIR)
+    target_include_directories(gpufl_tests PRIVATE ${NVAPI_INCLUDE_DIR})
+endif()
+
 # 5. Link libraries
 target_link_libraries(gpufl_tests PRIVATE
     gtest_main
