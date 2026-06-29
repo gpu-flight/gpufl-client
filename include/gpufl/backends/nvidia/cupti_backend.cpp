@@ -49,6 +49,7 @@
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/env_vars.hpp"
 #include "gpufl/core/logger/logger.hpp"
+#include "gpufl/core/monitor.hpp"  // Monitor::FlushAndStopCollector
 #include "gpufl/core/model/lifecycle_model.hpp"
 #include "gpufl/core/model/perf_metric_model.hpp"
 #include "gpufl/core/runtime.hpp"
@@ -842,10 +843,17 @@ void CuptiBackend::start() {
     // non-kernel memcpy/memset API metas before emitting rows.
     SetSuppressOrphanSyntheticKernels(
         opts_.profiling_engine == ProfilingEngine::SassMetrics);
-    // Windows-injection PC sampling loses its final flush to the process-exit
-    // teardown, so emit synthetic kernel rows during the run rather than only at
-    // shutdown (the same reason SASS disassembly runs mid-run for this mode).
-    SetDrainSyntheticKernelsMidRun(IsWindowsInjectedPcSampling());
+    // Windows-injection PC sampling AND Deep both lose their final flush to the
+    // process-exit teardown race (gpufl::shutdown runs during DLL detach, after
+    // the OS starts tearing the process down, so the shutdown drain can be cut
+    // off mid-write). Both emit callback-derived synthetic kernels, so drain
+    // them DURING the run rather than only at shutdown - then a lost teardown
+    // costs at most the last sub-second of kernels instead of all of them.
+    // (SASS-only suppresses synthetic kernels, so it is intentionally excluded.)
+    SetDrainSyntheticKernelsMidRun(
+        IsWindowsInjectedPcSampling() ||
+        (WindowsInjectedProcess() && combo_.empty() &&
+         opts_.profiling_engine == ProfilingEngine::Deep));
     kernel_activity_seen_.store(0, std::memory_order_relaxed);
     kernel_activity_emitted_.store(0, std::memory_order_relaxed);
     kernel_activity_throttled_.store(0, std::memory_order_relaxed);
@@ -1727,16 +1735,29 @@ void CuptiBackend::FlushProfilingDataBeforeCudaTeardown(const char* reason) {
     if (!initialized_ || !active_.load(std::memory_order_relaxed) || !engine_) {
         return;
     }
-    if (!IsSassProfilerMode()) return;
 
+    // Throttle to ~50ms: cleanup APIs fire in bursts (cudaFree x3, internal
+    // frees), and the drain below is idempotent, so re-running per burst is waste.
     const int64_t now = detail::GetTimestampNs();
-    int64_t expected = 0;
+    int64_t last = last_cleanup_flush_ns_.load(std::memory_order_relaxed);
+    if (now - last < 50'000'000) return;
     if (!last_cleanup_flush_ns_.compare_exchange_strong(
-            expected, now, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+            last, now, std::memory_order_acq_rel, std::memory_order_relaxed)) {
         return;
     }
 
-    engine_->flushBeforeCudaTeardown(reason);
+    // Windows injection: the synthetic/launch-derived kernel rows (Deep/PcSampling)
+    // are otherwise assembled + written only by gpufl's atexit shutdown, which
+    // races the final process teardown and intermittently loses them all (the
+    // collector is CPU-starved during short busy runs, so the ring isn't drained
+    // until shutdown). cudaFree fires HERE on the app thread before that race
+    // (cuCtxDestroy does NOT callback under injection - cudart defers context
+    // teardown to DLL detach). Have the collector drain + write the kernels now
+    // and wait for it. Drain-only (the collector keeps running), so it's safe for
+    // workloads that free mid-run (e.g. PyTorch).
+    if (WindowsInjectedProcess()) Monitor::RequestSyntheticDrainAndWait();
+
+    if (IsSassProfilerMode()) engine_->flushBeforeCudaTeardown(reason);
 }
 
 void CuptiBackend::EngineLaunchTick() {

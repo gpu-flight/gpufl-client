@@ -12,6 +12,7 @@
 
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
 #include "gpufl/core/debug_logger.hpp"
+#include "gpufl/core/teardown_flag.hpp"  // detail::isProcessExitTeardown
 
 namespace gpufl {
 
@@ -61,14 +62,22 @@ void PmSamplingEngine::start() {
 
 void PmSamplingEngine::stop() {
 #if GPUFL_HAS_PERFWORKS
+    // Windows-injection process exit: cudart already destroyed the context, so
+    // the PM CUPTI teardown faults against it. Skip; the OS reclaims at exit.
+    // (Same guard as PcSamplingEngine / SassMetricsEngine.)
+    if (gpufl::detail::isProcessExitTeardown()) return;
     StopPmSampling_();
 #endif
 }
 
 void PmSamplingEngine::shutdown() {
 #if GPUFL_HAS_PERFWORKS
-    StopPmSampling_();
-    DisablePmSampling_();
+    // Process exit: skip the fragile CUPTI teardown (cuptiPmSamplingStop/Disable +
+    // cuptiProfilerDeInitialize) against the destroyed context; the OS reclaims it.
+    if (!gpufl::detail::isProcessExitTeardown()) {
+        StopPmSampling_();
+        DisablePmSampling_();
+    }
 #endif
     operational_.store(false, std::memory_order_relaxed);
 }

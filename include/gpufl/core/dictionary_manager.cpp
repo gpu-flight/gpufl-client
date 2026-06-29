@@ -3,6 +3,7 @@
 #include "gpufl/core/env_vars.hpp"
 #include "gpufl/core/stack_trace.hpp"  // DemangleFunctionKey
 
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -180,6 +181,151 @@ void DictionaryManager::enqueueDisassembly(uint64_t crc, const uint8_t* data,
     pending_disasm_cubins_[crc].assign(data, data + size);
 }
 
+void DictionaryManager::flushPtx(Logger& logger, const std::string& session_id) {
+    if (ptx_emitted_) return;
+    ptx_emitted_ = true;
+
+    // Resolve the running executable. PTX (the virtual ISA) is embedded in the
+    // binary's fatbin, NOT in the SASS cubins CUPTI delivers, so cuobjdump reads
+    // the executable directly. Covers the target's own kernels; precompiled
+    // libraries (PyTorch/cuDNN/...) ship SASS-only and carry no PTX.
+    std::string exePath;
+#ifdef _WIN32
+    char exeBuf[MAX_PATH];
+    const DWORD elen = GetModuleFileNameA(nullptr, exeBuf, MAX_PATH);
+    if (elen == 0 || elen >= MAX_PATH) return;
+    exePath.assign(exeBuf, elen);
+#else
+    char exeBuf[4096];
+    const ssize_t elen = ::readlink("/proc/self/exe", exeBuf, sizeof(exeBuf) - 1);
+    if (elen <= 0) return;
+    exePath.assign(exeBuf, static_cast<size_t>(elen));
+#endif
+    GFL_LOG_DEBUG("[flushPtx] dumping PTX from exe=", exePath.c_str());
+
+    FILE* pipe = nullptr;
+#ifndef _WIN32
+    pid_t childPid = -1;
+#endif
+#ifdef _WIN32
+    char cmd[1024];
+    const char* cudaPath = std::getenv(gpufl::env::kCudaPath);
+    if (cudaPath && cudaPath[0]) {
+        std::snprintf(cmd, sizeof(cmd),
+                      "\"\"%s\\bin\\cuobjdump.exe\" -ptx \"%s\"\"",
+                      cudaPath, exePath.c_str());
+    } else {
+        std::snprintf(cmd, sizeof(cmd), "\"cuobjdump.exe -ptx \"%s\"\"",
+                      exePath.c_str());
+    }
+    pipe = _popen(cmd, "r");
+#else
+    std::vector<std::string> args = {"/usr/local/cuda/bin/cuobjdump", "-ptx",
+                                     exePath};
+    std::vector<char*> argv;
+    argv.reserve(args.size() + 1);
+    for (auto& a : args) argv.push_back(a.data());
+    argv.push_back(nullptr);
+    pipe = spawnReadPipe(argv.data(), childPid);
+#endif
+    if (!pipe) {
+        GFL_LOG_DEBUG("[flushPtx] cuobjdump unavailable - skipping PTX");
+        return;
+    }
+
+    std::string out;
+    char rbuf[8192];
+    size_t got;
+    while ((got = std::fread(rbuf, 1, sizeof(rbuf), pipe)) > 0)
+        out.append(rbuf, got);
+#ifdef _WIN32
+    _pclose(pipe);
+#else
+    ::fclose(pipe);
+    if (childPid > 0) { int status = 0; ::waitpid(childPid, &status, 0); }
+#endif
+    GFL_LOG_DEBUG("[flushPtx] cuobjdump produced ", out.size(), " bytes; head: ",
+                  out.substr(0, out.size() < 200 ? out.size() : 200).c_str());
+
+    // cuobjdump -ptx output is one or more PTX modules: a
+    // .version/.target/.address_size header, then ".visible .entry <mangled>("
+    // kernels with a "{ ... }" body. Split into per-kernel blocks, prepend the
+    // module header so each is self-contained, and emit one ptx_disassembly per
+    // kernel keyed by the mangled name (joins to kernels/SASS by md5 of it).
+    std::string header, arch, curName, curBody;
+    bool inFunc = false, bodyStarted = false;
+    int braceDepth = 0, emitted = 0;
+
+    auto emitFunc = [&]() {
+        if (curName.empty() || curBody.empty()) return;
+        std::ostringstream oss;
+        oss << "{\"version\":1,\"type\":\"ptx_disassembly\",\"session_id\":\""
+            << model::jsonEscape(session_id) << "\",\"function_name\":\""
+            << model::jsonEscape(curName) << "\",\"arch\":\""
+            << model::jsonEscape(arch) << "\",\"ptx\":\""
+            << model::jsonEscape(header + curBody) << "\"}";
+        logger.write(SassLine{oss.str()});
+        ++emitted;
+    };
+    auto countBraces = [&](const std::string& s) {
+        for (char c : s) {
+            if (c == '{') { ++braceDepth; bodyStarted = true; }
+            else if (c == '}') --braceDepth;
+        }
+    };
+
+    std::istringstream iss(out);
+    std::string line;
+    while (std::getline(iss, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+
+        if (inFunc) {
+            curBody += line;
+            curBody += '\n';
+            countBraces(line);
+            if (bodyStarted && braceDepth == 0) { emitFunc(); inFunc = false; }
+            continue;
+        }
+
+        const size_t ws = line.find_first_not_of(" \t");
+        const std::string t = (ws == std::string::npos) ? std::string()
+                                                        : line.substr(ws);
+        // New module header - reset so each kernel carries its own arch.
+        if (t.rfind(".version", 0) == 0) { header = t + "\n"; continue; }
+        if (t.rfind(".target", 0) == 0) {
+            header += t + "\n";
+            const size_t p = t.find("sm_");
+            if (p != std::string::npos) {
+                size_t e = p + 3;
+                while (e < t.size() && std::isdigit((unsigned char)t[e])) ++e;
+                arch = t.substr(p, e - p);
+            }
+            continue;
+        }
+        if (t.rfind(".address_size", 0) == 0) { header += t + "\n"; continue; }
+
+        const bool isEntry = t.rfind(".entry ", 0) == 0 ||
+                             t.rfind(".visible .entry ", 0) == 0 ||
+                             t.rfind(".weak .entry ", 0) == 0;
+        if (isEntry) {
+            const size_t ep = t.find(".entry ") + 7;  // past ".entry "
+            size_t e = ep;
+            while (e < t.size() && (std::isalnum((unsigned char)t[e]) ||
+                                    t[e] == '_' || t[e] == '$')) ++e;
+            curName = t.substr(ep, e - ep);
+            curBody = line;
+            curBody += '\n';
+            inFunc = true;
+            bodyStarted = false;
+            braceDepth = 0;
+            countBraces(line);
+            if (bodyStarted && braceDepth == 0) { emitFunc(); inFunc = false; }
+        }
+    }
+
+    GFL_LOG_DEBUG("[flushPtx] emitted ", emitted, " ptx_disassembly records");
+}
+
 void DictionaryManager::flushDisassembly(Logger& logger,
                                           const std::string& session_id) {
     std::unordered_map<uint64_t, std::vector<uint8_t>> pending;
@@ -188,6 +334,11 @@ void DictionaryManager::flushDisassembly(Logger& logger,
         if (pending_disasm_cubins_.empty()) return;
         pending = std::move(pending_disasm_cubins_);
     }
+
+    // Cubins are present => CUDA kernels exist; dump the executable's PTX once
+    // (it lives in the fatbin, not these SASS cubins). Same worker thread, also
+    // a subprocess, so it's injection-teardown-safe like nvdisasm.
+    flushPtx(logger, session_id);
 
     for (auto& [crc, bytes] : pending) {
         // Write cubin to a temp file

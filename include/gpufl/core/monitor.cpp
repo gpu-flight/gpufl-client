@@ -250,7 +250,12 @@ struct MonitorState {
     std::atomic<bool> initialized{false};
     std::thread collectorThread;
     std::atomic<bool> collectorRunning{false};
-    
+    // On-demand synchronous drain handshake: an app-thread CUDA cleanup callback
+    // bumps drainRequest and waits for the collector to match it in drainAck, so
+    // the (synthetic) kernels are written before the Windows-injection exit race.
+    std::atomic<uint64_t> drainRequest{0};
+    std::atomic<uint64_t> drainAck{0};
+
     BatchManager batches;
     MetadataManager metadata;
 
@@ -645,6 +650,23 @@ void CollectorLoop() {
     auto lastFlush = std::chrono::steady_clock::now();
 
     while (g_state.collectorRunning.load()) {
+        // Serve an on-demand drain request (a CUDA cleanup callback on the app
+        // thread, waiting for the kernels to be durable before process exit).
+        // Drain the ring fully + emit synthetic kernels + flush, then ack. This
+        // is the single-consumer drain done HERE, so the requester never touches
+        // the ring. Forces the write even when the collector was CPU-starved
+        // during a short busy run (the waiter yielded us the CPU).
+        if (const uint64_t req = g_state.drainRequest.load(std::memory_order_acquire);
+            req != g_state.drainAck.load(std::memory_order_relaxed)) {
+            while (RecordProcessor::processNext()) {}
+            if (Runtime* rt = runtime(); rt && rt->logger) {
+                drainSyntheticKernels(rt);
+                g_state.metadata.emitSignatures(rt);
+                g_state.batches.flushAll(*rt->logger, rt->session_id, BatchManager::FlushMode::Full);
+            }
+            g_state.drainAck.store(req, std::memory_order_release);
+        }
+
         if (!RecordProcessor::processNext()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
@@ -752,6 +774,23 @@ void Monitor::ReleaseBackendForExit() {
     }
     g_monitorBuffer.resetDroppedCount();
     g_state.adapter.reset();
+}
+
+void Monitor::RequestSyntheticDrainAndWait() {
+    // Ask the collector to drain the ring + write the (synthetic, launch-derived)
+    // kernels NOW, and wait for it. Called from a CUDA cleanup callback (cudaFree)
+    // on the app thread before the Windows-injection exit race. We can't drain
+    // here - the ring is single-consumer (the collector). Bumping the request and
+    // blocking yields the CPU to the (possibly starved) collector so it runs the
+    // drain; bounded so a stuck collector can't hang the app. Does NOT stop the
+    // collector, so workloads that free mid-run (PyTorch) keep collecting.
+    if (!g_state.collectorRunning.load(std::memory_order_acquire)) return;
+    const uint64_t req =
+        g_state.drainRequest.fetch_add(1, std::memory_order_acq_rel) + 1;
+    for (int i = 0; i < 400 &&
+                    g_state.drainAck.load(std::memory_order_acquire) < req; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
 }
 
 void Monitor::Start() { if (g_state.adapter) g_state.adapter->start(); }
