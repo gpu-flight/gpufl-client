@@ -10,6 +10,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iomanip>
 #include <random>
 #include <sstream>
@@ -20,10 +21,12 @@
 
 #include "agent_launcher.hpp"
 #include "gpufl/core/env_vars.hpp"
+#include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/json/json.hpp"
 #include "gpufl/core/logger/file_compressor.hpp"
 #include "gpufl/core/logger/log_salvage.hpp"
 #include "gpufl/inject/inject_entry.hpp"
+#include "gpufl/upload/upload_logs.hpp"
 
 namespace gpufl::launcher {
 namespace {
@@ -165,6 +168,13 @@ struct SessionLifecycleInfo {
     std::string app = "unknown";
     int64_t job_start_ts_ns = 0;
 };
+
+bool isSessionDirectory(const fs::directory_entry& entry) {
+    std::error_code ec;
+    if (!entry.is_directory(ec)) return false;
+    const std::string name = entry.path().filename().string();
+    return !name.empty() && name.front() != '.';
+}
 
 struct SyntheticShutdownContext {
     int exit_code = 0;
@@ -365,11 +375,10 @@ int ensureTraceCompletionMarkers(const fs::path& output_dir,
     int synthesized = 0;
     for (const auto& session_entry : fs::directory_iterator(output_dir, ec)) {
         if (ec) break;
-        if (!session_entry.is_directory(ec)) continue;
+        if (!isSessionDirectory(session_entry)) continue;
 
         const fs::path session_dir = session_entry.path();
         const std::string session_id = session_dir.filename().string();
-        if (session_id.empty() || session_id.front() == '.') continue;
 
         std::vector<fs::path> system_logs;
         std::vector<fs::path> fallback_logs;
@@ -400,6 +409,44 @@ int ensureTraceCompletionMarkers(const fs::path& output_dir,
         }
     }
     return synthesized;
+}
+
+// Out-of-process upload-complete signal. After the agent has drained and exited
+// cleanly, POST /events/session-complete for each session under output_dir so the
+// backend finalizes on its fast path (upload_complete_at) instead of waiting out
+// the grace/settle window. The agent sends this too, but from inside a process
+// racing its own shutdown — that POST is often interrupted before it lands; this
+// launcher-side signal is the reliable one. Best-effort: a failure just means the
+// backend's grace path finalizes a little slower.
+void signalSessionsComplete(const fs::path& output_dir,
+                            const BackendConfig& config,
+                            const bool quiet) {
+    if (config.backend_url.empty() || config.api_key.empty()) return;
+
+    std::error_code ec;
+    if (output_dir.empty() || !fs::exists(output_dir, ec)) return;
+
+    // Fire off requests in parallel. Bound total time via per-POST httplib timeouts
+    // (currently ~6s) to ensure a black-holed backend can't stall trace exit.
+    std::vector<std::future<std::pair<std::string, bool>>> futures;
+    for (const auto& entry : fs::directory_iterator(output_dir, ec)) {
+        if (ec) break;
+        if (!isSessionDirectory(entry)) continue;
+
+        const std::string session_id = entry.path().filename().string();
+        futures.push_back(std::async(std::launch::async, [config, session_id]() {
+            return std::make_pair(session_id, postSessionComplete(config, session_id));
+        }));
+    }
+
+    for (auto& f : futures) {
+        const auto res = f.get();
+        if (res.second) {
+            GFL_LOG_DEBUG("signalled upload-complete for session ", res.first);
+        } else if (!quiet) {
+            GFL_LOG_ERROR("failed to signal upload-complete for session ", res.first);
+        }
+    }
 }
 
 /// Remove with a short backoff (100/200/400 ms) - a freshly written or
@@ -522,6 +569,8 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
     }
     const fs::path agent_output_dir = fs::weakly_canonical(output_dir, ec);
     const fs::path upload_dir = ec ? output_dir : agent_output_dir;
+
+    DebugLogger::setEnabled(args.verbose);
 
     std::string error;
     if (!platform.prepareInjectionEnv(inject_lib, error)) {
@@ -703,9 +752,8 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
         shutdown_context.window_stopped = run.window_stopped;
         const int synthesized = ensureTraceCompletionMarkers(
                 output_dir, pass_start_ns, shutdown_context);
-        if (!args.quiet && synthesized > 0) {
-            std::fprintf(stderr, "[gpufl] wrote %d synthetic shutdown marker(s)\n",
-                         synthesized);
+        if (synthesized > 0) {
+            GFL_LOG_DEBUG("wrote ", synthesized, " synthetic shutdown marker(s)");
         }
     }
 
@@ -718,26 +766,29 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
         // --agent-drain-ms as a safety cap - instead of a fixed sleep that used to
         // hard-kill the agent mid-upload and drop its late windows.
         const int cap = args.agent_drain_ms;
-        if (!args.quiet) {
-            std::fprintf(stderr, "[gpufl] waiting up to %.1fs for agent to finish uploading\n",
-                         cap / 1000.0);
-        }
+        GFL_LOG_DEBUG("waiting up to ", cap / 1000.0, "s for agent to finish uploading");
         if (agent.waitForExit(cap)) {
-            if (!args.quiet) std::fprintf(stderr, "[gpufl] agent finished uploading\n");
+            GFL_LOG_DEBUG("agent finished uploading");
+            // Clean drain: every window was 202-accepted, so no more chunks are
+            // coming. Signal upload-complete from here (outside the agent's racing
+            // shutdown) so the backend finalizes on its fast path.
+            gpufl::BackendConfig config;
+            config.backend_url = resolveOption(args.backend_url, env::kBackendUrl);
+            config.api_key = resolveOption(args.api_key, env::kApiKey);
+            config.api_path = args.api_version.empty() ? "" : "/api/" + args.api_version;
+            signalSessionsComplete(output_dir, config, args.quiet);
         } else {
             if (!args.quiet) {
-                std::fprintf(stderr,
-                             "[gpufl] agent still running after %.1fs cap - stopping "
-                             "(late windows may need a post-hoc `gpufl upload`)\n",
-                             cap / 1000.0);
+                GFL_LOG_ERROR("agent still running after ", cap / 1000.0,
+                              "s cap - stopping (late windows may need a post-hoc `gpufl upload`) ");
             }
             agent.stop();
         }
     }
 
     const int repaired_logs = repairUncompressedLogs(output_dir);
-    if (!args.quiet && repaired_logs > 0) {
-        std::fprintf(stderr, "[gpufl] compressed %d log file(s)\n", repaired_logs);
+    if (repaired_logs > 0) {
+        GFL_LOG_DEBUG("compressed ", repaired_logs, " log file(s)");
     }
 
     return overall_rc;

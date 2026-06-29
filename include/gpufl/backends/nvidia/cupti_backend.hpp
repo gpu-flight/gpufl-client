@@ -40,6 +40,7 @@ class CuptiBackend : public IMonitorBackend {
 
     void initialize(const MonitorOptions& opts) override;
     void shutdown() override;
+    void emitCapabilities() override { EmitCaptureCapabilities_(); }
 
     static CUptiResult (*get_value())(CUpti_ActivityKind);
 
@@ -110,7 +111,7 @@ class CuptiBackend : public IMonitorBackend {
     void StartActivityFlushThreadIfNeeded_();
     void StopActivityFlushThread_();
     void NoteKernelLaunchForCleanupFlush() {
-        kernel_launch_callback_seen_.store(true, std::memory_order_release);
+        kernel_launch_callback_count_.fetch_add(1, std::memory_order_release);
         last_cleanup_flush_ns_.store(0, std::memory_order_release);
     }
     // Per-launch engine tick from the launch API_ENTER callback (app
@@ -137,6 +138,15 @@ class CuptiBackend : public IMonitorBackend {
     // to. (ProfilingEngine::Monitor never constructs a CuptiBackend at
     // all, so it doesn't reach this method.)
     bool NeedsCubinCapture() const { return resolved_plan_.needs_cubin_capture; }
+
+    /** True for single-engine PC sampling running under Windows DLL injection.
+     *  In that mode the cubin worker must NOT call cuptiGetCubinCrc() (it takes
+     *  CUPTI's internal global lock, which disengages the armed GPU PC sampler —
+     *  the proven root cause of zero-sample PC sampling on Windows); it uses
+     *  zlib crc32 instead and disassembles during the run rather than at the
+     *  fragile process-exit teardown. Defined out-of-line (needs the
+     *  Windows-injection probe). */
+    bool IsWindowsInjectedPcSampling() const;
 
     void RegisterHandler(const std::shared_ptr<ICuptiHandler>& handler);
 
@@ -296,7 +306,9 @@ class CuptiBackend : public IMonitorBackend {
     std::atomic<uint64_t> external_correlation_seen_{0};
     std::atomic<uint64_t> source_locator_seen_{0};
     std::atomic<uint64_t> function_record_seen_{0};
-    std::atomic<bool> kernel_launch_callback_seen_{false};
+    // Count (not just a flag) of kernel launch callbacks seen this session - the
+    // denominator for the real-vs-synthetic kernel ratio in EmitCaptureCapabilities_.
+    std::atomic<uint64_t> kernel_launch_callback_count_{0};
     std::atomic<int64_t> last_cleanup_flush_ns_{0};
     std::atomic<bool> activity_flush_thread_running_{false};
     std::thread activity_flush_thread_;

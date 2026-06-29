@@ -337,6 +337,24 @@ inline void PreloadMatchingPerfWorks() {}
 #endif
 }  // namespace
 
+bool CuptiBackend::IsWindowsInjectedPcSampling() const {
+    // Single-engine PC sampling under Windows DLL injection. The cubin worker
+    // keys captured cubins for disassembly + PC source correlation; doing that
+    // with cuptiGetCubinCrc() takes CUPTI's internal global lock, which while
+    // PC sampling is armed under Windows injection disengages the GPU PC sampler
+    // -> zero samples (proven root cause). So the worker uses zlib crc32 here
+    // and disassembles during the run (PC samples join the disassembly by
+    // function name, not by CRC, so the CRC choice is immaterial).
+#if defined(_WIN32)
+    const char* injected = std::getenv(env::kInject);
+    const bool win_inject = injected && std::strcmp(injected, "1") == 0;
+#else
+    const bool win_inject = false;
+#endif
+    return win_inject && combo_.empty() &&
+           opts_.profiling_engine == ProfilingEngine::PcSampling;
+}
+
 bool CuptiBackend::ShouldEnableNvtxMarkerActivityBeforeEngine_() const {
     if (!collectsKernelEvents()) return false;
     if (!IsSassProfilerMode()) return true;
@@ -824,6 +842,10 @@ void CuptiBackend::start() {
     // non-kernel memcpy/memset API metas before emitting rows.
     SetSuppressOrphanSyntheticKernels(
         opts_.profiling_engine == ProfilingEngine::SassMetrics);
+    // Windows-injection PC sampling loses its final flush to the process-exit
+    // teardown, so emit synthetic kernel rows during the run rather than only at
+    // shutdown (the same reason SASS disassembly runs mid-run for this mode).
+    SetDrainSyntheticKernelsMidRun(IsWindowsInjectedPcSampling());
     kernel_activity_seen_.store(0, std::memory_order_relaxed);
     kernel_activity_emitted_.store(0, std::memory_order_relaxed);
     kernel_activity_throttled_.store(0, std::memory_order_relaxed);
@@ -835,7 +857,7 @@ void CuptiBackend::start() {
     external_correlation_seen_.store(0, std::memory_order_relaxed);
     source_locator_seen_.store(0, std::memory_order_relaxed);
     function_record_seen_.store(0, std::memory_order_relaxed);
-    kernel_launch_callback_seen_.store(false, std::memory_order_relaxed);
+    kernel_launch_callback_count_.store(0, std::memory_order_relaxed);
     capture_capabilities_emitted_.store(false, std::memory_order_relaxed);
 
     // Reset the BufferCompleted companion maps for a clean per-session slate
@@ -1340,30 +1362,30 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
         source_locator_seen_.load(std::memory_order_relaxed);
     const uint64_t functionRows =
         function_record_seen_.load(std::memory_order_relaxed);
-    // Real CUPTI kernel activity records emitted this session. PcSampling enables
-    // CONCURRENT_KERNEL out-of-band in its engine (bypassing collectsKernelEvents(),
-    // the handler-enable gate that returns false for PC), so real records with
-    // MEASURED durations flow — and increment this — even for PC sessions.
+    // Real CUPTI kernel-activity records emitted this session (MEASURED GPU
+    // durations). PcSampling enables CONCURRENT_KERNEL out-of-band in its engine
+    // (bypassing collectsKernelEvents()), so SOME real records can flow even for
+    // PC sessions — e.g. when the GPUFL_PC_KERNEL_COLLECT=all heavy drain's
+    // Stop→flush→restart cycle succeeds for a handful of launches.
+    const uint64_t launchCount =
+        kernel_launch_callback_count_.load(std::memory_order_acquire);
     const bool realKernelRows = kernelRows > 0;
-    // Synthetic kernel rows are launch-callback duration ESTIMATES that
-    // drainSyntheticKernels emits for launches with no matching real activity
-    // record (host-dispatch timing, not measured). They appear when: kernel
-    // launches were seen, NO real activity records were collected, and the
-    // synthetic drain wasn't suppressed — suppression is on only for pure
-    // SASS-metrics mode (kernel activity intentionally off → no kernel rows at
-    // all). The live case is NON-ADMIN PC: PC arms but Stop/GetData are
-    // privilege-blocked, so zero real records flow and the kernel rows come from
-    // launch callbacks. kernel_launch_callback_seen_ is an atomic set on every
-    // launch callback, so reading it here is both safe AND populated —
-    // capabilities emit BEFORE the collector's end-of-session synthetic drain, so
-    // a post-drain emit count would read zero at this point.
+    // The rest of the launches get SYNTHETIC rows — launch-callback duration
+    // ESTIMATES (host dispatch gaps, not measured) from drainSyntheticKernels.
+    // Report "synthetic" when they're the MAJORITY (fewer than half the launches
+    // got a real record): a binary "no real record at all" test under-reported —
+    // when the PC heavy drain captured a handful of real records it flipped the
+    // whole session to "collected" while the timeline was still ~90% host-gap
+    // estimates. launchCount and kernelRows are both populated DURING the run, so
+    // this is correct whether capabilities emit before or after the end-of-session
+    // synthetic drain. (Pure SASS-metrics mode keeps no kernel rows at all.)
     const bool syntheticKernels =
-        !realKernelRows &&
         (requests.sass || requests.pc) &&
         opts_.profiling_engine != ProfilingEngine::SassMetrics &&
-        kernel_launch_callback_seen_.load(std::memory_order_acquire);
+        launchCount > 0 &&
+        kernelRows * 2 < launchCount;
     // "Has kernel data" = any kernel rows, real OR synthetic. The status then
-    // splits collected (measured) vs fallback (estimated) on syntheticKernels.
+    // splits collected (measured) vs fallback (mostly estimated) on syntheticKernels.
     const bool kernelHasData = realKernelRows || syntheticKernels;
     const bool memoryHasData = memoryRows > 0;
     const bool memTransferHasData = memTransferRows > 0;
@@ -1750,7 +1772,7 @@ void CuptiBackend::StartActivityFlushThreadIfNeeded_() {
                 break;
             }
             if (!active_.load(std::memory_order_relaxed)) continue;
-            if (!kernel_launch_callback_seen_.load(std::memory_order_acquire)) {
+            if (kernel_launch_callback_count_.load(std::memory_order_acquire) == 0) {
                 continue;
             }
             LogCuptiIfUnexpected(

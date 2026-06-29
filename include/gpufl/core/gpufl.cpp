@@ -18,6 +18,7 @@
 #include "gpufl/backends/host_collector.hpp"
 #include "gpufl/core/backend_factory.hpp"
 #include "gpufl/core/common.hpp"
+#include "gpufl/core/teardown_flag.hpp"  // detail::isProcessExitTeardown
 #include "gpufl/core/config_file_loader.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/events.hpp"
@@ -634,10 +635,23 @@ void shutdown() {
     // process exit races with late CUDA initialization. Joining it first keeps
     // backend shutdown from overlapping with telemetry collection.
     rt->sampler.shutdown();
-    GFL_LOG_DEBUG("Shutdown: sampler stopped -> Monitor::Shutdown()");
 
-    Monitor::Shutdown();
-    GFL_LOG_DEBUG("Shutdown: Monitor::Shutdown() returned -> finalize logs");
+    // Windows-injection process exit: the CUPTI release (cuptiPCSamplingStop/
+    // Disable) can hang or crash against the context the driver is tearing down.
+    // So drain + flush every batch, emit capabilities + the shutdown marker, and
+    // CLOSE the log BEFORE that release - a teardown failure then costs no data.
+    // Embedded/normal exits keep the clean order (Monitor::Shutdown releases
+    // CUPTI first so its activity flush can deliver the final kernels).
+    const bool processExit = detail::isProcessExitTeardown();
+
+    if (processExit) {
+        GFL_LOG_DEBUG("Shutdown: process-exit -> DrainAndFinalizeForExit()");
+        Monitor::DrainAndFinalizeForExit();
+    } else {
+        GFL_LOG_DEBUG("Shutdown: sampler stopped -> Monitor::Shutdown()");
+        Monitor::Shutdown();
+    }
+    GFL_LOG_DEBUG("Shutdown: monitor drained -> finalize logs");
 
     if (g_opts.continuous_system_sampling && rt->collector) {
         SystemStopEvent e;
@@ -661,6 +675,15 @@ void shutdown() {
     GFL_LOG_DEBUG("Shutdown: writing events done -> logger->close()");
     rt->logger->close();
     GFL_LOG_DEBUG("Shutdown: logger->close() returned");
+
+    // Logs are durable now. Release the CUPTI backend LAST so that if
+    // cuptiPCSamplingStop/Disable hangs or crashes against the dying context,
+    // the run's data is already saved.
+    if (processExit) {
+        GFL_LOG_DEBUG("Shutdown: process-exit -> ReleaseBackendForExit()");
+        Monitor::ReleaseBackendForExit();
+        GFL_LOG_DEBUG("Shutdown: ReleaseBackendForExit() returned");
+    }
 
     set_runtime(nullptr);
 

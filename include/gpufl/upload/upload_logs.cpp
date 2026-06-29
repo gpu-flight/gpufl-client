@@ -917,7 +917,69 @@ StreamPostResult postStreamChunk(httplib::Client&         client,
     return out;
 }
 
+bool postSessionCompleteImpl(httplib::Client& client,
+                             const std::string& api_path,
+                             const std::string& api_key,
+                             const std::string& session_id) {
+    const std::string path = normalizeApiPath(api_path) + "/events/session-complete";
+    const std::string ua = std::string("gpufl-client/") + kClientVersion + " (signal)";
+    const httplib::Headers headers = {
+        {"Authorization",              "Bearer " + api_key},
+        {"User-Agent",                 ua},
+        {"X-GpuFlight-Client-Version", kClientVersion},
+        {"X-GpuFlight-Wire-Version",   kWireVersion},
+        {"X-GpuFlight-Session-Id",     session_id},
+    };
+    // Empty body: the backend reads the session id from the header and stamps
+    // upload_complete_at; the body is ignored.
+    auto res = client.Post(path.c_str(), headers, std::string(), "application/json");
+    if (!res) {
+        GFL_LOG_DEBUG("[sessionComplete] transport error for ", session_id,
+                      " (httplib::Error=", static_cast<int>(res.error()), ")");
+        return false;
+    }
+    if (res->status >= 200 && res->status < 300) {
+        GFL_LOG_DEBUG("[sessionComplete] accepted for ", session_id,
+                      " (HTTP ", res->status, ")");
+        return true;
+    }
+    // Non-2xx (e.g. 404 on a backend that predates the endpoint): not fatal —
+    // the backend's grace/settle path still finalizes. Log and move on.
+    GFL_LOG_DEBUG("[sessionComplete] backend returned HTTP ", res->status,
+                  " for ", session_id);
+    return false;
+}
+
 }  // namespace
+
+// ─────────────────────────────────────────────────────────────────────
+// Out-of-process completion signal (POST /api/v1/events/session-complete)
+// ─────────────────────────────────────────────────────────────────────
+
+bool postSessionComplete(const BackendConfig& config,
+                         const std::string& session_id) {
+    UrlParts url;
+    if (!parseUrl(config.backend_url, url)) {
+        GFL_LOG_DEBUG("[sessionComplete] unparseable backend url '", config.backend_url, "'");
+        return false;
+    }
+    // Best-effort signal — fail fast (the backend grace path is the backstop) so a black-holed
+    // backend can't stall trace exit on the way out.
+    UploadOptions opts;
+    opts.connect_timeout_ms = 2000;
+    opts.read_timeout_ms = 4000;
+    auto client = makeClient(url, opts);
+    if (!client) return false;
+
+    return postSessionCompleteImpl(*client, config.api_path, config.api_key, session_id);
+}
+
+bool postSessionComplete(const std::string& backend_url,
+                         const std::string& api_path_in,
+                         const std::string& api_key,
+                         const std::string& session_id) {
+    return postSessionComplete({backend_url, api_key, api_path_in}, session_id);
+}
 
 // ─────────────────────────────────────────────────────────────────────
 // Main entry point

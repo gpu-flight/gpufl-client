@@ -1,6 +1,7 @@
 #include "gpufl/core/dictionary_manager.hpp"
 
 #include "gpufl/core/env_vars.hpp"
+#include "gpufl/core/stack_trace.hpp"  // DemangleFunctionKey
 
 #include <chrono>
 #include <cstdio>
@@ -280,17 +281,17 @@ void DictionaryManager::flushDisassembly(Logger& logger,
             const char* cudaPath = std::getenv(gpufl::env::kCudaPath);
             if (cudaPath && cudaPath[0]) {
                 std::snprintf(cmd, sizeof(cmd),
-                              "\"\"%s\\bin\\nvdisasm.exe\" --print-code \"%s\"\"",
+                              "\"\"%s\\bin\\nvdisasm.exe\" -g \"%s\"\"",
                               cudaPath, tmpPathStr.c_str());
             } else {
                 std::snprintf(cmd, sizeof(cmd),
-                              "\"nvdisasm.exe --print-code \"%s\"\"",
+                              "\"nvdisasm.exe -g \"%s\"\"",
                               tmpPathStr.c_str());
             }
             pipe = _popen(cmd, "r");
 #else
             std::vector<std::string> args = {
-                "/usr/local/cuda/bin/nvdisasm", "--print-code", tmpPathStr};
+                "/usr/local/cuda/bin/nvdisasm", "-g", tmpPathStr};
             std::vector<char*> argv;
             argv.reserve(args.size() + 1);
             for (auto& a : args) argv.push_back(a.data());
@@ -399,14 +400,17 @@ void DictionaryManager::flushDisassembly(Logger& logger,
                 funcEntries[currentFunc].push_back(
                     {pc, std::move(ins), currentSourceFile, currentSourceLine});
             } else {
-                // NVIDIA nvdisasm format:
-                // Function: "_Z11vectorScalePiii:"
-                // Instruction: "/*XXXX*/   INSTR ;"
+                // NVIDIA nvdisasm -g format:
+                // Function:     "_Z11vectorScalePiii:"
+                // Line marker:  //## File "<path>", line <N>
+                // Instruction:  "/*XXXX*/   INSTR ;"
                 if (!std::isspace(static_cast<unsigned char>(raw[0])) && raw[0] != '.' &&
                     raw.back() == ':') {
                     currentFunc = raw.substr(0, raw.size() - 1);
                     if (!funcEntries.count(currentFunc))
                         funcEntries[currentFunc] = {};
+                    currentSourceFile.clear();  // new function - reset line tracking
+                    currentSourceLine = 0;
                     continue;
                 }
 
@@ -414,6 +418,36 @@ void DictionaryManager::flushDisassembly(Logger& logger,
                 const size_t start = raw.find_first_not_of(" \t");
                 if (start == std::string::npos) continue;
                 const std::string s = raw.substr(start);
+
+                // Source-line annotation from -g (applies to the instructions
+                // that follow, until the next marker): //## File "path", line N
+                if (s.rfind("//## File", 0) == 0) {
+                    const size_t q1 = s.find('"');
+                    const size_t q2 = (q1 == std::string::npos)
+                                          ? std::string::npos : s.find('"', q1 + 1);
+                    const size_t lpos = s.find(", line ");
+                    if (q1 != std::string::npos && q2 != std::string::npos &&
+                        lpos != std::string::npos && q2 > q1) {
+                        // nvdisasm escapes backslashes in the quoted path.
+                        const std::string esc = s.substr(q1 + 1, q2 - q1 - 1);
+                        std::string path;
+                        path.reserve(esc.size());
+                        for (size_t k = 0; k < esc.size(); ++k) {
+                            if (esc[k] == '\\' && k + 1 < esc.size() && esc[k + 1] == '\\') {
+                                path += '\\';
+                                ++k;
+                            } else {
+                                path += esc[k];
+                            }
+                        }
+                        currentSourceFile = path;
+                        try {
+                            currentSourceLine = static_cast<uint32_t>(
+                                std::stoul(s.substr(lpos + 7)));
+                        } catch (...) { currentSourceLine = 0; }
+                    }
+                    continue;
+                }
 
                 if (s.rfind("/*", 0) != 0) continue;
                 const size_t end = s.find("*/");
@@ -427,7 +461,12 @@ void DictionaryManager::flushDisassembly(Logger& logger,
                 std::string ins = s.substr(insStart);
                 if (!ins.empty() && ins.back() == ';') ins.pop_back();
                 while (!ins.empty() && ins.back() == ' ') ins.pop_back();
-                funcEntries[currentFunc].push_back({pc, std::move(ins), {}, 0});
+                // -g emits non-code sections (.debug_line/.nv.info) whose
+                // "/*pc*/ .word/.dword/.string ..." lines mimic instructions.
+                // Real SASS opcodes never start with '.', so drop directives.
+                if (ins.empty() || ins[0] == '.') continue;
+                funcEntries[currentFunc].push_back(
+                    {pc, std::move(ins), currentSourceFile, currentSourceLine});
             }
         }
         GFL_LOG_DEBUG("[flushDisassembly] parsed ", funcEntries.size(),
@@ -480,10 +519,21 @@ void DictionaryManager::flushDisassembly(Logger& logger,
             logger.write(SassLine{oss.str()});
         }
 
-        // For AMD code objects with DWARF debug info, emit source file content
-        // and a profile_sample_batch that maps pc_offset -> source_file:line.
-        // This enables the same source-correlated ISA view as NVIDIA/CUPTI.
-        if (isAmd) {
+        // Emit source file content + a pc_offset -> source_file:line map
+        // (sample_kind=isa_source_map) whenever the disassembly carries line
+        // info: AMD via llvm-objdump -l, NVIDIA via nvdisasm -g (cubin built
+        // with -lineinfo). This is what gives the source-correlated ISA view its
+        // line mapping - and on Windows-injection PC sampling it's the ONLY
+        // source of it, since cuptiGetSassToSourceCorrelation can't run while
+        // the sampler is armed.
+        bool anySourceLine = false;
+        for (const auto& [funcName, entries] : funcEntries) {
+            for (const auto& e : entries) {
+                if (!e.source_file.empty() && e.source_line > 0) { anySourceLine = true; break; }
+            }
+            if (anySourceLine) break;
+        }
+        if (isAmd || anySourceLine) {
             // Collect unique source files and intern them
             std::unordered_map<std::string, uint32_t> sourceFileIds;
             for (const auto& [funcName, entries] : funcEntries) {
@@ -528,7 +578,12 @@ void DictionaryManager::flushDisassembly(Logger& logger,
                             bestCount = cnt;
                         }
                     }
-                    internFunction(funcName + "@" + primarySourceFile);
+                    // Demangle the name so it merges with the PC-sample function
+                    // entry (which is demangled), and carry the mangled symbol so
+                    // the funcKey/disassembly join still keys off md5(symbol).
+                    internFunction(
+                        core::DemangleFunctionKey(funcName + "@" + primarySourceFile),
+                        funcName);
                 }
 
                 // Flush dictionary + source content NOW so IDs appear
@@ -575,8 +630,9 @@ void DictionaryManager::flushDisassembly(Logger& logger,
                             bestCount = cnt;
                         }
                     }
-                    const std::string funcKey = funcName + "@" + primarySourceFile;
-                    const uint32_t functionId = internFunction(funcKey);
+                    const std::string funcKey =
+                        core::DemangleFunctionKey(funcName + "@" + primarySourceFile);
+                    const uint32_t functionId = internFunction(funcKey, funcName);
 
                     // Build profile_sample_batch JSON
                     std::ostringstream poss;

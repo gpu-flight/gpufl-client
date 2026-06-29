@@ -220,6 +220,13 @@ struct PmSampleInput {
 // Default false: normal / PC modes keep best-effort synthesis.
 void SetSuppressOrphanSyntheticKernels(bool suppress);
 
+// Session-level switch (set by the active backend at start): when true the
+// collector emits orphaned launches as synthetic kernel rows PERIODICALLY during
+// the run, not only at shutdown. Used for Windows-injection PC sampling, whose
+// process-exit teardown drops the final flush - mid-run emission is the only way
+// those kernel rows survive. Default false (other modes emit at shutdown).
+void SetDrainSyntheticKernelsMidRun(bool enable);
+
 /**
  * @brief The central monitoring engine.
  */
@@ -231,9 +238,26 @@ class Monitor {
     static void Initialize(const MonitorOptions& opts = {});
 
     /**
-     * @brief Shuts down the monitoring engine.
+     * @brief Shuts down the monitoring engine (clean teardown order: release
+     *        the CUPTI backend, then drain + flush). Used off the normal
+     *        (embedded) exit path.
      */
     static void Shutdown();
+
+    /**
+     * @brief Windows-injection process-exit teardown, phase 1: stop the
+     *        collector, drain the ring, flush all batches, and emit backend
+     *        capabilities WITHOUT touching CUPTI. Leaves all run data in the
+     *        logger so the caller can close it before the fragile release.
+     */
+    static void DrainAndFinalizeForExit();
+
+    /**
+     * @brief Windows-injection process-exit teardown, phase 2: the fragile
+     *        CUPTI release (cuptiPCSamplingStop/Disable). Call LAST, after the
+     *        logs are flushed + closed, so a hang/crash here can't lose data.
+     */
+    static void ReleaseBackendForExit();
 
     /**
      * @brief Starts global collection.
@@ -291,6 +315,13 @@ class Monitor {
      */
     static void EnqueueCubinForDisassembly(uint64_t crc, const uint8_t* data,
                                            size_t size);
+
+    /**
+     * Disassemble and emit any enqueued cubins now, instead of waiting for the
+     * shutdown flush. Used by the cubin worker under Windows-injection PC
+     * sampling to keep nvdisasm off the fragile process-exit teardown.
+     */
+    static void FlushDisassemblyNow();
 
     /**
      * @brief Push a pre-built ScopeBatchRow into the scope batch buffer.
