@@ -653,7 +653,13 @@ void shutdown() {
     }
     GFL_LOG_DEBUG("Shutdown: monitor drained -> finalize logs");
 
-    if (g_opts.continuous_system_sampling && rt->collector) {
+    // The optional "sampling_end" sample is skipped on Windows-injection exit:
+    // collector->sampleAll() does slow NVML/NVAPI work against the context cudart
+    // has already destroyed, and the process can be terminated mid-call. That
+    // dropped the shutdown marker written just below (logs falsely "synthetic"
+    // even though every kernel already flushed in DrainAndFinalizeForExit). The
+    // marker is written first instead; the final metric sample is non-essential.
+    if (g_opts.continuous_system_sampling && rt->collector && !processExit) {
         SystemStopEvent e;
         e.pid = detail::GetPid();
         e.app = rt->app_name;

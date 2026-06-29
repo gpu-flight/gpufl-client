@@ -96,8 +96,10 @@ enum class ProfilingEngine {
                     // utilization, L1/L2 hit rates, DRAM bandwidth.
                     // (CUPTI Range Profiler; requires GPUFL_HAS_PERFWORKS)
     RangeProfilerKernelReplay,  // Kernel-owned counters via AutoRange + KernelReplay.
-    Deep,           // PcSampling + SassMetrics in a single run - the
-                    // deepest single-session profile. (Was PcSamplingWithSass.)
+    Deep,           // SassMetrics + PmSampling in a single run - the
+                    // deepest single-session profile. (PC sampling is only a
+                    // fallback where SASS can't arm; SASS and PC are mutually
+                    // exclusive, so the normal capture is SASS + PM.)
 };
 
 inline const char* ProfilingEngineWireName(const ProfilingEngine engine) {
@@ -258,6 +260,15 @@ class Monitor {
      *        logs are flushed + closed, so a hang/crash here can't lose data.
      */
     static void ReleaseBackendForExit();
+
+    /**
+     * @brief Ask the collector to drain + write the synthetic/launch-derived
+     *        kernel rows now and wait (bounded) for it. Called from a CUDA
+     *        cleanup callback (cudaFree) on the app thread so the kernels are
+     *        durable before the Windows-injection atexit shutdown races process
+     *        teardown. Does not stop the collector (safe for mid-run frees).
+     */
+    static void RequestSyntheticDrainAndWait();
 
     /**
      * @brief Starts global collection.

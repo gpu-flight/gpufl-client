@@ -16,6 +16,7 @@
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
 #include "gpufl/core/activity_record.hpp"
 #include "gpufl/core/common.hpp"
+#include "gpufl/core/teardown_flag.hpp"  // detail::isProcessExitTeardown
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/logger/logger.hpp"
 #include "gpufl/core/model/lifecycle_model.hpp"
@@ -281,6 +282,11 @@ void SassMetricsEngine::DeInitProfilerIfNeeded_() {
 }
 
 void SassMetricsEngine::stop() {
+    // Windows-injection process exit: cudart already destroyed the context, so
+    // the SASS CUPTI drain/disable below faults against it. Skip - scoped
+    // workloads already drained at scope-stop; the OS reclaims the rest at exit.
+    // (Same guard PcSamplingEngine uses for its teardown.)
+    if (gpufl::detail::isProcessExitTeardown()) return;
     // Scope-bounded isolation test: scope stop drains and disables SASS. If a
     // scope is still armed at session stop, drain it here before shutdown.
     if (enabled_) {
@@ -289,6 +295,11 @@ void SassMetricsEngine::stop() {
 }
 
 void SassMetricsEngine::shutdown() {
+    // Process exit: skip the whole Profiler-API teardown (cudaDeviceSynchronize
+    // re-enters the dying cudart, and cuptiSassMetricsDisable / UnsetConfig /
+    // cuptiProfilerDeInitialize fault against the destroyed context). The OS
+    // reclaims it all at exit. This was the 0xC0000005 in the Deep/SASS engine.
+    if (gpufl::detail::isProcessExitTeardown()) return;
     if (enabled_ && ctx_.cuda_ctx) {
         cudaDeviceSynchronize();
         // Final drain pass - Monitor::Shutdown() may call shutdown()

@@ -102,7 +102,7 @@ struct InitOptions {
     //   RangeProfiler - scope-level hardware throughput counters
     //   RangeProfilerKernelReplay
     //                 - kernel-level hardware counters via CUPTI KernelReplay
-    //   Deep          - PcSampling + SassMetrics in one run
+    //   Deep          - SassMetrics + PmSampling in one run
     ProfilingEngine profiling_engine = ProfilingEngine::Monitor;
 
     uint32_t pm_sampling_interval_us = 100;
@@ -203,7 +203,7 @@ void shutdown();
 
 // Comprehensive defaults for "injection" capture mode (the
 // libgpufl_inject.so launcher path). Flips most observability flags on
-// and selects the Deep engine (PcSampling + SassMetrics in one run) for
+// and selects the Deep engine (SassMetrics + PmSampling in one run) for
 // the richest per-instruction view.
 // Documented overhead: ~5–15% wall time on heavy CUDA workloads.
 //

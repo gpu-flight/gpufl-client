@@ -88,6 +88,12 @@ class DictionaryManager {
     // JSON line per function.  No-op if nothing is pending.
     void flushDisassembly(Logger& logger, const std::string& session_id);
 
+    // Runs cuobjdump -ptx on the running executable and emits one
+    // ptx_disassembly JSON line per kernel (joined to kernels/SASS by the same
+    // mangled function name). PTX lives in the fatbin, not the SASS cubins we
+    // capture, so this reads the executable directly. Runs once per session.
+    void flushPtx(Logger& logger, const std::string& session_id);
+
     void reset() {
         std::lock_guard lk(mu_);
         kernel_dict_.clear();
@@ -142,6 +148,9 @@ class DictionaryManager {
 
     // cubin_crc → raw bytes (populated once per cubin, flushed via flushDisassembly)
     std::unordered_map<uint64_t, std::vector<uint8_t>> pending_disasm_cubins_;
+
+    // PTX is dumped from the executable once per session (see flushPtx).
+    bool ptx_emitted_ = false;
 
     // Batch ID counter for profile_sample_batch records emitted from
     // AMD DWARF source mapping (avoids collision with monitor batch IDs
