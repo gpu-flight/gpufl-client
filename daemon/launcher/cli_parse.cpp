@@ -167,6 +167,10 @@ const char* traceHelp() {
         "                            Hard cap on total target runtime (safety).\n"
         "        --after-window=<WHAT>\n"
         "                            What to do at window end. Only 'stop' today.\n"
+        "        --pc-sample-period=<N>\n"
+        "                            PC sampling period: log2 of GPU cycles per sample\n"
+        "                            (5..31; default 10). Lower = more frequent — for\n"
+        "                            short kernels that yield no PC samples by default.\n"
         "    -h, --help              Print this help\n"
         "\n"
         "EXAMPLES:\n"
@@ -320,6 +324,18 @@ TraceParseResult parseTraceArgs(const std::vector<std::string>& argv) {
                         "invalid --agent-drain-ms value: " + v +
                         " (expected a non-negative integer, milliseconds)"};
             }
+        } else if (key == "--pc-sample-period") {
+            std::string v;
+            auto err = take_value(v);
+            if (!err.empty()) return {std::nullopt, err};
+            int period = 0;
+            if (!parseNonNegativeInt(v, period) || period < 5 || period > 31) {
+                return {std::nullopt,
+                        "invalid --pc-sample-period value: " + v +
+                        " (expected an integer 5..31; the log2 of GPU cycles per "
+                        "PC sample - lower = more frequent, catches short kernels)"};
+            }
+            out.pc_sample_period = static_cast<uint32_t>(period);
         } else if (key == "--warmup") {
             std::string v;
             auto err = take_value(v);
@@ -400,19 +416,20 @@ const char* uploadHelp() {
         "        --backend-url=<URL> Backend base URL.   Env: GPUFL_BACKEND_URL\n"
         "        --api-key=<KEY>     Bearer token.       Env: GPUFL_API_KEY\n"
         "        --api-path=<PATH>   Reverse-proxy mount. Defaults to /api/v1\n"
-        "        --timeout=<SECS>    Total wall budget for the upload. Default 300\n"
-        "        --retries=<N>       Retries per failing POST. Default 1\n"
+        "        --agent-jar=<PATH>  Run the uploader as `java -jar <PATH>`.\n"
+        "                            Env: GPUFL_AGENT_JAR (else gpufl-agent on PATH)\n"
+        "        --timeout=<SECS>    Cap on waiting for the upload to finish. Default 300\n"
+        "        --retries=<N>       Accepted for compatibility; the agent retries internally\n"
         "    -q, --quiet             Suppress periodic progress lines\n"
-        "        --session-id=<ID>   Upload only this session (default: latest)\n"
-        "        --all-sessions      Upload every session in the dir (excl. --session-id)\n"
+        "        --all-sessions      Upload every session in the dir (this is the default)\n"
         "        --force             Re-upload even if the cursor says it shipped\n"
         "    -h, --help              Print this help\n"
         "\n"
         "EXAMPLES:\n"
         "    gpufl upload ~/.gpufl/traces/20260603-101500_ab12cd34\n"
-        "    gpufl upload ./logs --all-sessions\n"
+        "    gpufl upload ./logs --force\n"
         "    GPUFL_API_KEY=gpfl_… GPUFL_BACKEND_URL=https://api.gpuflight.com \\\n"
-        "        gpufl upload ./logs --session-id=<uuid>\n";
+        "        gpufl upload ./logs\n";
 }
 
 const char* monitorHelp() {
@@ -485,9 +502,13 @@ UploadParseResult parseUploadArgs(const std::vector<std::string>& argv) {
         } else if (key == "--api-path") {
             auto err = take_value(out.api_path);
             if (!err.empty()) return {std::nullopt, err};
-        } else if (key == "--session-id") {
-            auto err = take_value(out.session_id);
+        } else if (key == "--agent-jar") {
+            auto err = take_value(out.agent_jar);
             if (!err.empty()) return {std::nullopt, err};
+        } else if (key == "--session-id") {
+            return {std::nullopt,
+                    "--session-id is no longer supported; point <LOG_PATH> at a "
+                    "directory containing only that session"};
         } else if (key == "--timeout") {
             std::string v;
             auto err = take_value(v);
@@ -519,9 +540,6 @@ UploadParseResult parseUploadArgs(const std::vector<std::string>& argv) {
 
     if (!have_log_path) {
         return {std::nullopt, "missing <LOG_PATH> (the trace output directory)"};
-    }
-    if (!out.session_id.empty() && out.all_sessions) {
-        return {std::nullopt, "--session-id and --all-sessions are mutually exclusive"};
     }
     return {out, ""};
 }

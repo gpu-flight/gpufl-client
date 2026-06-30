@@ -37,6 +37,10 @@ struct TraceArgs {
     int64_t window_ms = 0;              // --window; 0 = run to the target's natural exit
     int64_t window_timeout_ms = 0;      // --window-timeout; hard cap on total runtime (0 = warmup+window)
     std::string after_window = "stop";  // --after-window; "stop" is the only value today
+    // PC sampling period as a log2 exponent (2^N GPU cycles/sample, valid 5..31;
+    // lower = more frequent → catches shorter kernels). 0 = leave the engine
+    // default. Plumbed to the injected target via GPUFL_PC_SAMPLING_PERIOD.
+    uint32_t pc_sample_period = 0;      // --pc-sample-period; 0 = engine default
     std::vector<std::string> command;   // tokens after `--`
 };
 
@@ -49,12 +53,12 @@ struct UploadArgs {
     std::string backend_url;        // --backend-url (else env GPUFL_BACKEND_URL)
     std::string api_key;            // --api-key (else env GPUFL_API_KEY)
     std::string api_path;           // --api-path; empty resolves to /api/v1
-    int timeout_s = 300;            // --timeout (seconds); total wall budget
-    int retries = 1;                // --retries per failing POST
+    int timeout_s = 300;            // --timeout (seconds); cap on waiting for the agent
+    int retries = 1;                // --retries (accepted; the agent retries internally)
     bool quiet = false;             // --quiet: suppress progress lines
-    std::string session_id;         // --session-id (mutually excl. with --all-sessions)
-    bool all_sessions = false;      // --all-sessions
-    bool force = false;             // --force: re-upload despite cursor
+    bool all_sessions = true;       // every session in the dir is uploaded (the default)
+    bool force = false;             // --force: re-upload despite cursor (throwaway cursor)
+    std::string agent_jar;          // --agent-jar; else GPUFL_AGENT_JAR / gpufl-agent on PATH
 };
 
 // Parsed `gpufl monitor` invocation. This starts the long-running

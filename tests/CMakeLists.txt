@@ -30,6 +30,7 @@ set(GPUFL_TEST_SOURCES
 
 if(GPUFL_ENABLE_NVIDIA AND GPUFL_HAS_CUPTI)
   list(APPEND GPUFL_TEST_SOURCES
+    backends/nvidia/test_capture_capability_resolver.cpp
     backends/nvidia/test_nvidia_backend.cpp
     common/log_utils.cpp
   )

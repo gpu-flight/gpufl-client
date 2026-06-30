@@ -13,6 +13,12 @@ struct AgentOptions {
     std::string api_key;
     std::string api_version = "v1";
     std::string agent_jar;
+    // Scope a launcher-spawned --upload agent to THIS run: upload only sessions that
+    // appear after it starts, ignoring old sessions in a reused --output dir.
+    bool scope_to_new_sessions = false;
+    // One-shot upload: exit immediately if no session is found at startup instead of
+    // waiting for one to appear (`gpufl upload`, not trace/monitor).
+    bool exit_if_empty = false;
 };
 
 struct AgentLaunchPlan {

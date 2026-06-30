@@ -2,6 +2,12 @@
 
 // Deferred bulk upload of a profiling session's NDJSON logs.
 //
+// The in-process, no-Java upload path. The CLI (`gpufl trace --upload`,
+// `gpufl upload`) spawns the gpufl-agent instead, for its live streaming, cursor
+// dedup, and staleness robustness; this stays self-contained for embedded C++ /
+// Python callers that can't assume a JVM is on the box (also used by the
+// GPUFL_INJECT_UPLOAD inject path, off by default).
+//
 // Replaces the per-batch HttpLogSink streaming model. The C++ client
 // writes everything to local NDJSON files during the session (always -
 // regardless of upload mode); when the user wants to ship data to the
