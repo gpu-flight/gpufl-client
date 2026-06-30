@@ -278,6 +278,13 @@ bool configureAgentEnvironment(const AgentOptions& opts, std::string& error) {
         error = "failed to configure agent environment";
         return false;
     }
+    // A launcher-spawned --upload agent scopes itself to THIS run: ignore sessions
+    // already on disk (other runs in a reused --output dir), upload only new ones.
+    if (opts.scope_to_new_sessions &&
+        !setEnv("GPUFL_AGENT_IGNORE_PREEXISTING", "1")) {
+        error = "failed to configure agent environment";
+        return false;
+    }
     return true;
 }
 

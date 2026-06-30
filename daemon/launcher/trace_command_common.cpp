@@ -551,14 +551,25 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
                                ? platform.defaultAppName(args.command.front())
                                : args.name;
 
-    // Each `gpufl trace` run gets its OWN folder so the upload agent picks up ONLY this run's
-    // session(s), not old sessions left over in a reused --output dir. The default output dir is
-    // already per-run (defaultOutputDir(dir_tag)); an explicit --output is a dir the user reuses
-    // across runs, so nest this run under a readable, unique "run-<name>-<id>" folder inside it.
-    const std::string run_folder = "run-" + slugForPath(app_name) + "-" + dir_tag.substr(0, 8);
-    const fs::path output_dir = args.output_dir.empty()
-                              ? platform.defaultOutputDir(dir_tag)
-                              : fs::path(args.output_dir) / run_folder;
+    // Where this run's session folder(s) land. The default output dir is already
+    // per-run (defaultOutputDir(dir_tag)), so sessions sit flat inside it. An
+    // explicit --output is a dir the user reuses across runs:
+    //   - multi-pass nests its passes under a readable "run-<name>-<analysis_id>"
+    //     folder so the passes of one analysis stay grouped (a flat dir would lose
+    //     which sessions belong to the same run);
+    //   - single-pass is one session, so it lands flat as <output>/<session_id>/ -
+    //     matching embedded gpufl and the upload agent's <parent>/<session_id>
+    //     discovery, with no redundant per-session wrapper.
+    fs::path output_dir;
+    if (args.output_dir.empty()) {
+        output_dir = platform.defaultOutputDir(dir_tag);
+    } else if (multipass) {
+        const std::string run_folder =
+            "run-" + slugForPath(app_name) + "-" + dir_tag.substr(0, 8);
+        output_dir = fs::path(args.output_dir) / run_folder;
+    } else {
+        output_dir = fs::path(args.output_dir);
+    }
 
     std::error_code ec;
     fs::create_directories(output_dir, ec);
@@ -631,6 +642,7 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
         agent_opts.api_key = resolveOption(args.api_key, env::kApiKey);
         agent_opts.api_version = args.api_version;
         agent_opts.agent_jar = args.agent_jar;
+        agent_opts.scope_to_new_sessions = true;  // upload only this run's session(s)
 
         if (!configureAgentEnvironment(agent_opts, error)) {
             std::fprintf(stderr, "gpufl trace --upload: %s\n", error.c_str());
