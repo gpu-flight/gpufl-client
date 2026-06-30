@@ -382,7 +382,7 @@ TEST(CliParseUpload, BasicLogPath) {
     EXPECT_EQ(r.args->timeout_s, 300);
     EXPECT_EQ(r.args->retries, 1);
     EXPECT_FALSE(r.args->quiet);
-    EXPECT_FALSE(r.args->all_sessions);
+    EXPECT_TRUE(r.args->all_sessions);  // every session in the dir, by default
     EXPECT_FALSE(r.args->force);
 }
 
@@ -416,10 +416,10 @@ TEST(CliParseUpload, MissingLogPath) {
     EXPECT_NE(r.error.find("LOG_PATH"), std::string::npos);
 }
 
-TEST(CliParseUpload, SessionIdAndAllSessionsMutuallyExclusive) {
-    auto r = parseUploadArgs(argsFor({"--session-id=abc", "--all-sessions", "/tmp/run"}));
+TEST(CliParseUpload, SessionIdNoLongerSupported) {
+    auto r = parseUploadArgs(argsFor({"--session-id=abc", "/tmp/run"}));
     EXPECT_FALSE(r.args.has_value());
-    EXPECT_NE(r.error.find("mutually exclusive"), std::string::npos);
+    EXPECT_NE(r.error.find("no longer supported"), std::string::npos);
 }
 
 TEST(CliParseUpload, InvalidTimeout) {
