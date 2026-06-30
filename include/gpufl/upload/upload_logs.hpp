@@ -2,6 +2,13 @@
 
 // Deferred bulk upload of a profiling session's NDJSON logs.
 //
+// DEPRECATED (in-process C++ uploader). The gpufl-agent is the single upload path
+// now: `gpufl trace --upload` and `gpufl upload` both spawn it, and it speaks the
+// same POST /api/v1/events/stream protocol with cursor dedup, salvage, and the
+// staleness / settle-marker robustness this batch uploader lacks. uploadLogs() is
+// retained only for the embedded / no-Java case (and the GPUFL_INJECT_UPLOAD
+// inject path, off by default); prefer the agent and don't add features here.
+//
 // Replaces the per-batch HttpLogSink streaming model. The C++ client
 // writes everything to local NDJSON files during the session (always -
 // regardless of upload mode); when the user wants to ship data to the

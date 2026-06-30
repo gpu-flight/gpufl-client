@@ -285,6 +285,12 @@ bool configureAgentEnvironment(const AgentOptions& opts, std::string& error) {
         error = "failed to configure agent environment";
         return false;
     }
+    // One-shot `gpufl upload`: exit if there's nothing to upload, don't wait.
+    if (opts.exit_if_empty &&
+        !setEnv("GPUFL_AGENT_EXIT_IF_EMPTY", "1")) {
+        error = "failed to configure agent environment";
+        return false;
+    }
     return true;
 }
 
