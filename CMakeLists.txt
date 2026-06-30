@@ -105,6 +105,8 @@ target_sources(gpufl PRIVATE
     include/gpufl/core/runtime.cpp
     include/gpufl/core/backend_factory.cpp
     include/gpufl/core/monitor_adapter.cpp
+    include/gpufl/core/monitor_batch_manager.cpp
+    include/gpufl/core/monitor_record_builders.cpp
     include/gpufl/core/monitor.cpp
     include/gpufl/core/gpufl.cpp
     include/gpufl/core/common.cpp
