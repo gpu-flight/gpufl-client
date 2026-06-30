@@ -262,6 +262,7 @@ if(GPUFL_ENABLE_NVIDIA)
                 include/gpufl/backends/nvidia/cupti_activity_callbacks.cpp
                 include/gpufl/backends/nvidia/cupti_activity_state.cpp
                 include/gpufl/backends/nvidia/cupti_utils.cpp
+                include/gpufl/backends/nvidia/capture_capability_resolver.cpp
                 include/gpufl/backends/nvidia/cupti_capture_capabilities.cpp
                 include/gpufl/backends/nvidia/cupti_engine_selection.cpp
                 include/gpufl/backends/nvidia/cupti_runtime_support.cpp
