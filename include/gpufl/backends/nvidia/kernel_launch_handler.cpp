@@ -128,7 +128,12 @@ void ComputeSyntheticOccupancy(ActivityRecord& rec, uint32_t device_id) {
 }  // namespace
 
 KernelLaunchHandler::KernelLaunchHandler(CuptiBackend* backend)
-    : backend_(backend) {}
+    : backend_(backend),
+      kHandled_([this] {
+          const auto cbs = requiredCallbacks();
+          return std::set(
+              cbs.begin(), cbs.end());
+      }()) {}
 
 std::vector<std::pair<CUpti_CallbackDomain, CUpti_CallbackId>>
 KernelLaunchHandler::requiredCallbacks() const {
@@ -246,16 +251,13 @@ bool KernelLaunchHandler::shouldHandle(const CUpti_CallbackDomain domain,
     // requiredCallbacks(). Deriving the filter from that list (rather than
     // re-typing every CBID and its version guard here) means the two can
     // never drift - a CBID added to one but forgotten in the other used to
-    // silently drop that launch API's telemetry. The set is identical for
-    // every instance, so build it once on first call (thread-safe since
-    // C++11) and reuse it; this stays on the per-callback hot path.
-    static const std::set<std::pair<CUpti_CallbackDomain, CUpti_CallbackId>>
-        kHandled = [this] {
-            const auto cbs = requiredCallbacks();
-            return std::set(
-                cbs.begin(), cbs.end());
-        }();
-    return kHandled.count({domain, cbid}) != 0;
+    // silently drop that launch API's telemetry. kHandled_ is built once in
+    // the constructor (NOT a function-local static): a CUPTI callback can
+    // fire from a driver-internal thread during process/DLL teardown, after
+    // C++ static-duration objects start being destroyed but before this
+    // handler instance is - a function-local static here was observed
+    // crashing (use of an already-destroyed std::set) under that race.
+    return kHandled_.count({domain, cbid}) != 0;
 }
 
 void KernelLaunchHandler::handle(CUpti_CallbackDomain domain,

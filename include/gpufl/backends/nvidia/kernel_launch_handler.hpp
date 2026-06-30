@@ -1,6 +1,7 @@
 #pragma once
 
 #include <mutex>
+#include <set>
 #include <string>
 #include <unordered_map>
 
@@ -26,6 +27,9 @@ class KernelLaunchHandler : public ICuptiHandler {
 
    private:
     CuptiBackend* backend_;
+    // shouldHandle()'s CBID filter, built once from requiredCallbacks() here in
+    // the constructor (NOT a function-local static - see shouldHandle()).
+    const std::set<std::pair<CUpti_CallbackDomain, CUpti_CallbackId>> kHandled_;
     // NOTE: kernel-name demangling moved OFF the callback path (Step 4a). The
     // collector thread demangles raw names (DemangleKernelNameCached in
     // monitor.cpp); there is no per-callback demangle mutex anymore.

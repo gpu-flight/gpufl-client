@@ -641,6 +641,17 @@ if(BUILD_GPUFL_INJECT AND ((UNIX AND NOT APPLE) OR WIN32))
         target_include_directories(gpufl_inject PRIVATE ${NVTX3_INCLUDE_DIR})
     endif()
     set_target_properties(gpufl_inject PROPERTIES OUTPUT_NAME gpufl_inject)
+    if(MSVC)
+        # Emit a PDB for Release too - this DLL runs inside an injected, unattended
+        # target process, so a crash there has no debugger attached; Windows Error
+        # Reporting only gives a module+offset, which needs a matching PDB to
+        # resolve to a function/line. /OPT:REF keeps dead-code elimination;
+        # /OPT:NOICF disables identical-code folding, which otherwise merges
+        # byte-identical functions and can attribute a crash to the wrong one.
+        target_compile_options(gpufl_inject PRIVATE $<$<CONFIG:Release>:/Zi>)
+        target_link_options(gpufl_inject PRIVATE
+            $<$<CONFIG:Release>:/DEBUG /OPT:REF /OPT:NOICF>)
+    endif()
     if(UNIX AND NOT APPLE)
         set_target_properties(gpufl_inject PROPERTIES
             # Hide internal symbols; only the extern "C" InitializeInjection
