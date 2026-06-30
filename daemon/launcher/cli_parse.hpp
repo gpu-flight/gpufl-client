@@ -37,6 +37,10 @@ struct TraceArgs {
     int64_t window_ms = 0;              // --window; 0 = run to the target's natural exit
     int64_t window_timeout_ms = 0;      // --window-timeout; hard cap on total runtime (0 = warmup+window)
     std::string after_window = "stop";  // --after-window; "stop" is the only value today
+    // PC sampling period as a log2 exponent (2^N GPU cycles/sample, valid 5..31;
+    // lower = more frequent → catches shorter kernels). 0 = leave the engine
+    // default. Plumbed to the injected target via GPUFL_PC_SAMPLING_PERIOD.
+    uint32_t pc_sample_period = 0;      // --pc-sample-period; 0 = engine default
     std::vector<std::string> command;   // tokens after `--`
 };
 

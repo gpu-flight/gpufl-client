@@ -596,6 +596,15 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
         return 2;
     }
 
+    // --pc-sample-period: sample more frequently than the default so short
+    // kernels that yield no samples produce data. 0 = leave the engine default;
+    // the injected target reads GPUFL_PC_SAMPLING_PERIOD in gpufl::init().
+    if (args.pc_sample_period != 0 &&
+        !setEnvOrPrint(platform, env::kPcSamplingPeriod,
+                       std::to_string(args.pc_sample_period))) {
+        return 2;
+    }
+
     // A bounded window stops the target after warmup+window wall-clock;
     // run_ms == 0 keeps the historical "run until the target exits" behavior.
     RunOptions run_opts;

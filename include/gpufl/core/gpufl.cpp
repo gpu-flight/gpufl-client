@@ -391,6 +391,25 @@ bool init(const InitOptions& opts) {
                 "selection.");
         }
     }
+
+    // Allow environment override of the PC sampling period (log2 cycles/sample),
+    // e.g. `gpufl trace --pc-sample-period`. The injection path has no other way
+    // to reach pc_sampling_period. CUPTI accepts 5..31; out-of-range/garbage is
+    // logged and ignored so a typo can't silently disable sampling.
+    if (const char* v = std::getenv(gpufl::env::kPcSamplingPeriod)) {
+        char* end = nullptr;
+        const unsigned long n = std::strtoul(v, &end, 10);
+        if (end != v && *end == '\0' && n >= 5 && n <= 31) {
+            mOpts.pc_sampling_period = static_cast<uint32_t>(n);
+            GFL_LOG_DEBUG("GPUFL_PC_SAMPLING_PERIOD override: 2^", n, " = ",
+                          (1ul << n), " cycles/sample");
+        } else {
+            GFL_LOG_ERROR("GPUFL_PC_SAMPLING_PERIOD='", v, "' is invalid "
+                          "(expected an integer 5..31). Keeping ",
+                          mOpts.pc_sampling_period, ".");
+        }
+    }
+
     mOpts.kernel_sample_rate_ms = g_opts.kernel_sample_rate_ms;
     mOpts.enable_stack_trace = g_opts.enable_stack_trace;
     mOpts.enable_source_collection = g_opts.enable_source_collection;

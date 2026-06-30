@@ -1,6 +1,7 @@
 #include "gpufl/backends/nvidia/cupti_backend.hpp"
 
 #include <atomic>
+#include <cstdio>
 #include <string>
 #include <utility>
 
@@ -41,6 +42,29 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
     const EngineRuntimeState engineState =
         InspectEngineRuntimeState(engine_.get(), opts_.profiling_engine,
                                   comboActive());
+
+    // Surface "armed but produced nothing" to the console (stderr). The
+    // capability matrix below only reaches the dashboard, so a `gpufl trace`
+    // run otherwise gives no local hint that a too-short workload starved the
+    // sampler. Point at the remedies.
+    if (requests.pc && engineState.pc.active && !engineState.pc.has_data) {
+        std::fprintf(stderr,
+            "[gpufl] PC sampling collected 0 stall samples - the profiled "
+            "workload was too short for the sampling interval. Run a "
+            "longer/heavier workload, or sample more frequently with "
+            "`gpufl trace --pc-sample-period <N>` (lower N).\n");
+    }
+    if (requests.sass && engineState.sass.active && !engineState.sass.has_data) {
+        std::fprintf(stderr,
+            "[gpufl] SASS metrics collected 0 instruction samples - the "
+            "profiled kernels were too short. Run more iterations / a "
+            "longer-running kernel to collect instruction-level data.\n");
+    }
+    if (requests.pm && engineState.pm.active && !engineState.pm.has_data) {
+        std::fprintf(stderr,
+            "[gpufl] PM sampling collected 0 hardware samples - the profiled "
+            "workload was too short for the sampling interval.\n");
+    }
 
     // Did each path actually emit rows (vs merely arm)? Drives the
     // "enabled_no_data" status so a capability that was turned ON but produced

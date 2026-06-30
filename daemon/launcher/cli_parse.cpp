@@ -167,6 +167,10 @@ const char* traceHelp() {
         "                            Hard cap on total target runtime (safety).\n"
         "        --after-window=<WHAT>\n"
         "                            What to do at window end. Only 'stop' today.\n"
+        "        --pc-sample-period=<N>\n"
+        "                            PC sampling period: log2 of GPU cycles per sample\n"
+        "                            (5..31; default 10). Lower = more frequent — for\n"
+        "                            short kernels that yield no PC samples by default.\n"
         "    -h, --help              Print this help\n"
         "\n"
         "EXAMPLES:\n"
@@ -320,6 +324,18 @@ TraceParseResult parseTraceArgs(const std::vector<std::string>& argv) {
                         "invalid --agent-drain-ms value: " + v +
                         " (expected a non-negative integer, milliseconds)"};
             }
+        } else if (key == "--pc-sample-period") {
+            std::string v;
+            auto err = take_value(v);
+            if (!err.empty()) return {std::nullopt, err};
+            int period = 0;
+            if (!parseNonNegativeInt(v, period) || period < 5 || period > 31) {
+                return {std::nullopt,
+                        "invalid --pc-sample-period value: " + v +
+                        " (expected an integer 5..31; the log2 of GPU cycles per "
+                        "PC sample - lower = more frequent, catches short kernels)"};
+            }
+            out.pc_sample_period = static_cast<uint32_t>(period);
         } else if (key == "--warmup") {
             std::string v;
             auto err = take_value(v);

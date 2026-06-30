@@ -116,6 +116,12 @@ constexpr const char* kPassCount  = "GPUFL_PASS_COUNT";
 // Draining can be timing sensitive on some CUPTI/PyTorch combinations; on
 // privilege failures the engine falls back to sample-only collection.
 constexpr const char* kPcKernelCollect = "GPUFL_PC_KERNEL_COLLECT";
+// Override the PC sampling period: the log2 exponent N for 2^N GPU cycles
+// between samples (valid 5..31; lower = more frequent = catches shorter kernels
+// at higher overhead). Maps to MonitorOptions::pc_sampling_period; lets
+// `gpufl trace --pc-sample-period` tune the injection path (which otherwise has
+// no way to set it).
+constexpr const char* kPcSamplingPeriod = "GPUFL_PC_SAMPLING_PERIOD";
 
 // ── Deep engine knobs ───────────────────────────────────────────────────────
 constexpr const char* kDeepPcOnly  = "GPUFL_DEEP_PC_ONLY";
