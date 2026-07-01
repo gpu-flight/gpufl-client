@@ -564,6 +564,7 @@ TEST(WireContract, KernelPerfMetricEventFields) {
     ev.dram_read_bytes = 1024;
     ev.dram_write_bytes = -1;
     ev.tensor_active_pct = -1.0;
+    ev.achieved_occupancy_pct = 43.75;
 
     const std::string json = gpufl::model::KernelPerfMetricModel(ev).buildJson();
 
@@ -576,4 +577,5 @@ TEST(WireContract, KernelPerfMetricEventFields) {
     EXPECT_TRUE(JsonContains(json, "\"l1_hit_rate_pct\":91.5000"));
     EXPECT_TRUE(JsonContains(json, "\"dram_read_bytes\":1024"));
     EXPECT_TRUE(JsonContains(json, "\"dram_write_bytes\":-1"));
+    EXPECT_TRUE(JsonContains(json, "\"achieved_occupancy_pct\":43.7500"));
 }
