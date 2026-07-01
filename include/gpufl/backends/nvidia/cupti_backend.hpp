@@ -41,6 +41,7 @@ class CuptiBackend : public IMonitorBackend {
     void initialize(const MonitorOptions& opts) override;
     void shutdown() override;
     void emitCapabilities() override { EmitCaptureCapabilities_(); }
+    void emitPendingPerfEvents() override;
 
     static CUptiResult (*get_value())(CUpti_ActivityKind);
 
@@ -110,6 +111,10 @@ class CuptiBackend : public IMonitorBackend {
     void FlushProfilingDataBeforeCudaTeardown(const char* reason);
     void StartActivityFlushThreadIfNeeded_();
     void StopActivityFlushThread_();
+    // Drain the engine's decoded per-kernel replay metric events to the log.
+    // Shared by stop() and emitPendingPerfEvents(); a no-op when the engine
+    // has no such events (already drained, or non-range engine).
+    void WriteKernelPerfEventsToLog_() const;
     void NoteKernelLaunchForCleanupFlush() {
         kernel_launch_callback_count_.fetch_add(1, std::memory_order_release);
         last_cleanup_flush_ns_.store(0, std::memory_order_release);

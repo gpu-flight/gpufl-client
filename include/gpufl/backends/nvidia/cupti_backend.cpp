@@ -781,6 +781,32 @@ void CuptiBackend::StopActivityFlushThread_() {
     }
 }
 
+void CuptiBackend::WriteKernelPerfEventsToLog_() const {
+    if (!engine_) return;
+    const Runtime* rt = runtime();
+    if (!rt || !rt->logger) return;
+    for (auto& ev : engine_->takeKernelPerfEvents()) {
+        ev.pid = detail::GetPid();
+        ev.app = rt->app_name;
+        ev.session_id = rt->session_id;
+        rt->logger->write(model::KernelPerfMetricModel(ev));
+    }
+}
+
+void CuptiBackend::emitPendingPerfEvents() {
+    // Windows-injection process-exit only calls stop()/shutdown() from
+    // ReleaseBackendForExit, AFTER the logger closes — so Range Profiler
+    // kernel-replay events (decoded inside engine stop) would be written to a
+    // closed log and lost. Decode + drain them here, from DrainAndFinalizeForExit
+    // while the log is still open. engine_->stop() only decodes already-collected
+    // counter data (a synchronous read, not the fragile thread-join/CUPTI-release
+    // teardown, which stays in shutdown()); it is guarded/idempotent, so the
+    // later stop() in ReleaseBackendForExit is a no-op re-drain.
+    if (!engine_) return;
+    engine_->stop();
+    WriteKernelPerfEventsToLog_();
+}
+
 void CuptiBackend::stop() {
     if (!initialized_) return;
     active_.store(false);
@@ -796,14 +822,7 @@ void CuptiBackend::stop() {
     // returns zero kernel records on driver 590+.
     if (engine_) {
         engine_->stop();
-        if (const Runtime* rt = runtime(); rt && rt->logger) {
-            for (auto& ev : engine_->takeKernelPerfEvents()) {
-                ev.pid = detail::GetPid();
-                ev.app = rt->app_name;
-                ev.session_id = rt->session_id;
-                rt->logger->write(model::KernelPerfMetricModel(ev));
-            }
-        }
+        WriteKernelPerfEventsToLog_();
     }
 
     // Disable all activity kinds FIRST, before the flush. The previous

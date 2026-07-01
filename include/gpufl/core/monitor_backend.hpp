@@ -38,6 +38,20 @@ class IMonitorBackend {
     virtual void emitCapabilities() {}
 
     /**
+     * @brief Decode and write end-of-session profiling data that only becomes
+     *        available once the engine is stopped (e.g. Range Profiler
+     *        kernel-replay per-kernel metrics — achieved occupancy, SM
+     *        throughput, cache hit rates) to the logger, WITHOUT the fragile
+     *        CUPTI thread-join/release teardown. Like emitCapabilities(), the
+     *        Windows-injection process-exit path calls this BEFORE the logger
+     *        closes — otherwise the engine stop (and thus this data) is
+     *        deferred to ReleaseBackendForExit, which runs after the log is
+     *        closed, silently dropping every decoded metric event. Idempotent;
+     *        a no-op for backends/engines that produce no such deferred data.
+     */
+    virtual void emitPendingPerfEvents() {}
+
+    /**
      * @brief start active monitoring/tracing.
      */
     virtual void start() = 0;

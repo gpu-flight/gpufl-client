@@ -532,10 +532,17 @@ void Monitor::DrainAndFinalizeForExit() {
         g_state.batches.flushAll(detail::MonitorBatchManager::FlushMode::Full);
     }
 
-    // Emit capabilities while the engine state is intact and the logger is
-    // still open - ReleaseBackendForExit runs after the logger closes.
+    // Emit the engine's deferred end-of-session data while the logger is still
+    // open - ReleaseBackendForExit (which stops/decodes the engine) runs AFTER
+    // logger->close(), so anything produced there is lost. Order matters:
+    // emitPendingPerfEvents() decodes the Range Profiler kernel-replay metrics
+    // (achieved occupancy etc.) FIRST, so the capability report below reflects
+    // the decoded ranges instead of "no data".
     if (g_state.adapter) {
-        if (IMonitorBackend* b = g_state.adapter->backend()) b->emitCapabilities();
+        if (IMonitorBackend* b = g_state.adapter->backend()) {
+            b->emitPendingPerfEvents();
+            b->emitCapabilities();
+        }
     }
     g_state.batches.clearFlushSink();
 }
