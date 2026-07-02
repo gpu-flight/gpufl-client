@@ -314,6 +314,11 @@ class CuptiBackend : public IMonitorBackend {
     // Count (not just a flag) of kernel launch callbacks seen this session - the
     // denominator for the real-vs-synthetic kernel ratio in EmitCaptureCapabilities_.
     std::atomic<uint64_t> kernel_launch_callback_count_{0};
+    // kernel_launch_callback_count_ snapshot at the last sync-exit activity
+    // flush (FlushActivityNow) - flush fires only when launches happened since,
+    // so back-to-back synchronizes with no new work cost nothing. Member (not a
+    // function-local static) so teardown can't destroy it under a live callback.
+    std::atomic<uint64_t> last_sync_flush_launch_count_{0};
     std::atomic<int64_t> last_cleanup_flush_ns_{0};
     std::atomic<bool> activity_flush_thread_running_{false};
     std::thread activity_flush_thread_;
