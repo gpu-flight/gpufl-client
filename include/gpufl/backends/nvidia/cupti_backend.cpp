@@ -250,6 +250,7 @@ void CuptiBackend::start() {
     source_locator_seen_.store(0, std::memory_order_relaxed);
     function_record_seen_.store(0, std::memory_order_relaxed);
     kernel_launch_callback_count_.store(0, std::memory_order_relaxed);
+    last_sync_flush_launch_count_.store(0, std::memory_order_relaxed);
     capture_capabilities_emitted_.store(false, std::memory_order_relaxed);
 
     // Reset the BufferCompleted companion maps for a clean per-session slate
@@ -781,6 +782,32 @@ void CuptiBackend::StopActivityFlushThread_() {
     }
 }
 
+void CuptiBackend::WriteKernelPerfEventsToLog_() const {
+    if (!engine_) return;
+    const Runtime* rt = runtime();
+    if (!rt || !rt->logger) return;
+    for (auto& ev : engine_->takeKernelPerfEvents()) {
+        ev.pid = detail::GetPid();
+        ev.app = rt->app_name;
+        ev.session_id = rt->session_id;
+        rt->logger->write(model::KernelPerfMetricModel(ev));
+    }
+}
+
+void CuptiBackend::emitPendingPerfEvents() {
+    // Windows-injection process-exit only calls stop()/shutdown() from
+    // ReleaseBackendForExit, AFTER the logger closes — so Range Profiler
+    // kernel-replay events (decoded inside engine stop) would be written to a
+    // closed log and lost. Decode + drain them here, from DrainAndFinalizeForExit
+    // while the log is still open. engine_->stop() only decodes already-collected
+    // counter data (a synchronous read, not the fragile thread-join/CUPTI-release
+    // teardown, which stays in shutdown()); it is guarded/idempotent, so the
+    // later stop() in ReleaseBackendForExit is a no-op re-drain.
+    if (!engine_) return;
+    engine_->stop();
+    WriteKernelPerfEventsToLog_();
+}
+
 void CuptiBackend::stop() {
     if (!initialized_) return;
     active_.store(false);
@@ -796,14 +823,7 @@ void CuptiBackend::stop() {
     // returns zero kernel records on driver 590+.
     if (engine_) {
         engine_->stop();
-        if (const Runtime* rt = runtime(); rt && rt->logger) {
-            for (auto& ev : engine_->takeKernelPerfEvents()) {
-                ev.pid = detail::GetPid();
-                ev.app = rt->app_name;
-                ev.session_id = rt->session_id;
-                rt->logger->write(model::KernelPerfMetricModel(ev));
-            }
-        }
+        WriteKernelPerfEventsToLog_();
     }
 
     // Disable all activity kinds FIRST, before the flush. The previous
@@ -947,13 +967,22 @@ void CuptiBackend::FlushActivityNow() {
     // Only the Windows-injection Trace case needs this (same gate as the
     // periodic flush thread): elsewhere the at-exit flush already drains.
     if (engine_ || !collectsKernelEvents() || !WindowsInjectedProcess()) return;
-    // Throttle: a sync-heavy app must not force-flush on every synchronize.
-    static std::atomic<int64_t> last_ns{0};
-    const int64_t now = detail::GetTimestampNs();
-    int64_t last = last_ns.load(std::memory_order_relaxed);
-    if (now - last < 50'000'000) return;  // 50 ms
-    if (!last_ns.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
-        return;  // another synchronize raced us; it will flush
+    // Flush iff kernel launches happened since the last sync flush. The old
+    // 50 ms time throttle silently dropped every launch after the first in a
+    // short multi-launch run (e.g. a 5-launch harness finishing in ~6 ms):
+    // the throttled records were never delivered - Windows-exit has no safe
+    // at-exit flush and the 250 ms periodic thread never got a tick - so all
+    // but the first kernel fell back to synthetic rows (host-gap duration,
+    // regs/occupancy 0). Launch-count change detection is deterministic:
+    // every launch is drained by the next synchronize, including the last
+    // one before exit, while launch-free synchronizes still cost nothing.
+    const uint64_t launches =
+        kernel_launch_callback_count_.load(std::memory_order_acquire);
+    uint64_t last = last_sync_flush_launch_count_.load(std::memory_order_relaxed);
+    if (launches == last) return;  // nothing new since the last flush
+    if (!last_sync_flush_launch_count_.compare_exchange_strong(
+            last, launches, std::memory_order_acq_rel)) {
+        return;  // another synchronize raced us; it covers these launches
     }
     LogCuptiIfUnexpected("sync-flush", "cuptiActivityFlushAll",
                          cuptiActivityFlushAll(CUPTI_ACTIVITY_FLAG_FLUSH_FORCED));

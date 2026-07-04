@@ -568,6 +568,12 @@ struct KernelPerfMetricEvent {
     int64_t dram_read_bytes = -1;
     int64_t dram_write_bytes = -1;
     double tensor_active_pct = -1.0;
+    // Achieved (measured) occupancy as a percent 0-100
+    // (sm__warps_active.avg.pct_of_peak_sustained_active) — the runtime
+    // counterpart to the theoretical KernelEvent.occupancy computed from
+    // launch config. -1.0 when not collected (only RangeProfilerKernelReplay
+    // measures it). Note the scale: this is 0-100, KernelEvent.occupancy is 0-1.
+    double achieved_occupancy_pct = -1.0;
 };
 
 /**

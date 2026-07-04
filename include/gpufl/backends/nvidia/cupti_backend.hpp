@@ -41,6 +41,7 @@ class CuptiBackend : public IMonitorBackend {
     void initialize(const MonitorOptions& opts) override;
     void shutdown() override;
     void emitCapabilities() override { EmitCaptureCapabilities_(); }
+    void emitPendingPerfEvents() override;
 
     static CUptiResult (*get_value())(CUpti_ActivityKind);
 
@@ -110,6 +111,10 @@ class CuptiBackend : public IMonitorBackend {
     void FlushProfilingDataBeforeCudaTeardown(const char* reason);
     void StartActivityFlushThreadIfNeeded_();
     void StopActivityFlushThread_();
+    // Drain the engine's decoded per-kernel replay metric events to the log.
+    // Shared by stop() and emitPendingPerfEvents(); a no-op when the engine
+    // has no such events (already drained, or non-range engine).
+    void WriteKernelPerfEventsToLog_() const;
     void NoteKernelLaunchForCleanupFlush() {
         kernel_launch_callback_count_.fetch_add(1, std::memory_order_release);
         last_cleanup_flush_ns_.store(0, std::memory_order_release);
@@ -309,6 +314,11 @@ class CuptiBackend : public IMonitorBackend {
     // Count (not just a flag) of kernel launch callbacks seen this session - the
     // denominator for the real-vs-synthetic kernel ratio in EmitCaptureCapabilities_.
     std::atomic<uint64_t> kernel_launch_callback_count_{0};
+    // kernel_launch_callback_count_ snapshot at the last sync-exit activity
+    // flush (FlushActivityNow) - flush fires only when launches happened since,
+    // so back-to-back synchronizes with no new work cost nothing. Member (not a
+    // function-local static) so teardown can't destroy it under a live callback.
+    std::atomic<uint64_t> last_sync_flush_launch_count_{0};
     std::atomic<int64_t> last_cleanup_flush_ns_{0};
     std::atomic<bool> activity_flush_thread_running_{false};
     std::thread activity_flush_thread_;

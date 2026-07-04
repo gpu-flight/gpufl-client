@@ -20,6 +20,10 @@ namespace gpufl {
 namespace {
 std::vector<const char*> kPerfMetricNames = {
     "sm__throughput.avg.pct_of_peak_sustained_elapsed",
+    // Achieved occupancy — measured active warps as % of peak. The runtime
+    // counterpart to the theoretical launch-config occupancy on KernelEvent.
+    // Expected single-pass; addMetric() skips it gracefully if a chip rejects it.
+    "sm__warps_active.avg.pct_of_peak_sustained_active",
     "l1tex__t_sector_hit_rate.pct",
     "lts__t_sector_hit_rate.pct",
     "dram__bytes_read.sum",
@@ -668,6 +672,8 @@ void RangeProfilerEngine::DecodeKernelReplayEvents_() {
                     (value >= 0.0) ? static_cast<int64_t>(value) : -1;
             } else if (std::strcmp(metricName, "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active") == 0) {
                 if (std::isfinite(value)) ev.tensor_active_pct = value;
+            } else if (std::strcmp(metricName, "sm__warps_active.avg.pct_of_peak_sustained_active") == 0) {
+                if (std::isfinite(value)) ev.achieved_occupancy_pct = value;
             }
         }
         decoded.push_back(std::move(ev));

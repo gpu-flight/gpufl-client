@@ -48,6 +48,7 @@ std::string KernelPerfMetricModel::buildJson() const {
         << ",\"dram_read_bytes\":"   << e_.dram_read_bytes
         << ",\"dram_write_bytes\":"  << e_.dram_write_bytes
         << ",\"tensor_active_pct\":" << e_.tensor_active_pct
+        << ",\"achieved_occupancy_pct\":" << e_.achieved_occupancy_pct
         << "}";
     return oss.str();
 }
