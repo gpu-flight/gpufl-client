@@ -148,11 +148,15 @@ std::vector<gpufl::DeviceSample> NvmlCollector::sampleAll() {
         }
 #endif
 
-        nvmlTemperature_t tempInfo{};
-        tempInfo.version = nvmlTemperature_v1;
-        tempInfo.sensorType = NVML_TEMPERATURE_GPU;
-        if (nvmlDeviceGetTemperatureV(dev, &tempInfo) == NVML_SUCCESS) {
-            s.temp_c = static_cast<int>(tempInfo.temperature);
+        // Classic nvmlDeviceGetTemperature, NOT the newer nvmlDeviceGetTemperatureV:
+        // the versioned variant is a link-time symbol that older NVML drivers don't
+        // export, so a link-time reference to it makes the ENTIRE gpufl binary fail
+        // to load on such a driver (undefined symbol: nvmlDeviceGetTemperatureV,
+        // exit 127) before it runs anything. The classic call is deprecated in
+        // CUDA 13 but present in every driver and returns the same GPU temperature.
+        // (tempC is declared with the other per-device locals above.)
+        if (nvmlDeviceGetTemperature(dev, NVML_TEMPERATURE_GPU, &tempC) == NVML_SUCCESS) {
+            s.temp_c = static_cast<int>(tempC);
         }
 
         if (nvmlDeviceGetPowerUsage(dev, &powerMilliW) == NVML_SUCCESS) {
