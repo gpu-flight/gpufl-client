@@ -18,7 +18,7 @@ namespace gpufl {
 
 #if GPUFL_HAS_PERFWORKS
 namespace {
-std::vector<const char*> kPerfMetricNames = {
+const std::vector<const char*> kPerfMetricNames = {
     "sm__throughput.avg.pct_of_peak_sustained_elapsed",
     // Achieved occupancy — measured active warps as % of peak. The runtime
     // counterpart to the theoretical launch-config occupancy on KernelEvent.
@@ -30,6 +30,72 @@ std::vector<const char*> kPerfMetricNames = {
     "dram__bytes_write.sum",
     "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active",
 };
+
+// Bank-conflict metrics are intentionally kernel-replay-only. Adding them to
+// scope RangeProfiler can turn its config into a multi-pass group, while that
+// mode only supports a single user replay pass. Kernel replay can replay each
+// launch as many times as PerfWorks needs and gives the lab/backend a per-kernel
+// result rather than a scope-wide total.
+const std::vector<const char*> kKernelReplaySharedMemoryMetricNames = {
+    "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum",
+    "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum",
+    "l1tex__data_bank_conflicts_pipe_lsu_mem_shared.sum",
+    "l1tex__data_pipe_lsu_wavefronts_mem_shared.sum",
+};
+
+constexpr const char* kSharedLoadBankConflicts =
+    "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum";
+constexpr const char* kSharedStoreBankConflicts =
+    "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum";
+constexpr const char* kSharedBankConflicts =
+    "l1tex__data_bank_conflicts_pipe_lsu_mem_shared.sum";
+constexpr const char* kSharedWavefronts =
+    "l1tex__data_pipe_lsu_wavefronts_mem_shared.sum";
+
+int64_t CounterValue(double value) {
+    return value >= 0.0 && std::isfinite(value)
+        ? static_cast<int64_t>(std::llround(value))
+        : -1;
+}
+
+double HitRateValue(const char* metricName, double value) {
+    if (std::isfinite(value) && value >= 0.0 && value <= 100.0) {
+        return value;
+    }
+    if (std::isfinite(value) && value >= 0.0) {
+        GFL_LOG_DEBUG("[RangeProfilerEngine] ignoring out-of-range hit-rate "
+                      "metric ", metricName, " = ", value,
+                      " (expected 0-100%)");
+    }
+    return -1.0;
+}
+
+void FinalizeSharedBankConflictMetrics(KernelPerfMetricEvent& event) {
+    if (event.shared_bank_conflicts < 0 &&
+        event.shared_load_bank_conflicts >= 0 &&
+        event.shared_store_bank_conflicts >= 0) {
+        event.shared_bank_conflicts = event.shared_load_bank_conflicts +
+                                      event.shared_store_bank_conflicts;
+    }
+    if (event.shared_bank_conflicts < 0 || event.shared_wavefronts <= 0) {
+        return;
+    }
+
+    event.shared_bank_conflict_overhead_pct =
+        100.0 * static_cast<double>(event.shared_bank_conflicts) /
+        static_cast<double>(event.shared_wavefronts);
+
+    // NVIDIA's conflict counter represents excessive shared-memory
+    // wavefronts. Removing those from the actual wavefront count recovers the
+    // ideal request count used by Nsight Compute's average N-way definition.
+    const int64_t idealWavefronts =
+        event.shared_wavefronts - event.shared_bank_conflicts;
+    if (idealWavefronts > 0) {
+        event.shared_bank_conflict_nway =
+            static_cast<double>(event.shared_wavefronts) /
+            static_cast<double>(idealWavefronts);
+    }
+}
 }  // namespace
 #endif
 
@@ -325,6 +391,36 @@ bool RangeProfilerEngine::InitPerfworksSession_(bool require_single_pass) {
         return false;
     };
 
+    // Some driver/toolkit combinations leave the host metric configuration
+    // in an error state after rejecting one metric: every later add then
+    // returns CUPTI_ERROR_UNKNOWN even when the metric is supported. Restore
+    // the previously accepted set on a fresh host object before trying the
+    // next optional metric.
+    bool metricConfigHealthy = true;
+    auto addMetricRecovering = [&](const char* metricName) {
+        if (addMetric(metricName)) return;
+
+        const std::vector<const char*> accepted = active_metric_names_;
+        if (!deinitHostObject() || !initHostObject()) {
+            metricConfigHealthy = false;
+            GFL_LOG_ERROR("[RangeProfilerEngine] could not recover metric "
+                          "configuration after rejecting ", metricName);
+            return;
+        }
+
+        active_metric_names_.clear();
+        for (const char* acceptedMetric : accepted) {
+            if (!addMetric(acceptedMetric)) {
+                metricConfigHealthy = false;
+                GFL_LOG_ERROR("[RangeProfilerEngine] could not restore accepted "
+                              "metric ", acceptedMetric);
+                return;
+            }
+        }
+        GFL_LOG_DEBUG("[RangeProfilerEngine] recovered metric configuration "
+                      "after rejecting ", metricName);
+    };
+
     auto buildConfigImage = [&](size_t& numPasses) {
         {
             CUpti_Profiler_Host_GetConfigImageSize_Params gs = {
@@ -369,7 +465,14 @@ bool RangeProfilerEngine::InitPerfworksSession_(bool require_single_pass) {
     if (!initHostObject()) return false;
     active_metric_names_.clear();
     for (const char* metricName : kPerfMetricNames) {
-        addMetric(metricName);
+        addMetricRecovering(metricName);
+        if (!metricConfigHealthy) return false;
+    }
+    if (mode_ == Mode::KernelReplay) {
+        for (const char* metricName : kKernelReplaySharedMemoryMetricNames) {
+            addMetricRecovering(metricName);
+            if (!metricConfigHealthy) return false;
+        }
     }
     if (active_metric_names_.empty()) {
         GFL_LOG_ERROR("[RangeProfilerEngine] no Range Profiler metrics were accepted");
@@ -554,9 +657,9 @@ void RangeProfilerEngine::EndPerfPassAndDecode_() {
         if (std::strcmp(metricName, "sm__throughput.avg.pct_of_peak_sustained_elapsed") == 0) {
             if (std::isfinite(value)) perf_last_event_.sm_throughput_pct = value;
         } else if (std::strcmp(metricName, "l1tex__t_sector_hit_rate.pct") == 0) {
-            perf_last_event_.l1_hit_rate_pct = std::isfinite(value) ? value : -1.0;
+            perf_last_event_.l1_hit_rate_pct = HitRateValue(metricName, value);
         } else if (std::strcmp(metricName, "lts__t_sector_hit_rate.pct") == 0) {
-            perf_last_event_.l2_hit_rate_pct = std::isfinite(value) ? value : -1.0;
+            perf_last_event_.l2_hit_rate_pct = HitRateValue(metricName, value);
         } else if (std::strcmp(metricName, "dram__bytes_read.sum") == 0) {
             perf_last_event_.dram_read_bytes =
                 (value >= 0.0) ? static_cast<int64_t>(value) : -1;
@@ -661,9 +764,9 @@ void RangeProfilerEngine::DecodeKernelReplayEvents_() {
             if (std::strcmp(metricName, "sm__throughput.avg.pct_of_peak_sustained_elapsed") == 0) {
                 if (std::isfinite(value)) ev.sm_throughput_pct = value;
             } else if (std::strcmp(metricName, "l1tex__t_sector_hit_rate.pct") == 0) {
-                ev.l1_hit_rate_pct = std::isfinite(value) ? value : -1.0;
+                ev.l1_hit_rate_pct = HitRateValue(metricName, value);
             } else if (std::strcmp(metricName, "lts__t_sector_hit_rate.pct") == 0) {
-                ev.l2_hit_rate_pct = std::isfinite(value) ? value : -1.0;
+                ev.l2_hit_rate_pct = HitRateValue(metricName, value);
             } else if (std::strcmp(metricName, "dram__bytes_read.sum") == 0) {
                 ev.dram_read_bytes =
                     (value >= 0.0) ? static_cast<int64_t>(value) : -1;
@@ -674,8 +777,17 @@ void RangeProfilerEngine::DecodeKernelReplayEvents_() {
                 if (std::isfinite(value)) ev.tensor_active_pct = value;
             } else if (std::strcmp(metricName, "sm__warps_active.avg.pct_of_peak_sustained_active") == 0) {
                 if (std::isfinite(value)) ev.achieved_occupancy_pct = value;
+            } else if (std::strcmp(metricName, kSharedLoadBankConflicts) == 0) {
+                ev.shared_load_bank_conflicts = CounterValue(value);
+            } else if (std::strcmp(metricName, kSharedStoreBankConflicts) == 0) {
+                ev.shared_store_bank_conflicts = CounterValue(value);
+            } else if (std::strcmp(metricName, kSharedBankConflicts) == 0) {
+                ev.shared_bank_conflicts = CounterValue(value);
+            } else if (std::strcmp(metricName, kSharedWavefronts) == 0) {
+                ev.shared_wavefronts = CounterValue(value);
             }
         }
+        FinalizeSharedBankConflictMetrics(ev);
         decoded.push_back(std::move(ev));
     }
 

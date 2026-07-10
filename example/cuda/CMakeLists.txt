@@ -39,6 +39,7 @@ add_executable(cupti_basic cupti_basic.cu)
 add_executable(occupancy_demo occupancy_demo.cu)
 add_executable(sass_divergence_demo sass_divergence_demo.cu)
 add_executable(memory_coalescing_demo memory_coalescing_demo.cu)
+add_executable(shared_bank_conflicts_demo shared_bank_conflicts_demo.cu)
 add_executable(deep_deadlock_repro deep_deadlock_repro.cu)
 add_executable(multi_engine_demo multi_engine_demo.cu)
 
@@ -160,6 +161,11 @@ target_link_libraries(memory_coalescing_demo PRIVATE
         CUDA::cupti
         CUDA::cudart
 )
+target_link_libraries(shared_bank_conflicts_demo PRIVATE
+        gpufl::gpufl
+        CUDA::cupti
+        CUDA::cudart
+)
 target_compile_options(memory_coalescing_demo PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:
         -lineinfo
@@ -215,6 +221,9 @@ set_target_properties(sass_divergence_demo PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
 )
 set_target_properties(memory_coalescing_demo PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+)
+set_target_properties(shared_bank_conflicts_demo PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
 )
 set_target_properties(deep_deadlock_repro PROPERTIES

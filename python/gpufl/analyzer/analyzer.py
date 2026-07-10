@@ -700,10 +700,56 @@ class GpuFlightSession:
             for col in [
                 'start_ns', 'end_ns',
                 'sm_throughput_pct', 'l1_hit_rate_pct', 'l2_hit_rate_pct',
-                'dram_read_bytes', 'dram_write_bytes', 'tensor_active_pct'
+                'dram_read_bytes', 'dram_write_bytes', 'tensor_active_pct',
+                'shared_load_bank_conflicts', 'shared_store_bank_conflicts',
+                'shared_bank_conflicts', 'shared_wavefronts',
+                'shared_bank_conflict_overhead_pct', 'shared_bank_conflict_nway'
             ]:
                 if col in self.perf.columns:
                     self.perf[col] = pd.to_numeric(self.perf[col], errors='coerce')
+            for col in ['l1_hit_rate_pct', 'l2_hit_rate_pct']:
+                if col in self.perf.columns:
+                    self.perf.loc[
+                        (self.perf[col] < 0) | (self.perf[col] > 100), col
+                    ] = float('nan')
+
+            # CUPTI AutoRange names may be numeric ("0", "1", ...). Join
+            # those rows to chronological kernel activity using the replay
+            # launch ordinal, scoped by session so merged multi-pass data does
+            # not cross-wire names.
+            if (not self.kernels.empty and 'launch_ordinal' in self.perf.columns
+                    and 'name' in self.kernels.columns):
+                ordered = self.kernels.sort_values('start_ns').copy()
+                use_session = ('session_id' in ordered.columns
+                               and 'session_id' in self.perf.columns)
+                if use_session:
+                    ordered['_launch_ordinal'] = (
+                        ordered.groupby('session_id', dropna=False).cumcount() + 1
+                    )
+                    name_by_launch = {
+                        (str(row['session_id']), int(row['_launch_ordinal'])): row['name']
+                        for _, row in ordered.iterrows()
+                    }
+                else:
+                    ordered['_launch_ordinal'] = range(1, len(ordered) + 1)
+                    name_by_launch = {
+                        int(row['_launch_ordinal']): row['name']
+                        for _, row in ordered.iterrows()
+                    }
+
+                kernel_rows = self.perf['kind'].eq('kernel')
+                for idx, row in self.perf[kernel_rows].iterrows():
+                    current_name = str(row.get('name') or '')
+                    if not current_name.isdigit() or pd.isna(row.get('launch_ordinal')):
+                        continue
+                    ordinal = int(row['launch_ordinal'])
+                    key = ((str(row.get('session_id')), ordinal)
+                           if use_session else ordinal)
+                    resolved = name_by_launch.get(key)
+                    if resolved:
+                        self.perf.at[idx, 'name'] = resolved
+                        if 'kernel_name' in self.perf.columns:
+                            self.perf.at[idx, 'kernel_name'] = resolved
             if {'start_ns', 'end_ns'}.issubset(self.perf.columns):
                 self.perf['duration_ms'] = (self.perf['end_ns'] - self.perf['start_ns']) / 1e6
 
@@ -1494,11 +1540,22 @@ class GpuFlightSession:
             return
 
         p = self.perf.copy()
-        for col in ['sm_throughput_pct', 'l1_hit_rate_pct', 'l2_hit_rate_pct', 'tensor_active_pct']:
+        for col in [
+            'sm_throughput_pct', 'l1_hit_rate_pct', 'l2_hit_rate_pct',
+            'tensor_active_pct', 'shared_bank_conflict_overhead_pct',
+            'shared_bank_conflict_nway'
+        ]:
             if col in p.columns:
                 # Backend uses -1.0 sentinel for unavailable counters.
                 p.loc[p[col] < 0, col] = float('nan')
-        for col in ['dram_read_bytes', 'dram_write_bytes']:
+        for col in ['l1_hit_rate_pct', 'l2_hit_rate_pct']:
+            if col in p.columns:
+                p.loc[p[col] > 100, col] = float('nan')
+        for col in [
+            'dram_read_bytes', 'dram_write_bytes',
+            'shared_load_bank_conflicts', 'shared_store_bank_conflicts',
+            'shared_bank_conflicts', 'shared_wavefronts'
+        ]:
             if col in p.columns:
                 p[col] = pd.to_numeric(p[col], errors='coerce')
                 p.loc[p[col] < 0, col] = float('nan')
@@ -1509,6 +1566,9 @@ class GpuFlightSession:
         def fmt_pct(v):
             return f"{v:.2f}" if pd.notna(v) else "n/a"
 
+        def fmt_nway(v):
+            return f"{v:.2f}x" if pd.notna(v) else "n/a"
+
         summary = Table(title="Perf Metrics Summary")
         summary.add_column("Metric", style="cyan")
         summary.add_column("Average", justify="right")
@@ -1516,6 +1576,14 @@ class GpuFlightSession:
         summary.add_row("L1 Hit Rate (%)", fmt_pct(avg_if_exists('l1_hit_rate_pct')))
         summary.add_row("L2 Hit Rate (%)", fmt_pct(avg_if_exists('l2_hit_rate_pct')))
         summary.add_row("Tensor Active (%)", fmt_pct(avg_if_exists('tensor_active_pct')))
+        summary.add_row("Shared Bank Conflict Overhead (%)",
+                        fmt_pct(avg_if_exists('shared_bank_conflict_overhead_pct')))
+        summary.add_row("Shared Bank Conflict N-way",
+                        fmt_nway(avg_if_exists('shared_bank_conflict_nway')))
+        if 'shared_bank_conflicts' in p.columns:
+            conflicts = p['shared_bank_conflicts'].dropna()
+            summary.add_row("Shared Bank Conflicts (avg)",
+                            f"{conflicts.mean():.0f}" if not conflicts.empty else "n/a")
         if 'dram_read_bytes' in p.columns:
             summary.add_row("DRAM Read (avg)", _fmt_bytes(p['dram_read_bytes'].dropna().mean()))
         if 'dram_write_bytes' in p.columns:
@@ -1527,7 +1595,9 @@ class GpuFlightSession:
 
         for col in [
             'sm_throughput_pct', 'l1_hit_rate_pct', 'l2_hit_rate_pct',
-            'tensor_active_pct', 'dram_read_bytes', 'dram_write_bytes'
+            'tensor_active_pct', 'dram_read_bytes', 'dram_write_bytes',
+            'shared_bank_conflicts', 'shared_bank_conflict_overhead_pct',
+            'shared_bank_conflict_nway'
         ]:
             if col not in p.columns:
                 p[col] = float('nan')
@@ -1543,6 +1613,9 @@ class GpuFlightSession:
             tensor=('tensor_active_pct', 'mean'),
             dram_r=('dram_read_bytes', 'mean'),
             dram_w=('dram_write_bytes', 'mean'),
+            bank_conflicts=('shared_bank_conflicts', 'mean'),
+            bank_overhead=('shared_bank_conflict_overhead_pct', 'mean'),
+            bank_nway=('shared_bank_conflict_nway', 'mean'),
         ).sort_values('count', ascending=False).head(top_n)
 
         table = Table(title=f"Perf Metrics by Target - Top {top_n}")
@@ -1552,6 +1625,8 @@ class GpuFlightSession:
         table.add_column("SM%", justify="right")
         table.add_column("L1%", justify="right")
         table.add_column("L2%", justify="right")
+        table.add_column("Bank%", justify="right")
+        table.add_column("N-way", justify="right")
         table.add_column("Tensor%", justify="right")
         table.add_column("DRAM Read", justify="right")
         table.add_column("DRAM Write", justify="right")
@@ -1564,6 +1639,8 @@ class GpuFlightSession:
                 fmt_pct(row['sm']),
                 fmt_pct(row['l1']),
                 fmt_pct(row['l2']),
+                fmt_pct(row['bank_overhead']),
+                f"{row['bank_nway']:.2f}x" if pd.notna(row['bank_nway']) else "n/a",
                 fmt_pct(row['tensor']),
                 _fmt_bytes(row['dram_r']) if pd.notna(row['dram_r']) else "n/a",
                 _fmt_bytes(row['dram_w']) if pd.notna(row['dram_w']) else "n/a",

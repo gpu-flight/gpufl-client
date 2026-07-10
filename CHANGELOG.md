@@ -5,6 +5,26 @@ inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows PEP 440 for the Python wheel and semver-style
 `MAJOR.MINOR.PATCH` for the C++ library.
 
+## [Unreleased]
+
+### Added
+
+- **Shared-memory bank-conflict profiling.**
+  `RangeProfilerKernelReplay` now emits per-kernel shared load/store/total
+  conflict counts, shared wavefronts, conflict overhead, and average N-way
+  serialization. Reports and `inspect_perf_metrics()` surface the derived
+  values, and `shared_bank_conflicts_demo` provides a 1-way/32-way comparison.
+
+### Fixed
+
+- **Range metric registration recovery.** A rejected optional PerfWorks metric
+  can poison subsequent metric registration on some toolkit/driver pairs.
+  GPUFlight now rebuilds the accepted metric configuration and continues, so
+  later supported counters are not silently lost.
+- **Clearer range-profiler reports.** Numeric CUPTI AutoRange labels are
+  correlated with kernel activity names, out-of-range cache hit rates are
+  reported as unavailable, and unsupported DRAM columns are omitted.
+
 ## [1.2.1] - 2026-06-23
 
 Headline: **Windows `gpufl trace` now captures real kernel details** — kernel

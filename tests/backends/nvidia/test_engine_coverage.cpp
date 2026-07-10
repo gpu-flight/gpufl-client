@@ -145,6 +145,8 @@ TEST_P(EngineCoverageTest, EmitsExpectedEvents) {
         gpufl::test::FilterByType(logs.device, "sass_config");
     const auto perfEvents =
         gpufl::test::FilterByType(logs.scope, "perf_metric_event");
+    const auto kernelPerfEvents =
+        gpufl::test::FilterByType(logs.device, "kernel_perf_metric_event");
 
     // Useful summary print for manual differential review across machines.
     std::cerr << "[engine_coverage] engine=" << gpufl::test::EngineName(engine)
@@ -269,6 +271,24 @@ TEST_P(EngineCoverageTest, EmitsExpectedEvents) {
             break;
         }
 
+        case gpufl::ProfilingEngine::RangeProfilerKernelReplay: {
+            if (samplesBestEffort && kernelPerfEvents.empty()) {
+                std::cerr << "[engine_coverage] kernel replay counters not "
+                             "delivered; best-effort on this platform\n";
+                break;
+            }
+            ASSERT_FALSE(kernelPerfEvents.empty())
+                << "RangeProfilerKernelReplay must emit kernel counter rows";
+            const auto& pe = kernelPerfEvents.front();
+            EXPECT_GE(pe.value<int64_t>("shared_load_bank_conflicts", -2), -1);
+            EXPECT_GE(pe.value<int64_t>("shared_store_bank_conflicts", -2), -1);
+            EXPECT_GE(pe.value<int64_t>("shared_bank_conflicts", -2), -1);
+            EXPECT_GE(pe.value<int64_t>("shared_wavefronts", -2), -1);
+            EXPECT_GE(pe.value<double>("shared_bank_conflict_overhead_pct", -2.0), -1.0);
+            EXPECT_GE(pe.value<double>("shared_bank_conflict_nway", -2.0), -1.0);
+            break;
+        }
+
         case gpufl::ProfilingEngine::Deep: {
             if (samplesBestEffort) {
                 std::cerr << "[engine_coverage] sample collection best-effort "
@@ -307,6 +327,7 @@ INSTANTIATE_TEST_SUITE_P(
                       gpufl::ProfilingEngine::PcSampling,
                       gpufl::ProfilingEngine::SassMetrics,
                       gpufl::ProfilingEngine::RangeProfiler,
+                      gpufl::ProfilingEngine::RangeProfilerKernelReplay,
                       gpufl::ProfilingEngine::Deep),
     [](const ::testing::TestParamInfo<gpufl::ProfilingEngine>& info) {
         return std::string(gpufl::test::EngineName(info.param));

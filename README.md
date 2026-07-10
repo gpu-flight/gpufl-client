@@ -217,7 +217,7 @@ gpufl.init("my-app",
 | `SassMetrics` | Per-instruction execution counts (binary instrumentation) | `session.inspect_profile_samples()` | Thread divergence and instruction-level behavior |
 | `PmSampling` | Time-series hardware counter samples from CUPTI PM Sampling | `session.inspect_pm_sampling()` | Hardware-counter timelines by scope |
 | `RangeProfiler` | SM throughput, L1/L2 hit rates, DRAM bandwidth, tensor core % | `session.inspect_perf_metrics()` | Hardware counter deep-dives |
-| `RangeProfilerKernelReplay` | Kernel replay hardware counters keyed by replay range/kernel name | `session.inspect_perf_metrics()` / report | Per-kernel hardware counters when timing can be correlated separately |
+| `RangeProfilerKernelReplay` | Kernel replay hardware counters keyed by replay range/kernel name, including shared-memory bank conflicts | `session.inspect_perf_metrics()` / report | Per-kernel hardware counters when timing can be correlated separately |
 | `Deep` | Deep decision pipeline: SASS first, PC-sampling fallback, PM Sampling when available | Text report plus profiling analyzer views | Single-run deep profiling with safe defaults |
 
 ### Launcher multi-pass
@@ -244,6 +244,26 @@ Think of merged data as a union of capabilities, not a blind overwrite.
 not overlap with trace timing. `RangeProfilerKernelReplay` adds per-kernel
 hardware counters; local reports and `inspect_perf_metrics()` surface those
 rows alongside scope-level `RangeProfiler` counters.
+
+### Shared-memory bank conflicts
+
+`RangeProfilerKernelReplay` collects shared-memory load, store, and total bank
+conflicts when the GPU exposes the corresponding PerfWorks counters. Each
+`kernel_perf_metric_event` includes:
+
+- `shared_load_bank_conflicts`, `shared_store_bank_conflicts`, and
+  `shared_bank_conflicts`: raw excessive shared-memory wavefront counts.
+- `shared_wavefronts`: total shared-memory wavefronts processed.
+- `shared_bank_conflict_overhead_pct`: the percentage of actual wavefront work
+  attributable to conflicts.
+- `shared_bank_conflict_nway`: average serialization factor; `1.0` is
+  conflict-free, while `32.0` is approximately a 32-way conflict.
+
+Unsupported metrics remain `-1` in NDJSON and display as `n/a`. Build and run
+the `shared_bank_conflicts_demo` CUDA example to compare a conflict-free
+stride-1 access with a deliberate stride-32 conflict. Hardware-counter
+collection replays kernels and may require several passes, so use it as an
+explicit diagnostic pass rather than an always-on production mode.
 
 ### C++ Usage
 

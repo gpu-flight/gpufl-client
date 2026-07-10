@@ -574,6 +574,18 @@ struct KernelPerfMetricEvent {
     // launch config. -1.0 when not collected (only RangeProfilerKernelReplay
     // measures it). Note the scale: this is 0-100, KernelEvent.occupancy is 0-1.
     double achieved_occupancy_pct = -1.0;
+
+    // Shared-memory bank-conflict counters from RangeProfilerKernelReplay.
+    // Raw counts are -1 when unsupported. `shared_bank_conflict_overhead_pct`
+    // is the fraction of shared wavefront work attributable to conflicts.
+    // `shared_bank_conflict_nway` is the average serialization factor, where
+    // 1.0 means conflict-free and 2.0 means two wavefronts per ideal request.
+    int64_t shared_load_bank_conflicts = -1;
+    int64_t shared_store_bank_conflicts = -1;
+    int64_t shared_bank_conflicts = -1;
+    int64_t shared_wavefronts = -1;
+    double shared_bank_conflict_overhead_pct = -1.0;
+    double shared_bank_conflict_nway = -1.0;
 };
 
 /**

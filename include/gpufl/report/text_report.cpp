@@ -2,6 +2,7 @@
 #include "gpufl/report/hint_engine.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -44,6 +45,17 @@ std::string fmtMaybePct(double v) {
     return oss.str();
 }
 
+std::string fmtMaybeHitRate(double v) {
+    return v <= 100.0 ? fmtMaybePct(v) : "n/a";
+}
+
+std::string fmtMaybeNway(double v) {
+    if (v < 0 || !std::isfinite(v)) return "n/a";
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(2) << v << "x";
+    return oss.str();
+}
+
 std::string fmtDuration(double ms) {
     std::ostringstream oss;
     if (ms >= 1000.0)      oss << std::fixed << std::setprecision(2) << (ms / 1000.0) << " s";
@@ -59,29 +71,46 @@ std::string fmtPower(double mw) {
     return oss.str();
 }
 
+// Keep concrete template arguments so exact specializations remain
+// distinguishable, while still removing return types and argument lists.
 std::string shortenKernelName(const std::string& name) {
     std::string s = name;
     auto at = s.find('@');
     if (at != std::string::npos) s = s.substr(0, at);
     for (const auto* prefix : {"void ", "int ", "float ", "double ", "__global__ "}) {
-        if (s.rfind(prefix, 0) == 0) { s = s.substr(std::string(prefix).size()); break; }
+        if (s.rfind(prefix, 0) == 0) {
+            s = s.substr(std::string(prefix).size());
+            break;
+        }
     }
-    auto tpl = s.find('<');
-    std::string funcPart = (tpl != std::string::npos) ? s.substr(0, tpl) : s;
-    auto paren = funcPart.find('(');
-    if (paren != std::string::npos) funcPart = funcPart.substr(0, paren);
 
-    std::vector<std::string> parts;
-    std::istringstream iss(funcPart);
-    std::string part;
-    while (std::getline(iss, part, ':'))
-        if (!part.empty()) parts.push_back(part);
+    int templateDepth = 0;
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '<') {
+            ++templateDepth;
+        } else if (s[i] == '>' && templateDepth > 0) {
+            --templateDepth;
+        } else if (s[i] == '(' && templateDepth == 0) {
+            s.resize(i);
+            break;
+        }
+    }
 
-    std::string shortFunc = (parts.size() > 2)
-        ? parts[parts.size() - 2] + "::" + parts.back()
-        : funcPart;
-    if (tpl != std::string::npos) shortFunc += "<...>";
-    return shortFunc;
+    const auto tpl = s.find('<');
+    const std::string templatePart =
+        (tpl != std::string::npos) ? s.substr(tpl) : std::string{};
+    const std::string funcPart =
+        (tpl != std::string::npos) ? s.substr(0, tpl) : s;
+    const auto lastNamespace = funcPart.rfind("::");
+    if (lastNamespace == std::string::npos) return funcPart + templatePart;
+
+    const auto previousNamespace = (lastNamespace >= 2)
+        ? funcPart.rfind("::", lastNamespace - 2)
+        : std::string::npos;
+    const size_t start = (previousNamespace == std::string::npos)
+        ? 0
+        : previousNamespace + 2;
+    return funcPart.substr(start) + templatePart;
 }
 
 std::string truncate(const std::string& s, size_t maxLen) {
@@ -388,6 +417,12 @@ void TextReport::parseDeviceLog(const std::vector<JsonValue>& records,
             pm.dram_read_bytes = rec.value<int64_t>("dram_read_bytes", -1);
             pm.dram_write_bytes = rec.value<int64_t>("dram_write_bytes", -1);
             pm.tensor_active_pct = rec.value<double>("tensor_active_pct", -1.0);
+            pm.shared_bank_conflicts = rec.value<int64_t>("shared_bank_conflicts", -1);
+            pm.shared_wavefronts = rec.value<int64_t>("shared_wavefronts", -1);
+            pm.shared_bank_conflict_overhead_pct =
+                rec.value<double>("shared_bank_conflict_overhead_pct", -1.0);
+            pm.shared_bank_conflict_nway =
+                rec.value<double>("shared_bank_conflict_nway", -1.0);
             if (!pm.name.empty()) perf_metrics_.push_back(std::move(pm));
         } else if (type == "memcpy_event_batch") {
             auto ci = buildColumnIndex(rec["columns"]);
@@ -1090,28 +1125,64 @@ void TextReport::writePerfMetricsSummary(std::ostringstream& out) const {
     });
     if (top_n_ > 0 && static_cast<int>(rows.size()) > top_n_) rows.resize(top_n_);
 
+    std::vector<const KernelRecord*> kernelsByLaunch;
+    kernelsByLaunch.reserve(kernels_.size());
+    for (const auto& kernel : kernels_) kernelsByLaunch.push_back(&kernel);
+    std::sort(kernelsByLaunch.begin(), kernelsByLaunch.end(),
+              [](const auto* a, const auto* b) {
+                  return a->start_ns < b->start_ns;
+              });
+
+    auto resolvedName = [&](const PerfMetricRecord* row) {
+        const bool numericAutoRange = !row->name.empty() &&
+            std::all_of(row->name.begin(), row->name.end(), [](unsigned char c) {
+                return std::isdigit(c) != 0;
+            });
+        if (row->target_kind == "Kernel" && numericAutoRange &&
+            row->launch_ordinal > 0 &&
+            row->launch_ordinal <= kernelsByLaunch.size()) {
+            return kernelsByLaunch[row->launch_ordinal - 1]->name;
+        }
+        return row->name;
+    };
+
+    const bool hasDramRead = std::any_of(rows.begin(), rows.end(),
+        [](const auto* row) { return row->dram_read_bytes >= 0; });
+    const bool hasDramWrite = std::any_of(rows.begin(), rows.end(),
+        [](const auto* row) { return row->dram_write_bytes >= 0; });
+
     out << "  " << std::left << std::setw(8) << "Target"
         << std::setw(32) << "Name"
         << std::right << std::setw(10) << "SM"
         << std::setw(10) << "L1"
         << std::setw(10) << "L2"
-        << std::setw(10) << "Tensor"
-        << std::setw(14) << "DRAM R"
-        << std::setw(14) << "DRAM W" << "\n";
-    out << "  " << std::string(108, '-') << "\n";
+        << std::setw(10) << "Bank"
+        << std::setw(10) << "N-way"
+        << std::setw(10) << "Tensor";
+    if (hasDramRead) out << std::setw(14) << "DRAM R";
+    if (hasDramWrite) out << std::setw(14) << "DRAM W";
+    out << "\n";
+    const size_t tableWidth = 100 + (hasDramRead ? 14 : 0) +
+                              (hasDramWrite ? 14 : 0);
+    out << "  " << std::string(tableWidth, '-') << "\n";
 
     for (const auto* r : rows) {
-        const std::string display_name =
-            r->target_kind == "Kernel" ? shortenKernelName(r->name) : r->name;
+        const std::string resolved = resolvedName(r);
+        const std::string display_name = r->target_kind == "Kernel"
+            ? shortenKernelName(resolved) : resolved;
         out << "  " << std::left << std::setw(8) << r->target_kind
             << std::setw(32) << truncate(display_name, 30)
             << std::right << std::setw(10) << fmtMaybePct(r->sm_throughput_pct)
-            << std::setw(10) << fmtMaybePct(r->l1_hit_rate_pct)
-            << std::setw(10) << fmtMaybePct(r->l2_hit_rate_pct)
-            << std::setw(10) << fmtMaybePct(r->tensor_active_pct)
-            << std::setw(14) << fmtMaybeBytes(r->dram_read_bytes)
-            << std::setw(14) << fmtMaybeBytes(r->dram_write_bytes)
-            << "\n";
+            << std::setw(10) << fmtMaybeHitRate(r->l1_hit_rate_pct)
+            << std::setw(10) << fmtMaybeHitRate(r->l2_hit_rate_pct)
+            << std::setw(10) << fmtMaybePct(r->shared_bank_conflict_overhead_pct)
+            << std::setw(10) << fmtMaybeNway(r->shared_bank_conflict_nway)
+            << std::setw(10) << fmtMaybePct(r->tensor_active_pct);
+        if (hasDramRead)
+            out << std::setw(14) << fmtMaybeBytes(r->dram_read_bytes);
+        if (hasDramWrite)
+            out << std::setw(14) << fmtMaybeBytes(r->dram_write_bytes);
+        out << "\n";
     }
 
     out << "\n  Note: Scope rows come from RangeProfiler; kernel rows come from "

@@ -49,6 +49,13 @@ std::string KernelPerfMetricModel::buildJson() const {
         << ",\"dram_write_bytes\":"  << e_.dram_write_bytes
         << ",\"tensor_active_pct\":" << e_.tensor_active_pct
         << ",\"achieved_occupancy_pct\":" << e_.achieved_occupancy_pct
+        << ",\"shared_load_bank_conflicts\":" << e_.shared_load_bank_conflicts
+        << ",\"shared_store_bank_conflicts\":" << e_.shared_store_bank_conflicts
+        << ",\"shared_bank_conflicts\":" << e_.shared_bank_conflicts
+        << ",\"shared_wavefronts\":" << e_.shared_wavefronts
+        << ",\"shared_bank_conflict_overhead_pct\":"
+        << e_.shared_bank_conflict_overhead_pct
+        << ",\"shared_bank_conflict_nway\":" << e_.shared_bank_conflict_nway
         << "}";
     return oss.str();
 }

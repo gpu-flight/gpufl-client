@@ -127,6 +127,10 @@ class TextReport {
         int64_t dram_read_bytes = -1;
         int64_t dram_write_bytes = -1;
         double tensor_active_pct = -1.0;
+        int64_t shared_bank_conflicts = -1;
+        int64_t shared_wavefronts = -1;
+        double shared_bank_conflict_overhead_pct = -1.0;
+        double shared_bank_conflict_nway = -1.0;
     };
 
     struct SessionInfo {
