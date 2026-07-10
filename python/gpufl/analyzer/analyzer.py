@@ -700,7 +700,10 @@ class GpuFlightSession:
             for col in [
                 'start_ns', 'end_ns',
                 'sm_throughput_pct', 'l1_hit_rate_pct', 'l2_hit_rate_pct',
-                'dram_read_bytes', 'dram_write_bytes', 'tensor_active_pct'
+                'dram_read_bytes', 'dram_write_bytes', 'tensor_active_pct',
+                'shared_load_bank_conflicts', 'shared_store_bank_conflicts',
+                'shared_bank_conflicts', 'shared_wavefronts',
+                'shared_bank_conflict_overhead_pct', 'shared_bank_conflict_nway'
             ]:
                 if col in self.perf.columns:
                     self.perf[col] = pd.to_numeric(self.perf[col], errors='coerce')
@@ -1494,11 +1497,19 @@ class GpuFlightSession:
             return
 
         p = self.perf.copy()
-        for col in ['sm_throughput_pct', 'l1_hit_rate_pct', 'l2_hit_rate_pct', 'tensor_active_pct']:
+        for col in [
+            'sm_throughput_pct', 'l1_hit_rate_pct', 'l2_hit_rate_pct',
+            'tensor_active_pct', 'shared_bank_conflict_overhead_pct',
+            'shared_bank_conflict_nway'
+        ]:
             if col in p.columns:
                 # Backend uses -1.0 sentinel for unavailable counters.
                 p.loc[p[col] < 0, col] = float('nan')
-        for col in ['dram_read_bytes', 'dram_write_bytes']:
+        for col in [
+            'dram_read_bytes', 'dram_write_bytes',
+            'shared_load_bank_conflicts', 'shared_store_bank_conflicts',
+            'shared_bank_conflicts', 'shared_wavefronts'
+        ]:
             if col in p.columns:
                 p[col] = pd.to_numeric(p[col], errors='coerce')
                 p.loc[p[col] < 0, col] = float('nan')
@@ -1509,6 +1520,9 @@ class GpuFlightSession:
         def fmt_pct(v):
             return f"{v:.2f}" if pd.notna(v) else "n/a"
 
+        def fmt_nway(v):
+            return f"{v:.2f}x" if pd.notna(v) else "n/a"
+
         summary = Table(title="Perf Metrics Summary")
         summary.add_column("Metric", style="cyan")
         summary.add_column("Average", justify="right")
@@ -1516,6 +1530,14 @@ class GpuFlightSession:
         summary.add_row("L1 Hit Rate (%)", fmt_pct(avg_if_exists('l1_hit_rate_pct')))
         summary.add_row("L2 Hit Rate (%)", fmt_pct(avg_if_exists('l2_hit_rate_pct')))
         summary.add_row("Tensor Active (%)", fmt_pct(avg_if_exists('tensor_active_pct')))
+        summary.add_row("Shared Bank Conflict Overhead (%)",
+                        fmt_pct(avg_if_exists('shared_bank_conflict_overhead_pct')))
+        summary.add_row("Shared Bank Conflict N-way",
+                        fmt_nway(avg_if_exists('shared_bank_conflict_nway')))
+        if 'shared_bank_conflicts' in p.columns:
+            conflicts = p['shared_bank_conflicts'].dropna()
+            summary.add_row("Shared Bank Conflicts (avg)",
+                            f"{conflicts.mean():.0f}" if not conflicts.empty else "n/a")
         if 'dram_read_bytes' in p.columns:
             summary.add_row("DRAM Read (avg)", _fmt_bytes(p['dram_read_bytes'].dropna().mean()))
         if 'dram_write_bytes' in p.columns:
@@ -1527,7 +1549,9 @@ class GpuFlightSession:
 
         for col in [
             'sm_throughput_pct', 'l1_hit_rate_pct', 'l2_hit_rate_pct',
-            'tensor_active_pct', 'dram_read_bytes', 'dram_write_bytes'
+            'tensor_active_pct', 'dram_read_bytes', 'dram_write_bytes',
+            'shared_bank_conflicts', 'shared_bank_conflict_overhead_pct',
+            'shared_bank_conflict_nway'
         ]:
             if col not in p.columns:
                 p[col] = float('nan')
@@ -1543,6 +1567,9 @@ class GpuFlightSession:
             tensor=('tensor_active_pct', 'mean'),
             dram_r=('dram_read_bytes', 'mean'),
             dram_w=('dram_write_bytes', 'mean'),
+            bank_conflicts=('shared_bank_conflicts', 'mean'),
+            bank_overhead=('shared_bank_conflict_overhead_pct', 'mean'),
+            bank_nway=('shared_bank_conflict_nway', 'mean'),
         ).sort_values('count', ascending=False).head(top_n)
 
         table = Table(title=f"Perf Metrics by Target - Top {top_n}")
@@ -1552,6 +1579,8 @@ class GpuFlightSession:
         table.add_column("SM%", justify="right")
         table.add_column("L1%", justify="right")
         table.add_column("L2%", justify="right")
+        table.add_column("Bank%", justify="right")
+        table.add_column("N-way", justify="right")
         table.add_column("Tensor%", justify="right")
         table.add_column("DRAM Read", justify="right")
         table.add_column("DRAM Write", justify="right")
@@ -1564,6 +1593,8 @@ class GpuFlightSession:
                 fmt_pct(row['sm']),
                 fmt_pct(row['l1']),
                 fmt_pct(row['l2']),
+                fmt_pct(row['bank_overhead']),
+                f"{row['bank_nway']:.2f}x" if pd.notna(row['bank_nway']) else "n/a",
                 fmt_pct(row['tensor']),
                 _fmt_bytes(row['dram_r']) if pd.notna(row['dram_r']) else "n/a",
                 _fmt_bytes(row['dram_w']) if pd.notna(row['dram_w']) else "n/a",

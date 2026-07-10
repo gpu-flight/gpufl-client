@@ -44,6 +44,13 @@ std::string fmtMaybePct(double v) {
     return oss.str();
 }
 
+std::string fmtMaybeNway(double v) {
+    if (v < 0 || !std::isfinite(v)) return "n/a";
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(2) << v << "x";
+    return oss.str();
+}
+
 std::string fmtDuration(double ms) {
     std::ostringstream oss;
     if (ms >= 1000.0)      oss << std::fixed << std::setprecision(2) << (ms / 1000.0) << " s";
@@ -388,6 +395,12 @@ void TextReport::parseDeviceLog(const std::vector<JsonValue>& records,
             pm.dram_read_bytes = rec.value<int64_t>("dram_read_bytes", -1);
             pm.dram_write_bytes = rec.value<int64_t>("dram_write_bytes", -1);
             pm.tensor_active_pct = rec.value<double>("tensor_active_pct", -1.0);
+            pm.shared_bank_conflicts = rec.value<int64_t>("shared_bank_conflicts", -1);
+            pm.shared_wavefronts = rec.value<int64_t>("shared_wavefronts", -1);
+            pm.shared_bank_conflict_overhead_pct =
+                rec.value<double>("shared_bank_conflict_overhead_pct", -1.0);
+            pm.shared_bank_conflict_nway =
+                rec.value<double>("shared_bank_conflict_nway", -1.0);
             if (!pm.name.empty()) perf_metrics_.push_back(std::move(pm));
         } else if (type == "memcpy_event_batch") {
             auto ci = buildColumnIndex(rec["columns"]);
@@ -1095,10 +1108,12 @@ void TextReport::writePerfMetricsSummary(std::ostringstream& out) const {
         << std::right << std::setw(10) << "SM"
         << std::setw(10) << "L1"
         << std::setw(10) << "L2"
+        << std::setw(10) << "Bank"
+        << std::setw(10) << "N-way"
         << std::setw(10) << "Tensor"
         << std::setw(14) << "DRAM R"
         << std::setw(14) << "DRAM W" << "\n";
-    out << "  " << std::string(108, '-') << "\n";
+    out << "  " << std::string(128, '-') << "\n";
 
     for (const auto* r : rows) {
         const std::string display_name =
@@ -1108,6 +1123,8 @@ void TextReport::writePerfMetricsSummary(std::ostringstream& out) const {
             << std::right << std::setw(10) << fmtMaybePct(r->sm_throughput_pct)
             << std::setw(10) << fmtMaybePct(r->l1_hit_rate_pct)
             << std::setw(10) << fmtMaybePct(r->l2_hit_rate_pct)
+            << std::setw(10) << fmtMaybePct(r->shared_bank_conflict_overhead_pct)
+            << std::setw(10) << fmtMaybeNway(r->shared_bank_conflict_nway)
             << std::setw(10) << fmtMaybePct(r->tensor_active_pct)
             << std::setw(14) << fmtMaybeBytes(r->dram_read_bytes)
             << std::setw(14) << fmtMaybeBytes(r->dram_write_bytes)

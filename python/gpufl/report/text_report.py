@@ -558,6 +558,8 @@ class TextReport:
         metric_cols = [
             "sm_throughput_pct", "l1_hit_rate_pct", "l2_hit_rate_pct",
             "tensor_active_pct", "dram_read_bytes", "dram_write_bytes",
+            "shared_bank_conflicts", "shared_wavefronts",
+            "shared_bank_conflict_overhead_pct", "shared_bank_conflict_nway",
         ]
         for col in metric_cols:
             if col not in p.columns:
@@ -579,6 +581,8 @@ class TextReport:
                 tensor=("tensor_active_pct", "mean"),
                 dram_r=("dram_read_bytes", "mean"),
                 dram_w=("dram_write_bytes", "mean"),
+                bank_overhead=("shared_bank_conflict_overhead_pct", "mean"),
+                bank_nway=("shared_bank_conflict_nway", "mean"),
             )
             .sort_values("sm", ascending=False, na_position="last")
             .head(self.top_n)
@@ -586,6 +590,9 @@ class TextReport:
 
         def fmt_pct(v):
             return f"{v:.1f}%" if pd.notna(v) else "n/a"
+
+        def fmt_nway(v):
+            return f"{v:.2f}x" if pd.notna(v) else "n/a"
 
         def short(value, limit):
             text = str(value)
@@ -596,15 +603,17 @@ class TextReport:
         lines.append("")
         lines.append(
             f"  {'Target':<8}{'Name':<32}{'SM':>10}{'L1':>10}{'L2':>10}"
-            f"{'Tensor':>10}{'DRAM R':>14}{'DRAM W':>14}"
+            f"{'Bank':>10}{'N-way':>10}{'Tensor':>10}{'DRAM R':>14}{'DRAM W':>14}"
         )
-        lines.append("  " + "-" * 108)
+        lines.append("  " + "-" * 128)
         for (kind, name), row in agg.iterrows():
             lines.append(
                 f"  {str(kind):<8}{short(name, 30):<32}"
                 f"{fmt_pct(row['sm']):>10}"
                 f"{fmt_pct(row['l1']):>10}"
                 f"{fmt_pct(row['l2']):>10}"
+                f"{fmt_pct(row['bank_overhead']):>10}"
+                f"{fmt_nway(row['bank_nway']):>10}"
                 f"{fmt_pct(row['tensor']):>10}"
                 f"{(_fmt_bytes(row['dram_r']) if pd.notna(row['dram_r']) else 'n/a'):>14}"
                 f"{(_fmt_bytes(row['dram_w']) if pd.notna(row['dram_w']) else 'n/a'):>14}"

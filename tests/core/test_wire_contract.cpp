@@ -565,6 +565,12 @@ TEST(WireContract, KernelPerfMetricEventFields) {
     ev.dram_write_bytes = -1;
     ev.tensor_active_pct = -1.0;
     ev.achieved_occupancy_pct = 43.75;
+    ev.shared_load_bank_conflicts = 192;
+    ev.shared_store_bank_conflicts = 64;
+    ev.shared_bank_conflicts = 256;
+    ev.shared_wavefronts = 512;
+    ev.shared_bank_conflict_overhead_pct = 50.0;
+    ev.shared_bank_conflict_nway = 2.0;
 
     const std::string json = gpufl::model::KernelPerfMetricModel(ev).buildJson();
 
@@ -578,4 +584,10 @@ TEST(WireContract, KernelPerfMetricEventFields) {
     EXPECT_TRUE(JsonContains(json, "\"dram_read_bytes\":1024"));
     EXPECT_TRUE(JsonContains(json, "\"dram_write_bytes\":-1"));
     EXPECT_TRUE(JsonContains(json, "\"achieved_occupancy_pct\":43.7500"));
+    EXPECT_TRUE(JsonContains(json, "\"shared_load_bank_conflicts\":192"));
+    EXPECT_TRUE(JsonContains(json, "\"shared_store_bank_conflicts\":64"));
+    EXPECT_TRUE(JsonContains(json, "\"shared_bank_conflicts\":256"));
+    EXPECT_TRUE(JsonContains(json, "\"shared_wavefronts\":512"));
+    EXPECT_TRUE(JsonContains(json, "\"shared_bank_conflict_overhead_pct\":50.0000"));
+    EXPECT_TRUE(JsonContains(json, "\"shared_bank_conflict_nway\":2.0000"));
 }
