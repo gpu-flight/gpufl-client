@@ -566,6 +566,8 @@ class TextReport:
                 p[col] = float("nan")
             p[col] = pd.to_numeric(p[col], errors="coerce")
             p.loc[p[col] < 0, col] = float("nan")
+        for col in ["l1_hit_rate_pct", "l2_hit_rate_pct"]:
+            p.loc[p[col] > 100, col] = float("nan")
 
         p = p[p["name"].notna()].copy()
         if p.empty:
@@ -601,13 +603,21 @@ class TextReport:
         lines = ["", _SEP, "  Range Profiler Counters", _SEP]
         lines.append(f"  Total Counter Rows:   {len(p)}")
         lines.append("")
-        lines.append(
+        has_dram_r = p["dram_read_bytes"].notna().any()
+        has_dram_w = p["dram_write_bytes"].notna().any()
+        header = (
             f"  {'Target':<8}{'Name':<32}{'SM':>10}{'L1':>10}{'L2':>10}"
-            f"{'Bank':>10}{'N-way':>10}{'Tensor':>10}{'DRAM R':>14}{'DRAM W':>14}"
+            f"{'Bank':>10}{'N-way':>10}{'Tensor':>10}"
         )
-        lines.append("  " + "-" * 128)
+        if has_dram_r:
+            header += f"{'DRAM R':>14}"
+        if has_dram_w:
+            header += f"{'DRAM W':>14}"
+        lines.append(header)
+        lines.append("  " + "-" * (100 + (14 if has_dram_r else 0)
+                                       + (14 if has_dram_w else 0)))
         for (kind, name), row in agg.iterrows():
-            lines.append(
+            line = (
                 f"  {str(kind):<8}{short(name, 30):<32}"
                 f"{fmt_pct(row['sm']):>10}"
                 f"{fmt_pct(row['l1']):>10}"
@@ -615,9 +625,12 @@ class TextReport:
                 f"{fmt_pct(row['bank_overhead']):>10}"
                 f"{fmt_nway(row['bank_nway']):>10}"
                 f"{fmt_pct(row['tensor']):>10}"
-                f"{(_fmt_bytes(row['dram_r']) if pd.notna(row['dram_r']) else 'n/a'):>14}"
-                f"{(_fmt_bytes(row['dram_w']) if pd.notna(row['dram_w']) else 'n/a'):>14}"
             )
+            if has_dram_r:
+                line += f"{(_fmt_bytes(row['dram_r']) if pd.notna(row['dram_r']) else 'n/a'):>14}"
+            if has_dram_w:
+                line += f"{(_fmt_bytes(row['dram_w']) if pd.notna(row['dram_w']) else 'n/a'):>14}"
+            lines.append(line)
         lines.append("")
         lines.append(
             "  Note: Scope rows come from RangeProfiler; kernel rows come from "

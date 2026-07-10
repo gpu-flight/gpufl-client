@@ -707,6 +707,49 @@ class GpuFlightSession:
             ]:
                 if col in self.perf.columns:
                     self.perf[col] = pd.to_numeric(self.perf[col], errors='coerce')
+            for col in ['l1_hit_rate_pct', 'l2_hit_rate_pct']:
+                if col in self.perf.columns:
+                    self.perf.loc[
+                        (self.perf[col] < 0) | (self.perf[col] > 100), col
+                    ] = float('nan')
+
+            # CUPTI AutoRange names may be numeric ("0", "1", ...). Join
+            # those rows to chronological kernel activity using the replay
+            # launch ordinal, scoped by session so merged multi-pass data does
+            # not cross-wire names.
+            if (not self.kernels.empty and 'launch_ordinal' in self.perf.columns
+                    and 'name' in self.kernels.columns):
+                ordered = self.kernels.sort_values('start_ns').copy()
+                use_session = ('session_id' in ordered.columns
+                               and 'session_id' in self.perf.columns)
+                if use_session:
+                    ordered['_launch_ordinal'] = (
+                        ordered.groupby('session_id', dropna=False).cumcount() + 1
+                    )
+                    name_by_launch = {
+                        (str(row['session_id']), int(row['_launch_ordinal'])): row['name']
+                        for _, row in ordered.iterrows()
+                    }
+                else:
+                    ordered['_launch_ordinal'] = range(1, len(ordered) + 1)
+                    name_by_launch = {
+                        int(row['_launch_ordinal']): row['name']
+                        for _, row in ordered.iterrows()
+                    }
+
+                kernel_rows = self.perf['kind'].eq('kernel')
+                for idx, row in self.perf[kernel_rows].iterrows():
+                    current_name = str(row.get('name') or '')
+                    if not current_name.isdigit() or pd.isna(row.get('launch_ordinal')):
+                        continue
+                    ordinal = int(row['launch_ordinal'])
+                    key = ((str(row.get('session_id')), ordinal)
+                           if use_session else ordinal)
+                    resolved = name_by_launch.get(key)
+                    if resolved:
+                        self.perf.at[idx, 'name'] = resolved
+                        if 'kernel_name' in self.perf.columns:
+                            self.perf.at[idx, 'kernel_name'] = resolved
             if {'start_ns', 'end_ns'}.issubset(self.perf.columns):
                 self.perf['duration_ms'] = (self.perf['end_ns'] - self.perf['start_ns']) / 1e6
 
@@ -1505,6 +1548,9 @@ class GpuFlightSession:
             if col in p.columns:
                 # Backend uses -1.0 sentinel for unavailable counters.
                 p.loc[p[col] < 0, col] = float('nan')
+        for col in ['l1_hit_rate_pct', 'l2_hit_rate_pct']:
+            if col in p.columns:
+                p.loc[p[col] > 100, col] = float('nan')
         for col in [
             'dram_read_bytes', 'dram_write_bytes',
             'shared_load_bank_conflicts', 'shared_store_bank_conflicts',

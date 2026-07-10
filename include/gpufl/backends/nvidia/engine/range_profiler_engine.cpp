@@ -58,6 +58,18 @@ int64_t CounterValue(double value) {
         : -1;
 }
 
+double HitRateValue(const char* metricName, double value) {
+    if (std::isfinite(value) && value >= 0.0 && value <= 100.0) {
+        return value;
+    }
+    if (std::isfinite(value) && value >= 0.0) {
+        GFL_LOG_DEBUG("[RangeProfilerEngine] ignoring out-of-range hit-rate "
+                      "metric ", metricName, " = ", value,
+                      " (expected 0-100%)");
+    }
+    return -1.0;
+}
+
 void FinalizeSharedBankConflictMetrics(KernelPerfMetricEvent& event) {
     if (event.shared_bank_conflicts < 0 &&
         event.shared_load_bank_conflicts >= 0 &&
@@ -645,9 +657,9 @@ void RangeProfilerEngine::EndPerfPassAndDecode_() {
         if (std::strcmp(metricName, "sm__throughput.avg.pct_of_peak_sustained_elapsed") == 0) {
             if (std::isfinite(value)) perf_last_event_.sm_throughput_pct = value;
         } else if (std::strcmp(metricName, "l1tex__t_sector_hit_rate.pct") == 0) {
-            perf_last_event_.l1_hit_rate_pct = std::isfinite(value) ? value : -1.0;
+            perf_last_event_.l1_hit_rate_pct = HitRateValue(metricName, value);
         } else if (std::strcmp(metricName, "lts__t_sector_hit_rate.pct") == 0) {
-            perf_last_event_.l2_hit_rate_pct = std::isfinite(value) ? value : -1.0;
+            perf_last_event_.l2_hit_rate_pct = HitRateValue(metricName, value);
         } else if (std::strcmp(metricName, "dram__bytes_read.sum") == 0) {
             perf_last_event_.dram_read_bytes =
                 (value >= 0.0) ? static_cast<int64_t>(value) : -1;
@@ -752,9 +764,9 @@ void RangeProfilerEngine::DecodeKernelReplayEvents_() {
             if (std::strcmp(metricName, "sm__throughput.avg.pct_of_peak_sustained_elapsed") == 0) {
                 if (std::isfinite(value)) ev.sm_throughput_pct = value;
             } else if (std::strcmp(metricName, "l1tex__t_sector_hit_rate.pct") == 0) {
-                ev.l1_hit_rate_pct = std::isfinite(value) ? value : -1.0;
+                ev.l1_hit_rate_pct = HitRateValue(metricName, value);
             } else if (std::strcmp(metricName, "lts__t_sector_hit_rate.pct") == 0) {
-                ev.l2_hit_rate_pct = std::isfinite(value) ? value : -1.0;
+                ev.l2_hit_rate_pct = HitRateValue(metricName, value);
             } else if (std::strcmp(metricName, "dram__bytes_read.sum") == 0) {
                 ev.dram_read_bytes =
                     (value >= 0.0) ? static_cast<int64_t>(value) : -1;

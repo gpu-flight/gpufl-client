@@ -140,3 +140,71 @@ def test_session_can_load_all_rotated_windows(tmp_path):
                             load_all_rotated=True)
     assert len(full.kernels) == 2
     assert list(full.kernels["name"]) == ["firstKernel", "secondKernel"]
+
+
+def test_kernel_replay_rows_resolve_names_and_reject_invalid_hit_rates(tmp_path):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    prefix = "replay"
+    events = [
+        {
+            "version": 1, "type": "job_start",
+            "session_id": "replay-session", "app": "test", "pid": 1,
+            "ts_ns": 100, "host": {}, "devices": []
+        },
+        {
+            "version": 1, "type": "dictionary_update",
+            "session_id": "replay-session",
+            "kernel_dict": {
+                "1": "void sharedBankAccess<1>(float*, int)",
+                "2": "void sharedBankAccess<32>(float*, int)",
+            },
+            "scope_name_dict": {}, "function_dict": {}, "metric_dict": {}
+        },
+        {
+            "version": 1, "type": "kernel_event_batch",
+            "session_id": "replay-session", "batch_id": 1,
+            "base_time_ns": 1000,
+            "columns": ["dt_ns", "kernel_id", "stream_id", "duration_ns",
+                        "corr_id", "dyn_shared", "num_regs", "has_details"],
+            "rows": [
+                [0, 1, 0, 100, 11, 0, 16, 0],
+                [200, 2, 0, 200, 22, 0, 16, 0],
+            ]
+        },
+        {
+            "version": 1, "type": "kernel_perf_metric_event",
+            "session_id": "replay-session", "kernel_name": "0",
+            "range_name": "0", "launch_ordinal": 1,
+            "l1_hit_rate_pct": 0.0, "l2_hit_rate_pct": 137.6,
+            "shared_bank_conflict_overhead_pct": 0.1,
+            "shared_bank_conflict_nway": 1.0,
+        },
+        {
+            "version": 1, "type": "kernel_perf_metric_event",
+            "session_id": "replay-session", "kernel_name": "1",
+            "range_name": "1", "launch_ordinal": 2,
+            "l1_hit_rate_pct": 0.0, "l2_hit_rate_pct": 99.5,
+            "shared_bank_conflict_overhead_pct": 96.9,
+            "shared_bank_conflict_nway": 31.87,
+        },
+        {
+            "type": "shutdown", "session_id": "replay-session",
+            "app": "test", "pid": 1, "ts_ns": 2000
+        },
+    ]
+
+    with open(log_dir / f"{prefix}.device.log", "w") as f:
+        for event in events:
+            f.write(json.dumps(event) + "\n")
+
+    session = GpuFlightSession(log_dir, log_prefix=prefix)
+    replay = session.perf.sort_values("launch_ordinal").reset_index(drop=True)
+
+    assert list(replay["name"]) == [
+        "void sharedBankAccess<1>(float*, int)",
+        "void sharedBankAccess<32>(float*, int)",
+    ]
+    assert replay.loc[0, "kernel_name"] == replay.loc[0, "name"]
+    assert replay.loc[0, "l2_hit_rate_pct"] != replay.loc[0, "l2_hit_rate_pct"]
+    assert replay.loc[1, "l2_hit_rate_pct"] == pytest.approx(99.5)

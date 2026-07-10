@@ -21,6 +21,9 @@ versioning follows PEP 440 for the Python wheel and semver-style
   can poison subsequent metric registration on some toolkit/driver pairs.
   GPUFlight now rebuilds the accepted metric configuration and continues, so
   later supported counters are not silently lost.
+- **Clearer range-profiler reports.** Numeric CUPTI AutoRange labels are
+  correlated with kernel activity names, out-of-range cache hit rates are
+  reported as unavailable, and unsupported DRAM columns are omitted.
 
 ## [1.2.1] - 2026-06-23
 
