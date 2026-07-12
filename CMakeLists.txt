@@ -654,8 +654,9 @@ if(BUILD_GPUFL_INJECT AND ((UNIX AND NOT APPLE) OR WIN32))
     endif()
     if(UNIX AND NOT APPLE)
         set_target_properties(gpufl_inject PROPERTIES
-            # Hide internal symbols; only the extern "C" InitializeInjection
-            # entry point is marked visibility("default") in the source.
+            # Hide internal symbols; the extern "C" injection ABI and explicit
+            # post-cuInit readiness handshake are marked visibility("default")
+            # in the source.
             # The .init_array constructor is invoked by ld.so directly and
             # doesn't need to be a visible symbol.
             CXX_VISIBILITY_PRESET hidden

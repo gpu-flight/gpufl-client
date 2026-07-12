@@ -66,6 +66,11 @@ constexpr const char* kStopEvent            = "GPUFL_STOP_EVENT";
 // (before main / cuInit). Off by default - pre-cuInit CUPTI subscribe segfaults
 // on no-CUDA targets; normally InitializeInjection drives init after cuInit.
 constexpr const char* kInjectUseConstructor = "GPUFL_INJECT_USE_CONSTRUCTOR";
+// Opt-in ("1"): InitializeInjection records that libcuda reached its injection
+// callback but does not start CUPTI from a racing background thread. A host that
+// must finish CUDA Driver initialization first (Numba is the motivating case)
+// calls the exported GpuFlightInitializeInjectionAfterCuda function afterward.
+constexpr const char* kInjectManualInit     = "GPUFL_INJECT_MANUAL_INIT";
 
 // Opt-in ("1"): turn on gpufl's debug logging (GFL_LOG_DEBUG → stderr) in the
 // injected target - same switch InitOptions.enable_debug_output exposes to
