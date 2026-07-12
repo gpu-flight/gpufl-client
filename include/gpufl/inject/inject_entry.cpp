@@ -627,9 +627,35 @@ int InitializeInjection(void* /*funcTable*/) {
     // injection pattern - so init fully completes before any kernel runs.
     std::call_once(g_init_once, doInjectInit);
 #else
-    startDeferredInjectInit();
+    // Numba loads the CUDA Driver API through cuda-python. Starting CUPTI on a
+    // detached thread while that first cuInit call is still on the stack races
+    // the driver's initialization and can segfault inside numba-cuda's
+    // safe_cuda_api_call. Its generated harness opts into a deterministic
+    // handshake: let cuInit return, then call the exported function below
+    // synchronously before any allocation or launch. Every other workload keeps
+    // the existing automatic deferred behavior.
+    const char* manual_init = envOrNull(gpufl::env::kInjectManualInit);
+    if (!manual_init || std::strcmp(manual_init, "1") != 0) {
+        startDeferredInjectInit();
+    }
 #endif
     return 0;
+}
+
+// Deterministic post-cuInit handshake for Driver-API hosts such as Numba.
+// PRECONDITION: the caller has completed CUDA Driver initialization. The
+// function is idempotent with every other injection entry through g_init_once.
+// Returning 1 means capture is ready; 0 means initialization was disabled or
+// failed. Exported with a stable C name so Python can resolve it from the
+// already-LD_PRELOADed process image via ctypes.CDLL(None).
+GPUFL_INJECT_EXPORT
+int GpuFlightInitializeInjectionAfterCuda() {
+    try {
+        std::call_once(g_init_once, doInjectInit);
+    } catch (...) {
+        return 0;
+    }
+    return g_init_ok.load(std::memory_order_acquire) ? 1 : 0;
 }
 
 #ifndef _WIN32
