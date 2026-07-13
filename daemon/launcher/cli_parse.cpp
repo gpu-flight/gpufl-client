@@ -112,6 +112,7 @@ const char* topLevelHelp() {
         "SUBCOMMANDS:\n"
         "    trace      Inject GPUFlight into a target process and capture telemetry\n"
         "    monitor    Run long-lived GPU/host telemetry collection\n"
+        "    info       Print local GPU device capabilities\n"
         "    upload     Upload a captured session's NDJSON logs to the backend\n"
         "    version    Print version + build info\n"
         "\n"
@@ -200,6 +201,8 @@ ParsedTopLevel parseTopLevel(int argc, char** argv) {
         out.sub = Subcommand::Upload;
     } else if (first == "monitor") {
         out.sub = Subcommand::Monitor;
+    } else if (first == "info") {
+        out.sub = Subcommand::Info;
     } else {
         out.sub = Subcommand::Unknown;
         out.remaining.push_back(first);
@@ -464,6 +467,24 @@ const char* monitorHelp() {
         "    gpufl monitor --name=llm-node-1 --upload\n";
 }
 
+const char* infoHelp() {
+    return
+        "gpufl info - Print local GPU device capabilities\n"
+        "\n"
+        "USAGE:\n"
+        "    gpufl info [OPTIONS]\n"
+        "\n"
+        "OPTIONS:\n"
+        "        --json              Emit stable machine-readable JSON\n"
+        "        --device=<ID>       Limit output to one zero-based device ID\n"
+        "    -h, --help              Print this help\n"
+        "\n"
+        "EXAMPLES:\n"
+        "    gpufl info\n"
+        "    gpufl info --json\n"
+        "    gpufl info --device=0 --json\n";
+}
+
 UploadParseResult parseUploadArgs(const std::vector<std::string>& argv) {
     UploadArgs out;
     bool have_log_path = false;
@@ -617,6 +638,53 @@ MonitorParseResult parseMonitorArgs(const std::vector<std::string>& argv) {
             return {std::nullopt,
                     "unexpected argument: " + tok +
                     " (`gpufl monitor` does not launch a target process; use `gpufl trace -- <cmd>`)"};
+        }
+    }
+
+    return {out, ""};
+}
+
+InfoParseResult parseInfoArgs(const std::vector<std::string>& argv) {
+    InfoArgs out;
+
+    for (size_t i = 0; i < argv.size(); ++i) {
+        const std::string& tok = argv[i];
+        if (tok == "-h" || tok == "--help") {
+            return {std::nullopt, "__help__"};
+        }
+        if (tok == "--json") {
+            out.json = true;
+            continue;
+        }
+
+        auto fb = splitFlag(tok);
+        if (fb.key == "--device") {
+            std::string value;
+            if (fb.inline_value) {
+                value = *fb.inline_value;
+            } else if (i + 1 < argv.size()) {
+                value = argv[++i];
+            } else {
+                return {std::nullopt, "missing value for --device"};
+            }
+
+            if (value.empty()) {
+                return {std::nullopt, "invalid --device value: expected a non-negative integer"};
+            }
+            char* end = nullptr;
+            const long parsed = std::strtol(value.c_str(), &end, 10);
+            if (*end != '\0' || parsed < 0) {
+                return {std::nullopt,
+                        "invalid --device value: " + value +
+                        " (expected a non-negative integer)"};
+            }
+            out.device_id = static_cast<int>(parsed);
+        } else if (!tok.empty() && tok[0] == '-') {
+            return {std::nullopt, "unknown flag: " + fb.key};
+        } else {
+            return {std::nullopt,
+                    "unexpected argument: " + tok +
+                    " (`gpufl info` does not accept positional arguments)"};
         }
     }
 
