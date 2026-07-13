@@ -1,5 +1,7 @@
 #include "gpufl/backends/nvidia/cuda_collector.hpp"
 
+#include <string>
+
 #include "gpufl/core/common.hpp"
 
 #if GPUFL_HAS_CUDA || defined(__CUDACC__)
@@ -17,7 +19,6 @@ std::vector<GpuStaticDeviceInfo> CudaCollector::sampleAll() {
 #if GPUFL_HAS_CUDA || defined(__CUDACC__)
     int count = 0;
     cudaError_t err = cudaGetDeviceCount(&count);
-    const bool driver_ready = cuInit(0) == CUDA_SUCCESS;
 
     if (err == cudaSuccess && count > 0) {
         for (int i = 0; i < count; ++i) {
@@ -30,6 +31,8 @@ std::vector<GpuStaticDeviceInfo> CudaCollector::sampleAll() {
                 info.vendor = "NVIDIA";
                 info.compute_major = prop.major;
                 info.compute_minor = prop.minor;
+                info.architecture = "sm_" + std::to_string(prop.major) +
+                                    std::to_string(prop.minor);
                 info.l2_cache_size = prop.l2CacheSize;
                 info.shared_mem_per_block = prop.sharedMemPerBlock;
                 info.regs_per_block = prop.regsPerBlock;
@@ -69,25 +72,34 @@ std::vector<GpuStaticDeviceInfo> CudaCollector::sampleAll() {
                 info.memory_pools_supported = prop.memoryPoolsSupported != 0;
                 info.cluster_launch = prop.clusterLaunch != 0;
 
-                if (driver_ready) {
-                    CUdevice device{};
-                    int tensor_map_supported = 0;
-                    if (cuDeviceGet(&device, i) == CUDA_SUCCESS &&
-                        cuDeviceGetAttribute(
-                            &tensor_map_supported,
-                            CU_DEVICE_ATTRIBUTE_TENSOR_MAP_ACCESS_SUPPORTED,
-                            device) == CUDA_SUCCESS) {
-                        info.tensor_map_access_supported =
-                            tensor_map_supported != 0;
-                    }
-                }
-
                 devices.push_back(info);
             }
         }
     }
 #endif
     return devices;
+}
+
+void EnrichCudaInfoCapabilities(std::vector<GpuStaticDeviceInfo>& devices) {
+#if GPUFL_HAS_CUDA || defined(__CUDACC__)
+    if (cuInit(0) != CUDA_SUCCESS) return;
+
+    for (GpuStaticDeviceInfo& info : devices) {
+        if (info.vendor != "NVIDIA" || info.id < 0) continue;
+
+        CUdevice device{};
+        int tensor_map_supported = 0;
+        if (cuDeviceGet(&device, info.id) == CUDA_SUCCESS &&
+            cuDeviceGetAttribute(
+                &tensor_map_supported,
+                CU_DEVICE_ATTRIBUTE_TENSOR_MAP_ACCESS_SUPPORTED,
+                device) == CUDA_SUCCESS) {
+            info.tensor_map_access_supported = tensor_map_supported != 0;
+        }
+    }
+#else
+    (void)devices;
+#endif
 }
 
 CudaRuntimeVersions QueryCudaRuntimeVersions() {

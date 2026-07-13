@@ -174,6 +174,7 @@ InfoReport collectInfoReport(std::string* reason) {
         report.devices.begin(), report.devices.end(),
         [](const GpuStaticDeviceInfo& device) { return device.vendor == "NVIDIA"; });
     if (has_nvidia) {
+        nvidia::EnrichCudaInfoCapabilities(report.devices);
         const nvidia::CudaRuntimeVersions versions =
             nvidia::QueryCudaRuntimeVersions();
         report.cuda_driver_version = versions.driver;
