@@ -511,6 +511,51 @@ TEST(CliParseMonitor, HelpFlag) {
     EXPECT_EQ(r.error, "__help__");
 }
 
+TEST(CliParseInfo, DefaultsToTextForAllDevices) {
+    auto r = parseInfoArgs({});
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    EXPECT_FALSE(r.args->json);
+    EXPECT_FALSE(r.args->device_id.has_value());
+}
+
+TEST(CliParseInfo, JsonFlag) {
+    auto r = parseInfoArgs(argsFor({"--json"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    EXPECT_TRUE(r.args->json);
+}
+
+TEST(CliParseInfo, DeviceEqualsForm) {
+    auto r = parseInfoArgs(argsFor({"--device=2", "--json"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    ASSERT_TRUE(r.args->device_id.has_value());
+    EXPECT_EQ(*r.args->device_id, 2);
+}
+
+TEST(CliParseInfo, DeviceSpaceForm) {
+    auto r = parseInfoArgs(argsFor({"--device", "0"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    ASSERT_TRUE(r.args->device_id.has_value());
+    EXPECT_EQ(*r.args->device_id, 0);
+}
+
+TEST(CliParseInfo, NegativeDeviceRejected) {
+    auto r = parseInfoArgs(argsFor({"--device=-1"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("non-negative integer"), std::string::npos);
+}
+
+TEST(CliParseInfo, PositionalArgumentRejected) {
+    auto r = parseInfoArgs(argsFor({"0"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("does not accept positional"), std::string::npos);
+}
+
+TEST(CliParseInfo, HelpFlag) {
+    auto r = parseInfoArgs(argsFor({"--help"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_EQ(r.error, "__help__");
+}
+
 TEST(CliParseTopLevel, NoArgsShowsHelp) {
     char* argv[] = {const_cast<char*>("gpufl"), nullptr};
     auto p = parseTopLevel(1, argv);
@@ -551,6 +596,16 @@ TEST(CliParseTopLevel, MonitorSubcommandStripsFirstToken) {
     EXPECT_EQ(p.sub, Subcommand::Monitor);
     ASSERT_EQ(p.remaining.size(), 1u);
     EXPECT_EQ(p.remaining[0], "--interval=1000");
+}
+
+TEST(CliParseTopLevel, InfoSubcommandStripsFirstToken) {
+    char* argv[] = {const_cast<char*>("gpufl"),
+                    const_cast<char*>("info"),
+                    const_cast<char*>("--json"), nullptr};
+    auto p = parseTopLevel(3, argv);
+    EXPECT_EQ(p.sub, Subcommand::Info);
+    ASSERT_EQ(p.remaining.size(), 1u);
+    EXPECT_EQ(p.remaining[0], "--json");
 }
 
 TEST(CliParseTopLevel, UnknownSubcommand) {

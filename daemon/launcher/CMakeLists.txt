@@ -22,6 +22,7 @@ add_executable(gpufl_launcher
     main.cpp
     agent_launcher.cpp
     cli_parse.cpp
+    info_command.cpp
     trace_command_common.cpp
     ${GPUFL_LAUNCHER_TRACE_IMPL}
     monitor_command.cpp

@@ -79,12 +79,20 @@ struct MonitorArgs {
     bool verbose = false;                // -v
 };
 
+// Parsed `gpufl info` invocation. This command only queries local device
+// capabilities; it never starts a trace or uploads data.
+struct InfoArgs {
+    bool json = false;                   // --json: machine-readable output
+    std::optional<int> device_id;        // --device: limit output to one device
+};
+
 enum class Subcommand {
     Help,        // `gpufl --help` / `gpufl` with no args
     Version,     // `gpufl version` / `gpufl -V`
     Trace,       // `gpufl trace [opts] -- <command>...`
     Upload,      // `gpufl upload <log_path> [opts]`
     Monitor,     // `gpufl monitor [opts]`
+    Info,        // `gpufl info [--json] [--device <id>]`
     Unknown,
 };
 
@@ -133,11 +141,20 @@ struct MonitorParseResult {
 
 MonitorParseResult parseMonitorArgs(const std::vector<std::string>& argv);
 
+// Parses the args passed to `gpufl info`.
+struct InfoParseResult {
+    std::optional<InfoArgs> args;
+    std::string error;
+};
+
+InfoParseResult parseInfoArgs(const std::vector<std::string>& argv);
+
 // Help text printed for `gpufl --help`, `gpufl trace --help`,
-// `gpufl upload --help`, and `gpufl monitor --help`.
+// `gpufl upload --help`, `gpufl monitor --help`, and `gpufl info --help`.
 const char* topLevelHelp();
 const char* traceHelp();
 const char* uploadHelp();
 const char* monitorHelp();
+const char* infoHelp();
 
 }  // namespace gpufl::launcher

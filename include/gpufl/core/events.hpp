@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -23,6 +24,31 @@ struct GpuStaticDeviceInfo {
     int regs_per_block = 0;
     int multi_processor_count = 0;
     int warp_size = 0;
+
+    // Extended device capabilities used by `gpufl info`. These remain out of
+    // the job_start serializer until the backend adopts the expanded schema,
+    // so adding them does not change the existing telemetry wire contract.
+    uint64_t total_global_mem = 0;
+    uint64_t total_const_mem = 0;
+    int shared_mem_per_block_optin = 0;
+    int shared_mem_per_multiprocessor = 0;
+    int regs_per_multiprocessor = 0;
+    int max_threads_per_block = 0;
+    int max_threads_per_multiprocessor = 0;
+    int max_blocks_per_multiprocessor = 0;
+    std::array<int, 3> max_threads_dim{};
+    std::array<int, 3> max_grid_size{};
+    int clock_rate_khz = 0;
+    int memory_clock_rate_khz = 0;
+    int memory_bus_width_bits = 0;
+    int async_engine_count = 0;
+    bool concurrent_kernels = false;
+    bool cooperative_launch = false;
+    bool unified_addressing = false;
+    bool managed_memory = false;
+    bool memory_pools_supported = false;
+    bool cluster_launch = false;
+    bool tensor_map_access_supported = false;
 };
 
 struct DeviceSample {

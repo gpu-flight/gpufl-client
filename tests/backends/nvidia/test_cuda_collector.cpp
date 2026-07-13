@@ -28,7 +28,27 @@ TEST_F(CudaCollectorTest, SampleStaticDeviceInfo) {
         // Sanity checks on properties
         EXPECT_GT(info.shared_mem_per_block, 0);
         EXPECT_GT(info.regs_per_block, 0);
+        EXPECT_GT(info.total_global_mem, 0u);
+        EXPECT_GT(info.total_const_mem, 0u);
+        EXPECT_GT(info.shared_mem_per_block_optin, 0);
+        EXPECT_GT(info.shared_mem_per_multiprocessor, 0);
+        EXPECT_GT(info.regs_per_multiprocessor, 0);
+        EXPECT_GT(info.max_threads_per_block, 0);
+        EXPECT_GT(info.max_threads_per_multiprocessor, 0);
+        EXPECT_GT(info.max_blocks_per_multiprocessor, 0);
+        EXPECT_GT(info.max_threads_dim[0], 0);
+        EXPECT_GT(info.max_grid_size[0], 0);
+        EXPECT_GT(info.clock_rate_khz, 0);
+        EXPECT_GT(info.memory_clock_rate_khz, 0);
+        EXPECT_GT(info.memory_bus_width_bits, 0);
     }
+}
+
+TEST_F(CudaCollectorTest, RuntimeVersionsAreAvailable) {
+    const auto versions = gpufl::nvidia::QueryCudaRuntimeVersions();
+
+    EXPECT_GT(versions.driver, 0);
+    EXPECT_GT(versions.runtime, 0);
 }
 
 #endif

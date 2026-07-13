@@ -1,6 +1,6 @@
 // gpufl launcher entry point. Top-level argv parse + subcommand dispatch.
-// Phase 1 ships `trace`, `upload`, and `version`; `monitor`, `inspect`
-// land in a later phase. `upload` consolidates the former Python
+// The native binary owns trace, monitor, info, upload, and version. `upload`
+// consolidates the former Python
 // `gpufl` console-script into this single native binary.
 
 #include <cstdio>
@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "cli_parse.hpp"
+#include "info_command.hpp"
 #include "monitor_command.hpp"
 #include "trace_command.hpp"
 #include "upload_command.hpp"
@@ -67,6 +68,20 @@ int runMonitorFromArgs(const std::vector<std::string>& argv) {
     return runMonitor(*parsed.args);
 }
 
+int runInfoFromArgs(const std::vector<std::string>& argv) {
+    auto parsed = parseInfoArgs(argv);
+    if (!parsed.args) {
+        if (parsed.error == "__help__") {
+            std::fputs(infoHelp(), stdout);
+            return 0;
+        }
+        std::fprintf(stderr, "gpufl info: %s\n\n", parsed.error.c_str());
+        std::fputs(infoHelp(), stderr);
+        return 2;
+    }
+    return runInfo(*parsed.args);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -83,6 +98,8 @@ int main(int argc, char** argv) {
             return runUploadFromArgs(top.remaining);
         case Subcommand::Monitor:
             return runMonitorFromArgs(top.remaining);
+        case Subcommand::Info:
+            return runInfoFromArgs(top.remaining);
         case Subcommand::Unknown:
             std::fprintf(stderr, "gpufl: unknown subcommand: %s\n\n",
                          top.remaining.empty() ? "" : top.remaining[0].c_str());
