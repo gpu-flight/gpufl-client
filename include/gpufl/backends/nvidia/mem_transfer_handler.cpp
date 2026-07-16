@@ -242,16 +242,37 @@ void MemTransferHandler::handle(CUpti_CallbackDomain domain,
 bool MemTransferHandler::handleActivityRecord(const CUpti_Activity* record,
                                               int64_t baseCpuNs,
                                               uint64_t baseCuptiTs) {
+    // Same invalid-timestamp drop the kernel handler applies. Observed live: a
+    // D2D memcpy around CUDA-graph replays arrived with a garbage-huge CUPTI
+    // timestamp whose converted wall time sat ~95 years past the session and
+    // exploded the dashboard timeline bounds; zeroed timestamps land at system
+    // boot the same way. The drop takes the API meta with it
+    // (KERNEL_META_DISCARD) so the collector's join map doesn't hold it forever.
+    constexpr int64_t kMaxTsSkewNs = 3'600'000'000'000LL;  // 1 hour
+
     if (record->kind == CUPTI_ACTIVITY_KIND_MEMCPY ||
         record->kind == CUPTI_ACTIVITY_KIND_MEMCPY2) {
         const auto* m = reinterpret_cast<const CUpti_ActivityMemcpy*>(record);
+        const int64_t wallStartNs =
+            baseCpuNs + static_cast<int64_t>(m->start - baseCuptiTs);
+        if (m->start == 0 || m->end < m->start ||
+            wallStartNs < baseCpuNs - kMaxTsSkewNs ||
+            wallStartNs > detail::GetTimestampNs() + kMaxTsSkewNs) {
+            GFL_LOG_DEBUG("[MemTransferHandler] dropping memcpy activity with "
+                          "invalid timestamps corr=", m->correlationId,
+                          " start=", m->start, " end=", m->end);
+            ActivityRecord drop{};
+            drop.type = TraceType::KERNEL_META_DISCARD;
+            drop.corr_id = m->correlationId;
+            g_monitorBuffer.Push(drop);
+            return false;
+        }
         ActivityRecord out{};
         out.device_id = m->deviceId;
         out.stream = static_cast<StreamHandle>(m->streamId);
         out.type = TraceType::MEMCPY;
         out.corr_id = m->correlationId;
-        out.cpu_start_ns =
-            baseCpuNs + static_cast<int64_t>(m->start - baseCuptiTs);
+        out.cpu_start_ns = wallStartNs;
         out.duration_ns = static_cast<int64_t>(m->end - m->start);
         out.bytes = m->bytes;
         out.copy_kind = m->copyKind;
@@ -268,13 +289,26 @@ bool MemTransferHandler::handleActivityRecord(const CUpti_Activity* record,
 
     if (record->kind == CUPTI_ACTIVITY_KIND_MEMSET) {
         const auto* m = reinterpret_cast<const CUpti_ActivityMemset*>(record);
+        const int64_t wallStartNs =
+            baseCpuNs + static_cast<int64_t>(m->start - baseCuptiTs);
+        if (m->start == 0 || m->end < m->start ||
+            wallStartNs < baseCpuNs - kMaxTsSkewNs ||
+            wallStartNs > detail::GetTimestampNs() + kMaxTsSkewNs) {
+            GFL_LOG_DEBUG("[MemTransferHandler] dropping memset activity with "
+                          "invalid timestamps corr=", m->correlationId,
+                          " start=", m->start, " end=", m->end);
+            ActivityRecord drop{};
+            drop.type = TraceType::KERNEL_META_DISCARD;
+            drop.corr_id = m->correlationId;
+            g_monitorBuffer.Push(drop);
+            return false;
+        }
         ActivityRecord out{};
         out.device_id = m->deviceId;
         out.stream = static_cast<StreamHandle>(m->streamId);
         out.type = TraceType::MEMSET;
         out.corr_id = m->correlationId;
-        out.cpu_start_ns =
-            baseCpuNs + static_cast<int64_t>(m->start - baseCuptiTs);
+        out.cpu_start_ns = wallStartNs;
         out.duration_ns = static_cast<int64_t>(m->end - m->start);
         out.bytes = m->bytes;
         std::snprintf(out.name, sizeof(out.name), "memset");

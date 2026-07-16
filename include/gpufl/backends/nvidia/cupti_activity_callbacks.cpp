@@ -239,37 +239,49 @@ void CUPTIAPI CuptiBackend::BufferCompleted(CUcontext context,
                         // are in CUPTI's clock domain - convert to
                         // wall using the same baseCpuNs/baseCuptiTs
                         // delta the rest of BufferCompleted uses.
-                        // start == end == 0 is a valid CUPTI signal
-                        // for "couldn't collect timing"; we honor it
-                        // by emitting duration=0 rather than dropping
-                        // the row (the graph_id is still useful
-                        // attribution).
+                        //
+                        // start == end == 0 is CUPTI's "couldn't
+                        // collect timing" signal. v1 emitted those as
+                        // duration=0 rows to keep the graph_id
+                        // attribution, but on Windows/Blackwell a
+                        // CUDA-graph replay loop returns MOSTLY zeroed
+                        // records (observed live: 61 of 63), and a
+                        // start_ns=0 row renders at epoch 0 and wrecks
+                        // the dashboard timeline bounds - so they are
+                        // dropped now, like every other
+                        // invalid-timestamp activity record.
                         auto* g = reinterpret_cast<
                             const CUpti_ActivityGraphTrace2*>(record);
-                        int64_t start_wall = 0;
-                        int64_t dur = 0;
-                        if (g->start != 0 || g->end != 0) {
-                            start_wall = static_cast<int64_t>(g->start) -
-                                         static_cast<int64_t>(baseCuptiTs) +
-                                         baseCpuNs;
+                        constexpr int64_t kMaxTsSkewNs =
+                            3'600'000'000'000LL;  // 1 hour
+                        const int64_t start_wall =
+                            static_cast<int64_t>(g->start) -
+                            static_cast<int64_t>(baseCuptiTs) + baseCpuNs;
+                        if (g->start == 0 || g->end < g->start ||
+                            start_wall < baseCpuNs - kMaxTsSkewNs ||
+                            start_wall >
+                                detail::GetTimestampNs() + kMaxTsSkewNs) {
+                            GFL_LOG_DEBUG(
+                                "[CuptiBackend] dropping graph-trace "
+                                "record with invalid timestamps corr=",
+                                g->correlationId, " start=", g->start,
+                                " end=", g->end);
+                        } else {
                             const int64_t end_wall =
                                 static_cast<int64_t>(g->end) -
                                 static_cast<int64_t>(baseCuptiTs) + baseCpuNs;
-                            dur = end_wall - start_wall;
-                            if (dur < 0) dur = 0;  // clock-skew guard
+                            ActivityRecord out{};
+                            out.type = TraceType::GRAPH_LAUNCH;
+                            out.cpu_start_ns = start_wall;
+                            out.duration_ns = end_wall - start_wall;
+                            out.device_id = g->deviceId;
+                            out.stream = g->streamId;
+                            out.corr_id = g->correlationId;
+                            out.graph_id = g->graphId;
+                            g_monitorBuffer.Push(out);
+                            backend->graph_activity_emitted_.fetch_add(
+                                1, std::memory_order_relaxed);
                         }
-
-                        ActivityRecord out{};
-                        out.type = TraceType::GRAPH_LAUNCH;
-                        out.cpu_start_ns = start_wall;
-                        out.duration_ns = dur;
-                        out.device_id = g->deviceId;
-                        out.stream = g->streamId;
-                        out.corr_id = g->correlationId;
-                        out.graph_id = g->graphId;
-                        g_monitorBuffer.Push(out);
-                        backend->graph_activity_emitted_.fetch_add(
-                            1, std::memory_order_relaxed);
                     } else if (record->kind ==
                                CUPTI_ACTIVITY_KIND_MEMORY2) {
                         // F3: cudaMalloc / cudaFree / cudaMallocAsync /

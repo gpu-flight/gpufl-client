@@ -242,6 +242,14 @@ struct RecordProcessor {
             case TraceType::SYNC_META:
                 g_state.metadata.syncStackByCorr[rec.corr_id] = rec.stack_id;
                 return true;
+            case TraceType::KERNEL_META_DISCARD:
+                // The CUPTI layer dropped this corr's activity record (invalid
+                // timestamps). Take the launch meta with it so
+                // drainSyntheticKernels can't resurrect the launch as a
+                // synthetic row with host-gap "duration" (a CUDA-graph capture
+                // pass is ~2k such drops in one go).
+                g_state.metadata.launchMetaByCorr.erase(rec.corr_id);
+                return true;
             default:
                 break;
         }
