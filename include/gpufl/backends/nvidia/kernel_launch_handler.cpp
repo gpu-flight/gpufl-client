@@ -492,15 +492,32 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
 
     // CUPTI occasionally delivers a kernel activity record with unfilled
     // timestamps (start == 0, often end == 0 too). A real kernel's CUPTI start
-    // is always nonzero, so start == 0 means "no GPU timing". Converting it
-    // through the wall-clock anchor (baseCpuNs + (0 - baseCuptiTs)) yields a
-    // time at system boot - days before the session - which then sorts to the
-    // very top of the UI's kernel list with a bogus absolute start and 0
-    // duration. Drop these; they carry no usable timeline data.
-    if (k->start == 0 || k->end < k->start) {
+    // is always nonzero, so start == 0 means "no GPU timing". Stream-capture
+    // launches (CUDA graph capture) hit this en masse - captured launches are
+    // recorded, not executed, so CUPTI emits their records with zeroed
+    // timestamps (~2k in one capture pass). Converting one through the
+    // wall-clock anchor (baseCpuNs + (0 - baseCuptiTs)) yields a time at
+    // system boot - days before the session. The plausibility window catches
+    // the opposite corruption too: a garbage-huge CUPTI timestamp whose
+    // converted wall time lands far past "now" (observed live on a memcpy
+    // record around CUDA-graph replays - same disease, other direction).
+    // Drop these; they carry no usable timeline data. The drop must also take
+    // the launch meta with it (KERNEL_META_DISCARD) or drainSyntheticKernels
+    // resurrects the launch as a synthetic row whose "duration" is the host
+    // dispatch gap.
+    constexpr int64_t kMaxTsSkewNs = 3'600'000'000'000LL;  // 1 hour
+    const int64_t wallStartNs =
+        baseCpuNs + static_cast<int64_t>(k->start - baseCuptiTs);
+    if (k->start == 0 || k->end < k->start ||
+        wallStartNs < baseCpuNs - kMaxTsSkewNs ||
+        wallStartNs > detail::GetTimestampNs() + kMaxTsSkewNs) {
         GFL_LOG_DEBUG("[KernelLaunchHandler] dropping kernel activity with "
                       "invalid timestamps corr=", k->correlationId,
                       " start=", k->start, " end=", k->end);
+        ActivityRecord drop{};
+        drop.type = TraceType::KERNEL_META_DISCARD;
+        drop.corr_id = k->correlationId;
+        g_monitorBuffer.Push(drop);
         return false;
     }
 
@@ -526,7 +543,7 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
     std::snprintf(out.name, sizeof(out.name), "%.*s",
                   static_cast<int>(sizeof(out.name) - 1),
                   kernelName);
-    out.cpu_start_ns = baseCpuNs + static_cast<int64_t>(k->start - baseCuptiTs);
+    out.cpu_start_ns = wallStartNs;
     out.duration_ns = static_cast<int64_t>(k->end - k->start);
     out.dyn_shared = k->dynamicSharedMemory;
     out.static_shared = k->staticSharedMemory;

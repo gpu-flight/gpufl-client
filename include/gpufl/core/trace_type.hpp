@@ -116,5 +116,15 @@ enum class TraceType : uint8_t {
     //   stores corr_id->stack_id in g_syncStackByCorr and never emits this record.
     //   Fields used on ActivityRecord: corr_id, stack_id.
     SYNC_META,
+    // KERNEL_META_DISCARD: pushed by KernelLaunchHandler / MemTransferHandler
+    //   when an activity record is DROPPED for invalid timestamps. The collector
+    //   erases the corr's launch-meta entry and emits nothing, so the dropped
+    //   launch can't be resurrected by drainSyntheticKernels as a synthetic row
+    //   whose "duration" is the host dispatch gap. Stream-capture launches
+    //   (CUDA graph capture) hit the invalid-timestamp drop en masse - captured
+    //   launches are recorded, not executed, so CUPTI emits their records with
+    //   zeroed timestamps - and one capture pass would otherwise leave ~2k junk
+    //   synthetic rows. Fields used on ActivityRecord: corr_id.
+    KERNEL_META_DISCARD,
 };
 }
