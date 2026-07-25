@@ -9,7 +9,7 @@ WHEEL_DIR="$ROOT_DIR/dist"
 
 usage() {
   cat <<'EOF'
-Usage: ./build-ubuntu.sh [--install|--wheel] [--python PATH] [--cuda-root PATH] [--wheel-dir PATH]
+Usage: ./build-ubuntu.sh [--install|--wheel|--trace] [--python PATH] [--cuda-root PATH] [--wheel-dir PATH]
 
 Defaults:
   --install
@@ -20,6 +20,7 @@ Defaults:
 Examples:
   ./build-ubuntu.sh
   ./build-ubuntu.sh --wheel
+  ./build-ubuntu.sh --trace
   ./build-ubuntu.sh --python .venv/bin/python --cuda-root /usr/local/cuda-13.2
 EOF
 }
@@ -32,6 +33,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --wheel)
       MODE="wheel"
+      shift
+      ;;
+    --trace)
+      MODE="trace"
       shift
       ;;
     --python)
@@ -99,6 +104,33 @@ echo "  cuda root: $CUDA_ROOT"
 if [[ "$MODE" == "wheel" ]]; then
   mkdir -p "$WHEEL_DIR"
   "$PYTHON_BIN" -m pip wheel "$ROOT_DIR" -w "$WHEEL_DIR" --no-deps -v "${COMMON_CONFIG[@]}"
+elif [[ "$MODE" == "trace" ]]; then
+  BUILD_DIR="$ROOT_DIR/build-ubuntu"
+  TRACE_CONFIG=(
+    -DCMAKE_BUILD_TYPE=Release
+    -DGPUFL_ENABLE_NVIDIA=ON
+    -DGPUFL_ENABLE_AMD=OFF
+    -DBUILD_PYTHON=OFF
+    -DBUILD_TESTING=OFF
+    -DBUILD_GPUFL_EXAMPLE=OFF
+    -DBUILD_GPUFL_LAUNCHER=ON
+    -DBUILD_GPUFL_INJECT=ON
+    "-DCUDAToolkit_ROOT=$CUDA_ROOT"
+    "-DCMAKE_CUDA_COMPILER=$CUDA_ROOT/bin/nvcc"
+  )
+
+  cmake -S "$ROOT_DIR" -B "$BUILD_DIR" "${TRACE_CONFIG[@]}"
+  cmake --build "$BUILD_DIR" --target gpufl_launcher gpufl_inject -j
+
+  LAUNCHER="$BUILD_DIR/daemon/launcher/gpufl"
+  INJECT_LIBRARY="$BUILD_DIR/libgpufl_inject.so"
+  echo
+  echo "Built native trace tooling:"
+  echo "  launcher: $LAUNCHER"
+  echo "  inject:   $INJECT_LIBRARY"
+  echo
+  echo "Run:  \"$LAUNCHER\" trace --passes=Trace -- \"$PYTHON_BIN\" <script.py>"
+  echo "      \"$LAUNCHER\" trace --passes=PcSampling -- \"$PYTHON_BIN\" <script.py>"
 else
   "$PYTHON_BIN" -m pip install "$ROOT_DIR" -v "${COMMON_CONFIG[@]}"
 fi
