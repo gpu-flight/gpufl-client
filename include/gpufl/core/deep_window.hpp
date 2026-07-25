@@ -94,25 +94,35 @@ class DeepWindow {
     static bool Active();
 
     /**
-     * @brief Per-launch bound check, driven from the CUPTI launch callback.
+     * @brief Per-launch bound accounting, driven from the CUPTI launch
+     * callback.
      *
-     * Consumes one launch of budget and closes the window once either
-     * bound is reached. The close has to land here: the launch callback on
-     * the application thread is the only reliably scheduled,
-     * context-current place to run a mid-session CUPTI stop/collect.
+     * Consumes one launch of budget and RECORDS that a bound was reached.
+     * It deliberately does not close: this runs inside a CUPTI callback,
+     * and the engines' teardown calls (cuptiPmSamplingDecodeData,
+     * cuptiPCSamplingStop) return CUPTI_ERROR_UNKNOWN when invoked from
+     * there. Verified on Linux/driver 610.43; Windows happened to tolerate
+     * it, which is why the first version looked correct.
      */
     static void OnLaunch();
 
     /**
-     * @brief Periodic bound check for when launches stop before the deadline.
+     * @brief Cheap, lock-free: is there an arm or a disarm waiting?
      *
-     * `may_close_here` is false on threads that must not run the CUPTI
-     * teardown (the collector thread against a Windows-injected target).
-     * There this only records that a close is due and the next launch
-     * performs it, so a window whose workload stops launching entirely
-     * stays open until session stop.
+     * Lets the collector poll every iteration and pay for making a CUDA
+     * context current only when there is actually something to do.
      */
-    static void OnPeriodicTick(bool may_close_here);
+    static bool HasPendingWork();
+
+    /**
+     * @brief Perform a pending arm or disarm.
+     *
+     * Both halves run here, off the CUPTI callback path and with the CUDA
+     * context current, which CuptiBackend::ServiceDeepWindow arranges. Arm
+     * and disarm are kept on the SAME thread deliberately: PM sampling's
+     * decode rejects a session whose start and stop straddle threads.
+     */
+    static void ServicePending();
 
     /** @brief Test seam: drop all state without touching a backend. */
     static void ResetForTesting();
@@ -120,6 +130,8 @@ class DeepWindow {
    private:
     // Claims a pending request and opens it. Called from OnLaunch only.
     static void TakePendingOpen_();
+    // Records that a bound was reached without acting on it.
+    static void RequestClose_(DeepWindowClose reason);
 };
 
 namespace detail {

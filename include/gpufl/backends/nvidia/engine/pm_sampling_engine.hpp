@@ -29,6 +29,9 @@ class PmSamplingEngine final : public IProfilingEngine {
 
     void onScopeStart(const char* name) override;
     void onScopeStop(const char* name) override;
+    // Drains the hardware buffer mid-scope; see the definition for why a
+    // scope longer than the buffer span otherwise loses everything.
+    void drainData() override;
 
     bool hasInsufficientPrivileges() const override {
         return insufficient_privileges_.load(std::memory_order_relaxed);
@@ -55,6 +58,9 @@ class PmSamplingEngine final : public IProfilingEngine {
 #if GPUFL_HAS_PERFWORKS
     bool InitializePmSampling_();
     bool BuildConfigImage_();
+    bool ResetCounterDataImage_();
+    int64_t BufferSpanNs_() const;
+    int64_t last_drain_ns_ = 0;
     // Log the chip's single-pass metric sets (the metric bundles collectible
     // in one pass) and their metrics. The set names are chip-specific, so
     // they're queried at runtime. Read-only (chip query, no host object / no

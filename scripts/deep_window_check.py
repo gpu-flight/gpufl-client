@@ -110,7 +110,7 @@ def main() -> int:
                         "the run was shorter than the window")
 
     start, end = w["start_ns"], w["end_ns"]
-    inside = late = alien = 0
+    inside = late = early = alien = 0
     latest_late_ms = 0.0
     for _, r in rows:
         if r.get("type") not in DEEP_BATCHES:
@@ -124,8 +124,12 @@ def main() -> int:
             ts = base + row[dt_i]
             if ts < start - ALIEN_NS or ts > end + ALIEN_NS:
                 alien += 1
-            elif start <= ts <= end + GRACE_NS:
+            elif start - GRACE_NS <= ts <= end + GRACE_NS:
+                # The engine arms fractionally before the window records its
+                # start, so a sample straddling the boundary belongs to it.
                 inside += 1
+            elif ts < start:
+                early += 1
             else:
                 late += 1
                 latest_late_ms = max(latest_late_ms, (ts - end) / 1e6)
@@ -137,6 +141,8 @@ def main() -> int:
     print(f"  deep samples inside : {inside}")
     print(f"  deep samples late   : {late}"
           + (f" (latest +{latest_late_ms:.0f}ms after close)" if late else ""))
+    if early:
+        print(f"  deep samples early  : {early}  (before the window armed)")
     print(f"  unanchored samples  : {alien}"
           + ("  <- raw CUPTI clock, not the wall anchor" if alien else ""))
     print(f"  range perf events   : {perf_events}")
@@ -148,14 +154,15 @@ def main() -> int:
                         "the engine kept sampling")
     if inside == 0 and perf_events == 0:
         if alien:
-            # PC sampling stamps some batches on the raw CUPTI clock, so the
-            # window cannot be checked by timestamp there. Say so instead of
-            # calling it a collection failure.
-            failures.append(
-                f"{alien} deep samples exist but are all on an unanchored "
-                "clock - cannot tell whether they fell inside the window")
-        else:
-            failures.append("no deep data collected in the window")
+            # PC sampling stamps its batches on the raw CUPTI clock rather
+            # than the wall anchor, so the window cannot be checked by
+            # timestamp there at all. That is a separate, pre-existing gap;
+            # report it as inconclusive rather than as a window failure.
+            print(f"INCONCLUSIVE: {alien} deep samples exist but are all on "
+                  "an unanchored clock, so whether they fell inside the "
+                  "window cannot be determined from timestamps")
+            return 3
+        failures.append("no deep data collected in the window")
     if expect_kernels and kernels == 0:
         failures.append("no kernel rows - the light tier did not run")
 

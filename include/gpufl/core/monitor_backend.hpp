@@ -105,6 +105,20 @@ class IMonitorBackend {
     /** @brief Periodically drain buffered profiling data. Thread-safe. */
     virtual void DrainProfilingData() {}
 
+    /**
+     * @brief Close a deep window whose bound has been reached.
+     *
+     * Called from the collector on every iteration, not on the slower flush
+     * beat, because it decides how closely a window tracks its deadline.
+     * Must stay cheap when there is nothing to close.
+     *
+     * It lives here rather than on the launch callback because the engines'
+     * teardown calls fail with CUPTI_ERROR_UNKNOWN when made from inside a
+     * CUPTI callback; the collector is off that path and can make the CUDA
+     * context current itself.
+     */
+    virtual void ServiceDeepWindow() {}
+
     virtual void OnPerfScopeStart(const char* name) {}
     virtual void OnPerfScopeStop(const char* name) {}
     // Perf-scope counterparts of OnDeepWindowStart/Stop; see those.

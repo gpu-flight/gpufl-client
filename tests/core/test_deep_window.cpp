@@ -54,6 +54,17 @@ class DeepWindowTest : public ::testing::Test {
     std::string log_dir_;
 };
 
+// The real pairing. The launch callback only records that a bound was
+// reached; the collector performs the close, because the engines' teardown
+// returns CUPTI_ERROR_UNKNOWN when called from inside a CUPTI callback.
+// Tests drive both halves so they exercise the shipped sequence.
+void Launch(const int times = 1) {
+    for (int i = 0; i < times; ++i) {
+        gpufl::DeepWindow::OnLaunch();
+        gpufl::DeepWindow::ServicePending();
+    }
+}
+
 gpufl::DeepWindowSpec Spec(const int64_t ms, const uint64_t launches,
                            const int64_t cooldown_ms = 0) {
     gpufl::DeepWindowSpec spec;
@@ -91,17 +102,17 @@ TEST_F(DeepWindowTest, SecondOpenIsIgnoredNotAnExtension) {
     EXPECT_FALSE(gpufl::DeepWindow::Open(Spec(0, 1000)));
 
     // Still bounded by the FIRST spec's budget of 3.
-    gpufl::DeepWindow::OnLaunch();
+    Launch();
     EXPECT_FALSE(gpufl::DeepWindow::Open(Spec(0, 1000)));
-    gpufl::DeepWindow::OnLaunch();
+    Launch();
     EXPECT_TRUE(gpufl::DeepWindow::Active());
-    gpufl::DeepWindow::OnLaunch();
+    Launch();
     EXPECT_FALSE(gpufl::DeepWindow::Active());
 }
 
 TEST_F(DeepWindowTest, ReopensAfterClosing) {
     ASSERT_TRUE(gpufl::DeepWindow::Open(Spec(0, 1)));
-    gpufl::DeepWindow::OnLaunch();
+    Launch();
     ASSERT_FALSE(gpufl::DeepWindow::Active());
 
     EXPECT_TRUE(gpufl::DeepWindow::Open(Spec(0, 1)));
@@ -112,15 +123,15 @@ TEST_F(DeepWindowTest, ReopensAfterClosing) {
 
 TEST_F(DeepWindowTest, LaunchBudgetClosesOnTheNthLaunch) {
     ASSERT_TRUE(gpufl::DeepWindow::Open(Spec(0, 2)));
-    gpufl::DeepWindow::OnLaunch();
+    Launch();
     EXPECT_TRUE(gpufl::DeepWindow::Active()) << "budget of 2 spent after 1";
-    gpufl::DeepWindow::OnLaunch();
+    Launch();
     EXPECT_FALSE(gpufl::DeepWindow::Active());
 }
 
 TEST_F(DeepWindowTest, NoBoundsMeansOnlyAManualCloseEndsIt) {
     ASSERT_TRUE(gpufl::DeepWindow::Open(Spec(0, 0)));
-    for (int i = 0; i < 100; ++i) gpufl::DeepWindow::OnLaunch();
+    for (int i = 0; i < 100; ++i) Launch();
     EXPECT_TRUE(gpufl::DeepWindow::Active());
 }
 
@@ -130,52 +141,77 @@ TEST_F(DeepWindowTest, DeadlineClosesOnTheNextLaunch) {
     // The deadline is only observed at a launch boundary - that is the one
     // place a mid-session CUPTI stop is safe.
     EXPECT_TRUE(gpufl::DeepWindow::Active());
-    gpufl::DeepWindow::OnLaunch();
+    Launch();
     EXPECT_FALSE(gpufl::DeepWindow::Active());
 }
 
 TEST_F(DeepWindowTest, LaunchBudgetWinsWhenItIsReachedFirst) {
     ASSERT_TRUE(gpufl::DeepWindow::Open(Spec(/*ms=*/60000, /*launches=*/1)));
-    gpufl::DeepWindow::OnLaunch();
+    Launch();
     EXPECT_FALSE(gpufl::DeepWindow::Active());
 }
 
 TEST_F(DeepWindowTest, OnLaunchWithNoWindowOpenIsHarmless) {
-    for (int i = 0; i < 10; ++i) gpufl::DeepWindow::OnLaunch();
+    for (int i = 0; i < 10; ++i) Launch();
     EXPECT_FALSE(gpufl::DeepWindow::Active());
 }
 
-// ── periodic tick fallback ──────────────────────────────────────────────────
+// ── the close runs off the CUPTI callback path ──────────────────────────────
+//
+// The launch callback may only RECORD that a bound was reached. Closing there
+// runs the engines' teardown inside a CUPTI callback, where
+// cuptiPmSamplingDecodeData and cuptiPCSamplingStop return
+// CUPTI_ERROR_UNKNOWN (observed on Linux/driver 610.43; Windows tolerated it,
+// which hid the bug).
 
-TEST_F(DeepWindowTest, PeriodicTickClosesAnExpiredWindowWhenAllowed) {
+TEST_F(DeepWindowTest, LaunchAloneNeverClosesTheWindow) {
+    ASSERT_TRUE(gpufl::DeepWindow::Open(Spec(0, /*launches=*/1)));
+    gpufl::DeepWindow::OnLaunch();  // budget spent, but no teardown here
+    EXPECT_TRUE(gpufl::DeepWindow::Active())
+        << "the launch callback must not run the teardown";
+
+    EXPECT_TRUE(gpufl::DeepWindow::HasPendingWork());
+    gpufl::DeepWindow::ServicePending();
+    EXPECT_FALSE(gpufl::DeepWindow::Active());
+}
+
+TEST_F(DeepWindowTest, ServiceCloseEndsAnExpiredWindowWithoutAnyLaunch) {
+    // A workload that stops launching still has its window closed, because
+    // the collector polls the deadline itself.
     ASSERT_TRUE(gpufl::DeepWindow::Open(Spec(/*ms=*/1, 0)));
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    gpufl::DeepWindow::OnPeriodicTick(/*may_close_here=*/true);
+    EXPECT_TRUE(gpufl::DeepWindow::HasPendingWork());
+    gpufl::DeepWindow::ServicePending();
     EXPECT_FALSE(gpufl::DeepWindow::Active());
 }
 
-TEST_F(DeepWindowTest, PeriodicTickDefersToTheNextLaunchWhenNotAllowed) {
-    // Windows injection: the collector thread must not run the CUPTI
-    // teardown, so it only flags the close.
-    ASSERT_TRUE(gpufl::DeepWindow::Open(Spec(/*ms=*/1, 0)));
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    gpufl::DeepWindow::OnPeriodicTick(/*may_close_here=*/false);
-    EXPECT_TRUE(gpufl::DeepWindow::Active()) << "must wait for a launch";
-
-    gpufl::DeepWindow::OnLaunch();
-    EXPECT_FALSE(gpufl::DeepWindow::Active());
-}
-
-TEST_F(DeepWindowTest, PeriodicTickLeavesAnUnexpiredWindowAlone) {
+TEST_F(DeepWindowTest, ServiceCloseLeavesAnUnexpiredWindowAlone) {
     ASSERT_TRUE(gpufl::DeepWindow::Open(Spec(/*ms=*/60000, 0)));
-    gpufl::DeepWindow::OnPeriodicTick(/*may_close_here=*/true);
+    EXPECT_FALSE(gpufl::DeepWindow::HasPendingWork());
+    gpufl::DeepWindow::ServicePending();
     EXPECT_TRUE(gpufl::DeepWindow::Active());
 }
 
-TEST_F(DeepWindowTest, PeriodicTickOnAnUnboundedWindowNeverCloses) {
+TEST_F(DeepWindowTest, ServiceCloseOnAnUnboundedWindowNeverCloses) {
     ASSERT_TRUE(gpufl::DeepWindow::Open(Spec(0, 0)));
-    gpufl::DeepWindow::OnPeriodicTick(/*may_close_here=*/true);
+    for (int i = 0; i < 5; ++i) gpufl::DeepWindow::ServicePending();
     EXPECT_TRUE(gpufl::DeepWindow::Active());
+}
+
+TEST_F(DeepWindowTest, CloseDueIsFalseWithNoWindowOpen) {
+    EXPECT_FALSE(gpufl::DeepWindow::HasPendingWork());
+    gpufl::DeepWindow::ServicePending();  // harmless
+    EXPECT_FALSE(gpufl::DeepWindow::Active());
+}
+
+TEST_F(DeepWindowTest, LaunchBudgetReasonSurvivesTheHandoff) {
+    // The reason recorded in the callback has to reach the event the
+    // collector writes, or a budget close would be reported as a deadline.
+    ASSERT_TRUE(gpufl::DeepWindow::Open(Spec(/*ms=*/60000, /*launches=*/1)));
+    gpufl::DeepWindow::OnLaunch();
+    ASSERT_TRUE(gpufl::DeepWindow::HasPendingWork());
+    gpufl::DeepWindow::ServicePending();
+    EXPECT_FALSE(gpufl::DeepWindow::Active());
 }
 
 // ── cooldown ────────────────────────────────────────────────────────────────
@@ -184,7 +220,7 @@ TEST_F(DeepWindowTest, CooldownBlocksAnImmediateReopen) {
     // The trap this exists for: a condition that stays true reopens a window
     // the instant the last one expired, and the run pays deep cost forever.
     ASSERT_TRUE(gpufl::DeepWindow::Open(Spec(0, 1, /*cooldown_ms=*/60000)));
-    gpufl::DeepWindow::OnLaunch();
+    Launch();
     ASSERT_FALSE(gpufl::DeepWindow::Active());
 
     EXPECT_FALSE(gpufl::DeepWindow::Open(Spec(0, 1, 60000)));
@@ -193,7 +229,7 @@ TEST_F(DeepWindowTest, CooldownBlocksAnImmediateReopen) {
 
 TEST_F(DeepWindowTest, CooldownExpiresAndReopeningWorksAgain) {
     ASSERT_TRUE(gpufl::DeepWindow::Open(Spec(0, 1, /*cooldown_ms=*/5)));
-    gpufl::DeepWindow::OnLaunch();
+    Launch();
     ASSERT_FALSE(gpufl::DeepWindow::Active());
 
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -202,7 +238,7 @@ TEST_F(DeepWindowTest, CooldownExpiresAndReopeningWorksAgain) {
 
 TEST_F(DeepWindowTest, NoCooldownMeansImmediateReopenIsAllowed) {
     ASSERT_TRUE(gpufl::DeepWindow::Open(Spec(0, 1)));
-    gpufl::DeepWindow::OnLaunch();
+    Launch();
     ASSERT_FALSE(gpufl::DeepWindow::Active());
     EXPECT_TRUE(gpufl::DeepWindow::Open(Spec(0, 1)));
 }
@@ -215,57 +251,57 @@ TEST_F(DeepWindowTest, RequestOpenArmsOnTheNextLaunchNotImmediately) {
     gpufl::DeepWindow::RequestOpen(Spec(60000, 0));
     EXPECT_FALSE(gpufl::DeepWindow::Active()) << "must wait for a launch";
 
-    gpufl::DeepWindow::OnLaunch();
+    Launch();
     EXPECT_TRUE(gpufl::DeepWindow::Active());
 }
 
 TEST_F(DeepWindowTest, RequestOpenIsConsumedOnce) {
     gpufl::DeepWindow::RequestOpen(Spec(60000, 0));
-    gpufl::DeepWindow::OnLaunch();
+    Launch();
     ASSERT_TRUE(gpufl::DeepWindow::Active());
 
     gpufl::DeepWindow::Close(gpufl::DeepWindowClose::Manual);
     // The request was spent on the first arm; a closed window stays closed.
-    gpufl::DeepWindow::OnLaunch();
+    Launch();
     EXPECT_FALSE(gpufl::DeepWindow::Active());
 }
 
 TEST_F(DeepWindowTest, RequestOpenCarriesItsBounds) {
     gpufl::DeepWindow::RequestOpen(Spec(0, /*launches=*/2));
-    gpufl::DeepWindow::OnLaunch();  // arms; does not consume budget
+    Launch();  // arms; does not consume budget
     ASSERT_TRUE(gpufl::DeepWindow::Active());
 
-    gpufl::DeepWindow::OnLaunch();
+    Launch();
     EXPECT_TRUE(gpufl::DeepWindow::Active());
-    gpufl::DeepWindow::OnLaunch();
+    Launch();
     EXPECT_FALSE(gpufl::DeepWindow::Active());
 }
 
 TEST_F(DeepWindowTest, NewestPendingSpecWins) {
     gpufl::DeepWindow::RequestOpen(Spec(0, 1));
     gpufl::DeepWindow::RequestOpen(Spec(60000, 0));
-    gpufl::DeepWindow::OnLaunch();
+    Launch();
     ASSERT_TRUE(gpufl::DeepWindow::Active());
 
     // Had the first spec won, this launch would spend its budget of 1.
-    gpufl::DeepWindow::OnLaunch();
+    Launch();
     EXPECT_TRUE(gpufl::DeepWindow::Active());
 }
 
 TEST_F(DeepWindowTest, ScheduledOpenWaitsOutItsDelay) {
     gpufl::DeepWindow::ScheduleOpenAfter(/*delay_ms=*/50, Spec(60000, 0));
-    gpufl::DeepWindow::OnLaunch();
+    Launch();
     EXPECT_FALSE(gpufl::DeepWindow::Active()) << "not due yet";
 
     std::this_thread::sleep_for(std::chrono::milliseconds(70));
-    gpufl::DeepWindow::OnLaunch();
+    Launch();
     EXPECT_TRUE(gpufl::DeepWindow::Active());
 }
 
 TEST_F(DeepWindowTest, RequestOpenWhileAWindowIsOpenDoesNotDisturbIt) {
     ASSERT_TRUE(gpufl::DeepWindow::Open(Spec(60000, 0)));
     gpufl::DeepWindow::RequestOpen(Spec(0, 1));
-    gpufl::DeepWindow::OnLaunch();
+    Launch();
     EXPECT_TRUE(gpufl::DeepWindow::Active())
         << "the open window's bounds still govern";
 }

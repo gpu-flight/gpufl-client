@@ -11,6 +11,7 @@
 #include <cstdint>
 
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
+#include "gpufl/core/common.hpp"  // detail::GetTimestampNs
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/teardown_flag.hpp"  // detail::isProcessExitTeardown
 
@@ -347,14 +348,50 @@ bool PmSamplingEngine::CreateCounterDataImage_() {
     }
 
     counter_data_image_.assign(size.counterDataSize, 0);
+    return ResetCounterDataImage_();
+}
+
+bool PmSamplingEngine::ResetCounterDataImage_() {
+    if (counter_data_image_.empty()) return false;
     CUpti_PmSampling_CounterDataImage_Initialize_Params init = {
         CUpti_PmSampling_CounterDataImage_Initialize_Params_STRUCT_SIZE};
     init.pPmSamplingObject = pm_object_;
     init.counterDataSize = counter_data_image_.size();
     init.pCounterData = counter_data_image_.data();
-    res = cuptiPmSamplingCounterDataImageInitialize(&init);
-    if (LogCuptiErrorIfFailed(this->name(), "cuptiPmSamplingCounterDataImageInitialize", res)) return false;
-    return true;
+    const CUptiResult res = cuptiPmSamplingCounterDataImageInitialize(&init);
+    return !LogCuptiErrorIfFailed(
+        this->name(), "cuptiPmSamplingCounterDataImageInitialize", res);
+}
+
+// The counter-data image holds pm_sampling_max_samples; at
+// pm_sampling_interval_us that is a fixed span of wall time (4096 x 100us =
+// ~410ms by default). Past it the hardware buffer overflows and this driver
+// reports the overflow from DecodeData as CUPTI_ERROR_UNKNOWN rather than
+// CUPTI_ERROR_OUT_OF_MEMORY, which loses the whole scope's samples. So drain
+// on the collector beat instead of only at scope end. Verified on an RTX
+// 3090: scopes up to 350ms decoded, 500ms and longer returned 999.
+int64_t PmSamplingEngine::BufferSpanNs_() const {
+    const int64_t samples = opts_.pm_sampling_max_samples > 0
+                                ? opts_.pm_sampling_max_samples
+                                : 4096;
+    const int64_t interval_us = opts_.pm_sampling_interval_us > 0
+                                    ? opts_.pm_sampling_interval_us
+                                    : 100;
+    return samples * interval_us * 1000;
+}
+
+void PmSamplingEngine::drainData() {
+    if (!running_) return;
+    // Half the buffer span: enough headroom that a late collector tick still
+    // lands before the hardware wraps.
+    const int64_t now = detail::GetTimestampNs();
+    const int64_t due = last_drain_ns_ + BufferSpanNs_() / 2;
+    if (last_drain_ns_ != 0 && now < due) return;
+
+    std::lock_guard<std::mutex> lk(pm_mu_);
+    if (!running_) return;
+    last_drain_ns_ = now;
+    DecodeAndEmit_();
 }
 
 void PmSamplingEngine::DecodeAndEmit_() {
@@ -434,6 +471,10 @@ void PmSamplingEngine::DecodeAndEmit_() {
         Monitor::PushPmSamples(rows);
         produced_data_.store(true, std::memory_order_relaxed);
     }
+
+    // Hand the image back empty so the next decode starts from a clean slate
+    // instead of re-emitting what we just pushed.
+    ResetCounterDataImage_();
     GFL_LOG_DEBUG("[PmSamplingEngine] decoded PM samples completed=", completed,
                   " populated=", info.numPopulatedSamples,
                   " rows=", rows.size());
