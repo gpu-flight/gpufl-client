@@ -516,6 +516,27 @@ void markDeferredInitFinished() {
     g_deferred_init_cv.notify_all();
 }
 
+// Blocks until the CUDA driver has finished its own initialization.
+//
+// cuInit is idempotent and thread-safe, so calling it here just waits on the
+// driver's init lock. Resolved at runtime rather than linked: this file
+// interposes CUDA symbols and cannot include cuda.h without colliding with
+// its own declarations.
+void waitForCudaDriverInit() {
+    using CuInitFn = int (*)(unsigned int);
+    CuInitFn fn = nullptr;
+#ifdef _WIN32
+    if (HMODULE cuda = GetModuleHandleA("nvcuda.dll")) {
+        fn = reinterpret_cast<CuInitFn>(GetProcAddress(cuda, "cuInit"));
+    }
+#else
+    // RTLD_DEFAULT, not RTLD_NEXT: libcuda loaded this library and may sit
+    // ahead of it in the search order.
+    fn = reinterpret_cast<CuInitFn>(dlsym(RTLD_DEFAULT, "cuInit"));
+#endif
+    if (fn) fn(0);
+}
+
 void startDeferredInjectInit() {
     registerDeferredWaitAtexit();
 
@@ -526,10 +547,20 @@ void startDeferredInjectInit() {
     }
 
     std::thread([] {
-        // NVIDIA calls InitializeInjection from inside the CUDA driver
-        // injection path. CUPTI subscription/activity setup can report
-        // success there but later deliver no callbacks. Step out of that
-        // callback frame before touching CUPTI.
+        // NVIDIA calls InitializeInjection from inside the CUDA driver's own
+        // initialization. cuptiSubscribe probes driver state, so reaching it
+        // while that initialization is still running faults inside libcuda.
+        //
+        // A sleep cannot fix this. Measured on an RTX 3090 / driver 610.43,
+        // `gpufl trace --passes Trace` crashed nondeterministically at every
+        // length tried - 3/10 at 5ms, 5/10 at 40ms, 0/10 at 0, 10, 20, 30 and
+        // 50ms - so the delay only moves the odds. cuInit is idempotent and
+        // thread-safe, and blocks on the driver's own init lock, which is the
+        // barrier the sleep was standing in for. Engines other than Trace hid
+        // this by doing slow PerfWorks setup before subscribing.
+        waitForCudaDriverInit();
+        // The delay knob stays: it is what --warmup uses to skip cold start,
+        // and it is now measured from a driver that is actually up.
         sleepMs(envIntOrDefault(gpufl::env::kInjectInitDelayMs, 1));
         try {
             std::call_once(g_init_once, doInjectInit);

@@ -86,9 +86,18 @@ GPUFL="$(find_bin gpufl daemon/launcher)" || {
     exit 2
 }
 
+# A non-login shell (ssh host 'cmd') does not source the profile that puts
+# CUDA on PATH, so fall back to the usual install locations.
+NVCC=""
+for c in nvcc /usr/local/cuda/bin/nvcc /opt/cuda/bin/nvcc \
+         /usr/local/cuda-13.3/bin/nvcc; do
+    command -v "$c" >/dev/null 2>&1 && { NVCC="$c"; break; }
+done
+[[ -n "$NVCC" ]] || { echo "nvcc not found (set PATH or install CUDA)" >&2; exit 2; }
+
 TARGET="$OUT_DIR/deep_window_target"
-echo "[e2e] compiling the gpufl-unaware target"
-nvcc -O2 -lineinfo -o "$TARGET" "$SCRIPT_DIR/deep_window_target.cu" \
+echo "[e2e] compiling the gpufl-unaware target with $NVCC"
+"$NVCC" -O2 -lineinfo -o "$TARGET" "$SCRIPT_DIR/deep_window_target.cu" \
     >"$OUT_DIR/nvcc.log" 2>&1 || { cat "$OUT_DIR/nvcc.log"; exit 2; }
 
 {
@@ -103,10 +112,18 @@ nvcc -O2 -lineinfo -o "$TARGET" "$SCRIPT_DIR/deep_window_target.cu" \
 
 PASS=0
 FAIL=0
+INCONCLUSIVE=0
 note() { echo "$@" | tee -a "$REPORT"; }
 record() {  # name, exit code
-    if [[ "$2" -eq 0 ]]; then PASS=$((PASS+1)); note "- **PASS** $1";
-    else FAIL=$((FAIL+1)); note "- **FAIL** $1"; fi
+    # 3 = the checker could not decide, e.g. PC sampling stamps its batches on
+    # the raw CUPTI clock so window membership is unknowable from timestamps.
+    # That is a gap in what we can observe, not a failing window; counting it
+    # as FAIL would hide real regressions in the noise.
+    case "$2" in
+        0) PASS=$((PASS+1));         note "- **PASS** $1" ;;
+        3) INCONCLUSIVE=$((INCONCLUSIVE+1)); note "- **INCONCLUSIVE** $1" ;;
+        *) FAIL=$((FAIL+1));         note "- **FAIL** $1" ;;
+    esac
 }
 
 # ── A. embed ────────────────────────────────────────────────────────────────
@@ -219,7 +236,7 @@ fi
 
 note "## Summary"
 note
-note "passed: $PASS, failed: $FAIL"
+note "passed: $PASS, failed: $FAIL, inconclusive: $INCONCLUSIVE"
 echo
 echo "[e2e] report: $REPORT"
 [[ "$FAIL" -eq 0 ]]
