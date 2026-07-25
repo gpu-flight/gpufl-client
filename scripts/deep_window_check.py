@@ -32,6 +32,12 @@ GRACE_NS = 100_000_000       # 100ms: a close-time collect, not a leak
 ALIEN_NS = 60_000_000_000    # >60s from the window = a different clock domain
 WALL_FLOOR = 1_000_000_000_000_000_000
 DEEP_BATCHES = ("pm_sample_batch", "profile_sample_batch")
+# profile_sample_batch carries two unrelated things. sample_kind 0 and 1 are
+# real timed samples (PC stall sampling, SASS metrics); 2 is isa_source_map, a
+# static pc_offset -> source_file:line table emitted next to the disassembly.
+# The map has no meaningful timestamp and is not something a window collects,
+# so counting it made PC sampling look like it was emitting garbage clocks.
+TIMED_SAMPLE_KINDS = (0, 1)
 
 
 def find_session(root: pathlib.Path) -> pathlib.Path:
@@ -112,15 +118,27 @@ def main() -> int:
     start, end = w["start_ns"], w["end_ns"]
     inside = late = early = alien = 0
     latest_late_ms = 0.0
+    # Some batches fan out to every channel, so the same rows appear in
+    # device/scope/sass/system. Counting each file independently multiplied
+    # them by four.
+    seen_batches = set()
     for _, r in rows:
         if r.get("type") not in DEEP_BATCHES:
             continue
+        key = (r["type"], r.get("batch_id"), r.get("base_time_ns"),
+               len(r.get("rows", [])))
+        if key in seen_batches:
+            continue
+        seen_batches.add(key)
         base = r.get("base_time_ns", 0)
         cols = r.get("columns", [])
         if "dt_ns" not in cols:
             continue
         dt_i = cols.index("dt_ns")
+        kind_i = cols.index("sample_kind") if "sample_kind" in cols else None
         for row in r.get("rows", []):
+            if kind_i is not None and row[kind_i] not in TIMED_SAMPLE_KINDS:
+                continue
             ts = base + row[dt_i]
             if ts < start - ALIEN_NS or ts > end + ALIEN_NS:
                 alien += 1
