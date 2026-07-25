@@ -751,14 +751,33 @@ void CuptiBackend::EngineLaunchTick() {
 
 void CuptiBackend::DrainProfilingData() {
     if (!initialized_ || !active_.load(std::memory_order_relaxed)) return;
-    // Fallback for a window whose workload stopped launching before the
-    // deadline. On a Windows-injected target the CUPTI teardown must not run
-    // from this collector thread, so there it only flags the close and the
-    // next launch performs it.
-    DeepWindow::OnPeriodicTick(/*may_close_here=*/!WindowsInjectedProcess());
-    if (engine_) {
-        engine_->drainData();
-    }
+    if (!engine_) return;
+    // Bind the context: this is the collector thread, and an engine draining
+    // its hardware buffer (PM sampling decodes here) needs one current.
+    CUcontext prev = nullptr;
+    cuCtxGetCurrent(&prev);
+    const bool rebound = ctx_ && prev != ctx_ &&
+                         cuCtxSetCurrent(ctx_) == CUDA_SUCCESS;
+    engine_->drainData();
+    if (rebound) cuCtxSetCurrent(prev);
+}
+
+void CuptiBackend::ServiceDeepWindow() {
+    if (!initialized_ || !active_.load(std::memory_order_relaxed)) return;
+    // Lock-free gate: skip the context work when there is nothing to do.
+    if (!DeepWindow::HasPendingWork()) return;
+
+    // The engines want the context current on the calling thread, and this
+    // is the collector's. Bind and restore, the same way the deferred engine
+    // start does when it runs off the app thread.
+    CUcontext prev = nullptr;
+    cuCtxGetCurrent(&prev);
+    const bool rebound = ctx_ && prev != ctx_ &&
+                         cuCtxSetCurrent(ctx_) == CUDA_SUCCESS;
+
+    DeepWindow::ServicePending();
+
+    if (rebound) cuCtxSetCurrent(prev);
 }
 
 void CuptiBackend::StartActivityFlushThreadIfNeeded_() {

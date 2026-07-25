@@ -449,6 +449,11 @@ void CollectorLoop() {
             g_state.drainAck.store(req, std::memory_order_release);
         }
 
+        // Every iteration, not on the 250ms flush beat below: this is what
+        // decides how closely a deep window tracks its deadline, and it is a
+        // lock-free check when no window is closing.
+        if (g_state.adapter) g_state.adapter->serviceDeepWindow();
+
         if (!RecordProcessor::processNext()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }

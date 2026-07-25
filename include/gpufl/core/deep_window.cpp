@@ -33,7 +33,10 @@ std::atomic g_active{false};
 std::atomic<int64_t>  g_deadline_ns{0};        // 0 = no time bound
 std::atomic<uint64_t> g_launches_remaining{0};  // 0 = no launch bound
 std::atomic<uint64_t> g_launches_covered{0};
+// Set by the launch callback when a bound is reached; consumed by the
+// collector, which is the thread allowed to run the engines' teardown.
 std::atomic     g_close_requested{false};
+std::atomic<int> g_close_reason{static_cast<int>(DeepWindowClose::Deadline)};
 
 // An open asked for by a thread that can't arm one itself. Checked lock-free
 // on the launch beat; g_pending_spec is only read once this is set, so the
@@ -284,13 +287,9 @@ void DeepWindow::ScheduleOpenAfter(const int64_t delay_ms,
                   " max_launches=", spec.max_launches);
 }
 
-// Runs on the app thread at launch ENTER - the only place the arm's CUPTI
-// calls are safe. Claims the request before opening so two launch threads
-// can't both act on it.
+// Runs on the collector, off the CUPTI callback path. Claims the request
+// before opening so nothing can act on it twice.
 void DeepWindow::TakePendingOpen_() {
-    if (!g_open_requested.load(std::memory_order_acquire)) return;
-    const int64_t due = g_pending_open_at_ns.load(std::memory_order_relaxed);
-    if (due > 0 && detail::GetTimestampNs() < due) return;
     if (!g_open_requested.exchange(false, std::memory_order_acq_rel)) return;
 
     DeepWindowSpec spec;
@@ -303,10 +302,9 @@ void DeepWindow::TakePendingOpen_() {
 }
 
 void DeepWindow::OnLaunch() {
-    if (!g_active.load(std::memory_order_acquire)) {
-        TakePendingOpen_();
-        return;
-    }
+    // Arming is the collector's job too - see ServicePending. This callback
+    // only counts.
+    if (!g_active.load(std::memory_order_acquire)) return;
 
     g_launches_covered.fetch_add(1, std::memory_order_relaxed);
 
@@ -314,36 +312,53 @@ void DeepWindow::OnLaunch() {
         // fetch_sub returns the PREVIOUS value, so 1 means this launch
         // consumed the last of the budget.
         if (g_launches_remaining.fetch_sub(1, std::memory_order_relaxed) <= 1) {
-            Close(DeepWindowClose::LaunchBudget);
-            return;
+            RequestClose_(DeepWindowClose::LaunchBudget);
         }
-    }
-
-    // A tick on a thread that couldn't run the teardown left this set.
-    if (g_close_requested.load(std::memory_order_acquire)) {
-        Close(DeepWindowClose::Deadline);
-        return;
-    }
-
-    const int64_t deadline = g_deadline_ns.load(std::memory_order_relaxed);
-    if (deadline > 0 && detail::GetTimestampNs() >= deadline) {
-        Close(DeepWindowClose::Deadline);
     }
 }
 
-void DeepWindow::OnPeriodicTick(const bool may_close_here) {
-    if (!g_active.load(std::memory_order_acquire)) return;
+void DeepWindow::RequestClose_(const DeepWindowClose reason) {
+    // First reason wins; a later bound can't relabel a close already asked
+    // for. Handing this to the collector instead of closing here is the
+    // whole point - see OnLaunch.
+    bool expected = false;
+    if (g_close_requested.compare_exchange_strong(expected, true,
+                                                  std::memory_order_acq_rel)) {
+        g_close_reason.store(static_cast<int>(reason), std::memory_order_release);
+    }
+}
 
+namespace {
+
+bool CloseDue_() {
+    if (!g_active.load(std::memory_order_acquire)) return false;
+    if (g_close_requested.load(std::memory_order_acquire)) return true;
     const int64_t deadline = g_deadline_ns.load(std::memory_order_relaxed);
-    if (deadline <= 0 || detail::GetTimestampNs() < deadline) return;
+    return deadline > 0 && detail::GetTimestampNs() >= deadline;
+}
 
-    if (may_close_here) {
-        Close(DeepWindowClose::Deadline);
+bool OpenDue_() {
+    if (g_active.load(std::memory_order_acquire)) return false;
+    if (!g_open_requested.load(std::memory_order_acquire)) return false;
+    const int64_t due = g_pending_open_at_ns.load(std::memory_order_relaxed);
+    return due <= 0 || detail::GetTimestampNs() >= due;
+}
+
+}  // namespace
+
+bool DeepWindow::HasPendingWork() { return CloseDue_() || OpenDue_(); }
+
+void DeepWindow::ServicePending() {
+    if (CloseDue_()) {
+        const DeepWindowClose reason =
+            g_close_requested.load(std::memory_order_acquire)
+                ? static_cast<DeepWindowClose>(
+                      g_close_reason.load(std::memory_order_acquire))
+                : DeepWindowClose::Deadline;
+        Close(reason);
         return;
     }
-    // Hand the close to the next launch: the CUPTI stop has to run on the
-    // application thread that owns the context.
-    g_close_requested.store(true, std::memory_order_release);
+    if (OpenDue_()) TakePendingOpen_();
 }
 
 void DeepWindow::ResetForTesting() {
@@ -353,6 +368,8 @@ void DeepWindow::ResetForTesting() {
     g_launches_remaining.store(0, std::memory_order_relaxed);
     g_launches_covered.store(0, std::memory_order_relaxed);
     g_close_requested.store(false, std::memory_order_relaxed);
+    g_close_reason.store(static_cast<int>(DeepWindowClose::Deadline),
+                         std::memory_order_relaxed);
     g_open_requested.store(false, std::memory_order_relaxed);
     g_pending_open_at_ns.store(0, std::memory_order_relaxed);
     g_pending_spec = DeepWindowSpec{};

@@ -195,6 +195,7 @@ class CuptiBackend : public IMonitorBackend {
         OnDeepWindowStart(name);
     }
     void DrainProfilingData() override;
+    void ServiceDeepWindow() override;
     void OnScopeStop(const char* name) override {
         GFL_LOG_DEBUG("OnScopeStop");
         if (!ScopeArmsEngines_()) return;

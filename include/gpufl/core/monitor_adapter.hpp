@@ -23,6 +23,7 @@ class IMonitorAdapter {
     virtual std::string memoryKindToString(uint32_t kind) const = 0;
 
     virtual void drainProfilingData() { if (backend()) backend()->DrainProfilingData(); }
+    virtual void serviceDeepWindow() { if (backend()) backend()->ServiceDeepWindow(); }
     virtual IMonitorBackend* backend() = 0;
 };
 
