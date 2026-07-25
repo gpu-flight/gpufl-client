@@ -33,6 +33,7 @@ SECONDS_PER_RUN=12
 SKIP_OVERHEAD=0
 ENGINES="PmSampling PcSampling SassMetrics RangeProfilerKernelReplay"
 REPS=3
+DEBUG=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -42,6 +43,10 @@ while [[ $# -gt 0 ]]; do
         --engines)   ENGINES="$2"; shift 2 ;;
         --reps)      REPS="$2"; shift 2 ;;
         --skip-overhead) SKIP_OVERHEAD=1; shift ;;
+        # Turns on GPUFL_DEBUG in every run: the engine diagnostics are the
+        # only way to tell "armed but the hardware gave nothing" apart from
+        # "never armed".
+        --debug)     DEBUG=1; shift ;;
         -h|--help)   sed -n '2,30p' "$0"; exit 0 ;;
         *) echo "unknown flag: $1" >&2; exit 2 ;;
     esac
@@ -54,13 +59,17 @@ mkdir -p "$OUT_DIR"
 
 CHECK="$SCRIPT_DIR/deep_window_check.py"
 REPORT="$OUT_DIR/report.md"
+[[ "$DEBUG" -eq 1 ]] && export GPUFL_DEBUG=1
 
 # Build dirs differ between single- and multi-config generators.
+# Absolute, because the embed leg runs from inside its own output directory
+# (the demo writes its logs relative to cwd) and a relative path would not
+# survive the cd.
 find_bin() {
     local name="$1" p
     for p in "$BUILD_DIR/$2/$name" "$BUILD_DIR/$2/Release/$name" \
              "$BUILD_DIR/$name" "$BUILD_DIR/Release/$name"; do
-        [[ -x "$p" ]] && { echo "$p"; return 0; }
+        [[ -x "$p" ]] && { (cd "$(dirname "$p")" && printf '%s/%s\n' "$PWD" "$name"); return 0; }
     done
     return 1
 }
@@ -163,10 +172,18 @@ if [[ "$SKIP_OVERHEAD" -eq 0 ]]; then
     note "## C. Overhead (iterations/sec, median of $REPS)"
     note
     declare -A RESULTS
+    declare -i probe_n=0
     run_probe() {  # label, then argv for the run
         local label="$1"; shift
+        probe_n+=1
+        local log="$OUT_DIR/ovh_${probe_n}_$(tr -c 'a-zA-Z0-9' '_' <<<"$label").log"
         local out
-        out="$("$@" 2>/dev/null | grep -o 'ITERS_PER_SEC=[0-9.]*' | tail -1)"
+        # Keep the log: a probe that yields no throughput line is a run that
+        # failed, and discarding stderr makes that indistinguishable from a
+        # parse bug.
+        out="$("$@" 2>"$log" | tee -a "$log" \
+               | grep -o 'ITERS_PER_SEC=[0-9.]*' | tail -1)"
+        [[ -n "$out" ]] || echo "[e2e] probe '$label' produced no throughput line; see $log" >&2
         RESULTS["$label"]+="${out#ITERS_PER_SEC=} "
     }
     for _ in $(seq 1 "$REPS"); do
