@@ -37,6 +37,17 @@ struct TraceArgs {
     int64_t window_ms = 0;              // --window; 0 = run to the target's natural exit
     int64_t window_timeout_ms = 0;      // --window-timeout; hard cap on total runtime (0 = warmup+window)
     std::string after_window = "stop";  // --after-window; "stop" is the only value today
+    // Bounded DEEP window - unrelated to --window above, which bounds the
+    // target's LIFETIME. These keep the target running and instead bound how
+    // long the deep engines (PC sampling / SASS / PM / Range) stay armed
+    // inside it. A target whose source can't be edited has no way to call
+    // gpufl::deepWindow(), so time is the trigger the launcher can offer.
+    // Any of them turns on window-only arming (GPUFL_DEEP_ARM=window).
+    int64_t  deep_after_ms = 0;      // --deep-after; 0 = arm at the first launch
+    int64_t  deep_for_ms = 0;        // --deep-for; duration bound, 0 = none
+    uint64_t deep_launches = 0;      // --deep-launches; launch bound, 0 = none
+    int64_t  deep_cooldown_ms = 0;   // --deep-cooldown; quiet time between windows
+    bool     deep_requested = false; // any --deep-* flag was given
     // PC sampling period as a log2 exponent (2^N GPU cycles/sample, valid 5..31;
     // lower = more frequent → catches shorter kernels). 0 = leave the engine
     // default. Plumbed to the injected target via GPUFL_PC_SAMPLING_PERIOD.

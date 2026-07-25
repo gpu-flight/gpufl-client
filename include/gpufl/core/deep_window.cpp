@@ -1,0 +1,404 @@
+#include "gpufl/core/deep_window.hpp"
+
+#include <atomic>
+#include <cstdlib>
+#include <mutex>
+
+#include "gpufl.hpp"
+#include "gpufl/core/common.hpp"
+#include "gpufl/core/debug_logger.hpp"
+#include "gpufl/core/env_vars.hpp"
+#include "gpufl/core/events.hpp"
+#include "gpufl/core/logger/logger.hpp"
+#include "gpufl/core/model/deep_window_model.hpp"
+#include "gpufl/core/model/perf_metric_model.hpp"
+#include "gpufl/core/monitor.hpp"
+#include "gpufl/core/monitor_backend.hpp"
+#include "gpufl/core/runtime.hpp"
+#include "gpufl/core/teardown_flag.hpp"  // detail::isProcessExitTeardown
+
+namespace gpufl {
+namespace {
+
+// Serializes open/close transitions. Held across the engine arm/disarm so a
+// window can't be closed between "state says open" and "engines are armed".
+std::mutex g_mu;
+
+// Read lock-free from the launch callback on every launch while a window is
+// open, so the hot path never touches g_mu. Also the re-entrancy guard:
+// Close() clears it before the engine teardown, and that teardown can
+// synchronize the device and re-enter the launch callback.
+std::atomic g_active{false};
+
+std::atomic<int64_t>  g_deadline_ns{0};        // 0 = no time bound
+std::atomic<uint64_t> g_launches_remaining{0};  // 0 = no launch bound
+std::atomic<uint64_t> g_launches_covered{0};
+std::atomic     g_close_requested{false};
+
+// An open asked for by a thread that can't arm one itself. Checked lock-free
+// on the launch beat; g_pending_spec is only read once this is set, so the
+// hot path pays for it exactly when a trigger is waiting.
+std::atomic       g_open_requested{false};
+std::atomic<int64_t> g_pending_open_at_ns{0};  // 0 = at the next launch
+DeepWindowSpec    g_pending_spec;              // guarded by g_mu
+
+// When the last window closed, so a cooldown can be enforced. 0 = never.
+std::atomic<int64_t> g_last_close_ns{0};
+
+int64_t     g_opened_ns = 0;
+int64_t     g_requested_duration_ms = 0;
+uint64_t    g_requested_max_launches = 0;
+std::string g_name;
+
+bool ComboActive() {
+    const char* combo = std::getenv(env::kEngineCombo);
+    return combo && combo[0] != '\0';
+}
+
+// Non-negative integer from env, or `fallback` when unset or malformed.
+int64_t EnvUnsignedOr(const char* name, const int64_t fallback) {
+    const char* v = std::getenv(name);
+    if (!v || v[0] == '\0') return fallback;
+    char* end = nullptr;
+    const long long n = std::strtoll(v, &end, 10);
+    if (end == v || *end != '\0' || n < 0) {
+        GFL_LOG_ERROR(name, "='", v,
+                      "' is not a non-negative integer. Ignoring.");
+        return fallback;
+    }
+    return n;
+}
+
+// Fills bounds left at 0 from the environment, so an operator can size a
+// window the application code already asks for - and so the injected path,
+// which can't set a DeepWindowSpec, can set one at all.
+void ApplyEnvDefaults(DeepWindowSpec& spec) {
+    if (spec.max_duration_ms == 0) {
+        spec.max_duration_ms = EnvUnsignedOr(env::kDeepWindowMs, 0);
+    }
+    if (spec.max_launches == 0) {
+        spec.max_launches =
+            static_cast<uint64_t>(EnvUnsignedOr(env::kDeepWindowMaxLaunches, 0));
+    }
+    if (spec.cooldown_ms == 0) {
+        spec.cooldown_ms = EnvUnsignedOr(env::kDeepWindowCooldownMs, 0);
+    }
+}
+
+// True while a just-closed window's cooldown is still running.
+bool InCooldown(const DeepWindowSpec& spec) {
+    if (spec.cooldown_ms <= 0) return false;
+    const int64_t last = g_last_close_ns.load(std::memory_order_relaxed);
+    if (last == 0) return false;
+    return detail::GetTimestampNs() - last < spec.cooldown_ms * 1000000;
+}
+
+}  // namespace
+
+const char* DeepWindowCloseName(const DeepWindowClose reason) {
+    switch (reason) {
+        case DeepWindowClose::Deadline:     return "deadline";
+        case DeepWindowClose::LaunchBudget: return "launch_budget";
+        case DeepWindowClose::Manual:       return "manual";
+        case DeepWindowClose::SessionStop:  return "session_stop";
+    }
+    return "unknown";
+}
+
+namespace detail {
+
+bool PerfScopeEnabled() {
+    // Also fire for an engine combo with a Trace base - otherwise a
+    // Trace+RangeProfiler combo would never trigger Range's perf scope.
+    return g_opts.profiling_engine != ProfilingEngine::Monitor &&
+           (g_opts.profiling_engine != ProfilingEngine::Trace || ComboActive());
+}
+
+void BeginPerfScopeIfEnabled(const char* name, const bool is_deep_window) {
+    if (!PerfScopeEnabled()) return;
+    if (is_deep_window) {
+        Monitor::BeginDeepWindowPerfScope(name);
+    } else {
+        Monitor::BeginPerfScope(name);
+    }
+}
+
+void EndPerfScopeIfEnabled(const char* name, const int pid,
+                           const int64_t start_ns, const int64_t end_ns,
+                           const bool is_deep_window) {
+    if (!PerfScopeEnabled()) return;
+    // Triggers EndPerfPassAndDecode first.
+    if (is_deep_window) {
+        Monitor::EndDeepWindowPerfScope(name);
+    } else {
+        Monitor::EndPerfScope(name);
+    }
+
+    const Runtime* rt = runtime();
+    if (!rt || !rt->logger) return;
+    IMonitorBackend* backend = Monitor::GetBackend();
+    if (!backend) return;
+    auto event_opt = backend->TakeLastPerfEvent();
+    if (!event_opt) return;
+
+    PerfMetricEvent& pe = *event_opt;
+    pe.pid        = pid;
+    pe.app        = rt->app_name;
+    pe.session_id = rt->session_id;
+    pe.name       = name ? name : "";
+    pe.start_ns   = start_ns;
+    pe.end_ns     = end_ns;
+    rt->logger->write(model::PerfMetricModel(pe));
+}
+
+}  // namespace detail
+
+bool DeepWindow::Active() {
+    return g_active.load(std::memory_order_acquire);
+}
+
+bool DeepWindow::Open(const DeepWindowSpec& spec) {
+    if (const Runtime* rt = runtime(); !rt || !rt->logger) return false;
+
+    std::string name;
+    {
+        std::lock_guard lk(g_mu);
+        if (g_active.load(std::memory_order_relaxed)) {
+            // Not an extension. A trigger that fires every step would
+            // otherwise hold the window open for the rest of the run.
+            return false;
+        }
+        if (InCooldown(spec)) {
+            // A condition that stays true would otherwise reopen a window the
+            // moment the last one expired, and the run never stops paying.
+            GFL_LOG_DEBUG("[DeepWindow] open suppressed: cooldown ",
+                          spec.cooldown_ms, "ms not elapsed");
+            return false;
+        }
+
+        g_opened_ns = detail::GetTimestampNs();
+        g_name = spec.name.empty() ? "deep_window" : spec.name;
+        g_requested_duration_ms = spec.max_duration_ms;
+        g_requested_max_launches = spec.max_launches;
+        g_deadline_ns.store(spec.max_duration_ms > 0
+                                ? g_opened_ns + spec.max_duration_ms * 1000000
+                                : 0,
+                            std::memory_order_relaxed);
+        g_launches_remaining.store(spec.max_launches, std::memory_order_relaxed);
+        g_launches_covered.store(0, std::memory_order_relaxed);
+        g_close_requested.store(false, std::memory_order_relaxed);
+        name = g_name;
+
+        // Publish last: once this is true the launch callback starts
+        // consuming budget, and everything it reads is already set.
+        g_active.store(true, std::memory_order_release);
+
+        // Arms the deep engines. Runs under the lock so a concurrent close
+        // can't disarm engines this call hasn't armed yet; safe because the
+        // arm path doesn't re-enter DeepWindow.
+        Monitor::BeginDeepWindowScope(name.c_str());
+        detail::BeginPerfScopeIfEnabled(name.c_str(), /*is_deep_window=*/true);
+    }
+
+    GFL_LOG_DEBUG("[DeepWindow] opened name=", name,
+                  " duration_ms=", spec.max_duration_ms,
+                  " max_launches=", spec.max_launches);
+    return true;
+}
+
+void DeepWindow::Close(const DeepWindowClose reason) {
+    if (!g_active.load(std::memory_order_acquire)) return;
+
+    DeepWindowEvent ev;
+    std::string name;
+    {
+        int64_t start_ns = 0;
+        std::lock_guard lk(g_mu);
+        if (!g_active.load(std::memory_order_relaxed)) return;
+        // Clear before the engine teardown below. That teardown can
+        // synchronize the device and re-enter the launch callback, and
+        // OnLaunch's lock-free check turns the re-entry into a no-op
+        // instead of a deadlock on g_mu.
+        g_active.store(false, std::memory_order_release);
+        g_close_requested.store(false, std::memory_order_relaxed);
+
+        name = g_name;
+        start_ns = g_opened_ns;
+        const int64_t end_ns = detail::GetTimestampNs();
+        // Starts the cooldown clock. Set from the decision point, not after
+        // the engine teardown, so a slow disarm doesn't shorten the quiet time.
+        g_last_close_ns.store(end_ns, std::memory_order_relaxed);
+
+        ev.pid                    = detail::GetPid();
+        ev.name                   = g_name;
+        ev.close_reason           = DeepWindowCloseName(reason);
+        ev.engine                 = ProfilingEngineWireName(g_opts.profiling_engine);
+        ev.start_ns               = start_ns;
+        ev.end_ns                 = end_ns;
+        ev.duration_ns            = end_ns - start_ns;
+        ev.launches_covered       = g_launches_covered.load(std::memory_order_relaxed);
+        ev.requested_duration_ms  = g_requested_duration_ms;
+        ev.requested_max_launches = g_requested_max_launches;
+
+        // Disarms the deep engines and drains whatever they collected.
+        // Skipped on process-exit teardown, where cudart has already
+        // destroyed the context and the scope-stop path would fault against
+        // it - the engines' own exit handling flushes there instead. The
+        // event below is still written so the window is on the record.
+        if (!detail::isProcessExitTeardown()) {
+            Monitor::EndDeepWindowScope(name.c_str());
+            detail::EndPerfScopeIfEnabled(name.c_str(), ev.pid, start_ns, end_ns,
+                                          /*is_deep_window=*/true);
+        }
+    }
+
+    if (const Runtime* rt = runtime(); rt && rt->logger) {
+        ev.app = rt->app_name;
+        ev.session_id = rt->session_id;
+        rt->logger->write(model::DeepWindowModel(ev));
+    }
+
+    GFL_LOG_DEBUG("[DeepWindow] closed name=", name,
+                  " reason=", ev.close_reason,
+                  " duration_ns=", ev.duration_ns,
+                  " launches_covered=", ev.launches_covered);
+}
+
+void DeepWindow::RequestOpen(const DeepWindowSpec& spec) {
+    ScheduleOpenAfter(0, spec);
+}
+
+void DeepWindow::ScheduleOpenAfter(const int64_t delay_ms,
+                                   const DeepWindowSpec& spec) {
+    {
+        std::lock_guard lk(g_mu);
+        g_pending_spec = spec;
+        g_pending_open_at_ns.store(
+            delay_ms > 0 ? detail::GetTimestampNs() + delay_ms * 1000000 : 0,
+            std::memory_order_relaxed);
+    }
+    // Published last: the launch beat reads the spec only once this is set.
+    g_open_requested.store(true, std::memory_order_release);
+    GFL_LOG_DEBUG("[DeepWindow] open requested delay_ms=", delay_ms,
+                  " duration_ms=", spec.max_duration_ms,
+                  " max_launches=", spec.max_launches);
+}
+
+// Runs on the app thread at launch ENTER - the only place the arm's CUPTI
+// calls are safe. Claims the request before opening so two launch threads
+// can't both act on it.
+void DeepWindow::TakePendingOpen_() {
+    if (!g_open_requested.load(std::memory_order_acquire)) return;
+    const int64_t due = g_pending_open_at_ns.load(std::memory_order_relaxed);
+    if (due > 0 && detail::GetTimestampNs() < due) return;
+    if (!g_open_requested.exchange(false, std::memory_order_acq_rel)) return;
+
+    DeepWindowSpec spec;
+    {
+        std::lock_guard lk(g_mu);
+        spec = g_pending_spec;
+    }
+    // Outside the lock: Open takes it too.
+    Open(spec);
+}
+
+void DeepWindow::OnLaunch() {
+    if (!g_active.load(std::memory_order_acquire)) {
+        TakePendingOpen_();
+        return;
+    }
+
+    g_launches_covered.fetch_add(1, std::memory_order_relaxed);
+
+    if (g_launches_remaining.load(std::memory_order_relaxed) > 0) {
+        // fetch_sub returns the PREVIOUS value, so 1 means this launch
+        // consumed the last of the budget.
+        if (g_launches_remaining.fetch_sub(1, std::memory_order_relaxed) <= 1) {
+            Close(DeepWindowClose::LaunchBudget);
+            return;
+        }
+    }
+
+    // A tick on a thread that couldn't run the teardown left this set.
+    if (g_close_requested.load(std::memory_order_acquire)) {
+        Close(DeepWindowClose::Deadline);
+        return;
+    }
+
+    const int64_t deadline = g_deadline_ns.load(std::memory_order_relaxed);
+    if (deadline > 0 && detail::GetTimestampNs() >= deadline) {
+        Close(DeepWindowClose::Deadline);
+    }
+}
+
+void DeepWindow::OnPeriodicTick(const bool may_close_here) {
+    if (!g_active.load(std::memory_order_acquire)) return;
+
+    const int64_t deadline = g_deadline_ns.load(std::memory_order_relaxed);
+    if (deadline <= 0 || detail::GetTimestampNs() < deadline) return;
+
+    if (may_close_here) {
+        Close(DeepWindowClose::Deadline);
+        return;
+    }
+    // Hand the close to the next launch: the CUPTI stop has to run on the
+    // application thread that owns the context.
+    g_close_requested.store(true, std::memory_order_release);
+}
+
+void DeepWindow::ResetForTesting() {
+    std::lock_guard<std::mutex> lk(g_mu);
+    g_active.store(false, std::memory_order_release);
+    g_deadline_ns.store(0, std::memory_order_relaxed);
+    g_launches_remaining.store(0, std::memory_order_relaxed);
+    g_launches_covered.store(0, std::memory_order_relaxed);
+    g_close_requested.store(false, std::memory_order_relaxed);
+    g_open_requested.store(false, std::memory_order_relaxed);
+    g_pending_open_at_ns.store(0, std::memory_order_relaxed);
+    g_pending_spec = DeepWindowSpec{};
+    g_last_close_ns.store(0, std::memory_order_relaxed);
+    g_opened_ns = 0;
+    g_requested_duration_ms = 0;
+    g_requested_max_launches = 0;
+    g_name.clear();
+}
+
+// ---- Public API ----
+
+void deepWindow(const DeepWindowSpec& spec) {
+    DeepWindowSpec resolved = spec;
+    ApplyEnvDefaults(resolved);
+    DeepWindow::Open(resolved);
+}
+
+void deepWindow(const int64_t max_duration_ms, const uint64_t max_launches) {
+    DeepWindowSpec spec;
+    spec.max_duration_ms = max_duration_ms;
+    spec.max_launches = max_launches;
+    deepWindow(spec);
+}
+
+// Reads the launcher's time-based trigger, the only one available when the
+// target's source can't be edited. Called once from init(); a no-op unless
+// GPUFL_DEEP_AFTER_MS is set.
+void scheduleEnvDeepWindow() {
+    const int64_t after_ms = EnvUnsignedOr(env::kDeepAfterMs, -1);
+    if (after_ms < 0) return;
+
+    DeepWindowSpec spec;
+    ApplyEnvDefaults(spec);
+    if (spec.max_duration_ms == 0 && spec.max_launches == 0) {
+        GFL_LOG_ERROR(
+            env::kDeepAfterMs,
+            " is set but no window bound is - the window would never close. "
+            "Set ", env::kDeepWindowMs, " or ", env::kDeepWindowMaxLaunches, ".");
+        return;
+    }
+    DeepWindow::ScheduleOpenAfter(after_ms, spec);
+}
+
+void deepWindowClose() { DeepWindow::Close(DeepWindowClose::Manual); }
+
+bool deepWindowActive() { return DeepWindow::Active(); }
+
+}  // namespace gpufl

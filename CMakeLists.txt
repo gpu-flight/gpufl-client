@@ -101,6 +101,8 @@ target_sources(gpufl PRIVATE
     include/gpufl/core/model/memory_alloc_event_model.cpp
     include/gpufl/core/model/graph_launch_event_model.cpp
     include/gpufl/core/model/system_event_model.cpp
+    include/gpufl/core/model/deep_window_model.cpp
+    include/gpufl/core/deep_window.cpp
     include/gpufl/core/sampler.cpp
     include/gpufl/core/runtime.cpp
     include/gpufl/core/backend_factory.cpp

@@ -21,6 +21,7 @@
 #include "gpufl/core/teardown_flag.hpp"  // detail::isProcessExitTeardown
 #include "gpufl/core/config_file_loader.hpp"
 #include "gpufl/core/debug_logger.hpp"
+#include "gpufl/core/deep_window.hpp"
 #include "gpufl/core/events.hpp"
 #include "gpufl/core/logger/logger.hpp"
 #include "gpufl/core/remote_config.hpp"
@@ -33,7 +34,6 @@
 // lives in remote_config.cpp, which includes httplib first and avoids
 // windows.h entirely.
 #include "gpufl/core/model/lifecycle_model.hpp"
-#include "gpufl/core/model/perf_metric_model.hpp"
 #include "gpufl/core/model/system_event_model.hpp"
 #include "gpufl/core/monitor.hpp"
 #include "gpufl/core/monitor_backend.hpp"
@@ -425,6 +425,26 @@ bool init(const InitOptions& opts) {
     mOpts.pm_sampling_preset = g_opts.pm_sampling_preset;
     mOpts.pm_sampling_metrics = g_opts.pm_sampling_metrics;
     mOpts.pm_sampling_scope_only = g_opts.pm_sampling_scope_only;
+    mOpts.deep_arm_mode = g_opts.deep_window_only ? DeepArmMode::WindowOnly
+                                                  : DeepArmMode::Always;
+    // GPUFL_DEEP_ARM reaches the injection path, which can't set InitOptions.
+    if (const char* v = std::getenv(gpufl::env::kDeepArm)) {
+        const std::string val(v);
+        if (val == "window") {
+            mOpts.deep_arm_mode = DeepArmMode::WindowOnly;
+        } else if (val == "always") {
+            mOpts.deep_arm_mode = DeepArmMode::Always;
+        } else {
+            GFL_LOG_ERROR("GPUFL_DEEP_ARM='", val,
+                          "' is not recognized. Valid values: always, window. "
+                          "Keeping current deep arm mode.");
+        }
+    }
+    // WindowOnly subsumes the PM-specific gate: PM sampling already arms on
+    // scope start, which is exactly what a window is.
+    if (mOpts.deep_arm_mode == DeepArmMode::WindowOnly) {
+        mOpts.pm_sampling_scope_only = true;
+    }
     mOpts.backend_kind = ToMonitorBackendKind(g_opts.backend);
 
     // EAGER module loading is OPT-IN. By default we leave CUDA on its normal
@@ -587,6 +607,12 @@ bool init(const InitOptions& opts) {
     g_nvtx_available.store(true, std::memory_order_release);
 #endif
 
+    // Arm the launcher's time-based deep window, if one was asked for. Last,
+    // so the delay is measured from a fully-initialized runtime, and safe
+    // from here: it only records the request; the arm itself happens on the
+    // app thread at the first launch past the delay.
+    scheduleEnvDeepWindow();
+
     GFL_LOG_DEBUG("Initialization complete!");
     return true;
 }
@@ -647,6 +673,11 @@ void shutdown() {
 
     Runtime* rt = runtime();
     if (!rt) return;
+
+    // Close a still-open deep window before anything is torn down, so its
+    // engines disarm through the normal scope-stop path and the window
+    // lands in the log rather than vanishing with the session.
+    DeepWindow::Close(DeepWindowClose::SessionStop);
 
     GFL_LOG_DEBUG("Shutdown: begin -> sampler.shutdown()");
     // Stop the system sampler before CUPTI/backend teardown. The sampler can
@@ -787,16 +818,10 @@ void ScopedMonitor::init_(const ScopeMeta& meta) {
 
     // Scope callbacks are useful for both tracing and profiling backends.
     Monitor::BeginProfilerScope(name_.c_str());
-    // Perf scope (Range Profiler / Perfworks). Also fire it when an engine combo
-    // (GPUFL_ENGINE_COMBO) is active even with a Trace base - otherwise a
-    // Trace+RangeProfiler combo would never trigger Range's perf scope. Harmless
-    // no-op for engines that don't use perf scopes (PC / PM).
-    const char* comboEnv = std::getenv(env::kEngineCombo);
-    const bool comboActive = comboEnv && comboEnv[0] != '\0';
-    if (g_opts.profiling_engine != ProfilingEngine::Monitor &&
-        (g_opts.profiling_engine != ProfilingEngine::Trace || comboActive)) {
-        Monitor::BeginPerfScope(name_.c_str());
-    }
+    // Perf scope (Range Profiler / Perfworks). Harmless no-op for engines
+    // that don't use perf scopes (PC / PM). Shared with DeepWindow so both
+    // paths agree on which engines get one.
+    detail::BeginPerfScopeIfEnabled(name_.c_str(), /*is_deep_window=*/false);
 }
 
 ScopedMonitor::~ScopedMonitor() {
@@ -837,27 +862,8 @@ ScopedMonitor::~ScopedMonitor() {
     // scope as an NVTX marker. That echo duplicated scope_event (the SPA
     // had to de-dupe it) and only the framework NVTX path remains useful.
     Monitor::EndProfilerScope(name_.c_str());
-    const char* comboEnv = std::getenv(gpufl::env::kEngineCombo);
-    const bool comboActive = comboEnv && comboEnv[0] != '\0';
-    if (g_opts.profiling_engine != ProfilingEngine::Monitor &&
-        (g_opts.profiling_engine != ProfilingEngine::Trace || comboActive)) {
-        Monitor::EndPerfScope(
-            name_.c_str());  // triggers EndPerfPassAndDecode first
-        if (IMonitorBackend* b = Monitor::GetBackend()) {
-            if (auto event_opt = b->TakeLastPerfEvent()) {
-                PerfMetricEvent& pe = *event_opt;
-                pe.pid = pid_;
-                pe.app = rt->app_name;
-                pe.session_id = rt->session_id;
-                pe.name = name_;
-                pe.start_ns = start_ns_;
-                pe.end_ns = end_ns;
-                rt->logger->write(model::PerfMetricModel(pe));
-
-                GFL_LOG_DEBUG("Log Perf Metric Event");
-            }
-        }
-    }
+    detail::EndPerfScopeIfEnabled(name_.c_str(), pid_, start_ns_, end_ns,
+                                  /*is_deep_window=*/false);
 }
 void generateReport(const std::string& output_path) {
     namespace fs = std::filesystem;

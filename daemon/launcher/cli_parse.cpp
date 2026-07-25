@@ -168,6 +168,18 @@ const char* traceHelp() {
         "                            Hard cap on total target runtime (safety).\n"
         "        --after-window=<WHAT>\n"
         "                            What to do at window end. Only 'stop' today.\n"
+        "        --deep-after=<DUR>  Arm the DEEP engines this long into the run,\n"
+        "                            then disarm. Unlike --window the target keeps\n"
+        "                            running. Needs a bound below. Default: 0 (arm\n"
+        "                            at the first kernel launch).\n"
+        "        --deep-for=<DUR>    How long the deep window stays armed.\n"
+        "        --deep-launches=<N> Kernel-launch bound on the deep window; ends it\n"
+        "                            at whichever bound is hit first. PREFER THIS for\n"
+        "                            SASS / Range: replay re-runs every kernel, so a\n"
+        "                            second of wall time covers ~25x less work there\n"
+        "                            than under PM sampling.\n"
+        "        --deep-cooldown=<DUR>\n"
+        "                            Quiet time before another window may open.\n"
         "        --pc-sample-period=<N>\n"
         "                            PC sampling period: log2 of GPU cycles per sample\n"
         "                            (5..31; default 10). Lower = more frequent — for\n"
@@ -369,6 +381,35 @@ TraceParseResult parseTraceArgs(const std::vector<std::string>& argv) {
                         " (expected a duration like 30s, 5m, 1h, "
                         "or a bare number of seconds)"};
             }
+        } else if (key == "--deep-after" || key == "--deep-for" ||
+                   key == "--deep-cooldown") {
+            std::string v;
+            auto err = take_value(v);
+            if (!err.empty()) return {std::nullopt, err};
+            int64_t ms = 0;
+            if (!parseDurationMs(v, ms)) {
+                return {std::nullopt,
+                        "invalid " + key + " value: " + v +
+                        " (expected a duration like 30s, 500ms, 5m, 1h, "
+                        "or a bare number of seconds)"};
+            }
+            if (key == "--deep-after")         out.deep_after_ms = ms;
+            else if (key == "--deep-for")      out.deep_for_ms = ms;
+            else                               out.deep_cooldown_ms = ms;
+            out.deep_requested = true;
+        } else if (key == "--deep-launches") {
+            std::string v;
+            auto err = take_value(v);
+            if (!err.empty()) return {std::nullopt, err};
+            char* end = nullptr;
+            const unsigned long long n = std::strtoull(v.c_str(), &end, 10);
+            if (end == v.c_str() || (end && *end != '\0') || n == 0) {
+                return {std::nullopt,
+                        "invalid --deep-launches value: " + v +
+                        " (expected a positive number of kernel launches)"};
+            }
+            out.deep_launches = static_cast<uint64_t>(n);
+            out.deep_requested = true;
         } else if (key == "--after-window") {
             auto err = take_value(out.after_window);
             if (!err.empty()) return {std::nullopt, err};
@@ -397,6 +438,15 @@ TraceParseResult parseTraceArgs(const std::vector<std::string>& argv) {
     }
     if (out.command.empty()) {
         return {std::nullopt, "no command specified after `--`"};
+    }
+    // A deep window with neither bound would arm and never disarm, which is
+    // just "profile deeply for the whole run" with extra steps.
+    if (out.deep_requested && out.deep_for_ms == 0 && out.deep_launches == 0) {
+        return {std::nullopt,
+                "a deep window needs a bound: pass --deep-for <duration> "
+                "or --deep-launches <n> (prefer --deep-launches for the "
+                "replay engines, where a second of wall time covers far "
+                "less work)"};
     }
     return {out, ""};
 }

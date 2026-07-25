@@ -22,6 +22,7 @@
 #include "gpufl/backends/nvidia/synchronization_handler.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
+#include "gpufl/core/deep_window.hpp"
 #include "gpufl/core/logger/logger.hpp"
 #include "gpufl/core/monitor.hpp"  // Monitor::RequestSyntheticDrainAndWait
 #include "gpufl/core/model/perf_metric_model.hpp"
@@ -670,8 +671,14 @@ void CuptiBackend::FinishDeferredEngineStart_() {
         profiling_request_, device_facts_, EnvOverrides::FromProcess());
     ApplyComboPlanOverrides(resolved_plan_, combo_);
 
-    EngineContext ectx{ctx_, device_id_, chip_name_, &cubin_mu_,
-                       &cubin_by_crc_};
+    // Carry the CUPTI->wall clock anchor, same as the non-deferred start.
+    // Omitting it left base_cpu_ns/base_cupti_ts at 0, so engines that stamp
+    // their own samples (PM, PC) emitted raw CUPTI timestamps - a different
+    // clock domain from the kernel timeline, which put every sample days
+    // away from the session. start() captures the anchor before flagging the
+    // start pending, so it is already valid here.
+    EngineContext ectx{ctx_,          device_id_,    chip_name_, &cubin_mu_,
+                       &cubin_by_crc_, base_cpu_ns_, base_cupti_ts_};
     engine_->initialize(opts_, ectx);
     engine_->start();
     ReenableActivityAfterEngineStart_();
@@ -734,11 +741,21 @@ void CuptiBackend::FlushProfilingDataBeforeCudaTeardown(const char* reason) {
 
 void CuptiBackend::EngineLaunchTick() {
     if (!initialized_ || !active_.load(std::memory_order_relaxed)) return;
+    // Bound check first: this is the app thread at launch ENTER, the only
+    // reliably scheduled, context-current place to run the window's
+    // stop/collect. Closing before the engine tick also spares the engine a
+    // beat it would only spend on a window that is already over.
+    DeepWindow::OnLaunch();
     if (engine_) engine_->onLaunchTick();
 }
 
 void CuptiBackend::DrainProfilingData() {
     if (!initialized_ || !active_.load(std::memory_order_relaxed)) return;
+    // Fallback for a window whose workload stopped launching before the
+    // deadline. On a Windows-injected target the CUPTI teardown must not run
+    // from this collector thread, so there it only flags the close and the
+    // next launch performs it.
+    DeepWindow::OnPeriodicTick(/*may_close_here=*/!WindowsInjectedProcess());
     if (engine_) {
         engine_->drainData();
     }

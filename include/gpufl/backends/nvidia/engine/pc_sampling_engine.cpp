@@ -200,14 +200,24 @@ void PcSamplingEngine::start() {
         // still degrades to a kernel trace. Synthetic-kernel fallback stays
         // suppressed (cupti_backend.cpp start()), so only REAL records show.
         cuptiActivityEnable(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL);
-        // Arm now — start() runs in the CONTEXT_CREATED callback, before the
-        // app's first kernel, while the GPU is quiet. Enable/config/Start
-        // return INVALID_OPERATION when kernels run concurrently (verified
-        // live), so pre-first-kernel is the only reliable window. profiler-
-        // init already ran pre-context, so stall enumeration succeeds here.
+        // Enable/config/Start return INVALID_OPERATION when kernels run
+        // concurrently (verified live), and start() runs in the
+        // CONTEXT_CREATED callback before the app's first kernel, while the
+        // GPU is quiet - the only reliable moment for them. profiler-init
+        // already ran pre-context, so stall enumeration succeeds here.
+        //
+        // WindowOnly splits that: enable + configure now (they must happen
+        // while quiet), but leave the sampler unarmed until a deep window
+        // opens. Only cuptiPCSamplingStart is deferred, and that one does
+        // succeed with kernels running - the mid-run drain-restart below
+        // has always relied on exactly that.
         {
             std::lock_guard lk(sampling_lifecycle_mu_);
-            StartPcSampling_();
+            if (opts_.deep_arm_mode == DeepArmMode::WindowOnly) {
+                EnableSamplingFeatures_();
+            } else {
+                StartPcSampling_();
+            }
         }
         // Enable can internally disable kernel activity — re-assert it.
         cuptiActivityEnable(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL);
@@ -391,13 +401,23 @@ void PcSamplingEngine::shutdown() {
 }
 
 void PcSamplingEngine::onScopeStart(const char* /*name*/) {
-    // Idempotent re-arm - start() already arms the whole session; this
-    // only matters if a prior arm attempt failed (e.g. context raced).
+    // Under WindowOnly this IS the arm: start() only enabled and configured
+    // the sampler. Otherwise it's an idempotent re-arm that matters only if
+    // a prior attempt failed (e.g. context raced).
     std::lock_guard lk(sampling_lifecycle_mu_);
     StartPcSampling_();
 }
 
 void PcSamplingEngine::onScopeStop(const char* /*name*/) {
+    if (opts_.deep_arm_mode == DeepArmMode::WindowOnly) {
+        // Disarm for real. A forced collect would leave the sampler running
+        // past the window, which is the whole thing WindowOnly exists to
+        // avoid. The ref count keeps a user scope nested inside the window
+        // from disarming it early.
+        std::lock_guard lk(sampling_lifecycle_mu_);
+        StopAndCollectPcSampling_();
+        return;
+    }
     // Forced collect at scope end. For the process-wide scope this is the
     // last healthy moment before Windows process-exit teardown breaks
     // cuptiPCSamplingStop with CUPTI_ERROR_UNKNOWN. Re-arms afterwards, so

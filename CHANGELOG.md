@@ -9,6 +9,53 @@ versioning follows PEP 440 for the Python wheel and semver-style
 
 ### Added
 
+- **Bounded deep-profiling windows.** `gpufl::deepWindow(ms, max_launches)`
+  (Python: `gpufl.deep_window(seconds, max_launches)`) arms the deep engines
+  for a short region and disarms them automatically, so a long-running job
+  can profile the moment it went wrong without carrying replay cost for its
+  whole lifetime:
+
+  ```cpp
+  if (tokens_per_sec < 1000) gpufl::deepWindow(3000);
+  ```
+
+  Calling it again while a window is open is ignored rather than treated as
+  an extension, so a check inside a training loop can run every step. The
+  duration and launch bounds combine with OR; prefer a launch budget for the
+  replay engines, where wall time and work done diverge sharply. Each window
+  emits a `deep_window` event carrying the launches it actually covered and
+  which bound closed it.
+
+  Set `InitOptions::deep_window_only` (Python `deep_window_only=True`, env
+  `GPUFL_DEEP_ARM=window`) to keep PC sampling, SASS metrics, PM sampling and
+  the Range profiler idle outside windows. `GPUFL_DEEP_WINDOW_MS` and
+  `GPUFL_DEEP_WINDOW_MAX_LAUNCHES` supply defaults for bounds left at 0.
+
+  `DeepWindowSpec::cooldown_ms` (`GPUFL_DEEP_WINDOW_COOLDOWN_MS`) sets the
+  minimum quiet time between windows. Without it a condition that stays true
+  reopens a window the instant the last one expired; only the library knows
+  when that was, so the bound lives there rather than in your trigger.
+- **`gpufl trace --deep-after` / `--deep-for` / `--deep-launches` /
+  `--deep-cooldown`.** Arms a deep window inside a target whose source you
+  can't edit, which otherwise has no way to call `deepWindow()`. Unlike
+  `--window`, which bounds the target's LIFETIME, these leave it running and
+  bound only how long the deep engines stay armed:
+
+  ```bash
+  gpufl trace --deep-after 30s --deep-for 3s --passes PmSampling -- python train.py
+  ```
+
+  Any `--deep-*` flag implies `GPUFL_DEEP_ARM=window`. A window with neither
+  a duration nor a launch bound is rejected.
+
+### Fixed
+
+- **PM/PC sample timestamps under `gpufl trace`.** The deferred engine start
+  (the path Windows injection always takes, since gpufl initializes before
+  the target creates a CUDA context) built its `EngineContext` without the
+  CUPTI-to-wall-clock anchor. Engines that stamp their own samples emitted
+  raw CUPTI timestamps, putting every PM sample days away from the kernel
+  timeline it should line up with.
 - **Shared-memory bank-conflict profiling.**
   `RangeProfilerKernelReplay` now emits per-kernel shared load/store/total
   conflict counts, shared wavefronts, conflict overhead, and average N-way

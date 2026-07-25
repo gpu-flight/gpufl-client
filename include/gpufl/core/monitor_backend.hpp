@@ -88,11 +88,28 @@ class IMonitorBackend {
     virtual void OnScopeStart(const char* name) {}
     virtual void OnScopeStop(const char* name) {}
 
+    /**
+     * @brief Scope hooks for a bounded deep window, as opposed to an
+     * ordinary user scope.
+     *
+     * They arm and disarm the same engines, but a backend running in
+     * DeepArmMode::WindowOnly has to tell the two apart: under that mode
+     * ordinary scopes must NOT arm anything, or a per-step GFL_SCOPE in a
+     * training loop would leave the engines armed for the whole run and
+     * the window would mean nothing. Default: identical to a user scope,
+     * which is right for every backend that arms unconditionally.
+     */
+    virtual void OnDeepWindowStart(const char* name) { OnScopeStart(name); }
+    virtual void OnDeepWindowStop(const char* name) { OnScopeStop(name); }
+
     /** @brief Periodically drain buffered profiling data. Thread-safe. */
     virtual void DrainProfilingData() {}
 
     virtual void OnPerfScopeStart(const char* name) {}
     virtual void OnPerfScopeStop(const char* name) {}
+    // Perf-scope counterparts of OnDeepWindowStart/Stop; see those.
+    virtual void OnDeepWindowPerfStart(const char* name) { OnPerfScopeStart(name); }
+    virtual void OnDeepWindowPerfStop(const char* name) { OnPerfScopeStop(name); }
     virtual std::optional<PerfMetricEvent> TakeLastPerfEvent() { return std::nullopt; }
 };
 

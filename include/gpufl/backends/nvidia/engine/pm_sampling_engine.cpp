@@ -39,13 +39,13 @@ bool PmSamplingEngine::initialize(const MonitorOptions& opts,
                   " metrics=", metrics_.size(),
                   " interval_us=", opts_.pm_sampling_interval_us,
                   " max_samples=", opts_.pm_sampling_max_samples,
-                  " scope_only=", opts_.pm_sampling_scope_only ? "true" : "false");
+                  " scope_gated=", ScopeGated_() ? "true" : "false");
     return true;
 }
 
 void PmSamplingEngine::start() {
 #if GPUFL_HAS_PERFWORKS
-    if (!opts_.pm_sampling_scope_only) {
+    if (!ScopeGated_()) {
         StartPmSampling_();
     } else {
         attempted_.store(true, std::memory_order_relaxed);
@@ -84,13 +84,13 @@ void PmSamplingEngine::shutdown() {
 
 void PmSamplingEngine::onScopeStart(const char*) {
 #if GPUFL_HAS_PERFWORKS
-    if (opts_.pm_sampling_scope_only) StartPmSampling_();
+    if (ScopeGated_()) StartPmSampling_();
 #endif
 }
 
 void PmSamplingEngine::onScopeStop(const char*) {
 #if GPUFL_HAS_PERFWORKS
-    if (opts_.pm_sampling_scope_only) StopPmSampling_();
+    if (ScopeGated_()) StopPmSampling_();
 #endif
 }
 

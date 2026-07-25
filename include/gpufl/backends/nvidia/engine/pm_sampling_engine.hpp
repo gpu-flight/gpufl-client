@@ -42,6 +42,13 @@ class PmSamplingEngine final : public IProfilingEngine {
     }
 
    private:
+    // True when sampling arms on scope start rather than at session start.
+    // A deep window IS a scope, so WindowOnly reduces to the same gate the
+    // PM engine has always had.
+    bool ScopeGated_() const {
+        return opts_.pm_sampling_scope_only ||
+               opts_.deep_arm_mode == DeepArmMode::WindowOnly;
+    }
     std::vector<std::string> ResolveMetrics_() const;
     void EmitConfig_() const;
 

@@ -133,6 +133,22 @@ inline const char* ProfilingEngineSessionKind(const ProfilingEngine engine) {
     return "monitor";
 }
 
+/**
+ * @brief When the deep engines hold their hardware resources armed.
+ *
+ *   Always     - armed from session start to session stop.
+ *   WindowOnly - idle until a deep window opens (gpufl::deepWindow), and
+ *                idle again once it closes. Lets a long-running job carry
+ *                deep capture without paying for it outside the moments
+ *                it asked for.
+ *
+ * Only the engines that hold a replay or sampling session care. Cubin
+ * capture and the CUPTI subscriber run from process start either way -
+ * they have to, or SASS correlation loses the modules loaded before the
+ * first window.
+ */
+enum class DeepArmMode { Always, WindowOnly };
+
 struct MonitorOptions {
     bool enable_debug_output = false;
     bool enable_stack_trace = false;
@@ -175,6 +191,7 @@ struct MonitorOptions {
     std::string pm_sampling_preset = "overview";
     std::vector<std::string> pm_sampling_metrics;
     bool pm_sampling_scope_only = true;
+    DeepArmMode deep_arm_mode = DeepArmMode::Always;
     // Default Monitor: no CUPTI. The user-facing default lives on
     // InitOptions (gpufl.hpp); this internal default matches it so a
     // bare MonitorOptions (e.g. the system-monitor daemon, which only
@@ -302,6 +319,17 @@ class Monitor {
      */
     static void BeginProfilerScope(const char* name);
     static void EndProfilerScope(const char* name);
+
+    /**
+     * @brief Profiler scope control for a bounded deep window.
+     *
+     * Same engines, but routed separately so a WindowOnly backend can arm
+     * for a window without arming for every user scope.
+     */
+    static void BeginDeepWindowScope(const char* name);
+    static void EndDeepWindowScope(const char* name);
+    static void BeginDeepWindowPerfScope(const char* name);
+    static void EndDeepWindowPerfScope(const char* name);
 
     /**
      * @brief Hardware counter (Perfworks) scope control

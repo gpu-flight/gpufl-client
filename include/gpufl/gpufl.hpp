@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "gpufl/core/deep_window.hpp"
 #include "gpufl/core/monitor.hpp"
 
 namespace gpufl {
@@ -111,6 +112,13 @@ struct InitOptions {
     std::vector<std::string> pm_sampling_metrics;
     bool pm_sampling_scope_only = true;
 
+    // When true the deep engines stay idle until gpufl::deepWindow() opens
+    // a window, instead of holding their session armed for the whole run.
+    // The setup that must happen at process start (CUPTI subscribe, cubin
+    // capture, Profiler API init) still does; only the sampling / replay
+    // session is deferred. Env override: GPUFL_DEEP_ARM=window.
+    bool deep_window_only = false;
+
     // ── Configuration sources, in precedence order (low → high) ────────────
     //
     //   1. InitOptions defaults (these field initializers)
@@ -180,6 +188,65 @@ BackendProbeResult probeRocm();
 
 void systemStart(std::string name = "system");
 void systemStop(std::string name = "system");
+
+// Bounded deep-profiling window. Arms the deep engines (PC sampling, SASS
+// metrics, PM sampling, Range profiler) for a short region and disarms
+// them automatically, so a long-running job can profile the moment it
+// went wrong without paying replay cost for its whole lifetime:
+//
+//     if (tokens_per_sec < 1000) gpufl::deepWindow(3000);
+//
+// Non-blocking; the workload keeps running through the window and past
+// its end. Calling it again while a window is open is IGNORED rather
+// than treated as an extension, so a trigger that fires every iteration
+// can't pin the window open.
+//
+// `max_duration_ms` and `max_launches` combine with OR - whichever is hit
+// first closes the window; 0 disables that bound.
+//
+// Prefer a launch budget for the replay engines. Wall time and work done
+// diverge sharply there: measured on one workload, a 1-second window
+// covered ~1200 launches under PM sampling but ~50 under SASS metrics,
+// because replay re-runs every kernel. A launch budget says what you
+// actually meant; a duration says how long you are willing to be slow.
+//
+// `max_launches` counts kernel-launch API callbacks, not kernels - the
+// runtime API path reports roughly two per launch (cudaLaunchKernel and
+// the cuLaunchKernel beneath it), so budget accordingly.
+//
+// Bounds are only observed at a launch boundary, the one place a
+// mid-session CUPTI stop is safe, so a window overruns its deadline by up
+// to one kernel launch. The window's actual coverage and the bound that
+// closed it are recorded in the session's deep_window event.
+//
+// Requires an engine that supports deep capture; a no-op under
+// ProfilingEngine::Monitor and on backends without one.
+void deepWindow(int64_t max_duration_ms, uint64_t max_launches = 0);
+
+// Full-control form. Adds `cooldown_ms`, the minimum quiet time after a
+// window closes before another may open. Set it when the condition can stay
+// true: without it a per-step check reopens a window the instant the last
+// one expired and the run pays deep cost forever. The library is the only
+// party that knows when the last window closed, which is why the bound
+// lives here rather than in your trigger.
+//
+//     gpufl::DeepWindowSpec spec;
+//     spec.max_duration_ms = 3000;
+//     spec.cooldown_ms     = 60000;   // at most one window a minute
+//     if (tokens_per_sec < 1000) gpufl::deepWindow(spec);
+void deepWindow(const DeepWindowSpec& spec);
+
+// Close the current window early. No-op when none is open.
+void deepWindowClose();
+
+bool deepWindowActive();
+
+// Arms a window `GPUFL_DEEP_AFTER_MS` after this call, sized by
+// `GPUFL_DEEP_WINDOW_MS` / `GPUFL_DEEP_WINDOW_MAX_LAUNCHES`. A no-op when
+// the first is unset. Called by init(); `gpufl trace --deep-after` is what
+// normally sets those, since a target whose source can't be edited has no
+// way to call deepWindow() itself.
+void scheduleEnvDeepWindow();
 
 // F1 (External Correlation) - active push/pop for callers that want to
 // tag CUDA work with an op id WITHOUT relying on a framework profiler

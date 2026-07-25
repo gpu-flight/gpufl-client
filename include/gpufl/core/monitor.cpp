@@ -618,6 +618,10 @@ void Monitor::RecordStop(void* handle, StreamHandle) {
 
 void Monitor::BeginProfilerScope(const char* name) { if (auto* b = GetBackend()) b->OnScopeStart(name); }
 void Monitor::EndProfilerScope(const char* name) { if (auto* b = GetBackend()) b->OnScopeStop(name); }
+void Monitor::BeginDeepWindowScope(const char* name) { if (auto* b = GetBackend()) b->OnDeepWindowStart(name); }
+void Monitor::EndDeepWindowScope(const char* name) { if (auto* b = GetBackend()) b->OnDeepWindowStop(name); }
+void Monitor::BeginDeepWindowPerfScope(const char* name) { if (auto* b = GetBackend()) b->OnDeepWindowPerfStart(name); }
+void Monitor::EndDeepWindowPerfScope(const char* name) { if (auto* b = GetBackend()) b->OnDeepWindowPerfStop(name); }
 void Monitor::BeginPerfScope(const char* name) { if (auto* b = GetBackend()) b->OnPerfScopeStart(name); }
 void Monitor::EndPerfScope(const char* name) { if (auto* b = GetBackend()) b->OnPerfScopeStop(name); }
 

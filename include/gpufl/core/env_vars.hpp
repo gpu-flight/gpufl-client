@@ -132,6 +132,22 @@ constexpr const char* kPcSamplingPeriod = "GPUFL_PC_SAMPLING_PERIOD";
 constexpr const char* kDeepPcOnly  = "GPUFL_DEEP_PC_ONLY";
 constexpr const char* kDeepTryBoth = "GPUFL_DEEP_TRY_BOTH";
 
+// ── Bounded deep window ─────────────────────────────────────────────────────
+// When the deep engines hold their session armed: "always" (default) or
+// "window" (idle until gpufl::deepWindow opens one). Reaches the injection
+// path, which has no other way to set MonitorOptions::deep_arm_mode.
+constexpr const char* kDeepArm             = "GPUFL_DEEP_ARM";
+// Default bounds for a window opened with that bound left at 0. Wall time
+// alone under-describes the replay engines, so both exist.
+constexpr const char* kDeepWindowMs        = "GPUFL_DEEP_WINDOW_MS";
+constexpr const char* kDeepWindowMaxLaunches = "GPUFL_DEEP_WINDOW_MAX_LAUNCHES";
+// Quiet time after a window closes before another may open.
+constexpr const char* kDeepWindowCooldownMs = "GPUFL_DEEP_WINDOW_COOLDOWN_MS";
+// Time-based trigger: open a window this long after init. The only trigger
+// that reaches a target whose source can't be edited, so `gpufl trace` sets
+// it from --deep-after. Unset = no scheduled window.
+constexpr const char* kDeepAfterMs         = "GPUFL_DEEP_AFTER_MS";
+
 // ── SASS metrics knobs ──────────────────────────────────────────────────────
 constexpr const char* kSassMetricsOnly              = "GPUFL_SASS_METRICS_ONLY";
 constexpr const char* kSassForceSafeActivity        = "GPUFL_SASS_FORCE_SAFE_ACTIVITY";
