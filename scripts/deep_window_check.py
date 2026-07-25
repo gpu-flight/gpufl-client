@@ -80,8 +80,14 @@ def main() -> int:
 
     print(f"session: {sess.name}")
     job = next((r for _, r in rows if r.get("type") == "job_start"), None)
+    engine = job.get("profiling_engine", "") if job else ""
     if job:
-        print(f"  engine              : {job.get('profiling_engine')}")
+        print(f"  engine              : {engine}")
+    # SASS metrics runs with kernel activity suppressed by default - the
+    # combination deadlocks on some drivers, so safe mode drops it and the
+    # collector also discards orphaned launches rather than synthesizing
+    # rows. Zero kernel rows is correct there, not a missing light tier.
+    expect_kernels = "sass_metrics" not in engine
     print(f"  deep windows        : {len(windows)}")
     for w in windows:
         print(f"    close_reason={w['close_reason']} "
@@ -134,14 +140,23 @@ def main() -> int:
     print(f"  unanchored samples  : {alien}"
           + ("  <- raw CUPTI clock, not the wall anchor" if alien else ""))
     print(f"  range perf events   : {perf_events}")
-    print(f"  kernel rows (run)   : {kernels}")
+    print(f"  kernel rows (run)   : {kernels}"
+          + ("" if expect_kernels else "  (suppressed for SASS by design)"))
 
     if late:
         failures.append(f"{late} deep samples after the window closed - "
                         "the engine kept sampling")
     if inside == 0 and perf_events == 0:
-        failures.append("no deep data collected in the window")
-    if kernels == 0:
+        if alien:
+            # PC sampling stamps some batches on the raw CUPTI clock, so the
+            # window cannot be checked by timestamp there. Say so instead of
+            # calling it a collection failure.
+            failures.append(
+                f"{alien} deep samples exist but are all on an unanchored "
+                "clock - cannot tell whether they fell inside the window")
+        else:
+            failures.append("no deep data collected in the window")
+    if expect_kernels and kernels == 0:
         failures.append("no kernel rows - the light tier did not run")
 
     if failures:
