@@ -102,16 +102,11 @@ class PcSamplingEngine final : public IProfilingEngine {
     ///        completed by the time the next API callback runs anyway.
     void StopAndCollectPcSampling_(bool sync_device = true);
     /// The cuptiPCSamplingGetData drain loop: parses PC records into
-    /// PC_SAMPLE activity records. Callable while sampling is still armed
-    /// (the NVIDIA pc_sampling sample's serialized-mode pattern - only
-    /// completed kernels' samples are returned) or after a Stop.
+    /// PC_SAMPLE activity records. MUST be called with sampling stopped.
+    /// Calling it while armed does not return the samples AND discards them
+    /// (verified on driver 610.43 / CUDA 13.3: a session that collected
+    /// 24.5M samples with stopped-GetData collected 0 with armed-GetData).
     void CollectPcSamplingData_();
-    /// Shared mid-session collect: throttled armed-GetData, safe to call
-    /// from CUPTI callbacks (try_lock, no cudart, no PCSamplingStop -
-    /// Stop returns 999 inside CUPTI callbacks). `force` bypasses the
-    /// interval throttle (used at process-scope end - the last healthy
-    /// moment before Windows process-exit teardown).
-    void MaybePeriodicCollect_(const char* reason, bool force);
 
     MonitorOptions opts_;
     EngineContext  ctx_;
@@ -128,7 +123,7 @@ class PcSamplingEngine final : public IProfilingEngine {
     // Kernel-timeline collection mode, parsed once from GPUFL_PC_KERNEL_COLLECT
     // in initialize(). drain_unavailable_ latches when a mid-run stop/flush
     // returns INSUFFICIENT_PRIVILEGES so we stop retrying and degrade to
-    // armed-GetData (sample-only) collection.
+    // sample-only collection.
     KernelCollect kernel_collect_ = KernelCollect::None;
     std::atomic<bool> drain_unavailable_{false};
 
@@ -137,17 +132,8 @@ class PcSamplingEngine final : public IProfilingEngine {
     // session stop/shutdown. Without it a cycle's Stop could interleave
     // with a scope-begin Start.
     std::mutex sampling_lifecycle_mu_;
-    // Minimum gap between periodic collects. Short GPU phases (a script
-    // whose kernels all finish within seconds of context creation) must
-    // still get at least one mid-run collect before exit teardown breaks
-    // cuptiPCSamplingStop, so this errs small; each collect is one
-    // stop→GetData→start cycle (~sub-ms) on the app thread.
+    // Minimum gap between kernel-activity drains (GPUFL_PC_KERNEL_COLLECT=all).
     static constexpr int64_t kCollectIntervalNs = 1'000'000'000;  // 1 s
-    // Last sample-only GetData collect, wall ns. This is intentionally
-    // separate from last_kernel_drain_ns_: launch callbacks may sample often,
-    // but they must not starve the plain-thread stop/flush/start drain that
-    // pulls kernel activity records.
-    std::atomic<int64_t> last_sample_collect_ns_{0};
     // Last kernel activity drain (stop -> flush -> start), wall ns.
     std::atomic<int64_t> last_kernel_drain_ns_{0};
 
