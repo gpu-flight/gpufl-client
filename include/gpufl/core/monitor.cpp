@@ -37,6 +37,11 @@ namespace gpufl {
 RingBuffer<ActivityRecord, kMonitorBufferSize> g_monitorBuffer;
 
 namespace {
+// Set once by Monitor::Initialize; see Monitor::ResolvedProfilingEngine.
+std::atomic<ProfilingEngine> g_resolvedProfilingEngine{ProfilingEngine::Monitor};
+}  // namespace
+
+namespace {
 
 /**
  * @brief Manages metadata joins, demangling, and execution signatures.
@@ -486,6 +491,13 @@ void CollectorLoop() {
 void Monitor::Initialize(const MonitorOptions& opts) {
     if (g_state.initialized.exchange(true)) return;
 
+    // The engine AFTER env overrides. InitOptions::profiling_engine is the
+    // pre-override request, and `gpufl trace --passes X` overrides only the
+    // MonitorOptions copy - so anything reporting which engine ran must read
+    // it from here, not from g_opts.
+    g_resolvedProfilingEngine.store(opts.profiling_engine,
+                                    std::memory_order_release);
+
     g_monitorBuffer.resetDroppedCount();
     g_state.batches.reset();
     g_state.metadata.reset();
@@ -623,8 +635,15 @@ void Monitor::RecordStop(void* handle, StreamHandle) {
 
 void Monitor::BeginProfilerScope(const char* name) { if (auto* b = GetBackend()) b->OnScopeStart(name); }
 void Monitor::EndProfilerScope(const char* name) { if (auto* b = GetBackend()) b->OnScopeStop(name); }
+ProfilingEngine Monitor::ResolvedProfilingEngine() {
+    return g_resolvedProfilingEngine.load(std::memory_order_acquire);
+}
+
 void Monitor::BeginDeepWindowScope(const char* name) { if (auto* b = GetBackend()) b->OnDeepWindowStart(name); }
-void Monitor::EndDeepWindowScope(const char* name) { if (auto* b = GetBackend()) b->OnDeepWindowStop(name); }
+std::vector<std::string> Monitor::EndDeepWindowScope(const char* name) {
+    if (auto* b = GetBackend()) return b->OnDeepWindowStop(name);
+    return {};
+}
 void Monitor::BeginDeepWindowPerfScope(const char* name) { if (auto* b = GetBackend()) b->OnDeepWindowPerfStart(name); }
 void Monitor::EndDeepWindowPerfScope(const char* name) { if (auto* b = GetBackend()) b->OnDeepWindowPerfStop(name); }
 void Monitor::BeginPerfScope(const char* name) { if (auto* b = GetBackend()) b->OnPerfScopeStart(name); }

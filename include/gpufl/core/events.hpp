@@ -655,7 +655,11 @@ struct DeepWindowEvent {
     std::string session_id;
     std::string name;
     std::string close_reason;   // DeepWindowCloseName(): "deadline" | ...
-    std::string engine;         // ProfilingEngineWireName of the armed engine
+    // Wire names of the deep engines this window actually armed. Empty means
+    // the window opened but armed nothing, which is a real outcome worth
+    // recording. Trace never appears here: it runs session-wide rather than
+    // arming with the window.
+    std::vector<std::string> engines;
     int64_t start_ns = 0;
     int64_t end_ns = 0;
     int64_t duration_ns = 0;

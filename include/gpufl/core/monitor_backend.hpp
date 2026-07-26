@@ -1,6 +1,8 @@
 #pragma once
 
 #include <optional>
+#include <string>
+#include <vector>
 
 #include "gpufl/core/events.hpp"
 #include "gpufl/core/monitor.hpp"
@@ -100,7 +102,38 @@ class IMonitorBackend {
      * which is right for every backend that arms unconditionally.
      */
     virtual void OnDeepWindowStart(const char* name) { OnScopeStart(name); }
-    virtual void OnDeepWindowStop(const char* name) { OnScopeStop(name); }
+
+    /**
+     * @brief Disarm, and report the wire names of the engines that WERE armed.
+     *
+     * An empty list means this window armed nothing, which is a real outcome
+     * and not an error signal. Trace is never listed: it collects for the
+     * whole session rather than arming with the window, so naming it here
+     * would credit the window with data it did not gate.
+     *
+     * The names are read here rather than through a separate query for two
+     * reasons. They have to be sampled BEFORE the disarm - afterwards nothing
+     * is armed and the answer is always empty - and folding it into the call
+     * that does the disarming makes that ordering impossible to get wrong.
+     *
+     * Deliberately a point-in-time reading, NOT the session's verdict.
+     * capture_capabilities.selected_engine answers "what did this session end
+     * up being" and can only be computed at session end, since it depends on
+     * what each engine finally produced. A window needs the other question:
+     * "what was armed while THIS window was open". The two legitimately
+     * differ - a Deep run whose SASS declines its first arm falls back to PC
+     * sampling, and a window that closed before an engine got blocked saw a
+     * different world than the session summary reports. Keeping both is what
+     * makes the window row an audit record rather than a duplicate.
+     *
+     * This is also what explains a window's launch coverage: a set containing
+     * SASS or a replaying Range profiler covers ~25x fewer launches per second
+     * than one holding only PC or PM sampling.
+     */
+    virtual std::vector<std::string> OnDeepWindowStop(const char* name) {
+        OnScopeStop(name);
+        return {};
+    }
 
     /** @brief Periodically drain buffered profiling data. Thread-safe. */
     virtual void DrainProfilingData() {}

@@ -326,8 +326,26 @@ class Monitor {
      * Same engines, but routed separately so a WindowOnly backend can arm
      * for a window without arming for every user scope.
      */
+    /**
+     * @brief The profiling engine actually in use, after env overrides.
+     *
+     * InitOptions::profiling_engine is only the request:
+     * `gpufl trace --passes X` sets GPUFL_PROFILING_ENGINE, which
+     * gpufl::init() applies to its MonitorOptions copy and NOT to g_opts.
+     * Anything that REPORTS which engine ran has to read it here, or an
+     * injected run mislabels itself as whatever the injection preset asked
+     * for. Monitor (the default) until Initialize() has run.
+     */
+    static ProfilingEngine ResolvedProfilingEngine();
+
     static void BeginDeepWindowScope(const char* name);
-    static void EndDeepWindowScope(const char* name);
+    /**
+     * @brief Disarms, and returns the wire names of the engines that were
+     * armed for the window (empty when no backend, or when none armed). See
+     * IMonitorBackend::OnDeepWindowStop for why the names come back from the
+     * disarm rather than from a separate query.
+     */
+    static std::vector<std::string> EndDeepWindowScope(const char* name);
     static void BeginDeepWindowPerfScope(const char* name);
     static void EndDeepWindowPerfScope(const char* name);
 

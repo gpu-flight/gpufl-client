@@ -7,6 +7,14 @@
 namespace gpufl::model {
 
 std::string DeepWindowModel::buildJson() const {
+    std::ostringstream engines;
+    engines << '[';
+    for (size_t i = 0; i < e_.engines.size(); ++i) {
+        if (i) engines << ',';
+        engines << '"' << jsonEscape(e_.engines[i]) << '"';
+    }
+    engines << ']';
+
     std::ostringstream oss;
     oss << "{\"type\":\"deep_window_event\""
         << ",\"pid\":"                     << e_.pid
@@ -14,7 +22,7 @@ std::string DeepWindowModel::buildJson() const {
         << ",\"session_id\":\""            << jsonEscape(e_.session_id)   << "\""
         << ",\"name\":\""                  << jsonEscape(e_.name)         << "\""
         << ",\"close_reason\":\""          << jsonEscape(e_.close_reason) << "\""
-        << ",\"engine\":\""                << jsonEscape(e_.engine)       << "\""
+        << ",\"engines\":"                 << engines.str()
         << ",\"start_ns\":"                << e_.start_ns
         << ",\"end_ns\":"                  << e_.end_ns
         << ",\"duration_ns\":"             << e_.duration_ns

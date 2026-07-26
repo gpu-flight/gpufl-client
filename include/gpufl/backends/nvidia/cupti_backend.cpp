@@ -762,6 +762,24 @@ void CuptiBackend::DrainProfilingData() {
     if (rebound) cuCtxSetCurrent(prev);
 }
 
+std::vector<std::string> CuptiBackend::ArmedEngineWireNames_() const {
+    // Reuses the inspector the capability rows are built from, so a combo, a
+    // Deep run and a single engine all narrow the same way: each path reports
+    // what it actually took, not what was asked for. Deep in particular asks
+    // for SASS + PC and settles for whichever armed, and those differ by ~25x
+    // in launches covered per second of window.
+    const EngineRuntimeState state = InspectEngineRuntimeState(
+        engine_.get(), opts_.profiling_engine, !combo_.empty());
+
+    std::vector<std::string> out;
+    if (state.sass.active)         out.emplace_back("nvidia.sass_metrics");
+    if (state.pc.active)           out.emplace_back("nvidia.pc_sampling");
+    if (state.pm.active)           out.emplace_back("nvidia.pm_sampling");
+    if (state.range.active)        out.emplace_back("nvidia.range_profiler");
+    if (state.range_kernel.active) out.emplace_back("nvidia.range_profiler_kernel_replay");
+    return out;
+}
+
 void CuptiBackend::ServiceDeepWindow() {
     if (!initialized_ || !active_.load(std::memory_order_relaxed)) return;
     // Lock-free gate: skip the context work when there is nothing to do.

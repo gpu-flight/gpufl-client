@@ -235,7 +235,6 @@ void DeepWindow::Close(const DeepWindowClose reason) {
         ev.pid                    = detail::GetPid();
         ev.name                   = g_name;
         ev.close_reason           = DeepWindowCloseName(reason);
-        ev.engine                 = ProfilingEngineWireName(g_opts.profiling_engine);
         ev.start_ns               = start_ns;
         ev.end_ns                 = end_ns;
         ev.duration_ns            = end_ns - start_ns;
@@ -249,9 +248,22 @@ void DeepWindow::Close(const DeepWindowClose reason) {
         // it - the engines' own exit handling flushes there instead. The
         // event below is still written so the window is on the record.
         if (!detail::isProcessExitTeardown()) {
-            Monitor::EndDeepWindowScope(name.c_str());
+            // The disarm hands back what WAS armed - an audit record of this
+            // window, distinct from the session-end verdict in
+            // capture_capabilities, which the two can legitimately disagree
+            // with when an engine fell back or got blocked mid-run.
+            ev.engines = Monitor::EndDeepWindowScope(name.c_str());
             detail::EndPerfScopeIfEnabled(name.c_str(), ev.pid, start_ns, end_ns,
                                           /*is_deep_window=*/true);
+        } else {
+            // Teardown skipped the disarm, so nothing observed the armed set.
+            // Name the resolved request instead - less trustworthy than a real
+            // reading, but close_reason marks the row as a teardown close.
+            // Not folded into an empty-list check: an empty list from a real
+            // disarm means this window armed nothing, and overwriting that
+            // would erase the one record of it.
+            ev.engines = {
+                ProfilingEngineWireName(Monitor::ResolvedProfilingEngine())};
         }
     }
 

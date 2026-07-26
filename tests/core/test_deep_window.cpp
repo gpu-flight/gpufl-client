@@ -342,7 +342,7 @@ TEST(DeepWindowModelTest, SerializesRequestedBoundsAlongsideTheOutcome) {
     e.session_id = "sess-1";
     e.name = "deep_window";
     e.close_reason = "deadline";
-    e.engine = "nvidia.pc_sampling";
+    e.engines = {"nvidia.sass_metrics", "nvidia.pc_sampling"};
     e.start_ns = 1000;
     e.end_ns = 3000;
     e.duration_ns = 2000;
@@ -353,9 +353,33 @@ TEST(DeepWindowModelTest, SerializesRequestedBoundsAlongsideTheOutcome) {
     const std::string json = gpufl::model::DeepWindowModel(e).buildJson();
     EXPECT_NE(json.find("\"type\":\"deep_window_event\""), std::string::npos);
     EXPECT_NE(json.find("\"close_reason\":\"deadline\""), std::string::npos);
-    EXPECT_NE(json.find("\"engine\":\"nvidia.pc_sampling\""), std::string::npos);
+    EXPECT_NE(
+        json.find("\"engines\":[\"nvidia.sass_metrics\",\"nvidia.pc_sampling\"]"),
+        std::string::npos);
     EXPECT_NE(json.find("\"launches_covered\":12"), std::string::npos);
     EXPECT_NE(json.find("\"requested_duration_ms\":3000"), std::string::npos);
     EXPECT_NE(json.find("\"duration_ns\":2000"), std::string::npos);
     EXPECT_EQ(gpufl::model::DeepWindowModel(e).channel(), gpufl::Channel::Scope);
+}
+
+TEST(DeepWindowModelTest, EmptyEngineListSerializesAsAnEmptyArray) {
+    // A window that armed nothing is a real outcome - the one PC sampling
+    // produces when its arm is refused - so it has to survive the wire as an
+    // empty list rather than as a missing field or a sentinel string.
+    gpufl::DeepWindowEvent e;
+    e.name = "deep_window";
+    e.close_reason = "deadline";
+
+    const std::string json = gpufl::model::DeepWindowModel(e).buildJson();
+    EXPECT_NE(json.find("\"engines\":[]"), std::string::npos);
+}
+
+TEST(DeepWindowModelTest, SingleEngineSerializesAsAOneElementArray) {
+    gpufl::DeepWindowEvent e;
+    e.name = "deep_window";
+    e.engines = {"nvidia.pm_sampling"};
+
+    const std::string json = gpufl::model::DeepWindowModel(e).buildJson();
+    EXPECT_NE(json.find("\"engines\":[\"nvidia.pm_sampling\"]"),
+              std::string::npos);
 }
