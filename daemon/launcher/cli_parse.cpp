@@ -172,12 +172,18 @@ const char* traceHelp() {
         "                            then disarm. Unlike --window the target keeps\n"
         "                            running. Needs a bound below. Default: 0 (arm\n"
         "                            at the first kernel launch).\n"
-        "        --deep-for=<DUR>    How long the deep window stays armed.\n"
+        "        --deep-for=<DUR>    How long the deep window stays armed. Note this\n"
+        "                            bounds TIME, which does not bound how much the\n"
+        "                            engines actually collect - see --deep-launches.\n"
         "        --deep-launches=<N> Kernel-launch bound on the deep window; ends it\n"
-        "                            at whichever bound is hit first. PREFER THIS for\n"
-        "                            SASS / Range: replay re-runs every kernel, so a\n"
+        "                            at whichever bound is hit first. PREFER THIS.\n"
+        "                            For SASS / Range replay re-runs every kernel, so a\n"
         "                            second of wall time covers ~25x less work there\n"
-        "                            than under PM sampling.\n"
+        "                            than under PM sampling. For PcSampling it is what\n"
+        "                            decides whether you get data at all: samples only\n"
+        "                            become readable after a few thousand launches, so\n"
+        "                            a short --deep-for window (or any window over\n"
+        "                            slow kernels) can collect nothing.\n"
         "        --deep-cooldown=<DUR>\n"
         "                            Quiet time before another window may open.\n"
         "        --pc-sample-period=<N>\n"
@@ -393,6 +399,24 @@ TraceParseResult parseTraceArgs(const std::vector<std::string>& argv) {
                         " (expected a duration like 30s, 500ms, 5m, 1h, "
                         "or a bare number of seconds)"};
             }
+            // A bare number is seconds, which collides with --deep-launches:
+            // `--deep-for=2000` meaning "2000 launches" silently becomes a
+            // 33-minute window, and the no-bound check below can't catch it
+            // because a bound *was* given. Reject the unit-less form once it
+            // is too large to plausibly be a duration someone typed on
+            // purpose - naming the alternative, since that is the mistake.
+            const bool unitless =
+                !v.empty() &&
+                v.find_first_not_of("0123456789") == std::string::npos;
+            if (key == "--deep-for" && unitless && ms >= 600'000) {
+                return {std::nullopt,
+                        "--deep-for=" + v + " means " + std::to_string(ms / 1000) +
+                        " SECONDS (a bare number is seconds), which is almost "
+                        "certainly not what you meant. Add a unit (e.g. " + v +
+                        "s, 5m) if you really want that long a window, or use "
+                        "--deep-launches " + v + " to bound it by kernel "
+                        "launches instead"};
+            }
             if (key == "--deep-after")         out.deep_after_ms = ms;
             else if (key == "--deep-for")      out.deep_for_ms = ms;
             else                               out.deep_cooldown_ms = ms;
@@ -443,10 +467,11 @@ TraceParseResult parseTraceArgs(const std::vector<std::string>& argv) {
     // just "profile deeply for the whole run" with extra steps.
     if (out.deep_requested && out.deep_for_ms == 0 && out.deep_launches == 0) {
         return {std::nullopt,
-                "a deep window needs a bound: pass --deep-for <duration> "
-                "or --deep-launches <n> (prefer --deep-launches for the "
-                "replay engines, where a second of wall time covers far "
-                "less work)"};
+                "a deep window needs a bound: pass --deep-launches <n> or "
+                "--deep-for <duration> (prefer --deep-launches: it is what "
+                "the engines actually scale with. The replay engines cover "
+                "far less work per second of wall time, and PC sampling "
+                "returns nothing at all below a few thousand launches)"};
     }
     return {out, ""};
 }

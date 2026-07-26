@@ -59,7 +59,10 @@ BuildPcSamplingConfig(const uint32_t samplingPeriod,
     };
 
     // Kernel-serialized collection plus explicit start/stop lets GPUFL own
-    // the PC sampling lifetime while avoiding mid-session GetData drains.
+    // the PC sampling lifetime. Serialized mode accumulates per kernel range
+    // and nothing is readable until enough ranges pile up, which is why a
+    // session's yield tracks kernel-launch count, not wall time (measured:
+    // 876 launches over 8 s = 0 samples, 2002 over the same 8 s = 87.8M).
     {
         CUpti_PCSamplingConfigurationInfo info = {};
         info.attributeType =
@@ -80,9 +83,11 @@ BuildPcSamplingConfig(const uint32_t samplingPeriod,
         info.attributeType =
             CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_SCRATCH_BUFFER_SIZE;
         // Host-resident staging between HW buffer and GetData. CUPTI sizing:
-        // ~1 MB per ~5,500 PCs with all stall reasons, so 32 MB covers
-        // ~175k distinct PCs per drain window - generous at our 1 s collect
-        // cadence (the old 256 MB was wildly oversized per context).
+        // ~1 MB per ~5,500 PCs with all stall reasons, so 32 MB covers ~175k
+        // distinct PCs - ample for the single end-of-scope read (the old
+        // 256 MB was wildly oversized per context). Sizing this up does not
+        // rescue a session that collected nothing: 256 MB was measured to
+        // make no difference.
         info.attributeData.scratchBufferSizeData.scratchBufferSize =
             32 * 1024 * 1024;
         addConfig(info);
@@ -97,8 +102,9 @@ BuildPcSamplingConfig(const uint32_t samplingPeriod,
     }
 
     // Explicit start/stop is required before cuptiPCSamplingStart/Stop.
-    // Do not call cuptiPCSamplingGetData while sampling is active; on CUDA
-    // 13.x this can drain the buffer and leave the final collection empty.
+    // Never call cuptiPCSamplingGetData while sampling is armed: it returns
+    // nothing AND discards what was buffered, so the final read comes back
+    // empty. See the collection note above StopAndCollectPcSampling_.
     {
         CUpti_PCSamplingConfigurationInfo info = {};
         info.attributeType =
