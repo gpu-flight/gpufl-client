@@ -180,6 +180,58 @@ TEST(CliParseTrace, AfterWindowBogusRejected) {
     EXPECT_NE(r.error.find("invalid --after-window"), std::string::npos);
 }
 
+// ── --deep-*: bound the DEEP engines inside a target that keeps running,
+// as opposed to --window, which bounds the target's lifetime.
+
+TEST(CliParseTrace, DeepWindowFlagsParse) {
+    auto r = parseTraceArgs(argsFor({"--deep-after=30s", "--deep-for=3s",
+                                     "--deep-cooldown=1m", "--", "./bin"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    EXPECT_EQ(r.args->deep_after_ms, 30000);
+    EXPECT_EQ(r.args->deep_for_ms, 3000);
+    EXPECT_EQ(r.args->deep_cooldown_ms, 60000);
+    EXPECT_TRUE(r.args->deep_requested);
+}
+
+TEST(CliParseTrace, DeepLaunchesParses) {
+    auto r = parseTraceArgs(argsFor({"--deep-launches", "500", "--", "./bin"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    EXPECT_EQ(r.args->deep_launches, 500u);
+    EXPECT_TRUE(r.args->deep_requested);
+}
+
+TEST(CliParseTrace, DeepWindowWithoutABoundRejected) {
+    // An unbounded deep window is just "profile deeply for the whole run".
+    auto r = parseTraceArgs(argsFor({"--deep-after=30s", "--", "./bin"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("needs a bound"), std::string::npos);
+}
+
+TEST(CliParseTrace, DeepLaunchesAloneIsABound) {
+    auto r = parseTraceArgs(argsFor({"--deep-launches=200", "--", "./bin"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    EXPECT_EQ(r.args->deep_after_ms, 0) << "arms at the first launch";
+}
+
+TEST(CliParseTrace, DeepLaunchesZeroRejected) {
+    auto r = parseTraceArgs(argsFor({"--deep-launches=0", "--", "./bin"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("invalid --deep-launches"), std::string::npos);
+}
+
+TEST(CliParseTrace, DeepForBogusDurationRejected) {
+    auto r = parseTraceArgs(argsFor({"--deep-for=soon", "--", "./bin"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("invalid --deep-for"), std::string::npos);
+}
+
+TEST(CliParseTrace, NoDeepFlagsLeavesDeepWindowOff) {
+    auto r = parseTraceArgs(argsFor({"--window=10s", "--", "./bin"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    EXPECT_FALSE(r.args->deep_requested);
+    EXPECT_EQ(r.args->window_ms, 10000) << "--window is unaffected";
+}
+
 TEST(CliParseTrace, EngineFlagRejectedWithMigrationHint) {
     auto r = parseTraceArgs(argsFor({"--engine=Deep", "--", "./bin"}));
     EXPECT_FALSE(r.args.has_value());

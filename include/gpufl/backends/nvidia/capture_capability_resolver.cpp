@@ -22,11 +22,27 @@ std::vector<std::string> BuildCaptureCapabilityWarnings(
     std::vector<std::string> warnings;
     if (input.requests.pc && input.engine_state.pc.active &&
         !input.engine_state.pc.has_data) {
+        // What decides this is the number of kernel launches sampled, not
+        // wall time: in KERNEL_SERIALIZED mode nothing is readable until
+        // enough kernel ranges have accumulated. Measured on an RTX 5060 /
+        // CUDA 13.3, same 8 s window: 876 launches returned 0 samples, 2002
+        // returned 87.8M. So the old advice here was actively wrong - a
+        // "heavier" workload means fewer launches, and a finer
+        // --pc-sample-period costs enough overhead to cut the launches
+        // covered (992 -> 58 in a fixed window), moving further from the
+        // threshold in both cases.
+        // No count in the text: launch_count is process-wide, while what
+        // matters is how many launches happened while sampling was armed -
+        // for a deep window those differ by a lot, and quoting the wrong one
+        // contradicts the advice.
         warnings.push_back(
-            "[gpufl] PC sampling collected 0 stall samples - the profiled "
-            "workload was too short for the sampling interval. Run a "
-            "longer/heavier workload, or sample more frequently with "
-            "`gpufl trace --pc-sample-period <N>` (lower N).");
+            "[gpufl] PC sampling collected 0 stall samples - too few kernel "
+            "launches were sampled. PC sampling accumulates per kernel and "
+            "needs a few thousand launches before any samples are readable. "
+            "Sample more launches - note that a longer wall-clock window is "
+            "not the same thing: a slow-kernel workload can run for seconds "
+            "and still cover too few. With a deep window, bound it with "
+            "`--deep-launches <n>` rather than `--deep-for <duration>`.");
     }
     if (input.requests.sass && input.engine_state.sass.active &&
         !input.engine_state.sass.has_data) {

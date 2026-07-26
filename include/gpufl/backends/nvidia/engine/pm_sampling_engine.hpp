@@ -29,6 +29,9 @@ class PmSamplingEngine final : public IProfilingEngine {
 
     void onScopeStart(const char* name) override;
     void onScopeStop(const char* name) override;
+    // Drains the hardware buffer mid-scope; see the definition for why a
+    // scope longer than the buffer span otherwise loses everything.
+    void drainData() override;
 
     bool hasInsufficientPrivileges() const override {
         return insufficient_privileges_.load(std::memory_order_relaxed);
@@ -42,12 +45,22 @@ class PmSamplingEngine final : public IProfilingEngine {
     }
 
    private:
+    // True when sampling arms on scope start rather than at session start.
+    // A deep window IS a scope, so WindowOnly reduces to the same gate the
+    // PM engine has always had.
+    bool ScopeGated_() const {
+        return opts_.pm_sampling_scope_only ||
+               opts_.deep_arm_mode == DeepArmMode::WindowOnly;
+    }
     std::vector<std::string> ResolveMetrics_() const;
     void EmitConfig_() const;
 
 #if GPUFL_HAS_PERFWORKS
     bool InitializePmSampling_();
     bool BuildConfigImage_();
+    bool ResetCounterDataImage_();
+    int64_t BufferSpanNs_() const;
+    int64_t last_drain_ns_ = 0;
     // Log the chip's single-pass metric sets (the metric bundles collectible
     // in one pass) and their metrics. The set names are chip-specific, so
     // they're queried at runtime. Read-only (chip query, no host object / no

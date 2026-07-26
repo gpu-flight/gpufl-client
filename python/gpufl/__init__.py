@@ -182,6 +182,8 @@ _preload_matching_perfworks()
 try:
     from ._gpufl_client import (
         Scope as _CScope, init, shutdown, system_start, system_stop,
+        deep_window as _c_deep_window, deep_window_close as _c_deep_window_close,
+        deep_window_active as _c_deep_window_active,
         BackendKind, InitOptions, ProfilingEngine,
         upload_logs as _c_upload_logs, UploadOptions, UploadResult,
     )
@@ -208,6 +210,15 @@ except ImportError as e:
 
     def system_stop(name="system"):
         return None
+
+    def _c_deep_window(seconds=0.0, max_launches=0):
+        return None
+
+    def _c_deep_window_close():
+        return None
+
+    def _c_deep_window_active():
+        return False
 
     class BackendKind:
         Auto = "Auto"
@@ -591,6 +602,56 @@ def system_stop(name="system"):
     if _disabled:
         return None
     return _original_system_stop(name)
+
+
+def deep_window(seconds=0.0, max_launches=0):
+    """Arm deep profiling for a short, self-closing window.
+
+    Lets a long-running job profile the moment it went wrong without
+    carrying replay cost for its whole lifetime::
+
+        if tokens_per_sec < 1000:
+            gpufl.deep_window(3.0)
+
+    Returns immediately; the workload keeps running through the window and
+    past its end. Calling it again while a window is open is ignored rather
+    than treated as an extension, so a check inside a training loop can run
+    every step without pinning the window open.
+
+    Args:
+        seconds:      Wall-clock bound. 0 = no time bound.
+        max_launches: Launch-callback bound. 0 = no launch bound. Counts
+                      kernel-launch API callbacks, not kernels - the runtime
+                      API path reports roughly two per launch.
+
+    The two bounds combine with OR - whichever is reached first closes the
+    window. Prefer a launch budget when the engine replays kernels (SASS,
+    Range profiler): measured on one workload, a 1-second window covered
+    ~1200 launches under PM sampling but ~50 under SASS metrics. Bounds are
+    observed at launch boundaries, so a window overruns its deadline by up
+    to one kernel launch. The coverage the window actually got, and which
+    bound ended it, are recorded in the session's deep_window event.
+
+    Requires an engine that supports deep capture; a no-op under
+    ProfilingEngine.Monitor or when gpufl is disabled.
+    """
+    if _disabled:
+        return None
+    return _c_deep_window(seconds, max_launches)
+
+
+def deep_window_close():
+    """Close the current deep window early. No-op when none is open."""
+    if _disabled:
+        return None
+    return _c_deep_window_close()
+
+
+def deep_window_active():
+    """True while a deep window is open."""
+    if _disabled:
+        return False
+    return _c_deep_window_active()
 
 
 # ── upload_logs: deferred bulk upload to the backend ────────────────────────
@@ -1015,6 +1076,7 @@ from ._targeting import targeting  # noqa: E402
 __all__ = [
     "Scope", "init", "shutdown", "session", "clean_logs", "targeting",
     "system_start", "system_stop",
+    "deep_window", "deep_window_close", "deep_window_active",
     "BackendKind", "InitOptions", "ProfilingEngine",
     "upload_logs", "UploadOptions", "UploadResult",
 ]

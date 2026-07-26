@@ -37,6 +37,11 @@ namespace gpufl {
 RingBuffer<ActivityRecord, kMonitorBufferSize> g_monitorBuffer;
 
 namespace {
+// Set once by Monitor::Initialize; see Monitor::ResolvedProfilingEngine.
+std::atomic<ProfilingEngine> g_resolvedProfilingEngine{ProfilingEngine::Monitor};
+}  // namespace
+
+namespace {
 
 /**
  * @brief Manages metadata joins, demangling, and execution signatures.
@@ -449,6 +454,11 @@ void CollectorLoop() {
             g_state.drainAck.store(req, std::memory_order_release);
         }
 
+        // Every iteration, not on the 250ms flush beat below: this is what
+        // decides how closely a deep window tracks its deadline, and it is a
+        // lock-free check when no window is closing.
+        if (g_state.adapter) g_state.adapter->serviceDeepWindow();
+
         if (!RecordProcessor::processNext()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
@@ -480,6 +490,13 @@ void CollectorLoop() {
 
 void Monitor::Initialize(const MonitorOptions& opts) {
     if (g_state.initialized.exchange(true)) return;
+
+    // The engine AFTER env overrides. InitOptions::profiling_engine is the
+    // pre-override request, and `gpufl trace --passes X` overrides only the
+    // MonitorOptions copy - so anything reporting which engine ran must read
+    // it from here, not from g_opts.
+    g_resolvedProfilingEngine.store(opts.profiling_engine,
+                                    std::memory_order_release);
 
     g_monitorBuffer.resetDroppedCount();
     g_state.batches.reset();
@@ -618,6 +635,17 @@ void Monitor::RecordStop(void* handle, StreamHandle) {
 
 void Monitor::BeginProfilerScope(const char* name) { if (auto* b = GetBackend()) b->OnScopeStart(name); }
 void Monitor::EndProfilerScope(const char* name) { if (auto* b = GetBackend()) b->OnScopeStop(name); }
+ProfilingEngine Monitor::ResolvedProfilingEngine() {
+    return g_resolvedProfilingEngine.load(std::memory_order_acquire);
+}
+
+void Monitor::BeginDeepWindowScope(const char* name) { if (auto* b = GetBackend()) b->OnDeepWindowStart(name); }
+std::vector<std::string> Monitor::EndDeepWindowScope(const char* name) {
+    if (auto* b = GetBackend()) return b->OnDeepWindowStop(name);
+    return {};
+}
+void Monitor::BeginDeepWindowPerfScope(const char* name) { if (auto* b = GetBackend()) b->OnDeepWindowPerfStart(name); }
+void Monitor::EndDeepWindowPerfScope(const char* name) { if (auto* b = GetBackend()) b->OnDeepWindowPerfStop(name); }
 void Monitor::BeginPerfScope(const char* name) { if (auto* b = GetBackend()) b->OnPerfScopeStart(name); }
 void Monitor::EndPerfScope(const char* name) { if (auto* b = GetBackend()) b->OnPerfScopeStop(name); }
 
@@ -632,6 +660,12 @@ void Monitor::PushActivityRecord(const ActivityRecord& rec) { g_monitorBuffer.Pu
 void Monitor::PushScopeRow(const ScopeBatchRow& row) {
     g_state.batches.pushTrackedScopeRow(row);
 }
+
+uint64_t Monitor::AllocateScopeInstanceId() {
+    return g_state.batches.allocateScopeInstanceId();
+}
+
+int Monitor::OpenScopeDepth() { return g_state.batches.openScopeDepth(); }
 
 void Monitor::PushProfileSamples(const std::vector<ProfileSampleInput>& samples) {
     if (samples.empty()) return;

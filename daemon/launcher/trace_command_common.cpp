@@ -616,6 +616,34 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
         return 2;
     }
 
+    // --deep-*: bound how long the DEEP engines stay armed inside a target
+    // that keeps running. Distinct from --window above, which bounds the
+    // target's lifetime. Asking for a deep window implies window-only
+    // arming, or the engines would be armed from the first kernel and the
+    // window would bound nothing.
+    if (args.deep_requested) {
+        if (!setEnvOrPrint(platform, env::kDeepArm, "window") ||
+            !setEnvOrPrint(platform, env::kDeepAfterMs,
+                           std::to_string(args.deep_after_ms))) {
+            return 2;
+        }
+        if (args.deep_for_ms > 0 &&
+            !setEnvOrPrint(platform, env::kDeepWindowMs,
+                           std::to_string(args.deep_for_ms))) {
+            return 2;
+        }
+        if (args.deep_launches > 0 &&
+            !setEnvOrPrint(platform, env::kDeepWindowMaxLaunches,
+                           std::to_string(args.deep_launches))) {
+            return 2;
+        }
+        if (args.deep_cooldown_ms > 0 &&
+            !setEnvOrPrint(platform, env::kDeepWindowCooldownMs,
+                           std::to_string(args.deep_cooldown_ms))) {
+            return 2;
+        }
+    }
+
     // A bounded window stops the target after warmup+window wall-clock;
     // run_ms == 0 keeps the historical "run until the target exits" behavior.
     RunOptions run_opts;

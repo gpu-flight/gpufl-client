@@ -1,6 +1,8 @@
 #pragma once
 
 #include <optional>
+#include <string>
+#include <vector>
 
 #include "gpufl/core/events.hpp"
 #include "gpufl/core/monitor.hpp"
@@ -88,11 +90,73 @@ class IMonitorBackend {
     virtual void OnScopeStart(const char* name) {}
     virtual void OnScopeStop(const char* name) {}
 
+    /**
+     * @brief Scope hooks for a bounded deep window, as opposed to an
+     * ordinary user scope.
+     *
+     * They arm and disarm the same engines, but a backend running in
+     * DeepArmMode::WindowOnly has to tell the two apart: under that mode
+     * ordinary scopes must NOT arm anything, or a per-step GFL_SCOPE in a
+     * training loop would leave the engines armed for the whole run and
+     * the window would mean nothing. Default: identical to a user scope,
+     * which is right for every backend that arms unconditionally.
+     */
+    virtual void OnDeepWindowStart(const char* name) { OnScopeStart(name); }
+
+    /**
+     * @brief Disarm, and report the wire names of the engines that WERE armed.
+     *
+     * An empty list means this window armed nothing, which is a real outcome
+     * and not an error signal. Trace is never listed: it collects for the
+     * whole session rather than arming with the window, so naming it here
+     * would credit the window with data it did not gate.
+     *
+     * The names are read here rather than through a separate query for two
+     * reasons. They have to be sampled BEFORE the disarm - afterwards nothing
+     * is armed and the answer is always empty - and folding it into the call
+     * that does the disarming makes that ordering impossible to get wrong.
+     *
+     * Deliberately a point-in-time reading, NOT the session's verdict.
+     * capture_capabilities.selected_engine answers "what did this session end
+     * up being" and can only be computed at session end, since it depends on
+     * what each engine finally produced. A window needs the other question:
+     * "what was armed while THIS window was open". The two legitimately
+     * differ - a Deep run whose SASS declines its first arm falls back to PC
+     * sampling, and a window that closed before an engine got blocked saw a
+     * different world than the session summary reports. Keeping both is what
+     * makes the window row an audit record rather than a duplicate.
+     *
+     * This is also what explains a window's launch coverage: a set containing
+     * SASS or a replaying Range profiler covers ~25x fewer launches per second
+     * than one holding only PC or PM sampling.
+     */
+    virtual std::vector<std::string> OnDeepWindowStop(const char* name) {
+        OnScopeStop(name);
+        return {};
+    }
+
     /** @brief Periodically drain buffered profiling data. Thread-safe. */
     virtual void DrainProfilingData() {}
 
+    /**
+     * @brief Close a deep window whose bound has been reached.
+     *
+     * Called from the collector on every iteration, not on the slower flush
+     * beat, because it decides how closely a window tracks its deadline.
+     * Must stay cheap when there is nothing to close.
+     *
+     * It lives here rather than on the launch callback because the engines'
+     * teardown calls fail with CUPTI_ERROR_UNKNOWN when made from inside a
+     * CUPTI callback; the collector is off that path and can make the CUDA
+     * context current itself.
+     */
+    virtual void ServiceDeepWindow() {}
+
     virtual void OnPerfScopeStart(const char* name) {}
     virtual void OnPerfScopeStop(const char* name) {}
+    // Perf-scope counterparts of OnDeepWindowStart/Stop; see those.
+    virtual void OnDeepWindowPerfStart(const char* name) { OnPerfScopeStart(name); }
+    virtual void OnDeepWindowPerfStop(const char* name) { OnPerfScopeStop(name); }
     virtual std::optional<PerfMetricEvent> TakeLastPerfEvent() { return std::nullopt; }
 };
 

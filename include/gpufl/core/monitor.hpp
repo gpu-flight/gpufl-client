@@ -133,6 +133,22 @@ inline const char* ProfilingEngineSessionKind(const ProfilingEngine engine) {
     return "monitor";
 }
 
+/**
+ * @brief When the deep engines hold their hardware resources armed.
+ *
+ *   Always     - armed from session start to session stop.
+ *   WindowOnly - idle until a deep window opens (gpufl::deepWindow), and
+ *                idle again once it closes. Lets a long-running job carry
+ *                deep capture without paying for it outside the moments
+ *                it asked for.
+ *
+ * Only the engines that hold a replay or sampling session care. Cubin
+ * capture and the CUPTI subscriber run from process start either way -
+ * they have to, or SASS correlation loses the modules loaded before the
+ * first window.
+ */
+enum class DeepArmMode { Always, WindowOnly };
+
 struct MonitorOptions {
     bool enable_debug_output = false;
     bool enable_stack_trace = false;
@@ -175,6 +191,7 @@ struct MonitorOptions {
     std::string pm_sampling_preset = "overview";
     std::vector<std::string> pm_sampling_metrics;
     bool pm_sampling_scope_only = true;
+    DeepArmMode deep_arm_mode = DeepArmMode::Always;
     // Default Monitor: no CUPTI. The user-facing default lives on
     // InitOptions (gpufl.hpp); this internal default matches it so a
     // bare MonitorOptions (e.g. the system-monitor daemon, which only
@@ -304,6 +321,35 @@ class Monitor {
     static void EndProfilerScope(const char* name);
 
     /**
+     * @brief Profiler scope control for a bounded deep window.
+     *
+     * Same engines, but routed separately so a WindowOnly backend can arm
+     * for a window without arming for every user scope.
+     */
+    /**
+     * @brief The profiling engine actually in use, after env overrides.
+     *
+     * InitOptions::profiling_engine is only the request:
+     * `gpufl trace --passes X` sets GPUFL_PROFILING_ENGINE, which
+     * gpufl::init() applies to its MonitorOptions copy and NOT to g_opts.
+     * Anything that REPORTS which engine ran has to read it here, or an
+     * injected run mislabels itself as whatever the injection preset asked
+     * for. Monitor (the default) until Initialize() has run.
+     */
+    static ProfilingEngine ResolvedProfilingEngine();
+
+    static void BeginDeepWindowScope(const char* name);
+    /**
+     * @brief Disarms, and returns the wire names of the engines that were
+     * armed for the window (empty when no backend, or when none armed). See
+     * IMonitorBackend::OnDeepWindowStop for why the names come back from the
+     * disarm rather than from a separate query.
+     */
+    static std::vector<std::string> EndDeepWindowScope(const char* name);
+    static void BeginDeepWindowPerfScope(const char* name);
+    static void EndDeepWindowPerfScope(const char* name);
+
+    /**
      * @brief Hardware counter (Perfworks) scope control
      */
     static void BeginPerfScope(const char* name);
@@ -338,6 +384,9 @@ class Monitor {
      * @brief Push a pre-built ScopeBatchRow into the scope batch buffer.
      */
     static void PushScopeRow(const ScopeBatchRow& row);
+    static uint64_t AllocateScopeInstanceId();
+    /** @brief Depth a scope opened right now would nest at. */
+    static int OpenScopeDepth();
 
     /**
      *  Push a raw activity record into the monitor ring buffer.

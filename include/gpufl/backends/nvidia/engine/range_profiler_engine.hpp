@@ -55,6 +55,9 @@ class RangeProfilerEngine final : public IProfilingEngine {
     bool InitPerfworksSession_(bool require_single_pass);
     void EndPerfPassAndDecode_();
     void DecodeKernelReplayEvents_();
+    // Arms kernel replay on an already-built Perfworks session. Called from
+    // start(), or from onPerfScopeStart when a deep window defers the arm.
+    void StartKernelReplay_();
 
     bool                       perf_session_active_  = false;
     mutable std::mutex         perf_mu_;

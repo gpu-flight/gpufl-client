@@ -113,26 +113,37 @@ void RangeProfilerEngine::start() {
     if (!perf_session_active_) {
         InitPerfworksSession_(mode_ == Mode::Scope);
     }
-    if (mode_ == Mode::KernelReplay && perf_session_active_) {
-        if (kernel_replay_running_) {
-            GFL_LOG_DEBUG("[RangeProfilerKernelReplay] start skipped: already running");
-            return;
-        }
-        CUpti_RangeProfiler_Start_Params p = {
-            CUpti_RangeProfiler_Start_Params_STRUCT_SIZE};
-        p.pRangeProfilerObject = range_profiler_object_;
-        if (LogCuptiErrorIfFailed(this->name(), "cuptiRangeProfilerStart",
-                                  cuptiRangeProfilerStart(&p))) {
-            return;
-        }
-        kernel_replay_running_ = true;
-        kernel_replay_decoded_ = false;
-        GFL_LOG_DEBUG("[RangeProfilerKernelReplay] started");
+    // WindowOnly keeps the Perfworks session built but the replay stopped:
+    // kernel replay re-runs every kernel, so leaving it running for the
+    // whole session is exactly the cost a window exists to avoid. It arms
+    // in onPerfScopeStart instead.
+    if (mode_ == Mode::KernelReplay && perf_session_active_ &&
+        opts_.deep_arm_mode != DeepArmMode::WindowOnly) {
+        StartKernelReplay_();
     }
 #else
     GFL_LOG_ERROR("[RangeProfilerEngine] Not built with GPUFL_HAS_PERFWORKS");
 #endif
 }
+
+#if GPUFL_HAS_PERFWORKS
+void RangeProfilerEngine::StartKernelReplay_() {
+    if (kernel_replay_running_) {
+        GFL_LOG_DEBUG("[RangeProfilerKernelReplay] start skipped: already running");
+        return;
+    }
+    CUpti_RangeProfiler_Start_Params p = {
+        CUpti_RangeProfiler_Start_Params_STRUCT_SIZE};
+    p.pRangeProfilerObject = range_profiler_object_;
+    if (LogCuptiErrorIfFailed(this->name(), "cuptiRangeProfilerStart",
+                              cuptiRangeProfilerStart(&p))) {
+        return;
+    }
+    kernel_replay_running_ = true;
+    kernel_replay_decoded_ = false;
+    GFL_LOG_DEBUG("[RangeProfilerKernelReplay] started");
+}
+#endif
 
 void RangeProfilerEngine::stop() {
 #if GPUFL_HAS_PERFWORKS
@@ -195,6 +206,14 @@ void RangeProfilerEngine::shutdown() {
 
 void RangeProfilerEngine::onPerfScopeStart(const char* name) {
 #if GPUFL_HAS_PERFWORKS
+    if (mode_ == Mode::KernelReplay) {
+        // WindowOnly deferred the replay arm out of start() to here.
+        if (opts_.deep_arm_mode == DeepArmMode::WindowOnly &&
+            perf_session_active_) {
+            StartKernelReplay_();
+        }
+        return;
+    }
     if (mode_ != Mode::Scope) return;
     attempted_.store(true, std::memory_order_relaxed);
     GFL_LOG_DEBUG("[RangeProfilerEngine] onPerfScopeStart name=",
@@ -237,6 +256,12 @@ void RangeProfilerEngine::onPerfScopeStart(const char* name) {
 
 void RangeProfilerEngine::onPerfScopeStop(const char* name) {
 #if GPUFL_HAS_PERFWORKS
+    if (mode_ == Mode::KernelReplay) {
+        // Stops the replay and decodes what it collected; the Perfworks
+        // session stays built so the next window can arm again.
+        if (opts_.deep_arm_mode == DeepArmMode::WindowOnly) stop();
+        return;
+    }
     if (mode_ != Mode::Scope) return;
     GFL_LOG_DEBUG("[RangeProfilerEngine] onPerfScopeStop name=",
                   (name ? name : "(null)"), " active=", perf_session_active_);

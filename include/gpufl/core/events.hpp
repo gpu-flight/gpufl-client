@@ -639,6 +639,37 @@ struct NvtxMarkerEvent {
 };
 
 /**
+ * One bounded deep-profiling window: the region between a
+ * gpufl::deepWindow() trigger and the bound that closed it.
+ *
+ * Deep engines arm on open and disarm on close, so this is the only
+ * record of what the window actually covered. Both the requested bounds
+ * and the outcome are carried, because they routinely disagree: under
+ * kernel replay a three-second window can cover a dozen launches, and
+ * `close_reason` is what tells the reader that was the deadline expiring
+ * rather than the profiler failing.
+ */
+struct DeepWindowEvent {
+    int pid = 0;
+    std::string app;
+    std::string session_id;
+    std::string name;
+    std::string close_reason;   // DeepWindowCloseName(): "deadline" | ...
+    // Wire names of the deep engines this window actually armed. Empty means
+    // the window opened but armed nothing, which is a real outcome worth
+    // recording. Trace never appears here: it runs session-wide rather than
+    // arming with the window.
+    std::vector<std::string> engines;
+    int64_t start_ns = 0;
+    int64_t end_ns = 0;
+    int64_t duration_ns = 0;
+    uint64_t launches_covered = 0;
+    // What the caller asked for, so a short window is self-explanatory.
+    int64_t requested_duration_ms = 0;
+    uint64_t requested_max_launches = 0;
+};
+
+/**
  * One CUDA graph launch event captured by CUPTI's
  * CUPTI_ACTIVITY_KIND_GRAPH_TRACE stream.
  *

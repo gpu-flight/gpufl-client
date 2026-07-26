@@ -142,6 +142,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
                      std::string pm_sampling_preset,
                      std::vector<std::string> pm_sampling_metrics,
                      bool pm_sampling_scope_only,
+                     bool deep_window_only,
                      bool flush_logs_always) -> bool {
 
         gpufl::InitOptions opts;
@@ -166,6 +167,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
         opts.pm_sampling_preset          = std::move(pm_sampling_preset);
         opts.pm_sampling_metrics         = std::move(pm_sampling_metrics);
         opts.pm_sampling_scope_only      = pm_sampling_scope_only;
+        opts.deep_window_only            = deep_window_only;
 
         return gpufl::init(opts);
     }, py::arg("app_name"),
@@ -188,6 +190,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
        py::arg("pm_sampling_preset")          = "overview",
        py::arg("pm_sampling_metrics")         = std::vector<std::string>{},
        py::arg("pm_sampling_scope_only")      = true,
+       py::arg("deep_window_only")            = false,
        py::arg("flush_logs_always")           = false);
 
     m.def("system_start", [](std::string name) { gpufl::systemStart(std::move(name)); },
@@ -195,6 +198,15 @@ PYBIND11_MODULE(_gpufl_client, m) {
 
     m.def("system_stop", [](std::string name) { gpufl::systemStop(std::move(name)); },
         py::arg("name") = "system");
+
+    m.def("deep_window",
+          [](double seconds, uint64_t max_launches) {
+              gpufl::deepWindow(static_cast<int64_t>(seconds * 1000.0),
+                                max_launches);
+          },
+          py::arg("seconds") = 0.0, py::arg("max_launches") = 0);
+    m.def("deep_window_close", &gpufl::deepWindowClose);
+    m.def("deep_window_active", &gpufl::deepWindowActive);
 
     m.def("shutdown", &gpufl::shutdown);
 

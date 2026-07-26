@@ -42,6 +42,7 @@ add_executable(memory_coalescing_demo memory_coalescing_demo.cu)
 add_executable(shared_bank_conflicts_demo shared_bank_conflicts_demo.cu)
 add_executable(deep_deadlock_repro deep_deadlock_repro.cu)
 add_executable(multi_engine_demo multi_engine_demo.cu)
+add_executable(deep_window_demo deep_window_demo.cu)
 
 target_compile_options(gfl_block_example PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:
@@ -182,6 +183,17 @@ target_link_libraries(multi_engine_demo PRIVATE
         CUDA::cupti
         CUDA::cudart
 )
+
+target_link_libraries(deep_window_demo PRIVATE
+        gpufl::gpufl
+        CUDA::cupti
+        CUDA::cudart
+)
+# PC / SASS want the cubin embedded for source correlation.
+target_compile_options(deep_window_demo PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:
+        -lineinfo
+        >)
 
 
 # Properties

@@ -181,13 +181,33 @@ class CuptiBackend : public IMonitorBackend {
 
     void EmitCaptureCapabilities_() const;
 
+    // In WindowOnly mode an ordinary user scope must not arm anything -
+    // otherwise a per-step GFL_SCOPE in a training loop keeps the engines
+    // armed for the whole run and the window means nothing. Deep windows
+    // come in through OnDeepWindowStart/Stop, which never gate.
+    bool ScopeArmsEngines_() const {
+        return opts_.deep_arm_mode != DeepArmMode::WindowOnly;
+    }
+
     void OnScopeStart(const char* name) override {
         GFL_LOG_DEBUG("OnScopeStart");
-        if (engine_) engine_->onScopeStart(name);
+        if (!ScopeArmsEngines_()) return;
+        OnDeepWindowStart(name);
     }
     void DrainProfilingData() override;
+    void ServiceDeepWindow() override;
     void OnScopeStop(const char* name) override {
         GFL_LOG_DEBUG("OnScopeStop");
+        if (!ScopeArmsEngines_()) return;
+        OnDeepWindowStop(name);
+    }
+
+    void OnDeepWindowStart(const char* name) override {
+        if (engine_) engine_->onScopeStart(name);
+    }
+    std::vector<std::string> OnDeepWindowStop(const char* name) override {
+        // Sample BEFORE the disarm below - afterwards nothing reads as armed.
+        std::vector<std::string> armed = ArmedEngineWireNames_();
         if (engine_) engine_->onScopeStop(name);
         // cuptiActivityFlushAll(1) permanently kills the CUPTI subscriber
         // callback when the SamplingAPI is armed (enableStartStopControl=0,
@@ -198,11 +218,20 @@ class CuptiBackend : public IMonitorBackend {
             opts_.profiling_engine == ProfilingEngine::Deep) {
             cudaDeviceSynchronize();
         }
+        return armed;
     }
     void OnPerfScopeStart(const char* name) override {
-        if (engine_) engine_->onPerfScopeStart(name);
+        if (!ScopeArmsEngines_()) return;
+        OnDeepWindowPerfStart(name);
     }
     void OnPerfScopeStop(const char* name) override {
+        if (!ScopeArmsEngines_()) return;
+        OnDeepWindowPerfStop(name);
+    }
+    void OnDeepWindowPerfStart(const char* name) override {
+        if (engine_) engine_->onPerfScopeStart(name);
+    }
+    void OnDeepWindowPerfStop(const char* name) override {
         if (engine_) engine_->onPerfScopeStop(name);
     }
     std::optional<PerfMetricEvent> TakeLastPerfEvent() override {
@@ -211,6 +240,13 @@ class CuptiBackend : public IMonitorBackend {
     }
 
    private:
+    // Wire names of the deep engines armed right now, in a stable order.
+    // Reports what each engine actually took rather than what was requested,
+    // so a Deep run whose SASS declined lists only PC sampling. Trace is
+    // absent by construction: it is not scope-gated, so a window never arms
+    // or disarms it.
+    std::vector<std::string> ArmedEngineWireNames_() const;
+
     bool ShouldEnableNvtxMarkerActivityBeforeEngine_() const;
     bool ShouldEnableNvtxMarkerActivityForSelectedEngine_() const;
     static void EnableNvtxMarkerActivity_(const char* phase);
