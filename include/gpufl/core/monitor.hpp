@@ -384,6 +384,9 @@ class Monitor {
      * @brief Push a pre-built ScopeBatchRow into the scope batch buffer.
      */
     static void PushScopeRow(const ScopeBatchRow& row);
+    static uint64_t AllocateScopeInstanceId();
+    /** @brief Depth a scope opened right now would nest at. */
+    static int OpenScopeDepth();
 
     /**
      *  Push a raw activity record into the monitor ring buffer.

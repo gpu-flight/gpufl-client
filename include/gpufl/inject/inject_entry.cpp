@@ -93,11 +93,6 @@ ProcessScopeState& processScope() {
     return *state;
 }
 
-uint64_t nextProcessScopeId() {
-    static std::atomic<uint64_t> next{1};
-    return next.fetch_add(1, std::memory_order_relaxed);
-}
-
 std::string processScopeName() {
     if (const char* app = std::getenv(gpufl::env::kAppName)) {
         if (app[0] != '\0') return std::string("process:") + app;
@@ -117,7 +112,11 @@ void beginProcessScope() {
 
     state.active = true;
     state.perf_scope = engineNeedsPerfScope();
-    state.instance_id = nextProcessScopeId();
+    // Must come from the shared allocator: instance ids pair begin with end,
+    // and every other scope - user scopes and deep windows - draws from it. A
+    // private counter here starts at 1 too and collides with the first of
+    // those, which pairs the wrong rows together.
+    state.instance_id = gpufl::Monitor::AllocateScopeInstanceId();
     state.name = processScopeName();
     state.name_id = gpufl::Monitor::InternScopeName(state.name);
 

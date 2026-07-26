@@ -18,6 +18,7 @@ void MonitorBatchManager::reset() {
         scopeBatch_.clear();
         profileBatch_.clear();
         pmSampleBatch_.clear();
+        scopeNameStack_.clear();
         openScopeWindows_.clear();
         completedScopeWindows_.clear();
     }
@@ -159,6 +160,11 @@ uint32_t MonitorBatchManager::activeScopeNameId() const {
     return activeScopeNameId_.load(std::memory_order_relaxed);
 }
 
+int MonitorBatchManager::openScopeDepth() const {
+    std::lock_guard lk(scopeBatchMu_);
+    return static_cast<int>(scopeNameStack_.size());
+}
+
 bool MonitorBatchManager::pushKernel(const KernelBatchRow& row,
                                      const KernelDetailRow* detail) {
     kernelBatch_.push(row);
@@ -181,14 +187,25 @@ void MonitorBatchManager::pushTraceScopeRows(const ScopeBatchRow& begin_row,
 }
 
 void MonitorBatchManager::pushTrackedScopeRow(const ScopeBatchRow& row) {
-    if (row.event_type == 0) {
-        activeScopeNameId_.store(row.name_id, std::memory_order_relaxed);
-    }
-
     std::lock_guard lk(scopeBatchMu_);
     if (row.event_type == 0) {
+        scopeNameStack_.emplace_back(row.scope_instance_id, row.name_id);
+        activeScopeNameId_.store(row.name_id, std::memory_order_relaxed);
         openScopeWindows_[row.scope_instance_id] = {row.ts_ns, row.name_id, row.depth};
     } else {
+        // Search from the back: the common case is closing the innermost
+        // scope, and an unmatched id leaves the stack alone rather than
+        // popping somebody else's scope.
+        for (auto it = scopeNameStack_.rbegin(); it != scopeNameStack_.rend(); ++it) {
+            if (it->first == row.scope_instance_id) {
+                scopeNameStack_.erase(std::next(it).base());
+                break;
+            }
+        }
+        activeScopeNameId_.store(
+            scopeNameStack_.empty() ? 0 : scopeNameStack_.back().second,
+            std::memory_order_relaxed);
+
         if (const auto it = openScopeWindows_.find(row.scope_instance_id);
             it != openScopeWindows_.end()) {
             completedScopeWindows_.push_back(

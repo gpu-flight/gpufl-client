@@ -661,6 +661,12 @@ void Monitor::PushScopeRow(const ScopeBatchRow& row) {
     g_state.batches.pushTrackedScopeRow(row);
 }
 
+uint64_t Monitor::AllocateScopeInstanceId() {
+    return g_state.batches.allocateScopeInstanceId();
+}
+
+int Monitor::OpenScopeDepth() { return g_state.batches.openScopeDepth(); }
+
 void Monitor::PushProfileSamples(const std::vector<ProfileSampleInput>& samples) {
     if (samples.empty()) return;
     const uint32_t scope_name_id = g_state.batches.activeScopeNameId();

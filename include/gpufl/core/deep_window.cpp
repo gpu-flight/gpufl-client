@@ -52,6 +52,9 @@ int64_t     g_opened_ns = 0;
 int64_t     g_requested_duration_ms = 0;
 uint64_t    g_requested_max_launches = 0;
 std::string g_name;
+// Pairs the window's scope begin/end rows. 0 = no scope row was pushed, which
+// is what a run with no Monitor backend looks like.
+uint64_t    g_scope_instance_id = 0;
 
 bool ComboActive() {
     const char* combo = std::getenv(env::kEngineCombo);
@@ -196,6 +199,21 @@ bool DeepWindow::Open(const DeepWindowSpec& spec) {
         // consuming budget, and everything it reads is already set.
         g_active.store(true, std::memory_order_release);
 
+        // Open the window as a real scope, not just an arming signal. This is
+        // what puts it on the timeline as its own range AND makes the samples
+        // collected inside it carry the window's name instead of the enclosing
+        // process scope - the sample writers stamp whatever scope is active.
+        // Pushed before the engines arm so nothing collected can land under
+        // the parent name.
+        g_scope_instance_id = Monitor::AllocateScopeInstanceId();
+        ScopeBatchRow open_row;
+        open_row.ts_ns = g_opened_ns;
+        open_row.scope_instance_id = g_scope_instance_id;
+        open_row.name_id = Monitor::InternScopeName(g_name);
+        open_row.event_type = 0;
+        open_row.depth = Monitor::OpenScopeDepth();
+        Monitor::PushScopeRow(open_row);
+
         // Arms the deep engines. Runs under the lock so a concurrent close
         // can't disarm engines this call hasn't armed yet; safe because the
         // arm path doesn't re-enter DeepWindow.
@@ -264,6 +282,22 @@ void DeepWindow::Close(const DeepWindowClose reason) {
             // would erase the one record of it.
             ev.engines = {
                 ProfilingEngineWireName(Monitor::ResolvedProfilingEngine())};
+        }
+
+        // Close the scope last. The disarm above drains what the engines
+        // collected, and those samples belong to this window - closing first
+        // would hand the name back to the process scope and mislabel them.
+        // Pushed even on the teardown path, where skipping it would leave the
+        // scope open and every later sample carrying the window's name.
+        if (g_scope_instance_id != 0) {
+            ScopeBatchRow close_row;
+            close_row.ts_ns = end_ns;
+            close_row.scope_instance_id = g_scope_instance_id;
+            close_row.name_id = Monitor::InternScopeName(name);
+            close_row.event_type = 1;
+            close_row.depth = 0;   // ignored on close; the open row carries it
+            Monitor::PushScopeRow(close_row);
+            g_scope_instance_id = 0;
         }
     }
 
@@ -390,6 +424,7 @@ void DeepWindow::ResetForTesting() {
     g_requested_duration_ms = 0;
     g_requested_max_launches = 0;
     g_name.clear();
+    g_scope_instance_id = 0;
 }
 
 // ---- Public API ----

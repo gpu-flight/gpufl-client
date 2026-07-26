@@ -42,6 +42,8 @@ public:
 
     uint64_t allocateScopeInstanceId();
     uint32_t activeScopeNameId() const;
+    /** @brief How many scopes are open right now; the depth a new one nests at. */
+    int openScopeDepth() const;
 
     bool pushKernel(const KernelBatchRow& row, const KernelDetailRow* detail = nullptr);
     bool pushMemcpy(const MemcpyBatchRow& row);
@@ -94,7 +96,16 @@ private:
     uint64_t pmSampleBatchId_ = 0;
     mutable std::mutex scopeBatchMu_;
     std::atomic<uint64_t> nextScopeInstanceId_{1};
+    // Cached top of scopeNameStack_. Read without the mutex on the sample hot
+    // path, written only while holding it.
     std::atomic<uint32_t> activeScopeNameId_{0};
+    // Scopes currently open, innermost last. A stack rather than a single
+    // value because scopes nest: a deep window opens inside the process scope
+    // and must hand the name back on close, or every sample after it keeps the
+    // window's name. Entries carry their instance id so a close that is not
+    // strictly LIFO - the collector can close a deep window while an
+    // application scope is open - removes the right one.
+    std::vector<std::pair<uint64_t, uint32_t>> scopeNameStack_;
     std::unordered_map<uint64_t, OpenScopeWindow> openScopeWindows_;
     std::vector<ScopeWindow> completedScopeWindows_;
 
