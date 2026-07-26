@@ -77,6 +77,9 @@ Toolkit, Python virtual environment, or wheel ABI.
 # Build a wheel into ./dist
 ./build.sh --wheel
 
+# Build the native gpufl trace launcher and injection library
+./build.sh --trace
+
 # Use an explicit Python and CUDA Toolkit
 ./build-ubuntu.sh --wheel \
   --python .venv/bin/python \
@@ -89,6 +92,7 @@ Useful options:
 |---|---|
 | `--install` | Install the package into the selected Python environment. This is the default. |
 | `--wheel` | Build a wheel into `./dist` or `--wheel-dir`. |
+| `--trace` | Build the native `gpufl` launcher and `libgpufl_inject.so` into `./build-ubuntu`. |
 | `--python PATH` | Python executable to use. Use your target virtual environment's Python when building wheels. |
 | `--cuda-root PATH` | CUDA Toolkit root, for example `/usr/local/cuda-13.2`. |
 | `--wheel-dir PATH` | Output directory for built wheels. |
