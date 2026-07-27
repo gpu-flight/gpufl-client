@@ -654,6 +654,17 @@ if(BUILD_GPUFL_INJECT AND ((UNIX AND NOT APPLE) OR WIN32))
         include/gpufl/inject/inject_entry.cpp
     )
     target_link_libraries(gpufl_inject PRIVATE gpufl::gpufl)
+
+    # The injected DLL is loaded by the CUDA driver into the profiled target,
+    # whose DLL search path has no reason to include our bin directory. The
+    # provider resolves the runtime from the injection DLL's own location, so
+    # it has to be there.
+    add_custom_command(TARGET gpufl_inject POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:gpufl_counter_runtime>
+                $<TARGET_FILE_DIR:gpufl_inject>
+        COMMENT "Colocating gpufl_counter_runtime with gpufl_inject"
+    )
     if(CUDAToolkit_INCLUDE_DIRS)
         target_include_directories(gpufl_inject PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
     endif()
@@ -775,6 +786,16 @@ if(BUILD_PYTHON)
     pybind11_add_module(_gpufl_client python/bindings.cpp)
 
     target_link_libraries(_gpufl_client PRIVATE gpufl::gpufl)
+
+    # Same for the Python extension: it may be the first module to bind, in
+    # which case it is the one that loads the runtime for the whole process.
+    add_custom_command(TARGET _gpufl_client POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:gpufl_counter_runtime>
+                $<TARGET_FILE_DIR:_gpufl_client>
+        COMMENT "Colocating gpufl_counter_runtime with _gpufl_client"
+    )
+    install(TARGETS gpufl_counter_runtime DESTINATION gpufl)
 
     # If CUDA is available, link it to the Python module
     if(GPUFL_HAS_CUDA)

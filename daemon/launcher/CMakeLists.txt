@@ -74,6 +74,18 @@ if(WIN32 AND TARGET gpufl_inject)
         COMMENT "Colocating gpufl_inject.dll next to gpufl.exe")
 endif()
 
+# The counter runtime travels with the inject DLL. Once injected, gpufl_inject
+# resolves it from its OWN directory - the target process's search path is not
+# ours to rely on - so it has to be wherever the inject DLL ended up.
+if(WIN32 AND TARGET gpufl_counter_runtime)
+    add_dependencies(gpufl_launcher gpufl_counter_runtime)
+    add_custom_command(TARGET gpufl_launcher POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:gpufl_counter_runtime>
+            $<TARGET_FILE_DIR:gpufl_launcher>
+        COMMENT "Colocating gpufl_counter_runtime.dll next to gpufl.exe")
+endif()
+
 # On Windows, copy CUPTI / NVPERF DLLs next to gpufl.exe (= beside the
 # colocated gpufl_inject.dll) so the inject DLL's dependencies resolve when
 # the driver loads it into the target. trace_command_win.cpp also prepends
