@@ -1,0 +1,347 @@
+#include "gpufl/core/metric_registry.hpp"
+
+#include <algorithm>
+#include <utility>
+
+#include "gpufl/core/events.hpp"
+
+namespace gpufl::detail {
+namespace {
+
+constexpr int64_t kNsPerMs = 1000000;
+
+}  // namespace
+
+const char* toString(const MetricState s) {
+    switch (s) {
+        case MetricState::Missing:   return "missing";
+        case MetricState::WarmingUp: return "warming_up";
+        case MetricState::Fresh:     return "fresh";
+        case MetricState::Stale:     return "stale";
+    }
+    return "unknown";
+}
+
+// ---------------------------------------------------------------- MetricFeeds
+
+void MetricFeeds::noteKernelLaunch(const int64_t ts_ns) {
+    std::lock_guard lk(mu_);
+    ++launch_.count;
+    launch_.last_event_ns = ts_ns;
+    launch_.seeded = true;
+}
+
+void MetricFeeds::noteKernelDuration(const int64_t ts_ns, const double duration_ms) {
+    std::lock_guard lk(mu_);
+    durations_.samples.push_back(duration_ms);
+    durations_.last_event_ns = ts_ns;
+}
+
+void MetricFeeds::noteDeviceSample(const DeviceSample& sample, const int64_t ts_ns) {
+    if (sample.device_id < 0) return;
+    std::lock_guard lk(mu_);
+    const auto index = static_cast<size_t>(sample.device_id);
+    if (index >= devices_.size()) devices_.resize(index + 1);
+    DeviceGauges& g = devices_[index];
+
+    // The measurement timestamp advances only here, never on a poll. A metric
+    // whose sequence advanced because someone asked about it could never be
+    // detected as dead.
+    g.util.value = static_cast<double>(sample.gpu_util);
+    g.util.last_event_ns = ts_ns;
+    ++g.util.measurements;
+
+    g.power.value = static_cast<double>(sample.power_mw);
+    g.power.last_event_ns = ts_ns;
+    ++g.power.measurements;
+
+    g.sm_clock.value = static_cast<double>(sample.clock_sm);
+    g.sm_clock.last_event_ns = ts_ns;
+    ++g.sm_clock.measurements;
+}
+
+void MetricFeeds::seedStartup(const int64_t ts_ns) {
+    std::lock_guard lk(mu_);
+    if (launch_.seeded) return;
+    launch_.last_event_ns = ts_ns;
+    launch_.seeded = true;
+    durations_.last_event_ns = ts_ns;
+}
+
+int MetricFeeds::deviceCount() const {
+    std::lock_guard lk(mu_);
+    return static_cast<int>(devices_.size());
+}
+
+MetricFeeds::LaunchFeed MetricFeeds::launchFeed() const {
+    std::lock_guard lk(mu_);
+    return launch_;
+}
+
+MetricFeeds::DurationFeed MetricFeeds::drainDurations() {
+    std::lock_guard lk(mu_);
+    DurationFeed out;
+    out.samples = std::move(durations_.samples);
+    out.last_event_ns = durations_.last_event_ns;
+    durations_.samples.clear();
+    return out;
+}
+
+int64_t MetricFeeds::durationsLastEventNs() const {
+    std::lock_guard lk(mu_);
+    return durations_.last_event_ns;
+}
+
+MetricFeeds::GaugeFeed MetricFeeds::gaugeFeed(const MetricKind kind,
+                                              const int device_index) const {
+    std::lock_guard lk(mu_);
+    if (device_index < 0 || static_cast<size_t>(device_index) >= devices_.size()) {
+        return {};
+    }
+    const DeviceGauges& g = devices_[static_cast<size_t>(device_index)];
+    switch (kind) {
+        case MetricKind::GpuUtilPct:    return g.util;
+        case MetricKind::GpuPowerMw:    return g.power;
+        case MetricKind::GpuSmClockMhz: return g.sm_clock;
+        default:                        return {};
+    }
+}
+
+void MetricFeeds::resetForTesting() {
+    std::lock_guard lk(mu_);
+    launch_ = LaunchFeed{};
+    durations_ = DurationFeed{};
+    devices_.clear();
+}
+
+// --------------------------------------------------------------- MetricSource
+
+MetricSource::MetricSource(MetricId id, MetricWindowConfig cfg, MetricFeeds* feeds,
+                           const gpufl_counter_provider_v1* counters)
+    : id_(std::move(id)), cfg_(cfg), feeds_(feeds), counters_(counters) {
+    bucket_ns_ = cfg_.bucketIntervalMs() * kNsPerMs;
+    const auto count = static_cast<size_t>(cfg_.bucketCount());
+    buckets_.assign(count, 0);
+    if (id_.shape() == MetricShape::Percentile) bucket_durations_.resize(count);
+    // The ring, not the configured window, is what the rate divides by: the
+    // bucket count rounds up, so the two differ and using the configured value
+    // would report a rate the samples do not support.
+    window_ns_ = static_cast<int64_t>(count) * bucket_ns_;
+    stale_ns_  = cfg_.stale_after_ms * kNsPerMs;
+}
+
+bool MetricSource::resolveCustomHandle() {
+    if (handle_ != nullptr) return true;
+    if (counters_ == nullptr || counters_->lookup == nullptr) return false;
+    // Lookup, never register. A rule naming a counter asks a question; creating
+    // the counter here would answer it with itself.
+    handle_ = counters_->lookup(id_.custom_name.c_str(), id_.custom_name.size());
+    return handle_ != nullptr;
+}
+
+double MetricSource::windowRatePerSec() const {
+    uint64_t total = 0;
+    for (const uint64_t n : buckets_) total += n;
+    const double seconds = static_cast<double>(window_ns_) / 1e9;
+    if (seconds <= 0.0) return 0.0;
+    return static_cast<double>(total) / seconds;
+}
+
+double MetricSource::windowPercentile() const {
+    std::vector<double> all;
+    for (const auto& bucket : bucket_durations_) {
+        all.insert(all.end(), bucket.begin(), bucket.end());
+    }
+    if (all.empty()) return 0.0;
+    const size_t mid = all.size() / 2;
+    std::nth_element(all.begin(), all.begin() + mid, all.end());
+    return all[mid];
+}
+
+void MetricSource::closeBucket(const int64_t boundary_ns) {
+    head_ = (head_ + 1) % buckets_.size();
+    ++buckets_closed_;
+    ++total_closes_;
+
+    switch (id_.shape()) {
+        case MetricShape::Rate: {
+            uint64_t total = 0;
+            if (id_.kind == MetricKind::KernelLaunchRate) {
+                total = feeds_->launchFeed().count;
+            } else if (resolveCustomHandle()) {
+                total = counters_->load(handle_);
+                if (total > 0) first_tick_seen_ = true;
+            }
+            // Unsigned delta: correct across a wrap, which is why the counter is
+            // allowed to wrap rather than saturate.
+            const uint64_t delta = baselined_ ? total - last_source_total_ : 0;
+            last_source_total_ = total;
+            baselined_ = true;
+            buckets_[head_] = delta;
+            if (delta > 0) last_tick_ns_ = boundary_ns;
+            break;
+        }
+        case MetricShape::Percentile: {
+            MetricFeeds::DurationFeed drained = feeds_->drainDurations();
+            auto& slot = bucket_durations_[head_];
+            slot.clear();
+            if (drained.samples.size() > kMaxDurationsPerBucket) {
+                drained.samples.resize(kMaxDurationsPerBucket);
+            }
+            slot = std::move(drained.samples);
+            break;
+        }
+        case MetricShape::Gauge:
+            break;
+    }
+
+    current_.observed_ns = boundary_ns;
+}
+
+MetricSample MetricSource::poll(const int64_t now_ns) {
+    if (next_boundary_ns_ == 0) {
+        next_boundary_ns_ = now_ns + bucket_ns_;
+        current_.observed_ns = now_ns;
+    }
+
+    // A collector that stalled longer than the whole window has no valid
+    // evidence left, so jump rather than replaying thousands of empty buckets.
+    // Replaying them would also be wrong: it would look like a run of measured
+    // zeros and could fire a stall rule that nothing actually observed.
+    if (now_ns - next_boundary_ns_ > window_ns_) {
+        std::fill(buckets_.begin(), buckets_.end(), 0);
+        for (auto& b : bucket_durations_) b.clear();
+        buckets_closed_ = 0;
+        baselined_ = false;
+        next_boundary_ns_ = now_ns + bucket_ns_;
+        current_.observed_ns = now_ns;
+    }
+
+    while (now_ns >= next_boundary_ns_) {
+        closeBucket(next_boundary_ns_);
+        next_boundary_ns_ += bucket_ns_;
+    }
+
+    const bool window_full = buckets_closed_ >= buckets_.size();
+
+    switch (id_.shape()) {
+        case MetricShape::Rate: {
+            int64_t source_ns = 0;
+            if (id_.kind == MetricKind::KernelLaunchRate) {
+                const MetricFeeds::LaunchFeed feed = feeds_->launchFeed();
+                if (!feed.seeded) {
+                    // Nothing has seeded the launch source, so there is no
+                    // baseline to measure staleness against yet.
+                    current_.state = MetricState::WarmingUp;
+                    current_.observed_ns = now_ns;
+                    current_.sequence = total_closes_;
+                    return current_;
+                }
+                source_ns = feed.last_event_ns;
+            } else {
+                if (!resolveCustomHandle()) {
+                    // Not registered yet. Resolved lazily on purpose: an env
+                    // rule is parsed during init(), long before application code
+                    // reaches gpufl::counter(), so deciding this at install time
+                    // would reject every counter rule before it could exist.
+                    current_.state = MetricState::Missing;
+                    current_.observed_ns = now_ns;
+                    current_.sequence = total_closes_;
+                    return current_;
+                }
+                if (!first_tick_seen_ && counters_->load(handle_) > 0) {
+                    first_tick_seen_ = true;
+                    // Seed the source clock at the moment the counter is first
+                    // seen to move; ticks before this point have no timestamp.
+                    last_tick_ns_ = now_ns;
+                }
+                if (!first_tick_seen_) {
+                    // Registered but never ticked. Not Missing - the counter
+                    // exists - and not Fresh 0 either, because a workload that
+                    // has not started yet must not read as a stalled one.
+                    current_.state = MetricState::WarmingUp;
+                    current_.observed_ns = now_ns;
+                    current_.sequence = total_closes_;
+                    return current_;
+                }
+                source_ns = last_tick_ns_;
+            }
+
+            current_.value = windowRatePerSec();
+            current_.last_source_event_ns = source_ns;
+            // Every closed bucket is a publication, including one with no
+            // ticks. That is what lets a genuine zero accumulate as evidence
+            // instead of looking like "no new data" - without it, the stall a
+            // rule most needs to catch is the one case it never could.
+            current_.sequence = total_closes_;
+            if (!window_full) {
+                current_.state = MetricState::WarmingUp;
+            } else if (now_ns - source_ns > stale_ns_) {
+                current_.state = MetricState::Stale;
+            } else {
+                current_.state = MetricState::Fresh;
+            }
+            break;
+        }
+        case MetricShape::Percentile: {
+            const bool have_samples =
+                std::any_of(bucket_durations_.begin(), bucket_durations_.end(),
+                            [](const std::vector<double>& b) { return !b.empty(); });
+            if (!window_full) {
+                current_.state = MetricState::WarmingUp;
+                break;
+            }
+            if (!have_samples) {
+                // An empty window has no percentile, so nothing is published:
+                // neither a value nor a new sequence. Publishing 0 ms would read
+                // as instantaneous kernels rather than no kernels, and a rule
+                // watching for slow kernels would silently never fire.
+                current_.state = MetricState::Stale;
+                break;
+            }
+            if (total_closes_ != last_published_close_) {
+                last_published_close_ = total_closes_;
+                ++sequence_;
+            }
+            current_.value = windowPercentile();
+            current_.last_source_event_ns = feeds_->durationsLastEventNs();
+            current_.sequence = sequence_;
+            current_.state = MetricState::Fresh;
+            break;
+        }
+        case MetricShape::Gauge: {
+            const MetricFeeds::GaugeFeed feed =
+                feeds_->gaugeFeed(id_.kind, id_.device_index);
+            if (feed.measurements == 0) {
+                current_.state = MetricState::WarmingUp;
+                break;
+            }
+            current_.value = feed.value;
+            current_.last_source_event_ns = feed.last_event_ns;
+            // Measurements, not polls. A sequence that advanced because someone
+            // asked would let one reading satisfy sustained_ms on its own.
+            current_.sequence = feed.measurements;
+            current_.state = now_ns - feed.last_event_ns > stale_ns_
+                                 ? MetricState::Stale
+                                 : MetricState::Fresh;
+            break;
+        }
+    }
+
+    return current_;
+}
+
+void MetricSource::resetEpoch(const int64_t now_ns) {
+    std::fill(buckets_.begin(), buckets_.end(), 0);
+    for (auto& b : bucket_durations_) b.clear();
+    buckets_closed_ = 0;
+    baselined_ = false;
+    next_boundary_ns_ = now_ns + bucket_ns_;
+    current_.observed_ns = now_ns;
+    current_.state = MetricState::WarmingUp;
+    // Drop anything the feed accumulated during the window for the same reason
+    // the buckets are cleared: it describes a contaminated workload.
+    if (id_.shape() == MetricShape::Percentile) feeds_->drainDurations();
+}
+
+}  // namespace gpufl::detail

@@ -45,6 +45,13 @@ uint64_t LocalLoadSinceBaseline(gpufl_counter_handle h) {
     return LocalSlot(h, &slot) ? CounterRegistry::instance().valueSinceBaseline(slot) : 0;
 }
 
+gpufl_counter_handle LocalLookup(const char* name, size_t len) {
+    if (name == nullptr) return nullptr;
+    const auto slot = CounterRegistry::instance().findCounter(std::string(name, len));
+    if (slot == CounterRegistry::kInvalidSlot) return nullptr;
+    return reinterpret_cast<gpufl_counter_handle>(static_cast<uintptr_t>(slot) + 1u);
+}
+
 void LocalBeginSession() { CounterRegistry::instance().beginSession(); }
 void LocalEndSession() { CounterRegistry::instance().endSession(); }
 int LocalSessionActive() { return CounterRegistry::instance().sessionActive() ? 1 : 0; }
@@ -54,6 +61,7 @@ const gpufl_counter_provider_v1 kLocalProvider = {
     sizeof(gpufl_counter_provider_v1),
     &LocalRegister, &LocalAdd, &LocalLoad, &LocalLoadSinceBaseline,
     &LocalBeginSession, &LocalEndSession, &LocalSessionActive,
+    &LocalLookup,
 };
 
 }  // namespace

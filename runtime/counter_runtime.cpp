@@ -56,6 +56,12 @@ uint64_t LoadSinceBaseline(const gpufl_counter_handle handle) {
     return CounterRegistry::instance().valueSinceBaseline(slot);
 }
 
+gpufl_counter_handle Lookup(const char* name, const size_t name_length) {
+    if (name == nullptr) return nullptr;
+    return ToHandle(CounterRegistry::instance().findCounter(
+        std::string(name, name_length)));
+}
+
 void BeginSession() { CounterRegistry::instance().beginSession(); }
 void EndSession() { CounterRegistry::instance().endSession(); }
 int SessionActive() { return CounterRegistry::instance().sessionActive() ? 1 : 0; }
@@ -70,6 +76,7 @@ const gpufl_counter_provider_v1 kProvider = {
     &BeginSession,
     &EndSession,
     &SessionActive,
+    &Lookup,
 };
 
 }  // namespace

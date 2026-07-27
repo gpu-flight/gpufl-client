@@ -33,6 +33,12 @@ std::string CounterRegistry::forLog(const std::string& name) {
     return name.substr(0, kMaxLogged) + "...(" + std::to_string(name.size()) + " chars)";
 }
 
+CounterRegistry::SlotId CounterRegistry::findCounter(const std::string& name) const {
+    std::lock_guard lk(mu_);
+    const auto it = byName_.find(name);
+    return it == byName_.end() ? kInvalidSlot : it->second;
+}
+
 CounterRegistry::SlotId CounterRegistry::registerCounter(const std::string& name) {
     if (!nameIsValid(name)) {
         std::lock_guard lk(mu_);

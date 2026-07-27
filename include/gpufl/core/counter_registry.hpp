@@ -70,6 +70,16 @@ public:
     SlotId registerCounter(const std::string& name);
 
     /**
+     * @brief Find @p name WITHOUT creating it. kInvalidSlot if absent.
+     *
+     * For readers that must not bring a counter into existence by asking about
+     * it - a rule naming a counter is a question, not a registration, and
+     * conflating the two hides the difference between a config typo and an idle
+     * workload.
+     */
+    SlotId findCounter(const std::string& name) const;
+
+    /**
      * @brief Stable address of a slot's value, or nullptr for kInvalidSlot.
      *
      * Handed to the caller once, at registration, so add() never touches the

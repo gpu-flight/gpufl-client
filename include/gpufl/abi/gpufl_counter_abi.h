@@ -70,6 +70,18 @@ typedef struct gpufl_counter_provider_v1 {
     void (*begin_session)(void);
     void (*end_session)(void);
     int  (*session_active)(void);
+
+    /*
+     * Find WITHOUT creating. Returns NULL when the application has not
+     * registered this counter.
+     *
+     * A rule naming a counter must not bring it into existence: doing so makes
+     * "the application never registered it" indistinguishable from "registered
+     * but never ticked", and those need different answers - the first is a
+     * config mistake worth reporting, the second is a workload that is simply
+     * idle.
+     */
+    gpufl_counter_handle (*lookup)(const char* name, size_t name_length);
 } gpufl_counter_provider_v1;
 
 /*
