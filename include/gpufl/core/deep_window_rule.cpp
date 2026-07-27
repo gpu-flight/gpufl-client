@@ -401,6 +401,7 @@ void RuleEvaluator::poll(const int64_t now_ns) {
     have_sequence_ = true;
 
     ++samples_seen_;
+    truncated_samples_ = sample.truncated_samples;
     last_value_ = sample.value;
     last_observed_ns_ = sample.observed_ns;
 
@@ -495,6 +496,7 @@ RuleSummary RuleEvaluator::snapshot(const int64_t now_ns) const {
     s.last_value = last_value_;
     s.last_observed_ns = last_observed_ns_;
     s.last_metric_state = last_metric_state_;
+    s.truncated_samples = truncated_samples_;
     s.reason = reason_;
     s.state_sequence = state_sequence_;
     s.emitted_ns = now_ns;

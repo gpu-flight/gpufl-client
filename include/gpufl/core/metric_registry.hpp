@@ -53,6 +53,15 @@ struct MetricSample {
     int64_t     last_source_event_ns = 0;
     uint64_t    sequence = 0;
     MetricState state = MetricState::Missing;
+    /**
+     * Completed kernels the feed had to discard before this reading.
+     *
+     * Non-zero means the value was computed from a subset. Travels WITH the
+     * sample rather than sitting in a counter nobody reads: a percentile over
+     * part of the data looks exactly like one over all of it, and the reader
+     * deciding what a rule concluded is the one who needs to know.
+     */
+    uint64_t    truncated_samples = 0;
 
     bool usable() const { return state == MetricState::Fresh; }
 };

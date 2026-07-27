@@ -159,6 +159,15 @@ struct RuleSummary {
     std::optional<double>  last_value;
     std::optional<int64_t> last_observed_ns;
     MetricState last_metric_state = MetricState::Missing;
+    /**
+     * Completed kernels discarded across the run.
+     *
+     * Reported so a conclusion drawn from a partial percentile is not
+     * presented as one drawn from all of it. Counted rather than used to
+     * suppress the metric: truncation starts at launch rates far below what
+     * the workloads this feature targets actually reach.
+     */
+    uint64_t    truncated_samples = 0;
     std::string reason;
     uint64_t    state_sequence = 0;
     int64_t     emitted_ns = 0;
@@ -286,6 +295,7 @@ private:
     std::optional<double>  last_value_;
     std::optional<int64_t> last_observed_ns_;
     MetricState last_metric_state_ = MetricState::Missing;
+    uint64_t    truncated_samples_ = 0;
 
     uint64_t pending_token_ = 0;
     bool     window_was_active_ = false;

@@ -535,4 +535,34 @@ TEST_F(MetricSourceTest, TruncationIsCountedWhereSomeoneCanSeeIt) {
         << "samples were discarded and nothing recorded it";
 }
 
+TEST_F(MetricSourceTest, TruncationTravelsWithTheReading) {
+    // An internal counter nobody reads cannot stop a partial percentile being
+    // presented as a complete one. The number has to reach whoever draws the
+    // conclusion, so it rides on the sample.
+    const MetricWindowConfig cfg{1000, 2000, 5000};
+    MetricSource src(parse("recent_kernel_ms"), cfg, &feeds, ActiveCounterProvider());
+    feeds.seedStartup(0);
+    src.poll(0);
+
+    for (size_t i = 0; i < MetricFeeds::kMaxPendingDurations + 1000; ++i) {
+        feeds.noteKernelDuration(10 * kMs, 5.0);
+    }
+    const auto s = advance(src, 10 * kMs, 1500 * kMs, 10 * kMs);
+    EXPECT_GT(s.truncated_samples, 0u)
+        << "the reading claims to be complete when it is not";
+}
+
+TEST_F(MetricSourceTest, AnUntruncatedReadingSaysSoWithZero) {
+    const MetricWindowConfig cfg{1000, 2000, 5000};
+    MetricSource src(parse("recent_kernel_ms"), cfg, &feeds, ActiveCounterProvider());
+    feeds.seedStartup(0);
+    for (int64_t t = 0; t < 1200 * kMs; t += 10 * kMs) {
+        feeds.noteKernelDuration(t, 3.0);
+        src.poll(t);
+    }
+    const auto s = src.poll(1200 * kMs);
+    ASSERT_EQ(s.state, MetricState::Fresh);
+    EXPECT_EQ(s.truncated_samples, 0u);
+}
+
 }  // namespace

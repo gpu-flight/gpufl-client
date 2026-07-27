@@ -66,6 +66,7 @@ std::string DeepWindowRuleSummaryModel::buildJson() const {
         << ",\"metric_state\":\""   << jsonEscape(e_.metric_state) << "\""
         << ",\"samples_seen\":"     << e_.samples_seen
         << ",\"windows_opened\":"   << e_.windows_opened
+        << ",\"truncated_samples\":" << e_.truncated_samples
         << ",\"state_sequence\":"   << e_.state_sequence
         << ",\"emitted_ns\":"       << e_.emitted_ns;
     // Written only when there is one. A null would have to be distinguished

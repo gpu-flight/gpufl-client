@@ -626,4 +626,21 @@ TEST_F(RuleEvaluatorTest, TheShutdownSummaryOutranksTheTransitionOne) {
 }
 
 
+TEST_F(RuleEvaluatorTest, TheSummaryReportsHowMuchDataWasDiscarded) {
+    // A conclusion drawn from a partial percentile must not read like one
+    // drawn from all of it, and the summary is where that conclusion lands.
+    DeepWindowRule rule = makeRule("recent_kernel_ms>1000 for 500ms");
+    MetricSource src(rule.metric, rule.timing, &feeds, ActiveCounterProvider());
+    RuleEvaluator ev(rule, "r1", RuleCapabilities{}, &src, coord.hooks());
+    feeds.seedStartup(0);
+
+    for (size_t i = 0; i < MetricFeeds::kMaxPendingDurations + 500; ++i) {
+        feeds.noteKernelDuration(10 * kMs, 2.0);
+    }
+    for (int64_t t = 0; t <= 2000 * kMs; t += 10 * kMs) ev.poll(t);
+
+    EXPECT_GT(ev.finish(2000 * kMs).truncated_samples, 0u)
+        << "the session concluded from a subset and never said so";
+}
+
 }  // namespace

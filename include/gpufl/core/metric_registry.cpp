@@ -261,6 +261,8 @@ void MetricSource::closeBucket(const int64_t boundary_ns) {
 }
 
 MetricSample MetricSource::poll(const int64_t now_ns) {
+    // Refreshed on every reading, including the early returns below.
+    current_.truncated_samples = durations_truncated_;
     if (next_boundary_ns_ == 0) {
         next_boundary_ns_ = now_ns + bucket_ns_;
         current_.observed_ns = now_ns;

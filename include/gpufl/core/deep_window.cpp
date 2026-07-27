@@ -443,11 +443,16 @@ void DeepWindow::ScheduleOpenAfter(const int64_t delay_ms,
 // Runs on the collector, off the CUPTI callback path. Claims the request
 // before opening so nothing can act on it twice.
 void DeepWindow::TakePendingOpen_() {
-    if (!g_open_requested.exchange(false, std::memory_order_acq_rel)) return;
-
     DeepWindowSpec spec;
     {
         std::lock_guard lk(g_mu);
+        // The flag and the record are claimed TOGETHER. Clearing the flag
+        // first and then taking the lock left a gap: a producer could acquire
+        // the lock, see nothing queued, and store its own request - which this
+        // collector then consumed believing it was the earlier one, while the
+        // producer's flag stayed set and let the same request open a second
+        // window later.
+        if (!g_open_requested.exchange(false, std::memory_order_acq_rel)) return;
         spec = g_pending.spec;
         // Claim the token here, not in Open(): Open can still refuse, and a
         // token left behind would keep reading as "queued" for the rest of the

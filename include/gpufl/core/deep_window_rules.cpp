@@ -213,6 +213,7 @@ void EmitSummary(const RuleSummary& summary, const std::string& expression) {
     ev.metric_state   = toString(summary.last_metric_state);
     ev.samples_seen   = summary.samples_seen;
     ev.windows_opened = summary.windows_opened;
+    ev.truncated_samples = summary.truncated_samples;
     ev.has_last_value = summary.last_value.has_value();
     if (ev.has_last_value) {
         ev.last_value = *summary.last_value;

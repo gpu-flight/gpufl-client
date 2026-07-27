@@ -722,6 +722,14 @@ struct DeepWindowRuleSummaryEvent {
     bool     has_last_value = false;
     double   last_value = 0.0;
     int64_t  last_observed_ns = 0;
+    /**
+     * Completed kernels discarded before the percentile was computed.
+     *
+     * 0 for every metric that is not a percentile, and for a percentile that
+     * kept everything. Non-zero says the conclusion rests on a subset - which
+     * a value alone can never show.
+     */
+    uint64_t truncated_samples = 0;
     // Monotonic, so a redelivered or late record cannot overwrite a newer one.
     uint64_t state_sequence = 0;
     int64_t  emitted_ns = 0;
