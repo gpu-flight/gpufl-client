@@ -385,8 +385,12 @@ uint64_t DeepWindow::RequestOpenTagged(const DeepWindowSpec& spec) {
         g_pending.spec = spec;
         g_pending.owner_token = token;
         g_pending_open_at_ns.store(0, std::memory_order_relaxed);
+        // Published INSIDE the lock. Releasing first left a window where a
+        // second caller took the lock, saw no request queued, and overwrote
+        // this one - which is precisely the first-wins rule this is meant to
+        // enforce, defeated by two threads asking at once.
+        g_open_requested.store(true, std::memory_order_release);
     }
-    g_open_requested.store(true, std::memory_order_release);
     GFL_LOG_DEBUG("[DeepWindow] tagged open requested token=", token,
                   " duration_ms=", spec.max_duration_ms);
     return token;
@@ -426,9 +430,11 @@ void DeepWindow::ScheduleOpenAfter(const int64_t delay_ms,
         g_pending_open_at_ns.store(
             delay_ms > 0 ? detail::GetTimestampNs() + delay_ms * 1000000 : 0,
             std::memory_order_relaxed);
+        // Under the lock, for the same reason as the tagged path: the launch
+        // beat still reads the spec only once this is set, and a concurrent
+        // caller can no longer slip in between the two.
+        g_open_requested.store(true, std::memory_order_release);
     }
-    // Published last: the launch beat reads the spec only once this is set.
-    g_open_requested.store(true, std::memory_order_release);
     GFL_LOG_DEBUG("[DeepWindow] open requested delay_ms=", delay_ms,
                   " duration_ms=", spec.max_duration_ms,
                   " max_launches=", spec.max_launches);
