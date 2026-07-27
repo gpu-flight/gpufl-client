@@ -79,6 +79,12 @@ std::atomic<uint64_t>* CounterRegistry::valueSlot(SlotId slot) {
     return &slots_[slot].value;
 }
 
+void CounterRegistry::addRaw(SlotId slot, uint64_t value) {
+    std::lock_guard lk(mu_);
+    if (slot >= slots_.size()) return;
+    slots_[slot].value.fetch_add(value, std::memory_order_relaxed);
+}
+
 uint64_t CounterRegistry::rawValue(SlotId slot) const {
     std::lock_guard lk(mu_);
     if (slot >= slots_.size()) return 0;

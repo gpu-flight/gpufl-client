@@ -5,8 +5,10 @@
 
 #include "gpufl.hpp"
 #include "gpufl/core/counter_registry.hpp"
+#include "gpufl/core/counter_provider.hpp"
 #include "gpufl/core/monitor.hpp"
 
+#include <cstring>
 #include <limits>
 
 using gpufl::detail::CounterRegistry;
@@ -20,6 +22,31 @@ class CounterRegistryTest : public ::testing::Test {
 
     CounterRegistry& reg() { return CounterRegistry::instance(); }
 };
+
+}  // namespace
+
+namespace {
+
+const gpufl_counter_provider_v1* prov() {
+    return gpufl::detail::ActiveCounterProvider();
+}
+
+// Read back through the ACTIVE provider, not the local registry. With a shared
+// runtime present, gpufl::counter() writes into the runtime's registry and this
+// module's own is untouched - reading the latter would compare two different
+// registries and fail for the right reason in the wrong test.
+uint64_t Raw(const char* name) {
+    auto h = prov()->register_counter(name, std::strlen(name));
+    return h ? prov()->load(h) : 0;
+}
+
+uint64_t Since(const char* name) {
+    auto h = prov()->register_counter(name, std::strlen(name));
+    return h ? prov()->load_since_baseline(h) : 0;
+}
+
+void BeginSession() { prov()->begin_session(); }
+void EndSession() { prov()->end_session(); }
 
 }  // namespace
 
@@ -50,12 +77,12 @@ TEST_F(CounterRegistryTest, CardinalityIsCapped) {
 }
 
 TEST_F(CounterRegistryTest, NonPositiveAddsAreIgnored) {
-    auto tokens = gpufl::counter("token");
+    auto tokens = gpufl::counter("nonpositive_probe");
     ASSERT_TRUE(tokens.valid());
     tokens.add(5);
     tokens.add(0);
     tokens.add(-100);   // must not wrap the unsigned counter
-    EXPECT_EQ(reg().rawValue(reg().registerCounter("token")), 5u);
+    EXPECT_EQ(Raw("nonpositive_probe"), 5u);
 }
 
 TEST_F(CounterRegistryTest, InvalidHandleAddIsANoOp) {
@@ -67,36 +94,34 @@ TEST_F(CounterRegistryTest, InvalidHandleAddIsANoOp) {
 TEST_F(CounterRegistryTest, AddsBeforeASessionAreExcludedFromIt) {
     // Slots outlive the runtime, so anything ticked before init() is already in
     // the slot. Without a baseline the new session would count it as its own.
-    auto tokens = gpufl::counter("token");
+    auto tokens = gpufl::counter("pre_session_probe");
     tokens.add(1000);
 
-    const auto slot = reg().registerCounter("token");
-    EXPECT_EQ(reg().rawValue(slot), 1000u);
+    EXPECT_EQ(Raw("pre_session_probe"), 1000u);
 
-    reg().beginSession();
-    EXPECT_EQ(reg().valueSinceBaseline(slot), 0u) << "pre-init ticks are not this session's";
+    BeginSession();
+    EXPECT_EQ(Since("pre_session_probe"), 0u) << "pre-init ticks are not this session's";
 
     tokens.add(7);
-    EXPECT_EQ(reg().valueSinceBaseline(slot), 7u);
+    EXPECT_EQ(Since("pre_session_probe"), 7u);
 }
 
 TEST_F(CounterRegistryTest, AddsBetweenSessionsAreExcludedFromTheNext) {
     auto tokens = gpufl::counter("token");
-    const auto slot = reg().registerCounter("token");
 
-    reg().beginSession();
+    BeginSession();
     tokens.add(10);
-    EXPECT_EQ(reg().valueSinceBaseline(slot), 10u);
-    reg().endSession();
+    EXPECT_EQ(Since("token"), 10u);
+    EndSession();
 
     // gpufl is down; the handle still works and the slot still accumulates.
     tokens.add(500);
 
-    reg().beginSession();
-    EXPECT_EQ(reg().valueSinceBaseline(slot), 0u)
+    BeginSession();
+    EXPECT_EQ(Since("token"), 0u)
         << "ticks while no runtime was active belong to no session";
     tokens.add(3);
-    EXPECT_EQ(reg().valueSinceBaseline(slot), 3u);
+    EXPECT_EQ(Since("token"), 3u);
 }
 
 TEST_F(CounterRegistryTest, HandleSurvivesASessionChange) {
@@ -105,21 +130,20 @@ TEST_F(CounterRegistryTest, HandleSurvivesASessionChange) {
     // number alone could not make that safe, since it cannot stop the state
     // being freed underneath a concurrent add().
     auto tokens = gpufl::counter("token");
-    const auto slot = reg().registerCounter("token");
 
-    reg().beginSession();
-    reg().endSession();
-    reg().beginSession();
+    BeginSession();
+    EndSession();
+    BeginSession();
 
     tokens.add(4);
-    EXPECT_EQ(reg().valueSinceBaseline(slot), 4u);
+    EXPECT_EQ(Since("token"), 4u);
 }
 
 TEST_F(CounterRegistryTest, CounterRegisteredMidSessionStartsAtZero) {
-    reg().beginSession();
+    BeginSession();
     auto late = gpufl::counter("late");
     late.add(9);
-    EXPECT_EQ(reg().valueSinceBaseline(reg().registerCounter("late")), 9u);
+    EXPECT_EQ(Since("late"), 9u);
 }
 
 TEST_F(CounterRegistryTest, ConcurrentRegistrationOfOneNameYieldsOneSlot) {
@@ -137,8 +161,7 @@ TEST_F(CounterRegistryTest, ConcurrentRegistrationOfOneNameYieldsOneSlot) {
 
 TEST_F(CounterRegistryTest, ConcurrentAddsAreNotLost) {
     auto tokens = gpufl::counter("token");
-    const auto slot = reg().registerCounter("token");
-    reg().beginSession();
+    BeginSession();
 
     constexpr int kThreads = 8;
     constexpr int kPerThread = 10'000;
@@ -150,14 +173,14 @@ TEST_F(CounterRegistryTest, ConcurrentAddsAreNotLost) {
     }
     for (auto& t : threads) t.join();
 
-    EXPECT_EQ(reg().valueSinceBaseline(slot),
+    EXPECT_EQ(Since("token"),
               static_cast<uint64_t>(kThreads) * kPerThread);
 }
 
 TEST_F(CounterRegistryTest, TickIsEquivalentButLooksThePriceUpEveryCall) {
     gpufl::tick("steps");
     gpufl::tick("steps", 4);
-    EXPECT_EQ(reg().rawValue(reg().registerCounter("steps")), 5u);
+    EXPECT_EQ(Raw("steps"), 5u);
 }
 
 // ── lifecycle wiring ────────────────────────────────────────────────────────
@@ -168,31 +191,29 @@ TEST_F(CounterRegistryTest, TickIsEquivalentButLooksThePriceUpEveryCall) {
 
 TEST_F(CounterRegistryTest, MonitorInitializeBaselinesThroughTheRealWiring) {
     auto tokens = gpufl::counter("token");
-    const auto slot = reg().registerCounter("token");
     tokens.add(1000);   // before any session exists
 
     gpufl::MonitorOptions opts;
     gpufl::Monitor::Initialize(opts);
-    EXPECT_EQ(reg().valueSinceBaseline(slot), 0u)
+    EXPECT_EQ(Since("token"), 0u)
         << "Monitor::Initialize must baseline the registry";
-    EXPECT_TRUE(reg().sessionActive());
+    EXPECT_TRUE(prov()->session_active() != 0);
 
     tokens.add(6);
-    EXPECT_EQ(reg().valueSinceBaseline(slot), 6u);
+    EXPECT_EQ(Since("token"), 6u);
 
     gpufl::Monitor::Shutdown();
-    EXPECT_FALSE(reg().sessionActive())
+    EXPECT_FALSE(prov()->session_active() != 0)
         << "Monitor::Shutdown must close the session";
 }
 
 TEST_F(CounterRegistryTest, TicksBetweenTwoMonitorSessionsBelongToNeither) {
     auto tokens = gpufl::counter("token");
-    const auto slot = reg().registerCounter("token");
 
     gpufl::MonitorOptions opts;
     gpufl::Monitor::Initialize(opts);
     tokens.add(10);
-    EXPECT_EQ(reg().valueSinceBaseline(slot), 10u);
+    EXPECT_EQ(Since("token"), 10u);
     gpufl::Monitor::Shutdown();
 
     // gpufl is down. The handle still works - the slot is process-lifetime -
@@ -200,9 +221,9 @@ TEST_F(CounterRegistryTest, TicksBetweenTwoMonitorSessionsBelongToNeither) {
     tokens.add(500);
 
     gpufl::Monitor::Initialize(opts);
-    EXPECT_EQ(reg().valueSinceBaseline(slot), 0u);
+    EXPECT_EQ(Since("token"), 0u);
     tokens.add(3);
-    EXPECT_EQ(reg().valueSinceBaseline(slot), 3u);
+    EXPECT_EQ(Since("token"), 3u);
     gpufl::Monitor::Shutdown();
 }
 
@@ -212,36 +233,68 @@ TEST_F(CounterRegistryTest, ProcessExitPathAlsoClosesTheSession) {
     // previous session's ticks.
     gpufl::MonitorOptions opts;
     gpufl::Monitor::Initialize(opts);
-    ASSERT_TRUE(reg().sessionActive());
+    ASSERT_TRUE(prov()->session_active() != 0);
 
     gpufl::Monitor::DrainAndFinalizeForExit();
-    EXPECT_FALSE(reg().sessionActive());
+    EXPECT_FALSE(prov()->session_active() != 0);
 }
 
 TEST_F(CounterRegistryTest, AddAboveThePerCallBoundIsRefused) {
     // Not overflow protection: a value this large is a caller bug - a pointer,
     // an uninitialised field - and letting it through makes every later rate
     // meaningless.
-    auto tokens = gpufl::counter("token");
-    const auto slot = reg().registerCounter("token");
+    auto tokens = gpufl::counter("bound_probe");
     tokens.add(gpufl::Counter::kMaxAddPerCall);
     tokens.add(gpufl::Counter::kMaxAddPerCall + 1);   // refused
-    EXPECT_EQ(reg().rawValue(slot),
+    EXPECT_EQ(Raw("bound_probe"),
               static_cast<uint64_t>(gpufl::Counter::kMaxAddPerCall));
 }
 
 TEST_F(CounterRegistryTest, DeltaIsCorrectAcrossAWrap) {
     // Rates are unsigned deltas precisely so a wrap needs no saturation or CAS
-    // loop. Drive the counter to just below the wrap and cross it.
-    auto tokens = gpufl::counter("token");
-    const auto slot = reg().registerCounter("token");
+    // loop. Driven against the in-module registry: reaching the wrap needs the
+    // slot's address, which the C ABI deliberately does not hand out.
+    const auto slot = reg().registerCounter("wrap_probe");
     auto* raw = reg().valueSlot(slot);
     ASSERT_NE(raw, nullptr);
 
     raw->store(std::numeric_limits<uint64_t>::max() - 5, std::memory_order_relaxed);
     reg().beginSession();
-    tokens.add(10);   // wraps past zero
+    reg().addRaw(slot, 10);   // wraps past zero
 
     EXPECT_EQ(reg().valueSinceBaseline(slot), 10u)
         << "unsigned subtraction must stay correct across a wrap";
+}
+
+// ── shared runtime binding ──────────────────────────────────────────────────
+
+TEST_F(CounterRegistryTest, BindsToTheSharedRuntimeWhenItIsPresent) {
+    // The cross-module property this whole ABI exists for cannot be proven from
+    // inside one executable - that needs the launcher + Python E2E. What can be
+    // checked here is that binding works at all when the library is reachable,
+    // and that the fallback is taken (rather than crashing) when it is not.
+    gpufl::detail::CounterProvider::resetForTesting();
+    const auto* provider = gpufl::detail::CounterProvider::get();
+
+    if (provider == nullptr) {
+        GTEST_SKIP() << "gpufl_counter_runtime not colocated with the test binary; "
+                        "fallback path exercised by every other test here";
+    }
+    EXPECT_EQ(provider->abi_version, GPUFL_COUNTER_ABI_VERSION);
+    EXPECT_GE(provider->struct_size, sizeof(gpufl_counter_provider_v1));
+    EXPECT_TRUE(gpufl::detail::CounterProvider::isShared());
+
+    // Round-trip through the C ABI rather than the registry directly.
+    auto handle = provider->register_counter("abi_probe", 9);
+    ASSERT_NE(handle, nullptr);
+    provider->begin_session();
+    provider->add(handle, 7);
+    EXPECT_EQ(provider->load_since_baseline(handle), 7u);
+    provider->end_session();
+}
+
+TEST_F(CounterRegistryTest, ActiveProviderIsNeverNull) {
+    // Callers must not each carry a fallback branch, so this holds whether or
+    // not the shared runtime is present.
+    EXPECT_NE(gpufl::detail::ActiveCounterProvider(), nullptr);
 }

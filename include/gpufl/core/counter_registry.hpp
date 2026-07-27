@@ -79,6 +79,15 @@ public:
      */
     std::atomic<uint64_t>* valueSlot(SlotId slot);
 
+    /**
+     * @brief Add without validating. For the C ABI boundary only.
+     *
+     * gpufl::Counter::add already rejects non-positive and absurd values before
+     * it gets here, and re-checking across the boundary would just duplicate a
+     * contract in two places that could then disagree.
+     */
+    void addRaw(SlotId slot, uint64_t value);
+
     /** @brief Raw slot value, including anything added before this runtime. */
     uint64_t rawValue(SlotId slot) const;
 

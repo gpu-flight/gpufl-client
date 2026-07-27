@@ -51,6 +51,21 @@ option(BUILD_TESTING "Build the testing tree." ON)
 add_library(gpufl STATIC)
 add_library(gpufl::gpufl ALIAS gpufl)
 
+# One counter registry per PROCESS, not per module. `gpufl` is static and is
+# linked separately into gpufl_inject, the Python extension and any host
+# application, so without this each would hold its own registry - a profiled
+# target would tick one and the injected evaluator would read another. Only a C
+# ABI crosses this boundary; see include/gpufl/abi/gpufl_counter_abi.h.
+add_library(gpufl_counter_runtime SHARED
+    runtime/counter_runtime.cpp
+    include/gpufl/core/counter_registry.cpp
+)
+target_include_directories(gpufl_counter_runtime PUBLIC include)
+set_target_properties(gpufl_counter_runtime PROPERTIES
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
+)
+
 target_include_directories(gpufl
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -109,6 +124,7 @@ target_sources(gpufl PRIVATE
     include/gpufl/core/monitor_adapter.cpp
     include/gpufl/core/counter_registry.cpp
     include/gpufl/core/counter_api.cpp
+    include/gpufl/core/counter_provider.cpp
     include/gpufl/core/monitor_batch_manager.cpp
     include/gpufl/core/monitor_record_builders.cpp
     include/gpufl/core/monitor.cpp

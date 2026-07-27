@@ -262,21 +262,28 @@ class Counter {
     // count at all: a pointer, an uninitialised field, a negative cast to
     // unsigned. Any of those quietly makes every rate meaningless.
     static constexpr int64_t kMaxAddPerCall = 1LL << 40;
-    // Ignores n outside (0, kMaxAddPerCall]. Two compares before one relaxed
-    // atomic; a single atomic add could not validate anything itself.
-    void add(int64_t n = 1) const {
-        if (slot_ && n > 0 && n <= kMaxAddPerCall) {
-            slot_->fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
-        }
-    }
-    // False when the name was rejected or the counter limit was reached. add()
-    // on such a handle is a no-op rather than an error.
-    bool valid() const { return slot_ != nullptr; }
+
+    // Ignores n outside (0, kMaxAddPerCall]. Validation happens here, on the
+    // caller's side of the boundary, so the contract lives in one place.
+    //
+    // This is an indirect call plus a relaxed atomic, not an inlined atomic:
+    // the counter lives in a shared runtime so that a profiled target and an
+    // injected evaluator share one registry, and passing a std::atomic across
+    // that boundary by address would tie both sides to one compiler's atomic
+    // layout.
+    void add(int64_t n = 1) const;
+
+    // False when the name was rejected, the counter limit was reached, or no
+    // counter runtime could be bound. add() on such a handle is a no-op rather
+    // than an error.
+    bool valid() const { return handle_ != nullptr; }
 
   private:
     friend Counter counter(const std::string&);
-    explicit Counter(std::atomic<uint64_t>* slot) : slot_(slot) {}
-    std::atomic<uint64_t>* slot_ = nullptr;
+    Counter(const void* provider, void* handle)
+        : provider_(provider), handle_(handle) {}
+    const void* provider_ = nullptr;   // gpufl_counter_provider_v1*
+    void* handle_ = nullptr;           // gpufl_counter_handle
 };
 
 // Registers (or finds) a counter. Names are 1-96 characters of [A-Za-z0-9._-];

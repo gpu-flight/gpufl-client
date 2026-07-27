@@ -13,7 +13,7 @@
 #include <vector>
 
 #include "gpufl/core/activity_record.hpp"
-#include "gpufl/core/counter_registry.hpp"
+#include "gpufl/core/counter_provider.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/logger/logger.hpp"
@@ -503,7 +503,7 @@ void Monitor::Initialize(const MonitorOptions& opts) {
     // Counter slots live for the process, so this session has to baseline them
     // or it would inherit the previous session's ticks plus anything added
     // while gpufl was shut down.
-    detail::CounterRegistry::instance().beginSession();
+    detail::ActiveCounterProvider()->begin_session();
     g_state.batches.reset();
     g_state.metadata.reset();
     g_state.batches.setSourceCollectionEnabled(opts.enable_source_collection);
@@ -543,7 +543,7 @@ void Monitor::Shutdown() {
     // Slots keep their values on purpose: a handle held across this stays
     // valid. What stops those adds counting twice is the baseline the next
     // Initialize takes, not clearing them here.
-    detail::CounterRegistry::instance().endSession();
+    detail::ActiveCounterProvider()->end_session();
 }
 
 void Monitor::DrainAndFinalizeForExit() {
@@ -582,7 +582,7 @@ void Monitor::DrainAndFinalizeForExit() {
     // Same close-out as Shutdown(). Without it a process that exits through
     // this path leaves the session marked active, and an embedded host that
     // re-initialised afterwards would inherit its ticks.
-    detail::CounterRegistry::instance().endSession();
+    detail::ActiveCounterProvider()->end_session();
 }
 
 void Monitor::ReleaseBackendForExit() {
