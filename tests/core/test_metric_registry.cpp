@@ -565,4 +565,46 @@ TEST_F(MetricSourceTest, AnUntruncatedReadingSaysSoWithZero) {
     EXPECT_EQ(s.truncated_samples, 0u);
 }
 
+TEST_F(MetricSourceTest, BucketLevelTrimmingIsCountedToo) {
+    // The gap the feed-level test could not see. There are TWO limits and the
+    // bucket's is the smaller, so this batch - above the bucket cap, below the
+    // feed cap - passes the feed untouched and is trimmed only when the bucket
+    // closes. Counting just the feed's refusals reports a complete percentile
+    // while a fifth of the kernels are gone.
+    static_assert(MetricSource::kMaxDurationsPerBucketForTesting <
+                      MetricFeeds::kMaxPendingDurations,
+                  "this test only means something while the bucket cap is smaller");
+    constexpr size_t kBatch =
+        MetricSource::kMaxDurationsPerBucketForTesting + 900;
+
+    const MetricWindowConfig cfg{1000, 2000, 5000};
+    MetricSource src(parse("recent_kernel_ms"), cfg, &feeds, ActiveCounterProvider());
+    feeds.seedStartup(0);
+    src.poll(0);
+
+    for (size_t i = 0; i < kBatch; ++i) feeds.noteKernelDuration(10 * kMs, 2.0);
+    const auto s = src.poll(200 * kMs);
+
+    EXPECT_EQ(s.truncated_samples,
+              kBatch - MetricSource::kMaxDurationsPerBucketForTesting)
+        << "the bucket trimmed silently";
+}
+
+TEST_F(MetricSourceTest, ALossIsVisibleOnThePollThatCausedIt) {
+    // Read before the buckets closed, the count belonged to the previous
+    // bucket - so the reading that dropped the samples still claimed the data
+    // was whole, and only the next one admitted it.
+    const MetricWindowConfig cfg{1000, 2000, 5000};
+    MetricSource src(parse("recent_kernel_ms"), cfg, &feeds, ActiveCounterProvider());
+    feeds.seedStartup(0);
+    src.poll(0);
+
+    for (size_t i = 0; i < MetricSource::kMaxDurationsPerBucketForTesting + 500;
+         ++i) {
+        feeds.noteKernelDuration(10 * kMs, 2.0);
+    }
+    // The very first poll that closes a bucket must already say so.
+    EXPECT_GT(src.poll(200 * kMs).truncated_samples, 0u);
+}
+
 }  // namespace

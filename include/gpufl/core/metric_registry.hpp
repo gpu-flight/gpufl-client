@@ -252,9 +252,6 @@ private:
     // A percentile does not decompose across buckets, so durations are kept
     // per bucket and expire with it rather than being folded into a sum.
     std::vector<std::vector<double>> bucket_durations_;
-    /// Per-bucket flag: this bucket refused samples, so its share of the
-    /// percentile is a sample rather than the whole truth.
-    std::vector<bool> bucket_truncated_;
     size_t   head_ = 0;
     /// Closes in the CURRENT epoch; decides whether the window is full.
     uint64_t buckets_closed_ = 0;
@@ -296,6 +293,12 @@ public:
      * metric on exactly the workloads it exists for.
      */
     uint64_t durationsTruncated() const { return durations_truncated_; }
+
+    /**
+     * @brief The per-bucket cap, exposed so a test can target the gap between
+     * it and the feed's cap rather than hard-coding a number that would drift.
+     */
+    static constexpr size_t kMaxDurationsPerBucketForTesting = kMaxDurationsPerBucket;
 
 private:
 

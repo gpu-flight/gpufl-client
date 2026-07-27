@@ -166,10 +166,7 @@ MetricSource::MetricSource(MetricId id, MetricWindowConfig cfg, MetricFeeds* fee
     bucket_ns_ = cfg_.bucketIntervalMs() * kNsPerMs;
     const auto count = static_cast<size_t>(cfg_.bucketCount());
     buckets_.assign(count, 0);
-    if (id_.shape() == MetricShape::Percentile) {
-        bucket_durations_.resize(count);
-        bucket_truncated_.assign(count, false);
-    }
+    if (id_.shape() == MetricShape::Percentile) bucket_durations_.resize(count);
     // The ring, not the configured window, is what the rate divides by: the
     // bucket count rounds up, so the two differ and using the configured value
     // would report a rate the samples do not support.
@@ -241,16 +238,22 @@ void MetricSource::closeBucket(const int64_t boundary_ns) {
                 feeds_->drainDurationsUpTo(boundary_ns);
             auto& slot = bucket_durations_[head_];
             slot.clear();
-            bucket_truncated_[head_] = drained.dropped > 0;
+            // BOTH limits count. The feed refuses at kMaxPendingDurations and
+            // the bucket trims at kMaxDurationsPerBucket, and a batch between
+            // the two - which is the common case, since the bucket cap is the
+            // smaller - passed the feed untouched and was then trimmed here
+            // without anything recording it. The reading would say the
+            // percentile was complete while a quarter of the kernels were gone.
+            durations_truncated_ += drained.dropped;
             if (drained.samples.size() > kMaxDurationsPerBucket) {
+                durations_truncated_ +=
+                    drained.samples.size() - kMaxDurationsPerBucket;
                 drained.samples.resize(kMaxDurationsPerBucket);
-                bucket_truncated_[head_] = true;
             }
             slot.reserve(drained.samples.size());
             for (const MetricFeeds::DurationSample& s : drained.samples) {
                 slot.push_back(s.ms);
             }
-            if (drained.dropped > 0) durations_truncated_ += drained.dropped;
             break;
         }
         case MetricShape::Gauge:
@@ -261,8 +264,6 @@ void MetricSource::closeBucket(const int64_t boundary_ns) {
 }
 
 MetricSample MetricSource::poll(const int64_t now_ns) {
-    // Refreshed on every reading, including the early returns below.
-    current_.truncated_samples = durations_truncated_;
     if (next_boundary_ns_ == 0) {
         next_boundary_ns_ = now_ns + bucket_ns_;
         current_.observed_ns = now_ns;
@@ -290,6 +291,12 @@ MetricSample MetricSource::poll(const int64_t now_ns) {
         closeBucket(next_boundary_ns_);
         next_boundary_ns_ += bucket_ns_;
     }
+
+    // AFTER the buckets have closed, so a loss recorded by this poll is
+    // reported by this poll. Reading it first published the previous bucket's
+    // figure and told the caller the data was whole for one reading longer
+    // than it was.
+    current_.truncated_samples = durations_truncated_;
 
     const bool window_full = buckets_closed_ >= buckets_.size();
 
