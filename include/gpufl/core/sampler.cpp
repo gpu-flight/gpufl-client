@@ -1,5 +1,7 @@
 #include "gpufl/core/sampler.hpp"
 
+#include "gpufl/core/deep_window_rules.hpp"
+
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/logger/logger.hpp"
@@ -106,6 +108,11 @@ void Sampler::runLoop_() {
         const int64_t ts = detail::GetTimestampNs();
 
         for (const DeviceSample& d : collector_->sampleAll()) {
+            // A rule reads gauges from here, not by polling: the timestamp has
+            // to be when the measurement was actually taken, or a metric could
+            // never be detected as having stopped.
+            detail::DeepWindowRules::NoteDeviceSample(d, ts);
+
             DeviceMetricBatchRow row;
             row.ts_ns            = ts;
             row.device_id        = d.device_id;

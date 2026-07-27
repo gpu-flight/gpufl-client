@@ -23,6 +23,7 @@
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/deep_window.hpp"
+#include "gpufl/core/deep_window_rules.hpp"
 #include "gpufl/core/logger/logger.hpp"
 #include "gpufl/core/monitor.hpp"  // Monitor::RequestSyntheticDrainAndWait
 #include "gpufl/core/model/perf_metric_model.hpp"
@@ -746,6 +747,11 @@ void CuptiBackend::EngineLaunchTick() {
     // stop/collect. Closing before the engine tick also spares the engine a
     // beat it would only spend on a window that is already over.
     DeepWindow::OnLaunch();
+    // The HOST launch rate a rule may watch. Gated on a rule wanting it, so a
+    // run without one pays a single relaxed atomic load per launch.
+    if (detail::DeepWindowRules::WantsLaunchFeed()) {
+        detail::DeepWindowRules::NoteKernelLaunch(detail::GetTimestampNs());
+    }
     if (engine_) engine_->onLaunchTick();
 }
 
@@ -760,6 +766,15 @@ void CuptiBackend::DrainProfilingData() {
                          cuCtxSetCurrent(ctx_) == CUDA_SUCCESS;
     engine_->drainData();
     if (rebound) cuCtxSetCurrent(prev);
+}
+
+bool CuptiBackend::DeepEnginesPrepared() const {
+    // The REQUEST set, not the runtime state: under WindowOnly nothing is armed
+    // until a window opens, and this has to answer before one ever does.
+    const EngineRequestSet requested =
+        BuildEngineRequestSet(opts_.profiling_engine, combo_);
+    return requested.pc || requested.sass || requested.pm || requested.range ||
+           requested.range_kernel;
 }
 
 std::vector<std::string> CuptiBackend::ArmedEngineWireNames_() const {

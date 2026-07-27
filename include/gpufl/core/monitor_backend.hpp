@@ -152,6 +152,20 @@ class IMonitorBackend {
      */
     virtual void ServiceDeepWindow() {}
 
+    /**
+     * @brief Is any engine that a window could arm actually prepared?
+     *
+     * The capability gate for conditional windows. Checking the configured
+     * engine enum is necessary but not sufficient: a Trace-only run resolves to
+     * a valid engine and still arms nothing inside a window, so a rule would
+     * spend its whole budget opening windows that collect no deep data.
+     *
+     * Answers about what was PREPARED, not what is currently armed - under
+     * WindowOnly nothing is armed until a window opens, which is precisely when
+     * the answer is needed.
+     */
+    virtual bool DeepEnginesPrepared() const { return false; }
+
     virtual void OnPerfScopeStart(const char* name) {}
     virtual void OnPerfScopeStop(const char* name) {}
     // Perf-scope counterparts of OnDeepWindowStart/Stop; see those.

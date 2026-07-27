@@ -247,6 +247,11 @@ class CuptiBackend : public IMonitorBackend {
     // or disarms it.
     std::vector<std::string> ArmedEngineWireNames_() const;
 
+    // Capability gate for conditional windows: does this run have an engine a
+    // window could arm at all? A Trace-only run answers no, which is what stops
+    // a rule burning its budget on windows that collect nothing.
+    bool DeepEnginesPrepared() const override;
+
     bool ShouldEnableNvtxMarkerActivityBeforeEngine_() const;
     bool ShouldEnableNvtxMarkerActivityForSelectedEngine_() const;
     static void EnableNvtxMarkerActivity_(const char* phase);

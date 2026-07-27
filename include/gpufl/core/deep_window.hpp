@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <string>
 
+#include "gpufl/core/events.hpp"
+
 namespace gpufl {
 
 /**
@@ -37,6 +39,10 @@ struct DeepWindowSpec {
     // here rather than in the caller's trigger.
     int64_t     cooldown_ms     = 0;
     std::string name = "deep_window";
+    // What asked for this window, when a rule did. Travels with the spec so the
+    // window carries its own explanation rather than needing a lookup that
+    // would have to survive the window closing.
+    DeepWindowTrigger trigger;
 };
 
 /**

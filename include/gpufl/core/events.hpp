@@ -649,7 +649,32 @@ struct NvtxMarkerEvent {
  * `close_reason` is what tells the reader that was the deadline expiring
  * rather than the profiler failing.
  */
+/**
+ * What a rule observed at the moment it asked for a window.
+ *
+ * Carried on the window rather than looked up later. A bare `trigger_value=842`
+ * becomes unreadable the first time somebody edits the threshold, so the whole
+ * comparison travels with the window it caused.
+ *
+ * `present` is false for a window nobody triggered - manual, scheduled, or the
+ * launcher's --deep-after.
+ */
+struct DeepWindowTrigger {
+    bool        present = false;
+    std::string rule_id;
+    std::string metric;          // canonical name, device index included
+    std::string op;              // "<" or ">"
+    double      threshold = 0.0;
+    double      rearm_threshold = 0.0;
+    double      observed = 0.0;
+    int64_t     rate_window_ms = 0;
+    int64_t     sustained_ms = 0;
+    int64_t     first_true_ns = 0;   // start of the run of true readings
+    int64_t     fired_ns = 0;
+};
+
 struct DeepWindowEvent {
+    DeepWindowTrigger trigger;
     int pid = 0;
     std::string app;
     std::string session_id;
@@ -667,6 +692,39 @@ struct DeepWindowEvent {
     // What the caller asked for, so a short window is self-explanatory.
     int64_t requested_duration_ms = 0;
     uint64_t requested_max_launches = 0;
+};
+
+/**
+ * What the session concluded about a conditional rule.
+ *
+ * Emitted even when the rule never fired. A rule that leaves no record is
+ * indistinguishable from one that was never true, and from a run that crashed
+ * before it could report - three situations calling for different responses.
+ *
+ * `state` and `outcome` are separate: state is where the evaluator was
+ * standing, outcome is the verdict. One field cannot carry both without making
+ * `armed` look like a conclusion.
+ */
+struct DeepWindowRuleSummaryEvent {
+    int pid = 0;
+    std::string app;
+    std::string session_id;
+    std::string rule_id;
+    std::string expression;      // the configured rule, as written
+    std::string state;
+    std::string outcome;
+    std::string reason;
+    std::string metric_state;
+    uint64_t samples_seen = 0;
+    uint32_t windows_opened = 0;
+    // Absent rather than a sentinel: there is a real "no value yet", and NaN
+    // does not survive the JSON and DB boundaries cleanly.
+    bool     has_last_value = false;
+    double   last_value = 0.0;
+    int64_t  last_observed_ns = 0;
+    // Monotonic, so a redelivered or late record cannot overwrite a newer one.
+    uint64_t state_sequence = 0;
+    int64_t  emitted_ns = 0;
 };
 
 /**

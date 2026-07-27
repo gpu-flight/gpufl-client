@@ -234,6 +234,14 @@ public:
                                std::string reason, int64_t now_ns);
 
 private:
+    /**
+     * The window spec plus the comparison that produced it.
+     *
+     * Built at the request, not at the close: by the time the window closes the
+     * reading that caused it is long gone, and a bare observed value with no
+     * threshold beside it stops being readable the first time the rule changes.
+     */
+    DeepWindowSpec specWithTrigger(const MetricSample& sample) const;
     bool conditionHolds(double value) const;
     bool rearmHolds(double value) const;
     void enterBlackout(int64_t now_ns);

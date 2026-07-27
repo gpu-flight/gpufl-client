@@ -20,4 +20,19 @@ struct DeepWindowModel final : IJsonSerializable {
     const DeepWindowEvent& e_;
 };
 
+/**
+ * JSON serializer for the conditional-rule summary. Same channel as the window
+ * itself: the two are read together, and a summary that arrived on a different
+ * channel could be ingested after the windows it explains.
+ */
+struct DeepWindowRuleSummaryModel final : IJsonSerializable {
+    explicit DeepWindowRuleSummaryModel(const DeepWindowRuleSummaryEvent& e)
+        : e_(e) {}
+    std::string buildJson() const override;
+    Channel channel() const override { return Channel::Scope; }
+
+   private:
+    const DeepWindowRuleSummaryEvent& e_;
+};
+
 }  // namespace gpufl::model

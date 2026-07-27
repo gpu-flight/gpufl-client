@@ -248,7 +248,7 @@ RuleEvaluator::RuleEvaluator(DeepWindowRule rule, std::string rule_id,
         // the alternative is reporting a counter that is being ticked as
         // Missing for the whole run.
         gate = RuleGate::CountersNotShared;
-    } else if (!rule_.metric.resolvesLazily() &&
+    } else if (caps.device_count > 0 && !rule_.metric.resolvesLazily() &&
                rule_.metric.shape() == MetricShape::Gauge &&
                rule_.metric.device_index >= caps.device_count) {
         // Built-in metrics are decided eagerly - unlike a custom counter, the
@@ -261,6 +261,22 @@ RuleEvaluator::RuleEvaluator(DeepWindowRule rule, std::string rule_id,
         terminal_ = RuleOutcome::Unsupported;
         reason_ = toString(gate);
     }
+}
+
+DeepWindowSpec RuleEvaluator::specWithTrigger(const MetricSample& sample) const {
+    DeepWindowSpec spec = rule_.window;
+    spec.trigger.present         = true;
+    spec.trigger.rule_id         = rule_id_;
+    spec.trigger.metric          = rule_.metric.canonical;
+    spec.trigger.op              = toString(rule_.op);
+    spec.trigger.threshold       = rule_.threshold;
+    spec.trigger.rearm_threshold = rule_.rearm_threshold;
+    spec.trigger.observed        = sample.value;
+    spec.trigger.rate_window_ms  = rule_.timing.rate_window_ms;
+    spec.trigger.sustained_ms    = rule_.timing.sustained_ms;
+    spec.trigger.first_true_ns   = first_true_observed_ns_.value_or(sample.observed_ns);
+    spec.trigger.fired_ns        = sample.observed_ns;
+    return spec;
 }
 
 bool RuleEvaluator::conditionHolds(const double value) const {
@@ -401,7 +417,7 @@ void RuleEvaluator::poll(const int64_t now_ns) {
                 ++state_sequence_;
                 // sustained_ms == 0 fires on this same reading, handled below.
                 if (rule_.timing.sustained_ms == 0) {
-                    pending_token_ = hooks_.request_open(hooks_.ctx, rule_.window);
+                    pending_token_ = hooks_.request_open(hooks_.ctx, specWithTrigger(sample));
                     if (pending_token_ != 0) {
                         state_ = RuleState::Opening;
                         ++state_sequence_;
@@ -427,7 +443,7 @@ void RuleEvaluator::poll(const int64_t now_ns) {
             const int64_t held_ns = sample.observed_ns - *first_true_observed_ns_;
             if (held_ns < rule_.timing.sustained_ms * 1000000) break;
 
-            pending_token_ = hooks_.request_open(hooks_.ctx, rule_.window);
+            pending_token_ = hooks_.request_open(hooks_.ctx, specWithTrigger(sample));
             if (pending_token_ != 0) {
                 state_ = RuleState::Opening;
                 ++state_sequence_;
@@ -482,9 +498,15 @@ RuleSummary RuleEvaluator::finish(const int64_t now_ns) {
         if (s.reason.empty()) {
             // Distinguish "watched it and it never happened" from "never had
             // anything to watch"; both leave windows_opened at 0.
-            s.reason = last_metric_state_ == MetricState::Missing
-                           ? "custom_metric_never_registered"
-                           : "condition_never_held";
+            if (last_metric_state_ == MetricState::Missing) {
+                s.reason = "custom_metric_never_registered";
+            } else if (samples_seen_ == 0) {
+                // Watched, but the source never produced a usable reading -
+                // a device that does not exist, or a sampler that never ran.
+                s.reason = "metric_source_never_reported";
+            } else {
+                s.reason = "condition_never_held";
+            }
         }
     }
 

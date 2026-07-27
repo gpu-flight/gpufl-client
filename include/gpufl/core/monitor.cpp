@@ -1,5 +1,7 @@
 #include "gpufl/core/monitor.hpp"
 
+#include "gpufl/core/deep_window_rules.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -459,6 +461,9 @@ void CollectorLoop() {
         // decides how closely a deep window tracks its deadline, and it is a
         // lock-free check when no window is closing.
         if (g_state.adapter) g_state.adapter->serviceDeepWindow();
+        // Immediately after, so a rule that decides to open is serviced on the
+        // very next beat rather than a full loop later.
+        detail::DeepWindowRules::Service();
 
         if (!RecordProcessor::processNext()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -522,6 +527,10 @@ void Monitor::Initialize(const MonitorOptions& opts) {
 void Monitor::Shutdown() {
     if (!g_state.initialized.exchange(false)) return;
 
+    // Before the logger goes away. A rule that never fired still owes an
+    // explanation, and this is the only place it can be written.
+    detail::DeepWindowRules::Finish();
+
     if (g_state.adapter) {
         g_state.adapter->stop();
         g_state.adapter->shutdown();
@@ -548,6 +557,8 @@ void Monitor::Shutdown() {
 
 void Monitor::DrainAndFinalizeForExit() {
     if (!g_state.initialized.exchange(false)) return;
+
+    detail::DeepWindowRules::Finish();
 
     // The backend's PC sampling cycle thread stops issuing CUPTI reads as soon
     // as process-exit teardown is flagged (PcSamplingEngine::drainData), so it

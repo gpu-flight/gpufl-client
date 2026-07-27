@@ -22,6 +22,7 @@
 #include "gpufl/core/config_file_loader.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/deep_window.hpp"
+#include "gpufl/core/deep_window_rules.hpp"
 #include "gpufl/core/events.hpp"
 #include "gpufl/core/logger/logger.hpp"
 #include "gpufl/core/remote_config.hpp"
@@ -612,6 +613,10 @@ bool init(const InitOptions& opts) {
     // from here: it only records the request; the arm itself happens on the
     // app thread at the first launch past the delay.
     scheduleEnvDeepWindow();
+    // Same reason as above: the rule needs a live backend to ask about deep
+    // engine capability, and a metric window that starts from a running
+    // runtime rather than from a half-built one.
+    detail::DeepWindowRules::InstallFromEnv();
 
     GFL_LOG_DEBUG("Initialization complete!");
     return true;

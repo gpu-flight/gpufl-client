@@ -63,6 +63,7 @@ uint64_t              g_pending_token = 0;   // guarded by g_mu
 // Open() can never inherit someone else's attribution.
 thread_local uint64_t g_claimed_token = 0;
 
+DeepWindowTrigger g_trigger;   // guarded by g_mu
 int64_t     g_opened_ns = 0;
 int64_t     g_requested_duration_ms = 0;
 uint64_t    g_requested_max_launches = 0;
@@ -204,6 +205,7 @@ bool DeepWindow::Open(const DeepWindowSpec& spec) {
         g_opens_completed.fetch_add(1, std::memory_order_acq_rel);
 
         g_opened_ns = detail::GetTimestampNs();
+        g_trigger = spec.trigger;
         g_name = spec.name.empty() ? "deep_window" : spec.name;
         g_requested_duration_ms = spec.max_duration_ms;
         g_requested_max_launches = spec.max_launches;
@@ -271,6 +273,7 @@ void DeepWindow::Close(const DeepWindowClose reason) {
         // the engine teardown, so a slow disarm doesn't shorten the quiet time.
         g_last_close_ns.store(end_ns, std::memory_order_relaxed);
 
+        ev.trigger                = g_trigger;
         ev.pid                    = detail::GetPid();
         ev.name                   = g_name;
         ev.close_reason           = DeepWindowCloseName(reason);
