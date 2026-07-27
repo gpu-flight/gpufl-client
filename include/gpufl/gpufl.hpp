@@ -236,6 +236,59 @@ void deepWindow(int64_t max_duration_ms, uint64_t max_launches = 0);
 //     if (tokens_per_sec < 1000) gpufl::deepWindow(spec);
 void deepWindow(const DeepWindowSpec& spec);
 
+// A named counter the application increments. Rules watch its RATE, so this
+// is how something only your code knows - tokens, steps, requests - becomes a
+// condition a deep window can trigger on.
+//
+//     auto tokens = gpufl::counter("token");   // once, outside the loop
+//     for (...) {
+//         tokens.add(batchSize);               // one relaxed atomic add
+//     }
+//
+// Prefer this to wrapping a hot loop in a scope. A scope costs two locked
+// batch pushes and a row on the wire per iteration; and being one-per, it
+// cannot say that a step produced eight tokens.
+//
+// Registration is the part that validates and allocates, so hoist it out of
+// the loop. A handle is safe to keep in a static and across
+// shutdown()/init(): the slot behind it lives for the process, and each
+// session counts only what accrued after its own start.
+class Counter {
+  public:
+    Counter() = default;
+    // Largest single add accepted. Not an overflow guard - the counter is
+    // 64-bit and rates are unsigned deltas, so a wrap is unreachable in
+    // practice and correct if it happened. This rejects a value that is not a
+    // count at all: a pointer, an uninitialised field, a negative cast to
+    // unsigned. Any of those quietly makes every rate meaningless.
+    static constexpr int64_t kMaxAddPerCall = 1LL << 40;
+    // Ignores n outside (0, kMaxAddPerCall]. Two compares before one relaxed
+    // atomic; a single atomic add could not validate anything itself.
+    void add(int64_t n = 1) const {
+        if (slot_ && n > 0 && n <= kMaxAddPerCall) {
+            slot_->fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
+        }
+    }
+    // False when the name was rejected or the counter limit was reached. add()
+    // on such a handle is a no-op rather than an error.
+    bool valid() const { return slot_ != nullptr; }
+
+  private:
+    friend Counter counter(const std::string&);
+    explicit Counter(std::atomic<uint64_t>* slot) : slot_(slot) {}
+    std::atomic<uint64_t>* slot_ = nullptr;
+};
+
+// Registers (or finds) a counter. Names are 1-96 characters of [A-Za-z0-9._-];
+// anything else, or exceeding the counter limit, returns an invalid handle and
+// logs why. Calling this repeatedly with the same name is safe and returns the
+// same counter, including from several threads at once.
+Counter counter(const std::string& name);
+
+// Convenience wrapper. NOT for tight loops: the name has to be looked up on
+// every call, which is exactly the cost the handle exists to avoid.
+void tick(const std::string& name, int64_t n = 1);
+
 // Close the current window early. No-op when none is open.
 void deepWindowClose();
 

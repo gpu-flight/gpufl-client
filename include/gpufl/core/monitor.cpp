@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "gpufl/core/activity_record.hpp"
+#include "gpufl/core/counter_registry.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/logger/logger.hpp"
@@ -499,6 +500,10 @@ void Monitor::Initialize(const MonitorOptions& opts) {
                                     std::memory_order_release);
 
     g_monitorBuffer.resetDroppedCount();
+    // Counter slots live for the process, so this session has to baseline them
+    // or it would inherit the previous session's ticks plus anything added
+    // while gpufl was shut down.
+    detail::CounterRegistry::instance().beginSession();
     g_state.batches.reset();
     g_state.metadata.reset();
     g_state.batches.setSourceCollectionEnabled(opts.enable_source_collection);
@@ -535,6 +540,10 @@ void Monitor::Shutdown() {
     g_monitorBuffer.resetDroppedCount();
     g_state.batches.clearFlushSink();
     g_state.adapter.reset();
+    // Slots keep their values on purpose: a handle held across this stays
+    // valid. What stops those adds counting twice is the baseline the next
+    // Initialize takes, not clearing them here.
+    detail::CounterRegistry::instance().endSession();
 }
 
 void Monitor::DrainAndFinalizeForExit() {
@@ -570,6 +579,10 @@ void Monitor::DrainAndFinalizeForExit() {
         }
     }
     g_state.batches.clearFlushSink();
+    // Same close-out as Shutdown(). Without it a process that exits through
+    // this path leaves the session marked active, and an embedded host that
+    // re-initialised afterwards would inherit its ticks.
+    detail::CounterRegistry::instance().endSession();
 }
 
 void Monitor::ReleaseBackendForExit() {

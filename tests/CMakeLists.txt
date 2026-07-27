@@ -18,6 +18,7 @@ set(GPUFL_TEST_SOURCES
     core/test_deep_window.cpp
     core/test_disabled.cpp
     core/test_wire_contract.cpp
+    core/test_counter_registry.cpp
     core/test_monitor.cpp
     core/test_itanium_demangle.cpp
     core/test_sampler.cpp

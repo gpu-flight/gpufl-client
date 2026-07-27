@@ -208,6 +208,15 @@ PYBIND11_MODULE(_gpufl_client, m) {
     m.def("deep_window_close", &gpufl::deepWindowClose);
     m.def("deep_window_active", &gpufl::deepWindowActive);
 
+    // Counter is exposed as an object so Python can hoist the lookup out of a
+    // decode loop the same way C++ does. add() then costs one relaxed atomic
+    // plus the call, instead of a name lookup per token.
+    py::class_<gpufl::Counter>(m, "Counter")
+        .def("add", &gpufl::Counter::add, py::arg("n") = 1)
+        .def("valid", &gpufl::Counter::valid);
+    m.def("counter", &gpufl::counter, py::arg("name"));
+    m.def("tick", &gpufl::tick, py::arg("name"), py::arg("n") = 1);
+
     m.def("shutdown", &gpufl::shutdown);
 
     // ── Deferred bulk upload ────────────────────────────────────────────

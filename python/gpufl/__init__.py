@@ -184,6 +184,7 @@ try:
         Scope as _CScope, init, shutdown, system_start, system_stop,
         deep_window as _c_deep_window, deep_window_close as _c_deep_window_close,
         deep_window_active as _c_deep_window_active,
+        counter as _c_counter, tick as _c_tick,
         BackendKind, InitOptions, ProfilingEngine,
         upload_logs as _c_upload_logs, UploadOptions, UploadResult,
     )
@@ -219,6 +220,19 @@ except ImportError as e:
 
     def _c_deep_window_active():
         return False
+
+    class _StubCounter:
+        def add(self, n=1):
+            return None
+
+        def valid(self):
+            return False
+
+    def _c_counter(name):
+        return _StubCounter()
+
+    def _c_tick(name, n=1):
+        return None
 
     class BackendKind:
         Auto = "Auto"
@@ -602,6 +616,43 @@ def system_stop(name="system"):
     if _disabled:
         return None
     return _original_system_stop(name)
+
+
+def counter(name):
+    """Register (or find) a named counter whose RATE a rule can watch.
+
+    How something only your code knows - tokens, steps, requests - becomes a
+    condition a deep window can trigger on::
+
+        tokens = gpufl.counter("token")   # once, outside the loop
+        for step in decode():
+            tokens.add(step.token_count)
+
+    Hoist the call out of the loop: registration is the part that validates
+    and allocates, while ``add`` is a single atomic increment. Prefer this to
+    wrapping a hot loop in a Scope, which costs two locked batch pushes and a
+    row on the wire per iteration - and, being one-per, cannot say that a step
+    produced eight tokens.
+
+    The handle is safe to keep in a module-level variable and across
+    ``shutdown()``/``init()``: the slot behind it lives for the process, and
+    each session counts only what accrued after its own start.
+
+    Args:
+        name: 1-96 characters of ``[A-Za-z0-9._-]``. Anything else, or
+              exceeding the counter limit, returns a handle whose ``add`` is a
+              no-op; ``valid()`` reports which you got.
+    """
+    return _c_counter(name)
+
+
+def tick(name, n=1):
+    """Increment a counter by name.
+
+    Convenience only. NOT for tight loops: the name is looked up on every
+    call, which is the cost :func:`counter` exists to avoid.
+    """
+    return _c_tick(name, n)
 
 
 def deep_window(seconds=0.0, max_launches=0):
@@ -1077,6 +1128,7 @@ __all__ = [
     "Scope", "init", "shutdown", "session", "clean_logs", "targeting",
     "system_start", "system_stop",
     "deep_window", "deep_window_close", "deep_window_active",
+    "counter", "tick",
     "BackendKind", "InitOptions", "ProfilingEngine",
     "upload_logs", "UploadOptions", "UploadResult",
 ]
