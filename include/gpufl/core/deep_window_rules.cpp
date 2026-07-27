@@ -48,6 +48,7 @@ std::unique_ptr<RuleEvaluator> g_eval;
 // something to report. Holding the summary rather than an error string keeps
 // the refused and the ran paths on one shape.
 std::unique_ptr<RuleSummary>   g_refused;
+bool g_refused_emitted = false;
 
 // Read by the launch callback on every launch, so it must not take the lock.
 std::atomic<bool> g_wants_launch_feed{false};
@@ -157,6 +158,48 @@ void RefuseLocked(const RuleOutcome outcome, const std::string& reason) {
 }
 
 /**
+ * Write one summary row.
+ *
+ * Shared by the terminal-transition emit and the shutdown emit so the two
+ * cannot describe the same rule differently. The backend upsert accepts only a
+ * strictly greater state_sequence, so the shutdown row - which always carries a
+ * higher one - wins, and a redelivery of either is a no-op.
+ */
+void EmitSummary(const RuleSummary& summary, const std::string& expression) {
+    const Runtime* rt = runtime();
+    if (!rt || !rt->logger) {
+        GFL_LOG_ERROR("[DeepWindowRule] no logger; summary lost: ",
+                      toString(summary.outcome), " ", summary.reason);
+        return;
+    }
+
+    DeepWindowRuleSummaryEvent ev;
+    ev.pid            = detail::GetPid();
+    ev.app            = rt->app_name;
+    ev.session_id     = rt->session_id;
+    ev.rule_id        = summary.rule_id;
+    ev.expression     = expression;
+    ev.state          = toString(summary.state);
+    ev.outcome        = toString(summary.outcome);
+    ev.reason         = summary.reason;
+    ev.metric_state   = toString(summary.last_metric_state);
+    ev.samples_seen   = summary.samples_seen;
+    ev.windows_opened = summary.windows_opened;
+    ev.has_last_value = summary.last_value.has_value();
+    if (ev.has_last_value) {
+        ev.last_value = *summary.last_value;
+        ev.last_observed_ns = summary.last_observed_ns.value_or(0);
+    }
+    ev.state_sequence = summary.state_sequence;
+    ev.emitted_ns     = summary.emitted_ns;
+
+    rt->logger->write(model::DeepWindowRuleSummaryModel(ev));
+    GFL_LOG_DEBUG("[DeepWindowRule] summary id=", ev.rule_id,
+                  " outcome=", ev.outcome, " windows=", ev.windows_opened,
+                  " seq=", ev.state_sequence, " reason=", ev.reason);
+}
+
+/**
  * Drop the session so a later init() installs cleanly.
  *
  * An embedded host can shutdown() and init() again in one process, and a
@@ -170,6 +213,7 @@ void ReleaseSession() {
     g_eval.reset();
     g_source.reset();
     g_refused.reset();
+    g_refused_emitted = false;
     g_expression.clear();
     g_rule_id.clear();
 }
@@ -288,12 +332,35 @@ void DeepWindowRules::NoteDeviceSample(const DeviceSample& sample,
 }
 
 void DeepWindowRules::Service() {
-    std::lock_guard lk(g_mu);
-    // Once the summary is written the evaluator must not run again: a later
-    // poll could open a window the recorded summary does not mention, and the
-    // session would report fewer windows than it actually took.
-    if (!g_eval || g_finished) return;
-    g_eval->poll(detail::GetTimestampNs());
+    RuleSummary terminal;
+    std::string expression;
+    {
+        std::lock_guard lk(g_mu);
+        if (g_finished) return;
+
+        // A rule refused before it could run reports as soon as there is a
+        // logger to report to, rather than waiting for a shutdown that may
+        // never come.
+        if (g_refused && !g_refused_emitted) {
+            g_refused_emitted = true;
+            terminal = *g_refused;
+            expression = g_expression;
+        } else if (g_eval) {
+            const int64_t now = detail::GetTimestampNs();
+            g_eval->poll(now);
+            // Emitted at the transition, not at shutdown: a run that crashes
+            // after spending its budget would otherwise look like one whose
+            // rule simply never fired.
+            if (!g_eval->takeTerminalToEmit()) return;
+            terminal = g_eval->snapshot(now);
+            expression = g_expression;
+        } else {
+            return;
+        }
+    }
+    // Outside the lock: the logger write can block, and the launch path must
+    // never queue behind it.
+    EmitSummary(terminal, expression);
 }
 
 void DeepWindowRules::Finish() {
@@ -323,40 +390,7 @@ void DeepWindowRules::Finish() {
     // forever, and a host that called init() again got no rule at all - a
     // reporting failure silently turning into a functional one.
     ReleaseSession();
-
-    const Runtime* rt = runtime();
-    if (!rt || !rt->logger) {
-        // Nothing to write to. Logged rather than dropped silently, since this
-        // is the record that explains why no window ever appeared.
-        GFL_LOG_ERROR("[DeepWindowRule] no logger at shutdown; summary lost: ",
-                      toString(summary.outcome), " ", summary.reason);
-        return;
-    }
-
-    DeepWindowRuleSummaryEvent ev;
-    ev.pid            = detail::GetPid();
-    ev.app            = rt->app_name;
-    ev.session_id     = rt->session_id;
-    ev.rule_id        = summary.rule_id;
-    ev.expression     = expression;
-    ev.state          = toString(summary.state);
-    ev.outcome        = toString(summary.outcome);
-    ev.reason         = summary.reason;
-    ev.metric_state   = toString(summary.last_metric_state);
-    ev.samples_seen   = summary.samples_seen;
-    ev.windows_opened = summary.windows_opened;
-    ev.has_last_value = summary.last_value.has_value();
-    if (ev.has_last_value) {
-        ev.last_value = *summary.last_value;
-        ev.last_observed_ns = summary.last_observed_ns.value_or(0);
-    }
-    ev.state_sequence = summary.state_sequence;
-    ev.emitted_ns     = summary.emitted_ns;
-
-    rt->logger->write(model::DeepWindowRuleSummaryModel(ev));
-    GFL_LOG_DEBUG("[DeepWindowRule] summary id=", ev.rule_id,
-                  " outcome=", ev.outcome, " windows=", ev.windows_opened,
-                  " reason=", ev.reason);
+    EmitSummary(summary, expression);
 }
 
 void DeepWindowRules::ResetForTesting() {
@@ -369,6 +403,7 @@ void DeepWindowRules::ResetForTesting() {
     g_source.reset();
     Feeds().resetForTesting();
     g_refused.reset();
+    g_refused_emitted = false;
     g_wants_launch_feed.store(false, std::memory_order_release);
     g_wants_duration_feed.store(false, std::memory_order_release);
     g_installed_relaxed.store(false, std::memory_order_release);

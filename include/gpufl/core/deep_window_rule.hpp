@@ -224,6 +224,17 @@ public:
     /** @brief Current summary without concluding, for a mid-run emit. */
     RuleSummary snapshot(int64_t now_ns) const;
 
+    /**
+     * @brief True once, when a terminal outcome is first reached.
+     *
+     * `exhausted` and `unsupported` are conclusions the run can reach long
+     * before it ends. Holding them until shutdown means a process that crashes
+     * afterwards explains nothing, and the session looks like one where the
+     * rule simply never fired. Reported here so the caller can write it at the
+     * transition; the shutdown summary still follows, with a higher sequence.
+     */
+    bool takeTerminalToEmit();
+
     RuleState state() const { return state_; }
     uint32_t windowsOpened() const { return windows_opened_; }
 
@@ -280,6 +291,7 @@ private:
     bool     window_was_active_ = false;
     uint64_t opens_seen_ = 0;
     bool     have_opens_ = false;
+    bool     terminal_emitted_ = false;
 };
 
 }  // namespace gpufl::detail

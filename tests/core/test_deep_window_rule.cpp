@@ -572,4 +572,58 @@ TEST_F(RuleEvaluatorTest, AWindowThatOpensAndClosesBetweenBeatsIsNotMissed) {
 }
 
 
+TEST_F(RuleEvaluatorTest, ATerminalOutcomeIsReportableOnceAtTheTransition) {
+    DeepWindowRule rule = makeRule("kernel_launch_rate<100 for 500ms");
+    rule.max_windows = 1;
+    MetricSource src(rule.metric, rule.timing, &feeds, ActiveCounterProvider());
+    RuleEvaluator ev(rule, "r1", RuleCapabilities{}, &src, coord.hooks());
+    feeds.seedStartup(0);
+
+    EXPECT_FALSE(ev.takeTerminalToEmit()) << "nothing terminal has happened yet";
+
+    run(ev, src, 0, 1500 * kMs, 10);
+    run(ev, src, 1510 * kMs, 4000 * kMs, 0);
+    coord.serviceOpen();
+    ev.poll(4010 * kMs);
+    ASSERT_EQ(ev.snapshot(4010 * kMs).outcome, RuleOutcome::Exhausted);
+
+    // Available at the transition, so a run that crashes afterwards still
+    // explains itself instead of looking like one whose rule never fired.
+    EXPECT_TRUE(ev.takeTerminalToEmit());
+    // Once only: the shutdown summary follows with a higher sequence, and two
+    // rows claiming the same thing help nobody.
+    EXPECT_FALSE(ev.takeTerminalToEmit());
+}
+
+TEST_F(RuleEvaluatorTest, AnUnsupportedRuleIsReportableImmediately) {
+    DeepWindowRule rule = makeRule("kernel_launch_rate<100 for 500ms");
+    MetricSource src(rule.metric, rule.timing, &feeds, ActiveCounterProvider());
+    RuleCapabilities caps;
+    caps.deep_engine_prepared = false;
+    RuleEvaluator ev(rule, "r1", caps, &src, coord.hooks());
+
+    // Decided at construction, so there is nothing to wait for.
+    EXPECT_TRUE(ev.takeTerminalToEmit());
+    EXPECT_FALSE(ev.takeTerminalToEmit());
+}
+
+TEST_F(RuleEvaluatorTest, TheShutdownSummaryOutranksTheTransitionOne) {
+    DeepWindowRule rule = makeRule("kernel_launch_rate<100 for 500ms");
+    rule.max_windows = 1;
+    MetricSource src(rule.metric, rule.timing, &feeds, ActiveCounterProvider());
+    RuleEvaluator ev(rule, "r1", RuleCapabilities{}, &src, coord.hooks());
+    feeds.seedStartup(0);
+
+    run(ev, src, 0, 1500 * kMs, 10);
+    run(ev, src, 1510 * kMs, 4000 * kMs, 0);
+    coord.serviceOpen();
+    ev.poll(4010 * kMs);
+    const uint64_t at_transition = ev.snapshot(4010 * kMs).state_sequence;
+
+    // The backend upsert only accepts a strictly greater sequence, so the final
+    // row must outrank the early one or it would be silently discarded.
+    EXPECT_GT(ev.finish(5000 * kMs).state_sequence, at_transition);
+}
+
+
 }  // namespace

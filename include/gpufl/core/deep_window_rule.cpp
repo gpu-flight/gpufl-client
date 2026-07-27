@@ -475,6 +475,16 @@ void RuleEvaluator::poll(const int64_t now_ns) {
     }
 }
 
+bool RuleEvaluator::takeTerminalToEmit() {
+    if (terminal_emitted_) return false;
+    if (terminal_ != RuleOutcome::Exhausted &&
+        terminal_ != RuleOutcome::Unsupported) {
+        return false;
+    }
+    terminal_emitted_ = true;
+    return true;
+}
+
 RuleSummary RuleEvaluator::snapshot(const int64_t now_ns) const {
     RuleSummary s;
     s.rule_id = rule_id_;
