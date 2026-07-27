@@ -148,21 +148,27 @@ enum class CaptureMode {
 };
 
 /**
- * The engines an adaptive run prepares, and when it arms them.
+ * The engines an adaptive run SELECTS, and when it arms them.
  *
  * Deliberately NOT `ProfilingEngine::Deep`. That enum means "the deepest
  * analysis this GPU supports" and picks SASS-or-PC plus PM; it does not
  * guarantee the base Trace activity that `recent_kernel_ms` and
  * `kernel_launch_rate` are computed from, and its base policy varies with the
  * path chosen. An adaptive run needs the base pinned.
+ *
+ * KNOWN GAP: "selected" is not yet "prepared". PmSamplingEngine defers
+ * cuptiProfilerInitialize, counter-availability lookup, Enable and SetConfig
+ * into its arm path, so today they run when the WINDOW opens rather than at
+ * startup. The window therefore pays initialisation out of its own duration,
+ * and a late or failed init costs the front of it. Splitting prepare from arm
+ * is the next change here; until it lands, do not describe this as
+ * "prepared before CUDA initialises".
  */
 struct AdaptiveCapturePlan {
     // Always on for the whole run. Kernel-timing conditions need it.
     std::string base = "Trace";
-    // Initialised at startup, idle until a window opens.
+    // Selected here; see the gap above for when they are actually initialised.
     std::vector<std::string> prepared_deep;
-    // Only PM has been measured as dormant-safe on real hardware so far;
-    // PC and SASS join this once their overhead has been characterised.
     bool arm_window_only = true;
 };
 

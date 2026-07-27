@@ -522,6 +522,21 @@ int repairUncompressedLogs(const fs::path& root) {
 }  // namespace
 
 int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
+    // Re-checked here, not only in the parser. The two modes are enforced by
+    // the CLI, but TraceArgs is a plain struct: anything constructing one
+    // directly - a test, a future caller, a refactor that reorders parsing -
+    // can set both fields and reach this function in a state the parser would
+    // have refused. resolvePassPlan() would then honour `passes` while the
+    // block below still exported the deep environment, producing a run that is
+    // neither mode.
+    if (args.deep_requested && !args.passes.empty()) {
+        std::fprintf(stderr,
+                     "gpufl: internal error - explicit passes and a deep "
+                     "window cannot both be requested
+");
+        return 2;
+    }
+
     const fs::path exe = platform.selfExe();
     if (exe.empty()) {
         std::fprintf(stderr, "gpufl: cannot resolve launcher path (%s)\n",

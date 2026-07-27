@@ -168,7 +168,12 @@ const char* traceHelp() {
         "                            Hard cap on total target runtime (safety).\n"
         "        --after-window=<WHAT>\n"
         "                            What to do at window end. Only 'stop' today.\n"
-        "        --deep-after=<DUR>  Arm the DEEP engines this long into the run,\n"
+        "    A deep window is ONE adaptive run: gpufl picks the deep engine, so\n"
+        "    --deep-* cannot be combined with --passes. Which engine was selected\n"
+        "    is printed at startup rather than promised here - it depends on the\n"
+        "    GPU, and today only PM sampling is selected.\n"
+        "\n"
+        "        --deep-after=<DUR>  Arm the deep engine this long into the run,\n"
         "                            then disarm. Unlike --window the target keeps\n"
         "                            running. Needs a bound below. Default: 0 (arm\n"
         "                            at the first kernel launch).\n"
@@ -178,14 +183,11 @@ const char* traceHelp() {
         "        --deep-when=<EXPR>  Open the window when a metric crosses a threshold,\n"
         "                            e.g. \"custom.token_rate<1000 for 2s\".\n"
         "        --deep-launches=<N> Kernel-launch bound on the deep window; ends it\n"
-        "                            at whichever bound is hit first. PREFER THIS.\n"
-        "                            For SASS / Range replay re-runs every kernel, so a\n"
-        "                            second of wall time covers ~25x less work there\n"
-        "                            than under PM sampling. For PcSampling it is what\n"
-        "                            decides whether you get data at all: samples only\n"
-        "                            become readable after a few thousand launches, so\n"
-        "                            a short --deep-for window (or any window over\n"
-        "                            slow kernels) can collect nothing.\n"
+        "                            at whichever bound is hit first. PREFER THIS:\n"
+        "                            wall time does not bound how much an engine\n"
+        "                            collects, and how far one second of it goes\n"
+        "                            differs by more than an order of magnitude\n"
+        "                            between engines.\n"
         "        --deep-cooldown=<DUR>\n"
         "                            Quiet time before another window may open.\n"
         "        --pc-sample-period=<N>\n"
@@ -493,9 +495,9 @@ TraceParseResult parseTraceArgs(const std::vector<std::string>& argv) {
                 "\n"
                 "  --passes runs the engines you name, relaunching the target "
                 "once per pass.\n"
-                "  --deep-* runs ONE adaptive pass: gpufl prepares a compatible "
+                "  --deep-* runs ONE adaptive pass: gpufl selects a compatible "
                 "deep engine\n"
-                "  before CUDA initialises and arms it only inside the window.\n"
+                "  and arms it only inside the window.\n"
                 "\n"
                 "Drop --passes to use a deep window."};
     }
@@ -813,15 +815,18 @@ AdaptiveCapturePlan resolveAdaptivePlan(const TraceArgs& args) {
     // reads as "condition never held".
     plan.base = "Trace";
 
-    // PM only, for now. It is the one deep engine measured dormant on real
-    // hardware - on a 3090, prepared-but-unarmed PM showed no measurable
-    // throughput cost against a Trace base (paired ratio x1.000, bootstrap
-    // 95% CI [1.000, 1.002] over 15 blocks) at a measurable +225 MiB RSS.
-    // PC sampling and SASS are NOT included: PC fails configuration under
-    // injection on that box and SASS emits no records, so neither has a
-    // dormant cost anyone has measured. Adding them here before that would be
-    // choosing the deepest engine rather than the deepest engine that fits an
-    // overhead budget.
+    // PM only, for now. It is the one deep engine that works on a 3090 at all:
+    // PC sampling fails configuration under injection there and SASS emits no
+    // records, so neither has a dormant cost anyone has measured.
+    //
+    // What WAS measured is narrower than it first looked. With PM selected but
+    // no window opened, GEMM throughput showed no detectable change against a
+    // Trace base (paired ratio 1.000, bootstrap 95% CI over 15 randomized
+    // blocks) while peak RSS rose 572 -> 797 MiB. But PmSamplingEngine defers
+    // its CUPTI initialisation into the arm path, so that run measured PM
+    // SELECTED, not PM prepared-and-idle - and the RSS delta cannot be
+    // attributed to PM preparation either. The numbers get redone once
+    // prepare and arm are actually separate.
     plan.prepared_deep = {"PmSampling"};
     plan.arm_window_only = true;
     return plan;
