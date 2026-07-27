@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -126,8 +127,17 @@ public:
     void resetForTesting();
 
 private:
+    // The launch feed is atomics, not mutex-guarded state. It is written from
+    // the CUDA launch callback on every launch, and a lock there would put the
+    // application's launch path behind the collector's polling - changing the
+    // launch rate the rule is trying to measure.
+    std::atomic<uint64_t> launch_count_{0};
+    std::atomic<int64_t>  launch_last_ns_{0};
+    std::atomic<bool>     launch_seeded_{false};
+
+    // Durations and gauges are fed from the activity/sampler threads, not from
+    // the per-launch path, so a lock is fine here.
     mutable std::mutex mu_;
-    LaunchFeed   launch_;
     DurationFeed durations_;
     struct DeviceGauges {
         GaugeFeed util;

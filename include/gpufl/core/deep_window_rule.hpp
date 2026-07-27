@@ -194,6 +194,11 @@ public:
         uint64_t (*request_open)(void* ctx, const DeepWindowSpec&) = nullptr;
         /// Is a window - any window, whoever opened it - currently open?
         bool (*window_active)(void* ctx) = nullptr;
+        /// Monotonic count of windows that have opened. A short launch-bounded
+        /// window can open AND close between two beats, so polling a boolean
+        /// would miss it entirely and its contaminated samples would feed the
+        /// rule as if profiling had never been on.
+        uint64_t (*opens_completed)(void* ctx) = nullptr;
         /// Token of the most recent open, so a manual window is not mistaken
         /// for the one this rule asked for and charged to its budget.
         uint64_t (*last_opened_token)(void* ctx) = nullptr;
@@ -273,6 +278,8 @@ private:
 
     uint64_t pending_token_ = 0;
     bool     window_was_active_ = false;
+    uint64_t opens_seen_ = 0;
+    bool     have_opens_ = false;
 };
 
 }  // namespace gpufl::detail

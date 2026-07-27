@@ -16,50 +16,38 @@ namespace {
 
 using gpufl::detail::CounterRegistry;
 
-// Handles are slot ids biased by one, cast to a pointer, rather than addresses
-// into the registry. An id survives anything the container does, and NULL then
-// falls out naturally as "invalid" without needing a sentinel address.
-gpufl_counter_handle ToHandle(const CounterRegistry::SlotId slot) {
-    if (slot == CounterRegistry::kInvalidSlot) return nullptr;
-    return reinterpret_cast<gpufl_counter_handle>(
-        static_cast<uintptr_t>(slot) + 1u);
-}
+// A handle IS the slot's address. Not a slot id: an id has to be
+// bounds-checked against the container, checking it means locking the
+// container, and that would put every ticking thread on one mutex - distorting
+// the throughput a rule exists to measure. Slots are never freed and a deque
+// never relocates them, so the address stays good for the life of the process.
+using Slot = CounterRegistry::Slot;
 
-bool FromHandle(const gpufl_counter_handle handle, CounterRegistry::SlotId* out) {
-    if (handle == nullptr) return false;
-    *out = static_cast<CounterRegistry::SlotId>(
-        reinterpret_cast<uintptr_t>(handle) - 1u);
-    return true;
-}
+Slot* AsSlot(const gpufl_counter_handle h) { return static_cast<Slot*>(h); }
 
 gpufl_counter_handle RegisterCounter(const char* name, const size_t name_length) {
     if (name == nullptr) return nullptr;
-    return ToHandle(CounterRegistry::instance().registerCounter(
-        std::string(name, name_length)));
-}
-
-void Add(const gpufl_counter_handle handle, const uint64_t value) {
-    CounterRegistry::SlotId slot;
-    if (!FromHandle(handle, &slot)) return;
-    CounterRegistry::instance().addRaw(slot, value);
-}
-
-uint64_t Load(const gpufl_counter_handle handle) {
-    CounterRegistry::SlotId slot;
-    if (!FromHandle(handle, &slot)) return 0;
-    return CounterRegistry::instance().rawValue(slot);
-}
-
-uint64_t LoadSinceBaseline(const gpufl_counter_handle handle) {
-    CounterRegistry::SlotId slot;
-    if (!FromHandle(handle, &slot)) return 0;
-    return CounterRegistry::instance().valueSinceBaseline(slot);
+    CounterRegistry& reg = CounterRegistry::instance();
+    return reg.slotFor(reg.registerCounter(std::string(name, name_length)));
 }
 
 gpufl_counter_handle Lookup(const char* name, const size_t name_length) {
     if (name == nullptr) return nullptr;
-    return ToHandle(CounterRegistry::instance().findCounter(
-        std::string(name, name_length)));
+    CounterRegistry& reg = CounterRegistry::instance();
+    return reg.slotFor(reg.findCounter(std::string(name, name_length)));
+}
+
+// Lock-free from here down: one relaxed atomic each.
+void Add(const gpufl_counter_handle handle, const uint64_t value) {
+    CounterRegistry::addRaw(AsSlot(handle), value);
+}
+
+uint64_t Load(const gpufl_counter_handle handle) {
+    return CounterRegistry::rawValue(AsSlot(handle));
+}
+
+uint64_t LoadSinceBaseline(const gpufl_counter_handle handle) {
+    return CounterRegistry::valueSinceBaseline(AsSlot(handle));
 }
 
 void BeginSession() { CounterRegistry::instance().beginSession(); }

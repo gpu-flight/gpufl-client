@@ -61,6 +61,16 @@ add_library(gpufl_counter_runtime SHARED
     include/gpufl/core/counter_registry.cpp
 )
 target_include_directories(gpufl_counter_runtime PUBLIC include)
+
+# Installed unconditionally, NOT only with the Python bindings. A launcher-only
+# install that omits it leaves the injected evaluator and the target application
+# each falling back to their own in-process registry - the exact split this
+# library exists to prevent, and one that shows up as a counter reading Missing
+# forever rather than as a missing file.
+install(TARGETS gpufl_counter_runtime
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
 set_target_properties(gpufl_counter_runtime PROPERTIES
     CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON
@@ -799,7 +809,6 @@ if(BUILD_PYTHON)
                 $<TARGET_FILE_DIR:_gpufl_client>
         COMMENT "Colocating gpufl_counter_runtime with _gpufl_client"
     )
-    install(TARGETS gpufl_counter_runtime DESTINATION gpufl)
 
     # If CUDA is available, link it to the Python module
     if(GPUFL_HAS_CUDA)

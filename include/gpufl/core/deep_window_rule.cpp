@@ -219,6 +219,7 @@ RuleEvaluator::Hooks RuleEvaluator::liveHooks() {
         return DeepWindow::RequestOpenTagged(spec);
     };
     h.window_active = [](void*) { return DeepWindow::Active(); };
+    h.opens_completed = [](void*) { return DeepWindow::OpensCompleted(); };
     h.last_opened_token = [](void*) { return DeepWindow::LastOpenedToken(); };
     h.pending_open_token = [](void*) { return DeepWindow::PendingOpenToken(); };
     h.ctx = nullptr;
@@ -308,6 +309,15 @@ void RuleEvaluator::poll(const int64_t now_ns) {
 
     const bool active = hooks_.window_active(hooks_.ctx);
 
+    // A window can open and close entirely between two beats - a launch-bounded
+    // one over a busy loop routinely does. The counter catches that; a boolean
+    // would not, and the samples taken during it would feed the rule as clean.
+    const uint64_t opens = hooks_.opens_completed != nullptr
+                               ? hooks_.opens_completed(hooks_.ctx) : 0;
+    const bool missed_window = have_opens_ && opens != opens_seen_ && !active;
+    opens_seen_ = opens;
+    have_opens_ = true;
+
     // 1. Confirm a requested open before anything else. The window we caused
     //    also puts us into blackout, so checking blackout first would lose the
     //    only chance to count it.
@@ -347,10 +357,11 @@ void RuleEvaluator::poll(const int64_t now_ns) {
         return;
     }
 
-    // 3. A window just closed. Blackout and recovery are distinct: blackout is
+    // 3. A window just closed - either one we watched, or one that came and
+    //    went between beats. Blackout and recovery are distinct: blackout is
     //    "discard everything", recovery is "refill the clean epoch". Merging
     //    them would let contaminated samples prove the workload recovered.
-    if (window_was_active_) {
+    if (window_was_active_ || missed_window) {
         window_was_active_ = false;
         source_->resetEpoch(now_ns);
         if (terminal_ == RuleOutcome::Exhausted) {

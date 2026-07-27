@@ -527,10 +527,6 @@ void Monitor::Initialize(const MonitorOptions& opts) {
 void Monitor::Shutdown() {
     if (!g_state.initialized.exchange(false)) return;
 
-    // Before the logger goes away. A rule that never fired still owes an
-    // explanation, and this is the only place it can be written.
-    detail::DeepWindowRules::Finish();
-
     if (g_state.adapter) {
         g_state.adapter->stop();
         g_state.adapter->shutdown();
@@ -538,6 +534,11 @@ void Monitor::Shutdown() {
 
     g_state.collectorRunning.store(false);
     if (g_state.collectorThread.joinable()) g_state.collectorThread.join();
+
+    // AFTER the collector has stopped, and before the logger goes away. Writing
+    // the summary while the collector still runs would let the evaluator open a
+    // window the recorded summary never mentions.
+    detail::DeepWindowRules::Finish();
 
     while (RecordProcessor::processNext()) {}
     if (Runtime* rt = runtime(); rt && rt->logger) {
@@ -558,8 +559,6 @@ void Monitor::Shutdown() {
 void Monitor::DrainAndFinalizeForExit() {
     if (!g_state.initialized.exchange(false)) return;
 
-    detail::DeepWindowRules::Finish();
-
     // The backend's PC sampling cycle thread stops issuing CUPTI reads as soon
     // as process-exit teardown is flagged (PcSamplingEngine::drainData), so it
     // sits idle here and can't fault mid-flush. We deliberately do NOT join it
@@ -569,6 +568,10 @@ void Monitor::DrainAndFinalizeForExit() {
     // the drain/flush/capabilities read already-captured state.
     g_state.collectorRunning.store(false);
     if (g_state.collectorThread.joinable()) g_state.collectorThread.join();
+
+    // Same ordering as Shutdown: the collector is stopped first, so nothing can
+    // advance the rule past what this summary reports.
+    detail::DeepWindowRules::Finish();
 
     while (RecordProcessor::processNext()) {}
     if (Runtime* rt = runtime(); rt && rt->logger) {

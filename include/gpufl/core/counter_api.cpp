@@ -17,39 +17,32 @@ namespace {
 // paths go through one code shape and cannot drift.
 using detail::CounterRegistry;
 
+using Slot = CounterRegistry::Slot;
+
+Slot* AsSlot(gpufl_counter_handle h) { return static_cast<Slot*>(h); }
+
 gpufl_counter_handle LocalRegister(const char* name, size_t len) {
     if (name == nullptr) return nullptr;
-    const auto slot = CounterRegistry::instance().registerCounter(std::string(name, len));
-    if (slot == CounterRegistry::kInvalidSlot) return nullptr;
-    return reinterpret_cast<gpufl_counter_handle>(static_cast<uintptr_t>(slot) + 1u);
-}
-
-bool LocalSlot(gpufl_counter_handle h, CounterRegistry::SlotId* out) {
-    if (h == nullptr) return false;
-    *out = static_cast<CounterRegistry::SlotId>(reinterpret_cast<uintptr_t>(h) - 1u);
-    return true;
-}
-
-void LocalAdd(gpufl_counter_handle h, uint64_t v) {
-    CounterRegistry::SlotId slot;
-    if (LocalSlot(h, &slot)) CounterRegistry::instance().addRaw(slot, v);
-}
-
-uint64_t LocalLoad(gpufl_counter_handle h) {
-    CounterRegistry::SlotId slot;
-    return LocalSlot(h, &slot) ? CounterRegistry::instance().rawValue(slot) : 0;
-}
-
-uint64_t LocalLoadSinceBaseline(gpufl_counter_handle h) {
-    CounterRegistry::SlotId slot;
-    return LocalSlot(h, &slot) ? CounterRegistry::instance().valueSinceBaseline(slot) : 0;
+    CounterRegistry& reg = CounterRegistry::instance();
+    return reg.slotFor(reg.registerCounter(std::string(name, len)));
 }
 
 gpufl_counter_handle LocalLookup(const char* name, size_t len) {
     if (name == nullptr) return nullptr;
-    const auto slot = CounterRegistry::instance().findCounter(std::string(name, len));
-    if (slot == CounterRegistry::kInvalidSlot) return nullptr;
-    return reinterpret_cast<gpufl_counter_handle>(static_cast<uintptr_t>(slot) + 1u);
+    CounterRegistry& reg = CounterRegistry::instance();
+    return reg.slotFor(reg.findCounter(std::string(name, len)));
+}
+
+void LocalAdd(gpufl_counter_handle h, uint64_t v) {
+    CounterRegistry::addRaw(AsSlot(h), v);
+}
+
+uint64_t LocalLoad(gpufl_counter_handle h) {
+    return CounterRegistry::rawValue(AsSlot(h));
+}
+
+uint64_t LocalLoadSinceBaseline(gpufl_counter_handle h) {
+    return CounterRegistry::valueSinceBaseline(AsSlot(h));
 }
 
 void LocalBeginSession() { CounterRegistry::instance().beginSession(); }

@@ -252,17 +252,17 @@ TEST_F(CounterRegistryTest, AddAboveThePerCallBoundIsRefused) {
 
 TEST_F(CounterRegistryTest, DeltaIsCorrectAcrossAWrap) {
     // Rates are unsigned deltas precisely so a wrap needs no saturation or CAS
-    // loop. Driven against the in-module registry: reaching the wrap needs the
-    // slot's address, which the C ABI deliberately does not hand out.
-    const auto slot = reg().registerCounter("wrap_probe");
-    auto* raw = reg().valueSlot(slot);
-    ASSERT_NE(raw, nullptr);
+    // loop. Driven against the in-module registry, since reaching the wrap
+    // means writing the raw value rather than adding to it.
+    auto* slot = reg().slotFor(reg().registerCounter("wrap_probe"));
+    ASSERT_NE(slot, nullptr);
 
-    raw->store(std::numeric_limits<uint64_t>::max() - 5, std::memory_order_relaxed);
+    slot->value.store(std::numeric_limits<uint64_t>::max() - 5,
+                      std::memory_order_relaxed);
     reg().beginSession();
-    reg().addRaw(slot, 10);   // wraps past zero
+    CounterRegistry::addRaw(slot, 10);   // wraps past zero
 
-    EXPECT_EQ(reg().valueSinceBaseline(slot), 10u)
+    EXPECT_EQ(CounterRegistry::valueSinceBaseline(slot), 10u)
         << "unsigned subtraction must stay correct across a wrap";
 }
 

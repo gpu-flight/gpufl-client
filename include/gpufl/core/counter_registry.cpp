@@ -72,37 +72,19 @@ CounterRegistry::SlotId CounterRegistry::registerCounter(const std::string& name
     slots_.back().name = name;
     // Registered mid-generation: baseline at the current value so ticks from a
     // previous session, or from before init(), do not land in this one.
-    slots_.back().baseline = slots_.back().value.load(std::memory_order_relaxed);
+    slots_.back().baseline.store(
+        slots_.back().value.load(std::memory_order_relaxed),
+        std::memory_order_relaxed);
     byName_.emplace(name, slot);
     return slot;
 }
 
-std::atomic<uint64_t>* CounterRegistry::valueSlot(SlotId slot) {
+CounterRegistry::Slot* CounterRegistry::slotFor(const SlotId slot) {
     std::lock_guard lk(mu_);
     if (slot >= slots_.size()) return nullptr;
     // Safe to hand out and keep: a deque never relocates existing elements, and
     // slots are never erased outside resetForTesting().
-    return &slots_[slot].value;
-}
-
-void CounterRegistry::addRaw(SlotId slot, uint64_t value) {
-    std::lock_guard lk(mu_);
-    if (slot >= slots_.size()) return;
-    slots_[slot].value.fetch_add(value, std::memory_order_relaxed);
-}
-
-uint64_t CounterRegistry::rawValue(SlotId slot) const {
-    std::lock_guard lk(mu_);
-    if (slot >= slots_.size()) return 0;
-    return slots_[slot].value.load(std::memory_order_relaxed);
-}
-
-uint64_t CounterRegistry::valueSinceBaseline(SlotId slot) const {
-    std::lock_guard lk(mu_);
-    if (slot >= slots_.size()) return 0;
-    // Unsigned subtraction, deliberately: correct across a wrap, where a signed
-    // difference would go negative.
-    return slots_[slot].value.load(std::memory_order_relaxed) - slots_[slot].baseline;
+    return &slots_[slot];
 }
 
 const std::string& CounterRegistry::name(SlotId slot) const {
@@ -120,7 +102,8 @@ size_t CounterRegistry::counterCount() const {
 void CounterRegistry::beginSession() {
     std::lock_guard lk(mu_);
     for (auto& slot : slots_) {
-        slot.baseline = slot.value.load(std::memory_order_relaxed);
+        slot.baseline.store(slot.value.load(std::memory_order_relaxed),
+                            std::memory_order_relaxed);
     }
     sessionActive_.store(true, std::memory_order_release);
 }

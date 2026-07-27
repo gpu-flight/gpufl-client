@@ -1,5 +1,6 @@
 #include "gpufl/backends/nvidia/kernel_launch_handler.hpp"
 
+#include "gpufl/core/deep_window_rules.hpp"
 #include "gpufl/core/env_vars.hpp"
 
 #include <algorithm>  // std::min(initializer_list) - see occupancy calc below
@@ -545,6 +546,11 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
                   kernelName);
     out.cpu_start_ns = wallStartNs;
     out.duration_ns = static_cast<int64_t>(k->end - k->start);
+    // Feed recent_kernel_ms. This is the only place a COMPLETED kernel's
+    // duration exists - the launch callback sees a launch, not a result - so a
+    // rule watching kernel duration reads nothing at all without this.
+    detail::DeepWindowRules::NoteKernelDuration(
+        wallStartNs, static_cast<double>(out.duration_ns) / 1e6);
     out.dyn_shared = k->dynamicSharedMemory;
     out.static_shared = k->staticSharedMemory;
     out.num_regs = k->registersPerThread;

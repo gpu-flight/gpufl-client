@@ -116,4 +116,32 @@ TEST_F(RuleInstallTest, ASecondRuleIsRefusedRatherThanSilentlyReplacing) {
     EXPECT_TRUE(DeepWindowRules::WantsLaunchFeed());
 }
 
+TEST_F(RuleInstallTest, AMalformedNumericOptionRefusesRatherThanDefaulting) {
+    setEnv(gpufl::env::kDeepWhen, "kernel_launch_rate<100 for 2s");
+    setEnv(gpufl::env::kDeepWindowMs, "500");
+    setEnv(gpufl::env::kDeepMaxWindows, "three");
+    DeepWindowRules::InstallFromEnv();
+
+    // Silently substituting the default would open real windows under a budget
+    // the user never chose and cannot see.
+    EXPECT_TRUE(DeepWindowRules::Installed());
+    EXPECT_FALSE(DeepWindowRules::WantsLaunchFeed())
+        << "a typo'd option was quietly replaced by a default";
+}
+
+TEST_F(RuleInstallTest, ARuleCanBeInstalledAgainAfterFinish) {
+    setEnv(gpufl::env::kDeepWhen, "kernel_launch_rate<100 for 2s");
+    setEnv(gpufl::env::kDeepWindowMs, "500");
+    DeepWindowRules::InstallFromEnv();
+    ASSERT_TRUE(DeepWindowRules::Installed());
+
+    // An embedded host may shutdown() and init() again in one process. Without
+    // releasing the session, the second run's rule is refused as a duplicate
+    // and that run silently has no trigger at all.
+    DeepWindowRules::Finish();
+    DeepWindowRules::InstallFromEnv();
+    EXPECT_TRUE(DeepWindowRules::WantsLaunchFeed())
+        << "the second session was left with no rule";
+}
+
 }  // namespace

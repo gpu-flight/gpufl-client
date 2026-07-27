@@ -29,7 +29,19 @@ bool     g_finished  = false;
 std::string g_expression;
 std::string g_rule_id;
 
-std::unique_ptr<MetricFeeds>   g_feeds;
+/**
+ * Process-lifetime feeds, never destroyed.
+ *
+ * The launch callback writes here without taking any lock, so the object must
+ * not be able to disappear underneath it. Same reasoning as the counter slots:
+ * a lifetime that ends is a race the hot path would have to pay to defend
+ * against. Contents are cleared on install instead.
+ */
+MetricFeeds& Feeds() {
+    static MetricFeeds feeds;
+    return feeds;
+}
+
 std::unique_ptr<MetricSource>  g_source;
 std::unique_ptr<RuleEvaluator> g_eval;
 // Set when the rule was refused before it could run, so Finish() still has
@@ -39,31 +51,42 @@ std::unique_ptr<RuleSummary>   g_refused;
 
 // Read by the launch callback on every launch, so it must not take the lock.
 std::atomic<bool> g_wants_launch_feed{false};
+std::atomic<bool> g_wants_duration_feed{false};
+// Mirrors g_installed without the mutex, for the feed entry points.
+std::atomic<bool> g_installed_relaxed{false};
 
 const char* EnvOrNull(const char* name) {
     const char* v = std::getenv(name);
     return (v && v[0] != '\0') ? v : nullptr;
 }
 
-int64_t EnvIntOr(const char* name, const int64_t fallback) {
+/**
+ * Integer from env, or the fallback when unset.
+ *
+ * A malformed value is a HARD failure, reported through @p bad rather than
+ * quietly replaced by the default. Substituting silently means a typo in a
+ * threshold or a budget still opens real windows, under settings the user never
+ * asked for and cannot see.
+ */
+int64_t EnvIntOr(const char* name, const int64_t fallback, std::string* bad) {
     const char* v = EnvOrNull(name);
     if (!v) return fallback;
     char* end = nullptr;
     const long long n = std::strtoll(v, &end, 10);
-    if (end == v || *end != '\0') {
-        GFL_LOG_ERROR(name, "='", v, "' is not an integer. Using ", fallback, ".");
+    if (end == v || *end != 0) {
+        if (bad->empty()) *bad = std::string(name) + "='" + v + "' is not an integer";
         return fallback;
     }
     return n;
 }
 
-bool EnvDoubleOr(const char* name, double* out) {
+bool EnvDoubleOr(const char* name, double* out, std::string* bad) {
     const char* v = EnvOrNull(name);
     if (!v) return false;
     char* end = nullptr;
     const double d = std::strtod(v, &end);
-    if (end == v || *end != '\0') {
-        GFL_LOG_ERROR(name, "='", v, "' is not a number. Ignoring.");
+    if (end == v || *end != 0) {
+        if (bad->empty()) *bad = std::string(name) + "='" + v + "' is not a number";
         return false;
     }
     *out = d;
@@ -101,7 +124,11 @@ std::string CanonicalConfig(const DeepWindowRule& r) {
 RuleCapabilities QueryCapabilities() {
     RuleCapabilities caps;
     // A Monitor-only run has no engine to arm inside a window at all.
-    caps.windows_supported = g_opts.profiling_engine != ProfilingEngine::Monitor;
+    // The RESOLVED engine, not the requested one: a request can be overridden
+    // at init, and gating on what was asked for would answer about a run that
+    // is not the one happening.
+    caps.windows_supported =
+        Monitor::ResolvedProfilingEngine() != ProfilingEngine::Monitor;
 
     IMonitorBackend* backend = Monitor::GetBackend();
     caps.deep_engine_prepared = backend != nullptr && backend->DeepEnginesPrepared();
@@ -129,6 +156,24 @@ void RefuseLocked(const RuleOutcome outcome, const std::string& reason) {
                   ". Profiling continues; only the trigger is off.");
 }
 
+/**
+ * Drop the session so a later init() installs cleanly.
+ *
+ * An embedded host can shutdown() and init() again in one process, and a
+ * session left claimed makes the second run's rule look like a duplicate -
+ * that run then has no trigger at all and nothing says why.
+ */
+void ReleaseSession() {
+    std::lock_guard lk(g_mu);
+    g_installed = false;
+    g_finished = false;
+    g_eval.reset();
+    g_source.reset();
+    g_refused.reset();
+    g_expression.clear();
+    g_rule_id.clear();
+}
+
 }  // namespace
 
 void DeepWindowRules::InstallFromEnv() {
@@ -154,23 +199,31 @@ void DeepWindowRules::InstallFromEnv() {
         return;
     }
 
+    std::string bad_env;
     DeepWindowRule rule = parsed.rule;
-    rule.timing.rate_window_ms = EnvIntOr(env::kDeepRateWindowMs, 1000);
+    rule.timing.rate_window_ms = EnvIntOr(env::kDeepRateWindowMs, 1000, &bad_env);
     rule.timing.stale_after_ms = EnvIntOr(
         env::kDeepStaleAfterMs,
         // Default derived from the other two so the out-of-the-box combination
         // is one that CAN fire, rather than one the validator then rejects.
         rule.timing.rate_window_ms + rule.timing.sustained_ms +
-            rule.timing.bucketIntervalMs() + 1000);
+            rule.timing.bucketIntervalMs() + 1000, &bad_env);
     double rearm = 0.0;
-    if (EnvDoubleOr(env::kDeepRearmAt, &rearm)) rule.rearm_threshold = rearm;
-    rule.max_windows = static_cast<int>(EnvIntOr(env::kDeepMaxWindows, 3));
+    if (EnvDoubleOr(env::kDeepRearmAt, &rearm, &bad_env)) rule.rearm_threshold = rearm;
+    rule.max_windows = static_cast<int>(EnvIntOr(env::kDeepMaxWindows, 3, &bad_env));
 
-    rule.window.max_duration_ms = EnvIntOr(env::kDeepWindowMs, 0);
+    rule.window.max_duration_ms = EnvIntOr(env::kDeepWindowMs, 0, &bad_env);
     rule.window.max_launches =
-        static_cast<uint64_t>(EnvIntOr(env::kDeepWindowMaxLaunches, 0));
-    rule.window.cooldown_ms = EnvIntOr(env::kDeepWindowCooldownMs, 0);
+        static_cast<uint64_t>(EnvIntOr(env::kDeepWindowMaxLaunches, 0, &bad_env));
+    rule.window.cooldown_ms = EnvIntOr(env::kDeepWindowCooldownMs, 0, &bad_env);
     rule.window.name = "deep_window";
+
+    if (!bad_env.empty()) {
+        // Fail closed. A malformed number silently replaced by a default opens
+        // real windows under settings nobody chose.
+        RefuseLocked(RuleOutcome::InvalidConfig, bad_env);
+        return;
+    }
 
     const RuleParseResult checked = validateRule(rule);
     if (!checked.ok()) {
@@ -181,10 +234,12 @@ void DeepWindowRules::InstallFromEnv() {
     }
 
     g_rule_id = RuleId(CanonicalConfig(rule));
-    g_feeds = std::make_unique<MetricFeeds>();
-    g_feeds->seedStartup(detail::GetTimestampNs());
+    // Cleared rather than reallocated: the feeds outlive every session so the
+    // lock-free launch path never has to check whether they still exist.
+    Feeds().resetForTesting();
+    Feeds().seedStartup(detail::GetTimestampNs());
     g_source = std::make_unique<MetricSource>(rule.metric, rule.timing,
-                                              g_feeds.get(),
+                                              &Feeds(),
                                               ActiveCounterProvider());
     g_eval = std::make_unique<RuleEvaluator>(rule, g_rule_id, QueryCapabilities(),
                                              g_source.get(),
@@ -192,10 +247,11 @@ void DeepWindowRules::InstallFromEnv() {
     g_installed = true;
     // The launch feed costs an atomic per launch, so only a rule that reads it
     // turns it on.
-    g_wants_launch_feed.store(
-        rule.metric.kind == MetricKind::KernelLaunchRate ||
-            rule.metric.kind == MetricKind::RecentKernelMs,
-        std::memory_order_release);
+    g_wants_launch_feed.store(rule.metric.kind == MetricKind::KernelLaunchRate,
+                              std::memory_order_release);
+    g_wants_duration_feed.store(rule.metric.kind == MetricKind::RecentKernelMs,
+                                std::memory_order_release);
+    g_installed_relaxed.store(true, std::memory_order_release);
 
     GFL_LOG_DEBUG("[DeepWindowRule] installed id=", g_rule_id, " '", g_expression,
                   "' state=", toString(g_eval->state()));
@@ -211,35 +267,47 @@ bool DeepWindowRules::WantsLaunchFeed() {
 }
 
 void DeepWindowRules::NoteKernelLaunch(const int64_t ts_ns) {
+    // No lock at all: one atomic gate, then three relaxed atomics. This runs on
+    // the application's launch path, and taking g_mu here would queue it behind
+    // the collector's evaluation - changing the launch rate being measured.
     if (!WantsLaunchFeed()) return;
-    std::lock_guard lk(g_mu);
-    if (g_feeds) g_feeds->noteKernelLaunch(ts_ns);
+    Feeds().noteKernelLaunch(ts_ns);
 }
 
 void DeepWindowRules::NoteKernelDuration(const int64_t ts_ns, const double ms) {
-    if (!WantsLaunchFeed()) return;
-    std::lock_guard lk(g_mu);
-    if (g_feeds) g_feeds->noteKernelDuration(ts_ns, ms);
+    // Fed from activity processing, not from the per-launch path, so the
+    // feed's own lock is acceptable here.
+    if (!g_wants_duration_feed.load(std::memory_order_acquire)) return;
+    Feeds().noteKernelDuration(ts_ns, ms);
 }
 
 void DeepWindowRules::NoteDeviceSample(const DeviceSample& sample,
                                        const int64_t ts_ns) {
-    std::lock_guard lk(g_mu);
-    if (g_feeds) g_feeds->noteDeviceSample(sample, ts_ns);
+    if (!g_installed_relaxed.load(std::memory_order_acquire)) return;
+    Feeds().noteDeviceSample(sample, ts_ns);
 }
 
 void DeepWindowRules::Service() {
     std::lock_guard lk(g_mu);
-    if (!g_eval) return;
+    // Once the summary is written the evaluator must not run again: a later
+    // poll could open a window the recorded summary does not mention, and the
+    // session would report fewer windows than it actually took.
+    if (!g_eval || g_finished) return;
     g_eval->poll(detail::GetTimestampNs());
 }
 
 void DeepWindowRules::Finish() {
     RuleSummary summary;
+    std::string expression;
     {
         std::lock_guard lk(g_mu);
         if (!g_installed || g_finished) return;
         g_finished = true;
+        // Set before producing the summary, so a collector beat that is already
+        // inside Service() cannot advance the evaluator past what is reported.
+        g_wants_launch_feed.store(false, std::memory_order_release);
+        g_wants_duration_feed.store(false, std::memory_order_release);
+        g_installed_relaxed.store(false, std::memory_order_release);
         if (g_refused) {
             summary = *g_refused;
         } else if (g_eval) {
@@ -247,7 +315,14 @@ void DeepWindowRules::Finish() {
         } else {
             return;
         }
+        expression = g_expression;
     }
+
+    // Released BEFORE the write is attempted. Tying the release to a successful
+    // write meant that a shutdown with no logger left the session claimed
+    // forever, and a host that called init() again got no rule at all - a
+    // reporting failure silently turning into a functional one.
+    ReleaseSession();
 
     const Runtime* rt = runtime();
     if (!rt || !rt->logger) {
@@ -263,7 +338,7 @@ void DeepWindowRules::Finish() {
     ev.app            = rt->app_name;
     ev.session_id     = rt->session_id;
     ev.rule_id        = summary.rule_id;
-    ev.expression     = g_expression;
+    ev.expression     = expression;
     ev.state          = toString(summary.state);
     ev.outcome        = toString(summary.outcome);
     ev.reason         = summary.reason;
@@ -292,9 +367,11 @@ void DeepWindowRules::ResetForTesting() {
     g_rule_id.clear();
     g_eval.reset();
     g_source.reset();
-    g_feeds.reset();
+    Feeds().resetForTesting();
     g_refused.reset();
     g_wants_launch_feed.store(false, std::memory_order_release);
+    g_wants_duration_feed.store(false, std::memory_order_release);
+    g_installed_relaxed.store(false, std::memory_order_release);
 }
 
 }  // namespace gpufl::detail

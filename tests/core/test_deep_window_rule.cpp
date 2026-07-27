@@ -39,6 +39,9 @@ struct FakeCoordinator {
     static uint64_t LastOpenedToken(void* ctx) {
         return static_cast<FakeCoordinator*>(ctx)->last_opened_token;
     }
+    static uint64_t OpensCompleted(void* ctx) {
+        return static_cast<uint64_t>(static_cast<FakeCoordinator*>(ctx)->opens);
+    }
     static uint64_t PendingOpenToken(void* ctx) {
         return static_cast<FakeCoordinator*>(ctx)->pending_token;
     }
@@ -49,6 +52,7 @@ struct FakeCoordinator {
         h.window_active = &Active;
         h.last_opened_token = &LastOpenedToken;
         h.pending_open_token = &PendingOpenToken;
+        h.opens_completed = &OpensCompleted;
         h.ctx = this;
         return h;
     }
@@ -546,5 +550,26 @@ TEST(RuleRefusedTest, AnInvalidRuleStillProducesAReportableSummary) {
     EXPECT_EQ(s.reason, "rearm_wrong_side");
     EXPECT_GT(s.state_sequence, 0u);
 }
+
+TEST_F(RuleEvaluatorTest, AWindowThatOpensAndClosesBetweenBeatsIsNotMissed) {
+    DeepWindowRule rule = makeRule("kernel_launch_rate<100 for 500ms");
+    MetricSource src(rule.metric, rule.timing, &feeds, ActiveCounterProvider());
+    RuleEvaluator ev(rule, "r1", RuleCapabilities{}, &src, coord.hooks());
+    feeds.seedStartup(0);
+
+    run(ev, src, 0, 1500 * kMs, 10);
+    ASSERT_EQ(ev.state(), RuleState::Armed);
+
+    // A launch-bounded window over a busy loop can open and close inside one
+    // collector beat. Polling a boolean would see nothing and let the samples
+    // taken during it count as clean.
+    coord.openManual();
+    coord.close();
+
+    ev.poll(1510 * kMs);
+    EXPECT_EQ(ev.state(), RuleState::Recovery)
+        << "a whole window came and went unnoticed";
+}
+
 
 }  // namespace

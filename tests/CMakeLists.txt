@@ -245,3 +245,22 @@ else()
         DISCOVERY_MODE POST_BUILD
     )
 endif()
+
+# Cross-module counter sharing. Cannot be proven from inside one executable -
+# it needs the Python extension AND the shared runtime as separate modules - so
+# it runs as its own process rather than as a gtest case. Skipped rather than
+# failed when the bindings are not built, since most configurations do not
+# build them.
+if(BUILD_PYTHON AND TARGET gpufl_counter_runtime)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME counter_cross_module
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_SOURCE_DIR}/scripts/counter_cross_module_check.py)
+        set_tests_properties(counter_cross_module PROPERTIES
+            ENVIRONMENT "GPUFL_REPO=${CMAKE_SOURCE_DIR}"
+            # The runtime has to be findable by name; the build tree puts it
+            # beside the extension.
+            WORKING_DIRECTORY $<TARGET_FILE_DIR:_gpufl_client>)
+    endif()
+endif()

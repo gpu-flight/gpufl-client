@@ -25,10 +25,10 @@ const char* toString(const MetricState s) {
 // ---------------------------------------------------------------- MetricFeeds
 
 void MetricFeeds::noteKernelLaunch(const int64_t ts_ns) {
-    std::lock_guard lk(mu_);
-    ++launch_.count;
-    launch_.last_event_ns = ts_ns;
-    launch_.seeded = true;
+    // Lock-free: this is the application's launch path.
+    launch_count_.fetch_add(1, std::memory_order_relaxed);
+    launch_last_ns_.store(ts_ns, std::memory_order_relaxed);
+    launch_seeded_.store(true, std::memory_order_release);
 }
 
 void MetricFeeds::noteKernelDuration(const int64_t ts_ns, const double duration_ms) {
@@ -61,11 +61,13 @@ void MetricFeeds::noteDeviceSample(const DeviceSample& sample, const int64_t ts_
 }
 
 void MetricFeeds::seedStartup(const int64_t ts_ns) {
-    std::lock_guard lk(mu_);
-    if (launch_.seeded) return;
-    launch_.last_event_ns = ts_ns;
-    launch_.seeded = true;
-    durations_.last_event_ns = ts_ns;
+    {
+        std::lock_guard lk(mu_);
+        durations_.last_event_ns = ts_ns;
+    }
+    if (launch_seeded_.load(std::memory_order_acquire)) return;
+    launch_last_ns_.store(ts_ns, std::memory_order_relaxed);
+    launch_seeded_.store(true, std::memory_order_release);
 }
 
 int MetricFeeds::deviceCount() const {
@@ -74,8 +76,13 @@ int MetricFeeds::deviceCount() const {
 }
 
 MetricFeeds::LaunchFeed MetricFeeds::launchFeed() const {
-    std::lock_guard lk(mu_);
-    return launch_;
+    LaunchFeed out;
+    // Seeded first: it is released last on the write side, so observing it
+    // true means the count and timestamp beside it are already visible.
+    out.seeded = launch_seeded_.load(std::memory_order_acquire);
+    out.count = launch_count_.load(std::memory_order_relaxed);
+    out.last_event_ns = launch_last_ns_.load(std::memory_order_relaxed);
+    return out;
 }
 
 MetricFeeds::DurationFeed MetricFeeds::drainDurations() {
@@ -109,9 +116,11 @@ MetricFeeds::GaugeFeed MetricFeeds::gaugeFeed(const MetricKind kind,
 
 void MetricFeeds::resetForTesting() {
     std::lock_guard lk(mu_);
-    launch_ = LaunchFeed{};
     durations_ = DurationFeed{};
     devices_.clear();
+    launch_count_.store(0, std::memory_order_relaxed);
+    launch_last_ns_.store(0, std::memory_order_relaxed);
+    launch_seeded_.store(false, std::memory_order_release);
 }
 
 // --------------------------------------------------------------- MetricSource
@@ -169,7 +178,12 @@ void MetricSource::closeBucket(const int64_t boundary_ns) {
             if (id_.kind == MetricKind::KernelLaunchRate) {
                 total = feeds_->launchFeed().count;
             } else if (resolveCustomHandle()) {
-                total = counters_->load(handle_);
+                // Since the session baseline, not the raw lifetime total. A
+                // permanent slot keeps its value across shutdown()/init(), so a
+                // counter ticked by a PREVIOUS session would otherwise read as
+                // already-ticked here and a stall rule would arm on evidence
+                // this run never saw.
+                total = counters_->load_since_baseline(handle_);
                 if (total > 0) first_tick_seen_ = true;
             }
             // Unsigned delta: correct across a wrap, which is why the counter is
@@ -249,7 +263,8 @@ MetricSample MetricSource::poll(const int64_t now_ns) {
                     current_.sequence = total_closes_;
                     return current_;
                 }
-                if (!first_tick_seen_ && counters_->load(handle_) > 0) {
+                if (!first_tick_seen_ &&
+                    counters_->load_since_baseline(handle_) > 0) {
                     first_tick_seen_ = true;
                     // Seed the source clock at the moment the counter is first
                     // seen to move; ticks before this point have no timestamp.

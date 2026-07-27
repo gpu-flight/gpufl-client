@@ -413,4 +413,37 @@ TEST_F(MetricSourceTest, ALongCollectorStallDoesNotReplayFabricatedZeros) {
     EXPECT_EQ(after.state, MetricState::WarmingUp);
 }
 
+TEST_F(MetricSourceTest, CustomCounterIgnoresTicksFromAnEarlierSession) {
+    // Slots are permanent by design, so a counter ticked by a previous session
+    // still holds that value. Reading the raw total would make the new session
+    // believe the counter had already moved, arm on evidence it never saw, and
+    // fire a stall rule on a workload that had not started.
+    auto c = gpufl::counter("metric_prev_session");
+    c.add(5000);                       // "previous session" traffic
+
+    ActiveCounterProvider()->begin_session();   // this session's baseline
+
+    const MetricWindowConfig cfg{1000, 2000, 5000};
+    MetricSource src(parse("custom.metric_prev_session_rate"), cfg, &feeds,
+                     ActiveCounterProvider());
+
+    const auto s = advance(src, 0, 3000 * kMs, 10 * kMs);
+    EXPECT_EQ(s.state, MetricState::WarmingUp)
+        << "counted a previous session's ticks as this session's first tick";
+    ActiveCounterProvider()->end_session();
+}
+
+TEST_F(MetricSourceTest, LaunchFeedIsVisibleWithoutTakingALock) {
+    // The launch path writes atomics only. This does not prove the absence of a
+    // lock, but it does pin the visibility contract the atomics have to keep:
+    // seeded is released last, so observing it means count and timestamp are
+    // already visible.
+    MetricFeeds f;
+    f.noteKernelLaunch(1234);
+    const auto feed = f.launchFeed();
+    EXPECT_TRUE(feed.seeded);
+    EXPECT_EQ(feed.count, 1u);
+    EXPECT_EQ(feed.last_event_ns, 1234);
+}
+
 }  // namespace
