@@ -229,7 +229,8 @@ TEST_F(MetricSourceTest, PollingBetweenBucketsDoesNotAdvanceTheSequence) {
 
 TEST_F(MetricSourceTest, CustomCounterIsMissingUntilTheAppRegistersIt) {
     const MetricWindowConfig cfg{1000, 2000, 5000};
-    MetricSource src(parse("custom.token_rate"), cfg, &feeds, ActiveCounterProvider());
+    MetricSource src(parse("custom.metric_absent_rate"), cfg, &feeds,
+                     ActiveCounterProvider());
 
     const auto before = advance(src, 0, 1100 * kMs, 10 * kMs);
     EXPECT_EQ(before.state, MetricState::Missing);
@@ -237,18 +238,24 @@ TEST_F(MetricSourceTest, CustomCounterIsMissingUntilTheAppRegistersIt) {
 
     // Asking about a counter must not create it - that would make "never
     // registered" indistinguishable from "registered but idle".
-    EXPECT_EQ(CounterRegistry::instance().findCounter("token"),
-              CounterRegistry::kInvalidSlot);
+    //
+    // Checked through the ACTIVE provider, which is what the source consults.
+    // With a shared runtime present the local registry is a different registry
+    // entirely, and asserting against it would pass without proving anything.
+    EXPECT_EQ(ActiveCounterProvider()->lookup("metric_absent",
+                                              std::strlen("metric_absent")),
+              nullptr);
 }
 
 TEST_F(MetricSourceTest, CustomCounterResolvesLazilyAfterRegistration) {
     const MetricWindowConfig cfg{1000, 2000, 5000};
-    MetricSource src(parse("custom.token_rate"), cfg, &feeds, ActiveCounterProvider());
+    MetricSource src(parse("custom.metric_lazy_rate"), cfg, &feeds,
+                     ActiveCounterProvider());
     EXPECT_EQ(src.poll(0).state, MetricState::Missing);
 
     // An env rule is parsed during init(), long before application code reaches
     // gpufl::counter(). Rejecting it at install time would kill every such rule.
-    auto tokens = gpufl::counter("token");
+    auto tokens = gpufl::counter("metric_lazy");
     const auto registered = advance(src, 10 * kMs, 1100 * kMs, 10 * kMs);
     EXPECT_EQ(registered.state, MetricState::WarmingUp)
         << "registered but never ticked is not Missing, and not Fresh 0 either";
@@ -264,8 +271,11 @@ TEST_F(MetricSourceTest, CustomCounterResolvesLazilyAfterRegistration) {
 
 TEST_F(MetricSourceTest, CustomCounterGoesStaleWhenTicksStop) {
     const MetricWindowConfig cfg{1000, 2000, 5000};
-    MetricSource src(parse("custom.stall_rate"), cfg, &feeds, ActiveCounterProvider());
-    auto c = gpufl::counter("stall");
+    MetricSource src(parse("custom.metric_stall_rate"), cfg, &feeds,
+                     ActiveCounterProvider());
+    // Unique to this test: slots are permanent by design, so a name shared with
+    // another test makes the result depend on execution order.
+    auto c = gpufl::counter("metric_stall");
 
     for (int64_t t = 0; t < 2000 * kMs; t += 10 * kMs) {
         c.add(5);
