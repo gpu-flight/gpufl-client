@@ -126,6 +126,7 @@ target_sources(gpufl PRIVATE
     include/gpufl/core/counter_api.cpp
     include/gpufl/core/counter_provider.cpp
     include/gpufl/core/metric_id.cpp
+    include/gpufl/core/deep_window_rule.cpp
     include/gpufl/core/metric_registry.cpp
     include/gpufl/core/monitor_batch_manager.cpp
     include/gpufl/core/monitor_record_builders.cpp

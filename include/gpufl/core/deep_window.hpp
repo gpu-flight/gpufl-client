@@ -80,6 +80,34 @@ class DeepWindow {
     static void RequestOpen(const DeepWindowSpec& spec);
 
     /**
+     * @brief Request an open and get back a token identifying it.
+     *
+     * For callers that must know whether the window they asked for actually
+     * happened - a rule with a window budget cannot count a window that never
+     * opened, and cannot let a manual one consume its budget either.
+     *
+     * Returns 0 when the request is refused outright (a window is already open,
+     * or the cooldown has not elapsed). A non-zero token matches
+     * LastOpenedToken() once, and only once, the requested window opens.
+     */
+    static uint64_t RequestOpenTagged(const DeepWindowSpec& spec);
+
+    /** @brief Token of the most recent open; 0 when it was not from a request. */
+    static uint64_t LastOpenedToken();
+
+    /**
+     * @brief Token of the request still queued, or 0 when none is.
+     *
+     * An open is serviced on a later beat, so "has not opened yet" and "will
+     * never open" look identical without this. A caller that treated the first
+     * as the second would abandon a window that was about to open.
+     */
+    static uint64_t PendingOpenToken();
+
+    /** @brief Monotonic count of windows that actually opened. */
+    static uint64_t OpensCompleted();
+
+    /**
      * @brief Same, but not before `delay_ms` have passed.
      *
      * Backs the launcher's time-based trigger, which is the only trigger

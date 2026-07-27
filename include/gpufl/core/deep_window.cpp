@@ -48,6 +48,21 @@ DeepWindowSpec    g_pending_spec;              // guarded by g_mu
 // When the last window closed, so a cooldown can be enforced. 0 = never.
 std::atomic<int64_t> g_last_close_ns{0};
 
+// Attribution for windows opened through a tagged request.
+//
+// A plain "a window opened" counter is not enough: a manual or scheduled
+// window opening while a rule's request is outstanding would be counted
+// against that rule's budget, and the budget is meant to bound what the RULE
+// costs. Tokens start at 1 so 0 keeps its meaning of "not from a request".
+std::atomic<uint64_t> g_next_open_token{1};
+std::atomic<uint64_t> g_last_opened_token{0};
+std::atomic<uint64_t> g_opens_completed{0};
+uint64_t              g_pending_token = 0;   // guarded by g_mu
+// Token of the request currently being serviced. Only TakePendingOpen_ sets
+// it, and only for the duration of the Open() call it drives, so a direct
+// Open() can never inherit someone else's attribution.
+thread_local uint64_t g_claimed_token = 0;
+
 int64_t     g_opened_ns = 0;
 int64_t     g_requested_duration_ms = 0;
 uint64_t    g_requested_max_launches = 0;
@@ -181,6 +196,12 @@ bool DeepWindow::Open(const DeepWindowSpec& spec) {
                           spec.cooldown_ms, "ms not elapsed");
             return false;
         }
+
+        // Publish who this open belongs to, then clear the claim so a later
+        // direct Open() cannot inherit it. g_pending_token is set only by
+        // RequestOpenTagged and consumed exactly once, here.
+        g_last_opened_token.store(g_claimed_token, std::memory_order_release);
+        g_opens_completed.fetch_add(1, std::memory_order_acq_rel);
 
         g_opened_ns = detail::GetTimestampNs();
         g_name = spec.name.empty() ? "deep_window" : spec.name;
@@ -321,6 +342,37 @@ void DeepWindow::RequestOpen(const DeepWindowSpec& spec) {
     ScheduleOpenAfter(0, spec);
 }
 
+uint64_t DeepWindow::RequestOpenTagged(const DeepWindowSpec& spec) {
+    {
+        std::lock_guard lk(g_mu);
+        // Decided here so the caller learns now, rather than discovering later
+        // that a window it counted on never opened.
+        if (g_active.load(std::memory_order_relaxed)) return 0;
+        if (InCooldown(spec)) return 0;
+    }
+    const uint64_t token = g_next_open_token.fetch_add(1, std::memory_order_relaxed);
+    {
+        std::lock_guard lk(g_mu);
+        g_pending_token = token;
+    }
+    ScheduleOpenAfter(0, spec);
+    return token;
+}
+
+uint64_t DeepWindow::LastOpenedToken() {
+    return g_last_opened_token.load(std::memory_order_acquire);
+}
+
+uint64_t DeepWindow::PendingOpenToken() {
+    if (!g_open_requested.load(std::memory_order_acquire)) return 0;
+    std::lock_guard lk(g_mu);
+    return g_pending_token;
+}
+
+uint64_t DeepWindow::OpensCompleted() {
+    return g_opens_completed.load(std::memory_order_acquire);
+}
+
 void DeepWindow::ScheduleOpenAfter(const int64_t delay_ms,
                                    const DeepWindowSpec& spec) {
     {
@@ -346,9 +398,16 @@ void DeepWindow::TakePendingOpen_() {
     {
         std::lock_guard lk(g_mu);
         spec = g_pending_spec;
+        // Claim the token here, not in Open(): Open can still refuse, and a
+        // token left behind would keep reading as "queued" for the rest of the
+        // run, so a rule would wait forever for a window that was already
+        // turned down.
+        g_claimed_token = g_pending_token;
+        g_pending_token = 0;
     }
     // Outside the lock: Open takes it too.
     Open(spec);
+    g_claimed_token = 0;
 }
 
 void DeepWindow::OnLaunch() {
@@ -414,6 +473,10 @@ void DeepWindow::ServicePending() {
 void DeepWindow::ResetForTesting() {
     std::lock_guard<std::mutex> lk(g_mu);
     g_active.store(false, std::memory_order_release);
+    g_next_open_token.store(1, std::memory_order_relaxed);
+    g_last_opened_token.store(0, std::memory_order_relaxed);
+    g_opens_completed.store(0, std::memory_order_relaxed);
+    g_pending_token = 0;
     g_deadline_ns.store(0, std::memory_order_relaxed);
     g_launches_remaining.store(0, std::memory_order_relaxed);
     g_launches_covered.store(0, std::memory_order_relaxed);
