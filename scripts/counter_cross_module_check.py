@@ -26,7 +26,26 @@ if not repo:
     print("XMOD: set GPUFL_REPO to the repository root", file=sys.stderr)
     sys.exit(2)
 sys.path.insert(0, str(pathlib.Path(repo) / "python"))
+
+# The extension must be the real one. A stub fallback would tick nothing and
+# the check would then "pass" while proving the opposite of what it claims.
+if sys.platform == "win32":
+    ext_dir = pathlib.Path(repo) / "python" / "gpufl"
+    if ext_dir.is_dir():
+        os.add_dll_directory(str(ext_dir))
+
 import gpufl  # noqa: E402
+
+# The package exposes counter() either way, so asking whether the attribute
+# exists proves nothing. The extension module itself has to be there - a stub
+# ticks nothing, and the check would then report a split registry when the real
+# problem was an interpreter that cannot load the extension at all.
+if "gpufl._gpufl_client" not in sys.modules:
+    print("XMOD: the _gpufl_client extension is not loaded - gpufl is running "
+          "its stub, so nothing was ticked. Check the interpreter matches the "
+          "one the extension was built for (%s)." % sys.version.split()[0],
+          file=sys.stderr)
+    sys.exit(1)
 
 tokens = gpufl.counter("xmod_token")
 tokens.add(41)
@@ -42,13 +61,33 @@ def runtime_names():
     return ["libgpufl_counter_runtime.so"]
 
 
+# Beside the extension first. That is where deployment puts it, and resolving
+# it any other way would test a layout the product does not ship.
+search = []
+ext_file = getattr(sys.modules.get("gpufl._gpufl_client"), "__file__", None)
+if ext_file:
+    search.append(pathlib.Path(ext_file).parent)
+search.append(pathlib.Path(repo) / "python" / "gpufl")
+
 lib = None
-for name in runtime_names():
-    try:
-        lib = ctypes.CDLL(name)
+for directory in search:
+    for name in runtime_names():
+        candidate = directory / name
+        if candidate.exists():
+            try:
+                lib = ctypes.CDLL(str(candidate))
+                break
+            except OSError:
+                continue
+    if lib is not None:
         break
-    except OSError:
-        continue
+if lib is None:
+    for name in runtime_names():
+        try:
+            lib = ctypes.CDLL(name)
+            break
+        except OSError:
+            continue
 if lib is None:
     # Not a pass. The whole point is that this library is reachable; if it is
     # not, the two modules are already on separate registries.

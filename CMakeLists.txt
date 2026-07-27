@@ -843,3 +843,49 @@ install(EXPORT gpufl_clientTargets
     NAMESPACE gpufl::
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/gpufl_client
 )
+
+# Cross-module counter sharing. Cannot be proven from inside one executable - it
+# needs the Python extension AND the shared runtime as separate modules - so it
+# runs as its own process rather than as a gtest case.
+#
+# Lives here, not in tests/, because tests/ is processed before _gpufl_client is
+# defined; gating on that target there is always false and the check silently
+# never registers - which is how it went unrun in the first place.
+#
+# Staged into the build tree rather than run against the source tree: the
+# extension has to sit INSIDE the package to be importable, and copying a build
+# artifact into source would leave it there for every later run.
+if(BUILD_TESTING AND BUILD_PYTHON AND TARGET _gpufl_client
+   AND TARGET gpufl_counter_runtime
+   AND CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+    # The interpreter the EXTENSION was built for, not whichever one a fresh
+    # find_package picks. A different minor version cannot import a cp3XX
+    # module at all, so the check would silently run against the stub and
+    # report that the registries are split when nothing of the sort happened.
+    if(DEFINED Python_EXECUTABLE)
+        set(GPUFL_XMOD_PYTHON "${Python_EXECUTABLE}")
+    elseif(DEFINED PYTHON_EXECUTABLE)
+        set(GPUFL_XMOD_PYTHON "${PYTHON_EXECUTABLE}")
+    endif()
+    if(GPUFL_XMOD_PYTHON)
+        set(GPUFL_XMOD_STAGE ${CMAKE_BINARY_DIR}/xmod_stage)
+        add_custom_target(counter_xmod_stage ALL
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    ${CMAKE_SOURCE_DIR}/python/gpufl
+                    ${GPUFL_XMOD_STAGE}/python/gpufl
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_FILE:_gpufl_client>
+                    ${GPUFL_XMOD_STAGE}/python/gpufl/
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_FILE:gpufl_counter_runtime>
+                    ${GPUFL_XMOD_STAGE}/python/gpufl/
+            COMMENT "Staging the cross-module counter check")
+        add_dependencies(counter_xmod_stage _gpufl_client gpufl_counter_runtime)
+
+        add_test(NAME counter_cross_module
+                 COMMAND ${GPUFL_XMOD_PYTHON}
+                         ${CMAKE_SOURCE_DIR}/scripts/counter_cross_module_check.py)
+        set_tests_properties(counter_cross_module PROPERTIES
+            ENVIRONMENT "GPUFL_REPO=${GPUFL_XMOD_STAGE}")
+    endif()
+endif()
