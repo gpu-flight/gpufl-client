@@ -487,4 +487,52 @@ TEST_F(MetricSourceTest, ALongStallDiscardsDurationsRecordedBeforeIt) {
     EXPECT_LT(after.value, 900.0);
 }
 
+TEST_F(MetricSourceTest, ACatchUpPutsDurationsInTheBucketTheyBelongTo) {
+    // The collector falls behind and closes several boundaries in one poll.
+    // With untimestamped samples the whole backlog lands in the OLDEST bucket
+    // and the rest come up empty, so the window holds one dense bucket instead
+    // of the spread that actually happened.
+    const MetricWindowConfig cfg{1000, 2000, 5000};   // 100ms buckets
+    MetricSource src(parse("recent_kernel_ms"), cfg, &feeds, ActiveCounterProvider());
+    feeds.seedStartup(0);
+    src.poll(0);
+
+    // Four buckets' worth of kernels, one per bucket, recorded while the
+    // collector is asleep. The last is 100ms; the rest are 1ms.
+    feeds.noteKernelDuration(50 * kMs, 1.0);
+    feeds.noteKernelDuration(150 * kMs, 1.0);
+    feeds.noteKernelDuration(250 * kMs, 1.0);
+    feeds.noteKernelDuration(350 * kMs, 100.0);
+
+    // One poll that closes all four boundaries at once.
+    src.poll(400 * kMs);
+
+    // Keep the window full without adding anything, then read.
+    const auto s = advance(src, 410 * kMs, 1100 * kMs, 10 * kMs);
+    ASSERT_EQ(s.state, MetricState::Fresh);
+    // Median of {1,1,1,100} is 1ms. If all four had been dumped into one
+    // bucket they would still be together here, so the sharper check is that
+    // the samples survive the catch-up at all rather than being expired by
+    // buckets that never held them.
+    EXPECT_LT(s.value, 50.0) << "value=" << s.value;
+}
+
+TEST_F(MetricSourceTest, TruncationIsCountedWhereSomeoneCanSeeIt) {
+    const MetricWindowConfig cfg{1000, 2000, 5000};
+    MetricSource src(parse("recent_kernel_ms"), cfg, &feeds, ActiveCounterProvider());
+    feeds.seedStartup(0);
+    src.poll(0);
+
+    for (size_t i = 0; i < MetricFeeds::kMaxPendingDurations + 2000; ++i) {
+        feeds.noteKernelDuration(10 * kMs, 5.0);
+    }
+    src.poll(200 * kMs);
+
+    // A percentile computed from a subset is not the percentile. Counting the
+    // loss is the minimum; suppressing the metric instead would disable it at
+    // exactly the launch rates it exists for.
+    EXPECT_GT(src.durationsTruncated(), 0u)
+        << "samples were discarded and nothing recorded it";
+}
+
 }  // namespace

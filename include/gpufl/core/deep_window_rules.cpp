@@ -118,6 +118,9 @@ std::string RuleId(const std::string& canonical_input) {
     return oss.str().substr(0, 12);
 }
 
+/** Upper bound accepted from config; the rule validator enforces the same. */
+constexpr int64_t kMaxWindowsConfigurable = 64;
+
 /** rate_window + sustained + bucket + 1s, or 0 with @p bad set on overflow. */
 int64_t CheckedStaleDefault(const MetricWindowConfig& t, std::string* bad) {
     constexpr int64_t kMax = INT64_MAX;   // not numeric_limits: windows.h defines max()
@@ -280,7 +283,18 @@ void DeepWindowRules::InstallFromEnv() {
         EnvIntOr(env::kDeepStaleAfterMs, derived_stale, &bad_env);
     double rearm = 0.0;
     if (EnvDoubleOr(env::kDeepRearmAt, &rearm, &bad_env)) rule.rearm_threshold = rearm;
-    rule.max_windows = static_cast<int>(EnvIntOr(env::kDeepMaxWindows, 3, &bad_env));
+    // Range-checked BEFORE narrowing. 4294967297 fits an int64 and survives
+    // the ERANGE check, then narrows to 1 - a value the validator happily
+    // accepts, so the run silently uses a budget nobody asked for.
+    const int64_t max_windows = EnvIntOr(env::kDeepMaxWindows, 3, &bad_env);
+    if (max_windows < 1 || max_windows > kMaxWindowsConfigurable) {
+        if (bad_env.empty()) {
+            bad_env = std::string(env::kDeepMaxWindows) + "=" +
+                      std::to_string(max_windows) + " is out of range";
+        }
+    }
+    rule.max_windows = static_cast<int>(
+        max_windows < 1 || max_windows > kMaxWindowsConfigurable ? 1 : max_windows);
 
     rule.window.max_duration_ms = EnvIntOr(env::kDeepWindowMs, 0, &bad_env);
     rule.window.max_launches =

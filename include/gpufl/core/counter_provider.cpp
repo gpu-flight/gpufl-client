@@ -214,11 +214,39 @@ std::vector<std::string> CounterRuntimeCandidatesForTesting(
 
 const gpufl_counter_provider_v1* CounterProvider::get() {
     std::lock_guard lk(g_mu);
-    if (!g_resolved) {
-        g_resolved = Resolve();
-        if (!g_resolved) g_failed_once = true;
+    if (g_resolved) return g_provider;
+
+    if (g_failed_once) {
+        // A full path scan already came up empty. Repeating it on every
+        // counter() would mean a filesystem probe per registration for the
+        // entire life of an ordinary embedded run, which has no shared runtime
+        // and never will.
+        //
+        // What CAN change is that the runtime gets mapped later - the injected
+        // library loads at the first CUDA call. So retry only that: one cheap
+        // already-loaded check, no path search.
+        void* handle = AlreadyLoaded();
+        if (handle == nullptr) return g_provider;
+        using GetProviderFn = const gpufl_counter_provider_v1* (*)();
+        const auto entry = reinterpret_cast<GetProviderFn>(
+            FindSymbol(handle, "gpufl_get_counter_provider_v1"));
+        if (entry == nullptr) return g_provider;
+        const gpufl_counter_provider_v1* provider = entry();
+        if (provider == nullptr ||
+            provider->abi_version != GPUFL_COUNTER_ABI_VERSION ||
+            provider->struct_size < sizeof(gpufl_counter_provider_v1)) {
+            return g_provider;
+        }
+        g_provider = provider;
+        g_shared = true;
+        g_resolved = true;
+        GFL_LOG_DEBUG("[CounterProvider] bound to shared runtime that appeared "
+                      "after the first attempt");
         return g_provider;
     }
+
+    g_resolved = Resolve();
+    if (!g_resolved) g_failed_once = true;
     return g_provider;
 }
 

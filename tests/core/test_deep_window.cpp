@@ -10,6 +10,8 @@
 // deliberately refuses to report a window as open when gpufl isn't running.
 
 #include <gtest/gtest.h>
+#include <vector>
+#include <atomic>
 
 #include <chrono>
 #include <filesystem>
@@ -72,6 +74,49 @@ gpufl::DeepWindowSpec Spec(const int64_t ms, const uint64_t launches,
     spec.max_launches = launches;
     spec.cooldown_ms = cooldown_ms;
     return spec;
+}
+
+TEST_F(DeepWindowTest, ConcurrentRequestsStillLeaveExactlyOneQueued) {
+    // First-wins has to hold when two threads ask at once. Publishing the
+    // queued flag after releasing the lock left a gap where the second caller
+    // took the lock, saw nothing queued, and overwrote the first - the very
+    // rule this enforces, defeated by concurrency.
+    //
+    // What this DOES pin: exactly one winner under contention, so removing the
+    // first-wins check fails here immediately.
+    //
+    // What it does NOT pin: the publish-under-lock ordering. That window is a
+    // few instructions between unlocking and the atomic store, and a waiter
+    // woken by the unlock has almost always missed it - 400 gated rounds never
+    // reproduced it. The ordering is correct by construction rather than by
+    // demonstration, and pretending otherwise would be worse than saying so.
+    constexpr int kRounds = 50;
+    constexpr int kThreads = 4;
+
+    for (int round = 0; round < kRounds; ++round) {
+        gpufl::DeepWindow::ResetForTesting();
+
+        std::atomic<bool> go{false};
+        std::atomic<int> accepted{0};
+        std::vector<std::thread> threads;
+        for (int i = 0; i < kThreads; ++i) {
+            threads.emplace_back([&] {
+                while (!go.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                }
+                if (gpufl::DeepWindow::RequestOpenTagged(Spec(60000, 0)) != 0) {
+                    accepted.fetch_add(1, std::memory_order_relaxed);
+                }
+            });
+        }
+        go.store(true, std::memory_order_release);
+        for (auto& t : threads) t.join();
+
+        ASSERT_EQ(accepted.load(), 1)
+            << "round " << round << ": more than one request was granted";
+        ASSERT_NE(gpufl::DeepWindow::PendingOpenToken(), 0u)
+            << "round " << round << ": nothing left queued";
+    }
 }
 
 }  // namespace

@@ -40,7 +40,7 @@ void MetricFeeds::noteKernelDuration(const int64_t ts_ns, const double duration_
     if (durations_.samples.size() >= kMaxPendingDurations) {
         ++durations_.dropped;
     } else {
-        durations_.samples.push_back(duration_ms);
+        durations_.samples.push_back(DurationSample{ts_ns, duration_ms});
     }
     // Advances even when the sample is dropped: the SOURCE is alive, and
     // freezing this would report a busy workload as a dead one.
@@ -95,6 +95,29 @@ MetricFeeds::LaunchFeed MetricFeeds::launchFeed() const {
     return out;
 }
 
+MetricFeeds::DurationFeed MetricFeeds::drainDurationsUpTo(const int64_t boundary_ns) {
+    std::lock_guard lk(mu_);
+    DurationFeed out;
+    out.last_event_ns = durations_.last_event_ns;
+    out.dropped = durations_.dropped;
+    durations_.dropped = 0;
+
+    // Kernels complete roughly in order, so a linear partition is enough; the
+    // point is that a sample from after the boundary stays for the bucket it
+    // belongs to rather than being counted in an earlier one.
+    std::vector<DurationSample> keep;
+    keep.reserve(durations_.samples.size());
+    for (const DurationSample& s : durations_.samples) {
+        if (s.ts_ns <= boundary_ns) {
+            out.samples.push_back(s);
+        } else {
+            keep.push_back(s);
+        }
+    }
+    durations_.samples.swap(keep);
+    return out;
+}
+
 MetricFeeds::DurationFeed MetricFeeds::drainDurations() {
     std::lock_guard lk(mu_);
     DurationFeed out;
@@ -143,7 +166,10 @@ MetricSource::MetricSource(MetricId id, MetricWindowConfig cfg, MetricFeeds* fee
     bucket_ns_ = cfg_.bucketIntervalMs() * kNsPerMs;
     const auto count = static_cast<size_t>(cfg_.bucketCount());
     buckets_.assign(count, 0);
-    if (id_.shape() == MetricShape::Percentile) bucket_durations_.resize(count);
+    if (id_.shape() == MetricShape::Percentile) {
+        bucket_durations_.resize(count);
+        bucket_truncated_.assign(count, false);
+    }
     // The ring, not the configured window, is what the rate divides by: the
     // bucket count rounds up, so the two differ and using the configured value
     // would report a rate the samples do not support.
@@ -208,13 +234,22 @@ void MetricSource::closeBucket(const int64_t boundary_ns) {
             break;
         }
         case MetricShape::Percentile: {
-            MetricFeeds::DurationFeed drained = feeds_->drainDurations();
+            // Up to THIS boundary only. Draining everything would put a
+            // catch-up's whole backlog into the oldest bucket and leave the
+            // rest of the window empty.
+            MetricFeeds::DurationFeed drained =
+                feeds_->drainDurationsUpTo(boundary_ns);
             auto& slot = bucket_durations_[head_];
             slot.clear();
+            bucket_truncated_[head_] = drained.dropped > 0;
             if (drained.samples.size() > kMaxDurationsPerBucket) {
                 drained.samples.resize(kMaxDurationsPerBucket);
+                bucket_truncated_[head_] = true;
             }
-            slot = std::move(drained.samples);
+            slot.reserve(drained.samples.size());
+            for (const MetricFeeds::DurationSample& s : drained.samples) {
+                slot.push_back(s.ms);
+            }
             if (drained.dropped > 0) durations_truncated_ += drained.dropped;
             break;
         }

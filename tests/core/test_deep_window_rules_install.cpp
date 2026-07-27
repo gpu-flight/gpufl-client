@@ -162,4 +162,18 @@ TEST_F(RuleInstallTest, AnOutOfRangeNumericOptionIsRefused) {
         << "a value too large to represent was accepted";
 }
 
+TEST_F(RuleInstallTest, AMaxWindowsThatDoesNotFitAnIntIsRefused) {
+    // 4294967297 survives ERANGE - it fits an int64 - and then narrows to 1,
+    // which the validator accepts. The run would silently use a budget nobody
+    // configured.
+    setEnv(gpufl::env::kDeepWhen, "kernel_launch_rate<100 for 2s");
+    setEnv(gpufl::env::kDeepWindowMs, "500");
+    setEnv(gpufl::env::kDeepMaxWindows, "4294967297");
+    DeepWindowRules::InstallFromEnv();
+
+    EXPECT_TRUE(DeepWindowRules::Installed());
+    EXPECT_FALSE(DeepWindowRules::WantsLaunchFeed())
+        << "a value that cannot fit an int was narrowed into a valid one";
+}
+
 }  // namespace

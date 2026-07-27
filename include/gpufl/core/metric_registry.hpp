@@ -101,8 +101,22 @@ public:
         int64_t  last_event_ns = 0;
         bool     seeded = false;
     };
+    /**
+     * One completed kernel.
+     *
+     * Carries its own timestamp because a bare duration cannot be placed in a
+     * bucket. When the collector falls behind and closes several boundaries in
+     * one poll, an untimestamped batch all lands in the OLDEST bucket and the
+     * rest come up empty - which skews the percentile and expires the samples
+     * earlier than their own timestamps say they should.
+     */
+    struct DurationSample {
+        int64_t ts_ns = 0;
+        double  ms = 0.0;
+    };
+
     struct DurationFeed {
-        std::vector<double> samples;   // durations since the last drain
+        std::vector<DurationSample> samples;
         int64_t last_event_ns = 0;
         /// Durations refused because the buffer was full, so a truncated
         /// percentile is visible rather than silently reported as complete.
@@ -132,6 +146,14 @@ public:
      * recent_kernel_ms would silently starve the first.
      */
     DurationFeed drainDurations();
+    /**
+     * @brief Take only the durations that completed at or before @p boundary_ns.
+     *
+     * What lets a catch-up over several boundaries put each sample in the
+     * bucket it actually belongs to instead of dumping the batch into the
+     * first one closed.
+     */
+    DurationFeed drainDurationsUpTo(int64_t boundary_ns);
     /** @brief Last duration timestamp WITHOUT draining, for staleness checks. */
     int64_t durationsLastEventNs() const;
     GaugeFeed gaugeFeed(MetricKind kind, int device_index) const;
@@ -221,6 +243,9 @@ private:
     // A percentile does not decompose across buckets, so durations are kept
     // per bucket and expire with it rather than being folded into a sum.
     std::vector<std::vector<double>> bucket_durations_;
+    /// Per-bucket flag: this bucket refused samples, so its share of the
+    /// percentile is a sample rather than the whole truth.
+    std::vector<bool> bucket_truncated_;
     size_t   head_ = 0;
     /// Closes in the CURRENT epoch; decides whether the window is full.
     uint64_t buckets_closed_ = 0;
@@ -251,6 +276,19 @@ private:
     /// Durations the feed had to refuse. Surfaced so a truncated percentile is
     /// not presented as a complete one.
     uint64_t durations_truncated_ = 0;
+
+public:
+    /**
+     * @brief How many completed kernels the feed had to discard.
+     *
+     * Non-zero means the percentile was computed from a subset. Reported
+     * rather than used to suppress the metric: at the launch rates that cause
+     * it - hundreds of thousands per second - suppression would disable the
+     * metric on exactly the workloads it exists for.
+     */
+    uint64_t durationsTruncated() const { return durations_truncated_; }
+
+private:
 
     MetricSample current_;
     uint64_t     sequence_ = 0;
