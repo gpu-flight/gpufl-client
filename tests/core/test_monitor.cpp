@@ -163,3 +163,282 @@ TEST(ScopeNameStackTest, DepthReportsWhereANewScopeWouldNest) {
     m.pushTrackedScopeRow(ScopeRow(2, inner, 1));
     EXPECT_EQ(m.openScopeDepth(), 1);
 }
+
+// ── PM sample scope attribution ─────────────────────────────────────────────
+//
+// Attribution used to rescan every completed scope of the run for every PM
+// sample, over a list that was never trimmed. These cover the replacement: a
+// retention watermark driven by decode progress, and a per-drain sort-and-sweep
+// that must agree with the original resolver exactly.
+
+namespace {
+
+gpufl::PmSampleBatchRow PmSample(int64_t ts_ns) {
+    gpufl::PmSampleBatchRow row;
+    row.ts_ns = ts_ns;
+    return row;
+}
+
+gpufl::ScopeBatchRow ScopeEdge(uint64_t instance_id, uint32_t name_id, int64_t ts_ns,
+                               uint8_t event_type, int depth) {
+    gpufl::ScopeBatchRow row;
+    row.ts_ns = ts_ns;
+    row.scope_instance_id = instance_id;
+    row.name_id = name_id;
+    row.event_type = event_type;
+    row.depth = depth;
+    return row;
+}
+
+// Open then close a scope over [start_ns, end_ns] at the given depth.
+void RecordScope(gpufl::detail::MonitorBatchManager& m, uint64_t instance_id,
+                 uint32_t name_id, int64_t start_ns, int64_t end_ns, int depth) {
+    m.pushTrackedScopeRow(ScopeEdge(instance_id, name_id, start_ns, 0, depth));
+    m.pushTrackedScopeRow(ScopeEdge(instance_id, name_id, end_ns, 1, depth));
+}
+
+}  // namespace
+
+TEST(ScopeAttributionTest, BatchSweepMatchesThePerSampleResolver) {
+    // Both must pick the same scope for every timestamp. The sweep is only an
+    // optimisation, so any disagreement is a regression in attribution.
+    gpufl::detail::MonitorBatchManager m;
+    const uint32_t outer = m.internScopeName("process:app");
+    const uint32_t mid = m.internScopeName("epoch");
+    const uint32_t inner = m.internScopeName("step");
+
+    // Nested, overlapping, and sharing boundaries. Closed out of order on
+    // purpose: real closes are timestamped before they take the lock.
+    RecordScope(m, 3, inner, 300, 400, 2);
+    RecordScope(m, 2, mid, 200, 500, 1);
+    RecordScope(m, 1, outer, 100, 900, 0);
+    RecordScope(m, 4, inner, 500, 500, 2);   // zero-width, boundary shared with mid
+    // Overlapping siblings at the SAME depth. Without these the depth
+    // comparison alone decides every sample and the start_ns tie-break is
+    // never exercised - two threads each running their own scope is exactly
+    // how this arises.
+    RecordScope(m, 5, mid, 600, 800, 1);
+    RecordScope(m, 6, inner, 700, 850, 1);
+
+    std::vector<int64_t> timestamps;
+    for (int64_t ts = 50; ts <= 950; ts += 7) timestamps.push_back(ts);
+    for (int64_t ts : {100LL, 200LL, 300LL, 400LL, 500LL, 900LL}) timestamps.push_back(ts);
+
+    std::vector<gpufl::PmSampleBatchRow> rows;
+    for (int64_t ts : timestamps) rows.push_back(PmSample(ts));
+    m.resolveScopeIdsForTesting(rows, /*fallback_id=*/0);
+
+    for (const auto& row : rows) {
+        const uint32_t reference = m.resolveScopeIdForTesting(row.ts_ns);
+        EXPECT_EQ(row.scope_name_id, reference)
+            << "sweep and per-sample resolver disagree at ts=" << row.ts_ns;
+    }
+}
+
+TEST(ScopeAttributionTest, SampleInsideAStillOpenScopeIsAttributedToIt) {
+    // PM drains mid-run, so the scope covering a sample is routinely still
+    // open. Before this, such samples fell back to whatever was on top at drain
+    // time - which is not the same question.
+    gpufl::detail::MonitorBatchManager m;
+    const uint32_t outer = m.internScopeName("process:app");
+    const uint32_t open = m.internScopeName("deep_window");
+
+    RecordScope(m, 1, outer, 100, 900, 0);
+    m.pushTrackedScopeRow(ScopeEdge(2, open, 400, 0, 1));   // never closed
+
+    std::vector<gpufl::PmSampleBatchRow> rows{PmSample(300), PmSample(500)};
+    m.resolveScopeIdsForTesting(rows, /*fallback_id=*/0);
+
+    EXPECT_EQ(rows[0].scope_name_id, outer) << "before the open scope started";
+    EXPECT_EQ(rows[1].scope_name_id, open) << "inside the still-open scope";
+}
+
+TEST(ScopeAttributionTest, PendingCloseCapsAnOpenScopeAtItsCapturedTimestamp) {
+    // A close captures its timestamp before waiting for the scope-state lock.
+    // The snapshot must observe that pending timestamp instead of extending the
+    // still-open map entry through the entire PM batch.
+    gpufl::detail::MonitorBatchManager m;
+    const uint32_t name = m.internScopeName("closing");
+    m.pushTrackedScopeRow(ScopeEdge(1, name, 100, 0, 0));
+    m.markScopeClosePending(1, 200);
+
+    std::vector<gpufl::PmSampleBatchRow> rows{PmSample(150), PmSample(250)};
+    m.resolveScopeIdsForTesting(rows, /*fallback_id=*/0);
+
+    EXPECT_EQ(rows[0].scope_name_id, name);
+    EXPECT_EQ(rows[1].scope_name_id, 0u)
+        << "a pending close must prevent provisional extension past its timestamp";
+}
+
+TEST(ScopeAttributionTest, RetentionDropsOnlyWhatTheWatermarkReleases) {
+    gpufl::detail::MonitorBatchManager m;
+    const uint32_t name = m.internScopeName("step");
+    RecordScope(m, 1, name, 100, 200, 0);
+    RecordScope(m, 2, name, 300, 400, 0);
+    RecordScope(m, 3, name, 500, 600, 0);
+    EXPECT_EQ(m.retainedCompletedScopesForTesting(), 3u);
+
+    // Nothing published yet: a run without PM sampling must never lose scopes.
+    std::vector<gpufl::PmSampleBatchRow> probe{PmSample(150)};
+    m.resolveScopeIdsForTesting(probe, 0);
+    EXPECT_EQ(m.retainedCompletedScopesForTesting(), 3u);
+
+    m.publishScopeRetentionWatermark(450);
+    m.resolveScopeIdsForTesting(probe, 0);
+    EXPECT_EQ(m.retainedCompletedScopesForTesting(), 1u)
+        << "only the scope ending after the watermark survives";
+}
+
+TEST(ScopeAttributionTest, WatermarkNeverMovesBackwards) {
+    // A failed decode or an overflow must not un-retire scopes already
+    // released, so a lower value is ignored rather than applied.
+    gpufl::detail::MonitorBatchManager m;
+    const uint32_t name = m.internScopeName("step");
+    RecordScope(m, 1, name, 100, 200, 0);
+    RecordScope(m, 2, name, 300, 400, 0);
+
+    m.publishScopeRetentionWatermark(350);
+    m.publishScopeRetentionWatermark(50);    // ignored
+
+    std::vector<gpufl::PmSampleBatchRow> probe{PmSample(380)};
+    m.resolveScopeIdsForTesting(probe, 0);
+    EXPECT_EQ(m.retainedCompletedScopesForTesting(), 1u);
+}
+
+TEST(ScopeAttributionTest, DelayedDrainKeepsScopesThatWallClockWouldHaveDropped) {
+    // The watermark is event time, not wall clock. A collector stalled for
+    // seconds must still attribute the samples it eventually decodes.
+    gpufl::detail::MonitorBatchManager m;
+    const uint32_t name = m.internScopeName("step");
+    RecordScope(m, 1, name, 1'000'000'000, 1'100'000'000, 0);
+
+    // Simulate a long stall: no watermark is published because nothing decoded.
+    std::vector<gpufl::PmSampleBatchRow> rows{PmSample(1'050'000'000)};
+    m.resolveScopeIdsForTesting(rows, /*fallback_id=*/7);
+
+    EXPECT_EQ(rows[0].scope_name_id, name)
+        << "a scope that ended 2s ago is still needed by an undecoded sample";
+}
+
+TEST(ScopeAttributionTest, EqualDepthAndStartResolveIdenticallyInBothPaths) {
+    // std::sort is not stable and open scopes come out of an unordered_map, so
+    // without a tertiary key two scopes sharing depth AND start could resolve
+    // differently between the batch sweep and the reference resolver.
+    gpufl::detail::MonitorBatchManager m;
+    const uint32_t a = m.internScopeName("thread_a");
+    const uint32_t b = m.internScopeName("thread_b");
+
+    // Same depth and start, DIFFERENT ends. If the ranking ever reports the two
+    // as equivalent, the sweep's ordered set keeps only one of them - and a
+    // sample after the shorter one ends then resolves to nothing instead of to
+    // the scope still covering it. Equal ends would hide that entirely.
+    RecordScope(m, 10, a, 100, 200, 1);
+    RecordScope(m, 11, b, 100, 400, 1);
+
+    std::vector<gpufl::PmSampleBatchRow> rows{PmSample(150), PmSample(250), PmSample(350)};
+    m.resolveScopeIdsForTesting(rows, /*fallback_id=*/0);
+    for (const auto& row : rows) {
+        EXPECT_EQ(row.scope_name_id, m.resolveScopeIdForTesting(row.ts_ns));
+    }
+}
+
+TEST(ScopeAttributionTest, UncoveredSampleIsUnattributedNotGivenTheLiveScope) {
+    // The old fallback handed an unmatched sample whatever scope was open at
+    // DECODE time. That is the temporal error this resolver exists to remove:
+    // a sample can sit in the buffer while scopes come and go.
+    gpufl::detail::MonitorBatchManager m;
+    const uint32_t earlier = m.internScopeName("earlier");
+    const uint32_t live = m.internScopeName("live_now");
+
+    RecordScope(m, 1, earlier, 100, 200, 0);
+    // A different scope is open by the time the batch is decoded.
+    m.pushTrackedScopeRow(ScopeEdge(2, live, 900, 0, 0));
+
+    std::vector<gpufl::PmSampleBatchRow> rows{PmSample(500)};   // covered by neither
+    m.resolveScopeIdsForTesting(rows, /*fallback_id=*/0);
+
+    EXPECT_EQ(rows[0].scope_name_id, 0u)
+        << "an uncovered sample must stay unattributed, not inherit the live scope";
+}
+
+TEST(ScopeAttributionTest, ManyOverlappingScopesStillResolveCorrectly) {
+    // Cross-thread workloads keep a large active set. The sweep has to stay
+    // correct as that grows, not just when a couple of scopes nest.
+    gpufl::detail::MonitorBatchManager m;
+
+    // A distinct name per scope. With one shared name the assertion could not
+    // tell a correct pick from a wrong one - every answer would compare equal.
+    constexpr int kScopes = 400;
+    std::vector<uint32_t> names;
+    names.reserve(kScopes);
+    for (int i = 0; i < kScopes; ++i) {
+        names.push_back(m.internScopeName("worker_" + std::to_string(i)));
+    }
+    for (int i = 0; i < kScopes; ++i) {
+        RecordScope(m, static_cast<uint64_t>(i + 1), names[i],
+                    /*start*/ i, /*end*/ 10'000 + i, /*depth*/ i % 4);
+    }
+
+    std::vector<gpufl::PmSampleBatchRow> rows;
+    for (int64_t ts = 0; ts < 10'000; ts += 337) rows.push_back(PmSample(ts));
+    m.resolveScopeIdsForTesting(rows, /*fallback_id=*/0);
+
+    for (const auto& row : rows) {
+        EXPECT_EQ(row.scope_name_id, m.resolveScopeIdForTesting(row.ts_ns))
+            << "large active set diverges at ts=" << row.ts_ns;
+    }
+}
+
+TEST(ScopeAttributionTest, CapAppliesWithoutAnyPmSamples) {
+    // The retention watermark is the real bound, but only PM sampling ever
+    // publishes one. A Trace-only run closes scopes and never decodes a sample,
+    // so if the cap only ran on the PM path this deque would grow for the life
+    // of the process - unbounded, and with nothing recorded to say so.
+    gpufl::detail::MonitorBatchManager m;
+    const uint32_t name = m.internScopeName("step");
+
+    constexpr int kScopes = 70'000;   // over kMaxCompletedScopes
+    for (int i = 0; i < kScopes; ++i) {
+        RecordScope(m, static_cast<uint64_t>(i + 1), name, i, i + 1, 0);
+    }
+
+    EXPECT_LE(m.retainedCompletedScopesForTesting(), 65536u);
+    EXPECT_EQ(m.scopeAttributionTruncated(), 0u)
+        << "evicting unused Trace-only history is not PM attribution loss";
+    EXPECT_EQ(m.pmSampleRowsSeen(), 0u)
+        << "evicting unused Trace-only history is not PM attribution loss";
+}
+
+TEST(ScopeAttributionTest, CapCountsEvictionWhilePmSamplingIsActive) {
+    gpufl::detail::MonitorBatchManager m;
+    const uint32_t name = m.internScopeName("step");
+    m.beginPmScopeAttribution(100);
+
+    constexpr int kScopes = 70'000;
+    for (int i = 0; i < kScopes; ++i) {
+        RecordScope(m, static_cast<uint64_t>(i + 1), name, i, i + 1, 0);
+    }
+
+    EXPECT_GT(m.scopeAttributionTruncated(), 0u)
+        << "eviction while PM can have buffered samples is an attribution risk";
+}
+
+TEST(ScopeAttributionTest, OldTraceHistoryEvictedDuringPmIsNotPartialAttribution) {
+    gpufl::detail::MonitorBatchManager m;
+    const uint32_t name = m.internScopeName("trace_step");
+
+    constexpr int kScopes = 70'000;
+    for (int i = 0; i < kScopes; ++i) {
+        RecordScope(m, static_cast<uint64_t>(i + 1), name, i, i + 1, 0);
+    }
+    m.beginPmScopeAttribution(1'000'000);
+
+    // Force more evictions after PM starts. Every evicted entry still predates
+    // the PM boundary, so none can be needed by a PM sample.
+    for (int i = 0; i < 100; ++i) {
+        const int64_t ts = 1'000'000 + i;
+        RecordScope(m, static_cast<uint64_t>(kScopes + i + 1), name, ts, ts + 1, 0);
+    }
+
+    EXPECT_EQ(m.scopeAttributionTruncated(), 0u);
+}

@@ -1,7 +1,12 @@
 #include "gpufl/core/monitor_batch_manager.hpp"
 
+#include <algorithm>
+#include <limits>
+#include <queue>
+#include <set>
 #include <utility>
 
+#include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/logger/logger.hpp"
 #include "gpufl/core/model/batch_models.hpp"
@@ -21,6 +26,15 @@ void MonitorBatchManager::reset() {
         scopeNameStack_.clear();
         openScopeWindows_.clear();
         completedScopeWindows_.clear();
+        scopeRetentionWatermarkNs_ = 0;
+        pmScopeAttributionStartNs_ = 0;
+        scopeHistoryEvictionLogged_ = false;
+        scopeAttributionTruncated_ = 0;
+        pmSampleRowsSeen_ = 0;
+        {
+            std::lock_guard pending_lk(pendingScopeCloseMu_);
+            pendingScopeCloseNs_.clear();
+        }
     }
     syncBatch_.clear();
     memAllocBatch_.clear();
@@ -165,6 +179,22 @@ int MonitorBatchManager::openScopeDepth() const {
     return static_cast<int>(scopeNameStack_.size());
 }
 
+int64_t MonitorBatchManager::captureScopeCloseTimestamp(uint64_t instance_id) {
+    // The timestamp and its publication share the same lock observed by the PM
+    // snapshot. If snapshot wins, its batch predates this close; if close wins,
+    // snapshot sees the exact end and cannot provisionally extend past it.
+    std::lock_guard lk(pendingScopeCloseMu_);
+    const int64_t end_ns = GetTimestampNs();
+    pendingScopeCloseNs_[instance_id] = end_ns;
+    return end_ns;
+}
+
+void MonitorBatchManager::markScopeClosePending(uint64_t instance_id, int64_t end_ns) {
+    std::lock_guard lk(pendingScopeCloseMu_);
+    const auto [it, inserted] = pendingScopeCloseNs_.emplace(instance_id, end_ns);
+    if (!inserted && end_ns < it->second) it->second = end_ns;
+}
+
 bool MonitorBatchManager::pushKernel(const KernelBatchRow& row,
                                      const KernelDetailRow* detail) {
     kernelBatch_.push(row);
@@ -187,6 +217,13 @@ void MonitorBatchManager::pushTraceScopeRows(const ScopeBatchRow& begin_row,
 }
 
 void MonitorBatchManager::pushTrackedScopeRow(const ScopeBatchRow& row) {
+    // Publish a close's already-captured timestamp before waiting for the main
+    // scope lock. A concurrent PM snapshot can then stop the open interval at
+    // this timestamp instead of extending it through the whole sample batch.
+    if (row.event_type != 0) {
+        markScopeClosePending(row.scope_instance_id, row.ts_ns);
+    }
+
     std::lock_guard lk(scopeBatchMu_);
     if (row.event_type == 0) {
         scopeNameStack_.emplace_back(row.scope_instance_id, row.name_id);
@@ -211,7 +248,12 @@ void MonitorBatchManager::pushTrackedScopeRow(const ScopeBatchRow& row) {
             completedScopeWindows_.push_back(
                     {it->second.start_ns, row.ts_ns, row.scope_instance_id, row.name_id, it->second.depth});
             openScopeWindows_.erase(it);
+            // Bound it here rather than only when PM samples arrive. Nothing
+            // publishes a retention watermark unless PM is actually sampling,
+            // so a Trace-only run would grow this for the life of the process.
+            enforceScopeCapLocked();
         }
+        clearPendingScopeCloseLocked(row.scope_instance_id);
     }
     scopeBatch_.push(row);
 }
@@ -230,13 +272,230 @@ void MonitorBatchManager::pushProfileSamples(const std::vector<ProfileSampleBatc
 }
 
 void MonitorBatchManager::pushPmSamplesResolvingScopes(const std::vector<PmSampleBatchRow>& rows) {
-    const uint32_t fallback_id = activeScopeNameId_.load(std::memory_order_relaxed);
+    if (rows.empty()) return;
+
+    std::vector resolved(rows.begin(), rows.end());
+
+    // Snapshot under the lock, sweep outside it. Holding scopeBatchMu_ for the
+    // whole sort-and-sweep would block every scope close for the duration, and
+    // a close that is already holding its end timestamp and waiting here is
+    // exactly what widens the window below.
+    std::vector<ScopeWindow> candidates;
+    {
+        std::lock_guard lk(scopeBatchMu_);
+        pmSampleRowsSeen_ += rows.size();
+        trimCompletedScopesLocked();
+        candidates = snapshotScopeCandidatesLocked(rows);
+    }
+
+    // No fallback to the currently active scope. A sample no interval covers is
+    // left unattributed, and that is the point of this path: handing it
+    // whichever scope happens to be open at DECODE time answers "what is
+    // running now", not "what was running when this was sampled", and the two
+    // differ by however long the sample sat in the buffer - exactly the error
+    // this resolver exists to remove. Open scopes are already candidates, so a
+    // sample inside a still-running scope resolves properly rather than by luck.
+    resolveScopeIdsForBatch(candidates, resolved, /*fallback_id=*/0);
+
+    {
+        std::lock_guard lk(scopeBatchMu_);
+        for (const auto& row : resolved) pmSampleBatch_.push(row);
+    }
+}
+
+void MonitorBatchManager::publishScopeRetentionWatermark(int64_t ts_ns) {
     std::lock_guard lk(scopeBatchMu_);
-    for (const auto& sample : rows) {
-        PmSampleBatchRow row = sample;
-        row.scope_name_id = resolveScopeIdLocked(row.ts_ns);
-        if (row.scope_name_id == 0) row.scope_name_id = fallback_id;
-        pmSampleBatch_.push(row);
+    // Monotonic. A caller that regressed - a decode that failed, a buffer that
+    // overflowed - must not be able to un-retire scopes it already released.
+    if (ts_ns > scopeRetentionWatermarkNs_) scopeRetentionWatermarkNs_ = ts_ns;
+}
+
+void MonitorBatchManager::beginPmScopeAttribution(int64_t start_ns) {
+    std::lock_guard lk(scopeBatchMu_);
+    pmScopeAttributionStartNs_ = start_ns;
+}
+
+void MonitorBatchManager::endPmScopeAttribution() {
+    std::lock_guard lk(scopeBatchMu_);
+    pmScopeAttributionStartNs_ = 0;
+}
+
+uint64_t MonitorBatchManager::scopeAttributionTruncated() const {
+    std::lock_guard lk(scopeBatchMu_);
+    return scopeAttributionTruncated_;
+}
+
+uint64_t MonitorBatchManager::pmSampleRowsSeen() const {
+    std::lock_guard lk(scopeBatchMu_);
+    return pmSampleRowsSeen_;
+}
+
+void MonitorBatchManager::resolveScopeIdsForTesting(std::vector<PmSampleBatchRow>& rows,
+                                                    uint32_t fallback_id) {
+    std::vector<ScopeWindow> candidates;
+    {
+        std::lock_guard lk(scopeBatchMu_);
+        trimCompletedScopesLocked();
+        candidates = snapshotScopeCandidatesLocked(rows);
+    }
+    resolveScopeIdsForBatch(candidates, rows, fallback_id);
+}
+
+uint32_t MonitorBatchManager::resolveScopeIdForTesting(int64_t ts_ns) const {
+    std::lock_guard lk(scopeBatchMu_);
+    return resolveScopeIdLocked(ts_ns);
+}
+
+size_t MonitorBatchManager::retainedCompletedScopesForTesting() const {
+    std::lock_guard lk(scopeBatchMu_);
+    return completedScopeWindows_.size();
+}
+
+void MonitorBatchManager::clearPendingScopeCloseLocked(uint64_t instance_id) {
+    // Called with scopeBatchMu_ held. Snapshot takes locks in the same order:
+    // scopeBatchMu_ first, pendingScopeCloseMu_ second.
+    std::lock_guard lk(pendingScopeCloseMu_);
+    pendingScopeCloseNs_.erase(instance_id);
+}
+
+void MonitorBatchManager::enforceScopeCapLocked() {
+    // Runs on every close, not only when PM samples arrive. The watermark is
+    // the real bound, but nothing publishes one unless PM is actually
+    // sampling - so a Trace-only run, or one where PM never initialised, would
+    // otherwise grow this deque for the life of the process with no cap and no
+    // telemetry to show for it.
+    if (completedScopeWindows_.size() <= kMaxCompletedScopes) return;
+    const size_t excess = completedScopeWindows_.size() - kMaxCompletedScopes;
+    uint64_t attribution_risk = 0;
+    if (pmScopeAttributionStartNs_ > 0) {
+        for (size_t i = 0; i < excess; ++i) {
+            if (completedScopeWindows_[i].end_ns >= pmScopeAttributionStartNs_) {
+                ++attribution_risk;
+            }
+        }
+    }
+    completedScopeWindows_.erase(completedScopeWindows_.begin(),
+                                 completedScopeWindows_.begin() + static_cast<long>(excess));
+    // Trace-only history is unused by PM attribution. Count an eviction as a
+    // data-quality risk only when it overlaps the current PM collection
+    // boundary. This also handles mixed sessions: a long Trace warmup cannot
+    // make a later Deep PM window look partial merely because old, pre-window
+    // entries are evicted while PM happens to be active.
+    scopeAttributionTruncated_ += attribution_risk;
+    if (!scopeHistoryEvictionLogged_) {
+        scopeHistoryEvictionLogged_ = true;
+        GFL_LOG_ERROR("[MonitorBatchManager] scope_history_evicted: hard cap reached; ",
+                      excess,
+                      " completed scope record(s) dropped (further messages suppressed)");
+    }
+}
+
+void MonitorBatchManager::trimCompletedScopesLocked() {
+    // The deque is NOT ordered by end_ns, so this cannot stop at the first
+    // survivor. It is a full pass, but only over what the watermark has not
+    // already retired, and it runs once per drain rather than once per sample.
+    if (scopeRetentionWatermarkNs_ > 0) {
+        const int64_t cutoff = scopeRetentionWatermarkNs_;
+        const auto it = std::remove_if(
+            completedScopeWindows_.begin(), completedScopeWindows_.end(),
+            [cutoff](const ScopeWindow& w) { return w.end_ns < cutoff; });
+        completedScopeWindows_.erase(it, completedScopeWindows_.end());
+    }
+
+    // Backstop. Reaching this means the watermark is not advancing, so the
+    // entries dropped here may still have been needed: record it rather than
+    // let the samples quietly go unattributed.
+    enforceScopeCapLocked();
+}
+
+std::vector<MonitorBatchManager::ScopeWindow>
+MonitorBatchManager::snapshotScopeCandidatesLocked(
+        const std::vector<PmSampleBatchRow>& rows) const {
+    // Candidates = closed scopes still retained, PLUS scopes that are still
+    // open. The open ones matter: PM drains mid-run, so a sample is routinely
+    // decoded while the scope covering it is still running. Giving them a
+    // provisional end at the batch's newest sample keeps them eligible for
+    // every sample in this batch without inventing a close that has not
+    // happened.
+    //
+    int64_t provisional_end = std::numeric_limits<int64_t>::min();
+    for (const auto& row : rows) provisional_end = std::max(provisional_end, row.ts_ns);
+
+    std::vector<ScopeWindow> candidates;
+    candidates.reserve(completedScopeWindows_.size() + openScopeWindows_.size());
+    candidates.assign(completedScopeWindows_.begin(), completedScopeWindows_.end());
+    {
+        // Close publishes pending first and never holds this mutex while
+        // waiting for scopeBatchMu_, so this lock order cannot deadlock.
+        std::lock_guard pending_lk(pendingScopeCloseMu_);
+        for (const auto& [instance_id, open] : openScopeWindows_) {
+            int64_t effective_end = provisional_end;
+            if (const auto close = pendingScopeCloseNs_.find(instance_id);
+                close != pendingScopeCloseNs_.end()) {
+                effective_end = std::min(effective_end, close->second);
+            }
+            if (open.start_ns > effective_end) continue;
+            candidates.push_back(ScopeWindow{open.start_ns, effective_end, instance_id,
+                                             open.name_id, open.depth});
+        }
+    }
+    return candidates;
+}
+
+void MonitorBatchManager::resolveScopeIdsForBatch(std::vector<ScopeWindow>& candidates,
+                                                  std::vector<PmSampleBatchRow>& rows,
+                                                  uint32_t fallback_id) {
+    if (candidates.empty()) {
+        for (auto& row : rows) row.scope_name_id = fallback_id;
+        return;
+    }
+
+    std::sort(candidates.begin(), candidates.end(),
+              [](const ScopeWindow& a, const ScopeWindow& b) { return a.start_ns < b.start_ns; });
+
+    std::vector<size_t> order(rows.size());
+    for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::sort(order.begin(), order.end(),
+              [&rows](size_t a, size_t b) { return rows[a].ts_ns < rows[b].ts_ns; });
+
+    // Two structures over the active set rather than one flat list. Rescanning
+    // it per sample would keep the cost at O(samples x concurrent scopes),
+    // which is the shape this replaces. `ranked` is ordered so the winner is
+    // its last element; `expiry` surfaces the soonest end so retirement costs
+    // a peek instead of a pass.
+    struct ByRank {
+        bool operator()(const ScopeWindow* a, const ScopeWindow* b) const {
+            return b->outranks(*a);
+        }
+    };
+    struct ByEnd {
+        bool operator()(const ScopeWindow* a, const ScopeWindow* b) const {
+            return a->end_ns > b->end_ns;   // min-heap on end_ns
+        }
+    };
+    std::set<const ScopeWindow*, ByRank> ranked;
+    std::priority_queue<const ScopeWindow*, std::vector<const ScopeWindow*>, ByEnd> expiry;
+
+    size_t next_candidate = 0;
+    for (const size_t idx : order) {
+        const int64_t ts = rows[idx].ts_ns;
+
+        // Admit everything that has started. Candidates are start-sorted, so
+        // each is admitted once across the whole batch.
+        while (next_candidate < candidates.size() && candidates[next_candidate].start_ns <= ts) {
+            const ScopeWindow* w = &candidates[next_candidate++];
+            ranked.insert(w);
+            expiry.push(w);
+        }
+        // Retire what has ended. Samples are visited in time order, so an
+        // expired scope can never be wanted again. Both ends are inclusive,
+        // hence `end_ns < ts` rather than `<=`.
+        while (!expiry.empty() && expiry.top()->end_ns < ts) {
+            ranked.erase(expiry.top());
+            expiry.pop();
+        }
+
+        rows[idx].scope_name_id = ranked.empty() ? fallback_id : (*ranked.rbegin())->name_id;
     }
 }
 
@@ -249,19 +508,29 @@ void MonitorBatchManager::pushSynchronization(const SynchronizationEventBatchRow
     syncBatch_.push(row);
 }
 
+// Ranking shared by both resolvers. Depth first, then latest start; the
+// instance id breaks a remaining tie so the answer does not depend on
+// container order. Without it two scopes at the same depth and start could
+// resolve differently between the reference and the batch path, since neither
+// std::sort nor an unordered_map preserves any order for equal keys.
+//
+// The tertiary key is also load-bearing for the sweep, not merely tidy: it
+// orders a std::set, and a comparator that ever reports equivalence would make
+// that set silently keep one of the two scopes and drop the other. Instance ids
+// are unique, so no two entries can compare equal.
+bool MonitorBatchManager::ScopeWindow::outranks(const ScopeWindow& other) const {
+    if (depth != other.depth) return depth > other.depth;
+    if (start_ns != other.start_ns) return start_ns > other.start_ns;
+    return instance_id > other.instance_id;
+}
+
 uint32_t MonitorBatchManager::resolveScopeIdLocked(int64_t ts_ns) const {
-    uint32_t best_id = 0;
-    int best_depth = -1;
-    int64_t best_start = 0;
-    for (auto it = completedScopeWindows_.rbegin(); it != completedScopeWindows_.rend(); ++it) {
-        if (ts_ns < it->start_ns || ts_ns > it->end_ns) continue;
-        if (it->depth > best_depth || (it->depth == best_depth && it->start_ns >= best_start)) {
-            best_id = it->name_id;
-            best_depth = it->depth;
-            best_start = it->start_ns;
-        }
+    const ScopeWindow* best = nullptr;
+    for (const auto& w : completedScopeWindows_) {
+        if (ts_ns < w.start_ns || ts_ns > w.end_ns) continue;
+        if (!best || w.outranks(*best)) best = &w;
     }
-    return best_id;
+    return best ? best->name_id : 0;
 }
 
 }  // namespace gpufl::detail

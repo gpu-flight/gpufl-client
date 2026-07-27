@@ -136,11 +136,11 @@ void endProcessScope() {
     if (!state.active) return;
 
     gpufl::ScopeBatchRow row;
-    row.ts_ns = gpufl::detail::GetTimestampNs();
     row.scope_instance_id = state.instance_id;
     row.name_id = state.name_id;
     row.event_type = 1;
     row.depth = 0;
+    row.ts_ns = gpufl::Monitor::CaptureScopeCloseTimestamp(state.instance_id);
     gpufl::Monitor::PushScopeRow(row);
     gpufl::Monitor::EndProfilerScope(state.name.c_str());
     if (state.perf_scope) gpufl::Monitor::EndPerfScope(state.name.c_str());

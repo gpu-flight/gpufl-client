@@ -667,6 +667,14 @@ uint64_t Monitor::AllocateScopeInstanceId() {
 
 int Monitor::OpenScopeDepth() { return g_state.batches.openScopeDepth(); }
 
+int64_t Monitor::CaptureScopeCloseTimestamp(uint64_t instance_id) {
+    return g_state.batches.captureScopeCloseTimestamp(instance_id);
+}
+
+void Monitor::MarkScopeClosePending(uint64_t instance_id, int64_t end_ns) {
+    g_state.batches.markScopeClosePending(instance_id, end_ns);
+}
+
 void Monitor::PushProfileSamples(const std::vector<ProfileSampleInput>& samples) {
     if (samples.empty()) return;
     const uint32_t scope_name_id = g_state.batches.activeScopeNameId();
@@ -709,6 +717,26 @@ void Monitor::PushPmSamples(const std::vector<PmSampleInput>& samples) {
         rows.push_back(row);
     }
     g_state.batches.pushPmSamplesResolvingScopes(rows);
+}
+
+void Monitor::PublishScopeRetentionWatermark(int64_t ts_ns) {
+    g_state.batches.publishScopeRetentionWatermark(ts_ns);
+}
+
+void Monitor::BeginPmScopeAttribution(int64_t start_ns) {
+    g_state.batches.beginPmScopeAttribution(start_ns);
+}
+
+void Monitor::EndPmScopeAttribution() {
+    g_state.batches.endPmScopeAttribution();
+}
+
+uint64_t Monitor::ScopeAttributionTruncated() {
+    return g_state.batches.scopeAttributionTruncated();
+}
+
+uint64_t Monitor::PmSampleRowsSeen() {
+    return g_state.batches.pmSampleRowsSeen();
 }
 
 void Monitor::EmitPmSamplingConfig(uint32_t device_id, uint32_t interval_us, uint32_t max_samples, const std::string& preset, const std::vector<std::string>& metrics) {

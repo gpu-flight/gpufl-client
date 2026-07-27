@@ -848,14 +848,14 @@ ScopedMonitor::~ScopedMonitor() {
     auto& stack = getThreadScopeStack();
     if (!stack.empty()) stack.pop_back();
     const int depth = static_cast<int>(stack.size());
-    const int64_t end_ns = detail::GetTimestampNs();
 
     ScopeBatchRow row;
-    row.ts_ns = end_ns;
     row.scope_instance_id = scope_id_;
     row.name_id = Monitor::InternScopeName(name_);
     row.event_type = 1;  // end
     row.depth = depth;
+    const int64_t end_ns = Monitor::CaptureScopeCloseTimestamp(scope_id_);
+    row.ts_ns = end_ns;
     Monitor::PushScopeRow(row);
 
     // Scopes are recorded via scope_event only - we no longer echo each

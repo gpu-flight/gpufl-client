@@ -296,6 +296,10 @@ void DeepWindow::Close(const DeepWindowClose reason) {
             close_row.name_id = Monitor::InternScopeName(name);
             close_row.event_type = 1;
             close_row.depth = 0;   // ignored on close; the open row carries it
+            // end_ns intentionally precedes engine disarm so the window event
+            // measures the requested boundary. Publish it only after the final
+            // drain above, immediately before the scope-state transition.
+            Monitor::MarkScopeClosePending(g_scope_instance_id, end_ns);
             Monitor::PushScopeRow(close_row);
             g_scope_instance_id = 0;
         }

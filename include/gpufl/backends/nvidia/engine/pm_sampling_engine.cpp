@@ -6,6 +6,7 @@
 #include <cuda_runtime.h>
 #endif
 
+#include <limits>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -407,9 +408,17 @@ void PmSamplingEngine::DecodeAndEmit_() {
         LogCuptiErrorIfFailed(this->name(), "cuptiPmSamplingDecodeData", res);
         return;
     }
-    if (decode.overflow || res == CUPTI_ERROR_OUT_OF_MEMORY) {
+    const bool overflowed = decode.overflow || res == CUPTI_ERROR_OUT_OF_MEMORY;
+    if (overflowed) {
         GFL_LOG_ERROR("[PmSamplingEngine] PM sampling hardware buffer overflow; increase pm_sampling_max_samples or interval_us");
     }
+    // CUPTI states outright whether the hardware buffer was exhausted.
+    // END_OF_RECORDS is the only reason that proves nothing older is left to
+    // come; COUNTER_DATA_FULL means records remain because the destination
+    // image filled first.
+    const bool buffer_exhausted =
+        res == CUPTI_SUCCESS && !overflowed &&
+        decode.decodeStopReason == CUPTI_PM_SAMPLING_DECODE_STOP_REASON_END_OF_RECORDS;
 
     CUpti_PmSampling_GetCounterDataInfo_Params info = {
         CUpti_PmSampling_GetCounterDataInfo_Params_STRUCT_SIZE};
@@ -447,7 +456,7 @@ void PmSamplingEngine::DecodeAndEmit_() {
         if (LogCuptiErrorIfFailed(this->name(), "cuptiProfilerHostEvaluateToGpuValues", res)) continue;
 
         const uint64_t mid = sampleInfo.startTimestamp +
-            ((sampleInfo.endTimestamp - sampleInfo.startTimestamp) / 2ull);
+            (sampleInfo.endTimestamp - sampleInfo.startTimestamp) / 2ull;
         // CUPTI sample ts -> wall-clock via the kernel anchor, so PM lines up
         // with the kernel timeline.
         const int64_t mid_wall_ns = ctx_.base_cpu_ns +
@@ -470,6 +479,22 @@ void PmSamplingEngine::DecodeAndEmit_() {
     if (!rows.empty()) {
         Monitor::PushPmSamples(rows);
         produced_data_.store(true, std::memory_order_relaxed);
+
+        // Release the scopes no later sample can reach - but only when CUPTI
+        // has told us the hardware buffer is actually empty. Sampling is time
+        // ordered, so once it is, every future record is newer than everything
+        // just decoded and the newest timestamp here is a real boundary.
+        //
+        // Deriving one from the buffer span instead would be an inference about
+        // capacity, not a guarantee, and it would be wrong precisely when
+        // records were left behind. On overflow or COUNTER_DATA_FULL the
+        // watermark simply stays where it is, so a truncated decode cannot
+        // strand the scopes its leftovers still need.
+        if (buffer_exhausted) {
+            int64_t newest_ns = std::numeric_limits<int64_t>::min();
+            for (const auto& row : rows) newest_ns = std::max(newest_ns, row.ts_ns);
+            Monitor::PublishScopeRetentionWatermark(newest_ns);
+        }
     }
 
     // Hand the image back empty so the next decode starts from a clean slate
@@ -528,6 +553,9 @@ void PmSamplingEngine::StartPmSampling_() {
         return;
     }
 
+    // Capture before the CUPTI call so the boundary is conservative: even a
+    // sample produced during a slow successful start is covered.
+    const int64_t attribution_start_ns = detail::GetTimestampNs();
     CUpti_PmSampling_Start_Params start = {CUpti_PmSampling_Start_Params_STRUCT_SIZE};
     start.pPmSamplingObject = pm_object_;
     CUptiResult res = cuptiPmSamplingStart(&start);
@@ -536,6 +564,7 @@ void PmSamplingEngine::StartPmSampling_() {
         return;
     }
     running_ = true;
+    Monitor::BeginPmScopeAttribution(attribution_start_ns);
     operational_.store(true, std::memory_order_relaxed);
     GFL_LOG_DEBUG("[PmSamplingEngine] >>> STARTED (Scope Begin) <<<");
 }
@@ -551,6 +580,7 @@ void PmSamplingEngine::StopPmSampling_() {
         GFL_LOG_DEBUG("[PmSamplingEngine] <<< COLLECTING (Scope End) >>>");
         DecodeAndEmit_();
     }
+    Monitor::EndPmScopeAttribution();
     running_ = false;
 }
 #endif
