@@ -769,12 +769,7 @@ void CuptiBackend::DrainProfilingData() {
 }
 
 bool CuptiBackend::DeepEnginesPrepared() const {
-    // The REQUEST set, not the runtime state: under WindowOnly nothing is armed
-    // until a window opens, and this has to answer before one ever does.
-    const EngineRequestSet requested =
-        BuildEngineRequestSet(opts_.profiling_engine, combo_);
-    return requested.pc || requested.sass || requested.pm || requested.range ||
-           requested.range_kernel;
+    return engine_ != nullptr && engine_->isPrepared();
 }
 
 std::vector<std::string> CuptiBackend::ArmedEngineWireNames_() const {

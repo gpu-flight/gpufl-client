@@ -251,6 +251,9 @@ class CuptiBackend : public IMonitorBackend {
     // window could arm at all? A Trace-only run answers no, which is what stops
     // a rule burning its budget on windows that collect nothing.
     bool DeepEnginesPrepared() const override;
+    bool DeepEnginePreparationPending() const override {
+        return engine_start_pending_.load(std::memory_order_acquire);
+    }
 
     bool ShouldEnableNvtxMarkerActivityBeforeEngine_() const;
     bool ShouldEnableNvtxMarkerActivityForSelectedEngine_() const;

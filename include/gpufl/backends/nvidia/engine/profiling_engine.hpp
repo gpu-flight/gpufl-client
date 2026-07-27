@@ -128,6 +128,16 @@ class IProfilingEngine {
     virtual bool stallReasonsUnavailable() const { return false; }
 
     /**
+     * @brief True once all context-bound configuration and storage needed to
+     * arm this engine have been created successfully.
+     *
+     * Window-gated engines use this to distinguish "selected" from "ready to
+     * arm". The default preserves existing engines whose start() performs both
+     * preparation and arming; engines with a split lifecycle override it.
+     */
+    virtual bool isPrepared() const { return isOperational(); }
+
+    /**
      * @brief True if this engine started successfully and is producing
      * data. False if start() was skipped, failed, or the engine is None.
      */

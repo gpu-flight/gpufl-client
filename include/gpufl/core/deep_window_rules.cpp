@@ -160,7 +160,14 @@ RuleCapabilities QueryCapabilities() {
         Monitor::ResolvedProfilingEngine() != ProfilingEngine::Monitor;
 
     IMonitorBackend* backend = Monitor::GetBackend();
-    caps.deep_engine_prepared = backend != nullptr && backend->DeepEnginesPrepared();
+    // Installation can run before Windows injection receives CONTEXT_CREATED.
+    // Pending is acceptable here; the queued open checks actual preparation
+    // after the first CUDA context exists. A completed preparation failure is
+    // rejected now instead of leaving a rule that can only open empty windows.
+    caps.deep_engine_prepared =
+        backend != nullptr &&
+        (backend->DeepEnginesPrepared() ||
+         backend->DeepEnginePreparationPending());
 
     caps.counters_shared = CounterProvider::isShared();
     // Under injection the target and this evaluator are separate modules, which

@@ -128,16 +128,25 @@ struct TraceParseResult {
 TraceParseResult parseTraceArgs(const std::vector<std::string>& argv);
 
 /**
- * How a run decides which engines to prepare - two modes, never mixed.
+ * Validate execution-mode invariants independently of argument parsing.
+ *
+ * TraceArgs is intentionally a simple value type and is also constructed by
+ * tests and shared launcher code. Keep this check at both the parser boundary
+ * and the execution boundary so those callers cannot create a mixed mode.
+ * Returns an empty string when valid, otherwise a user-facing error.
+ */
+std::string validateTraceExecutionMode(const TraceArgs& args);
+
+/**
+ * How a run decides which engines to select - two modes, never mixed.
  *
  * ExplicitPasses is the caller saying "run exactly these engines, relaunching
  * the target once per pass". AdaptiveDeepWindow is the caller saying "watch for
  * a condition and profile deeply when it happens" and leaving the engines to
  * gpufl.
  *
- * They cannot be combined because the choice is not available at trigger time:
- * cuptiProfilerInitialize has to run before any CUDA context exists, so the
- * deep engines are fixed at process start whatever the trigger later does.
+ * They cannot be combined because the engine set is fixed before the trigger:
+ * an adaptive window may arm only engines selected when the target starts.
  * Accepting a --passes list alongside a deep flag would let a user ask for a
  * base with nothing a window could arm - `--passes=Trace --deep-after=30s`
  * silently produced a window that armed nothing.
@@ -147,6 +156,8 @@ enum class CaptureMode {
     AdaptiveDeepWindow,
 };
 
+CaptureMode resolveCaptureMode(const TraceArgs& args);
+
 /**
  * The engines an adaptive run SELECTS, and when it arms them.
  *
@@ -155,24 +166,17 @@ enum class CaptureMode {
  * guarantee the base Trace activity that `recent_kernel_ms` and
  * `kernel_launch_rate` are computed from, and its base policy varies with the
  * path chosen. An adaptive run needs the base pinned.
- *
- * KNOWN GAP: "selected" is not yet "prepared". PmSamplingEngine defers
- * cuptiProfilerInitialize, counter-availability lookup, Enable and SetConfig
- * into its arm path, so today they run when the WINDOW opens rather than at
- * startup. The window therefore pays initialisation out of its own duration,
- * and a late or failed init costs the front of it. Splitting prepare from arm
- * is the next change here; until it lands, do not describe this as
- * "prepared before CUDA initialises".
  */
 struct AdaptiveCapturePlan {
     // Always on for the whole run. Kernel-timing conditions need it.
     std::string base = "Trace";
-    // Selected here; see the gap above for when they are actually initialised.
-    std::vector<std::string> prepared_deep;
+    // Selected by the launcher. The engine prepares after the first valid CUDA
+    // context exists and remains idle until a window opens.
+    std::vector<std::string> selected_deep;
     bool arm_window_only = true;
 };
 
-/** The plan for an adaptive run. Empty prepared_deep if mode is explicit. */
+/** The plan for an adaptive run. Empty selected_deep if mode is explicit. */
 AdaptiveCapturePlan resolveAdaptivePlan(const TraceArgs& args);
 
 // Resolves the ordered capture plan (one isolated CUPTI engine per pass) from

@@ -753,19 +753,19 @@ TEST(CliParseDeepModeTest, TheAdaptivePlanPinsTheBaseAndArmsOnlyInTheWindow) {
     // records, and a rule that loses its metric reads as "never held".
     EXPECT_EQ(plan.base, "Trace");
     EXPECT_TRUE(plan.arm_window_only);
-    ASSERT_FALSE(plan.prepared_deep.empty());
+    ASSERT_FALSE(plan.selected_deep.empty());
     // PM only for now. PC and SASS join once their dormant cost has been
     // measured - picking the deepest engine is not the same as picking the
     // deepest one that fits an overhead budget.
-    EXPECT_EQ(plan.prepared_deep.size(), 1u);
-    EXPECT_EQ(plan.prepared_deep[0], "PmSampling");
+    EXPECT_EQ(plan.selected_deep.size(), 1u);
+    EXPECT_EQ(plan.selected_deep[0], "PmSampling");
 }
 
 TEST(CliParseDeepModeTest, WithoutADeepFlagThereIsNoAdaptivePlan) {
     const auto r = parseTrace({"--passes=Trace,PcSampling", "--", "app"});
     ASSERT_TRUE(r.args.has_value()) << r.error;
 
-    EXPECT_TRUE(gpufl::launcher::resolveAdaptivePlan(*r.args).prepared_deep.empty());
+    EXPECT_TRUE(gpufl::launcher::resolveAdaptivePlan(*r.args).selected_deep.empty());
     // The explicit list is honoured untouched.
     EXPECT_EQ(gpufl::launcher::resolvePassPlan(*r.args).size(), 2u);
 }
@@ -776,4 +776,31 @@ TEST(CliParseDeepModeTest, PlainTraceIsStillTheDefault) {
     const auto plan = gpufl::launcher::resolvePassPlan(*r.args);
     ASSERT_EQ(plan.size(), 1u);
     EXPECT_EQ(plan[0], "Trace");
+}
+
+TEST(CliParseDeepModeTest, ProgrammaticMixedModeFailsSharedValidation) {
+    gpufl::launcher::TraceArgs args;
+    args.passes = {"Trace"};
+    args.deep_requested = true;
+
+    const std::string error =
+        gpufl::launcher::validateTraceExecutionMode(args);
+    EXPECT_NE(error.find("--passes cannot be combined"), std::string::npos);
+    EXPECT_NE(error.find("Drop --passes"), std::string::npos);
+}
+
+TEST(CliParseDeepModeTest, SharedValidationAcceptsEachModeSeparately) {
+    gpufl::launcher::TraceArgs explicit_args;
+    explicit_args.passes = {"Trace", "PmSampling"};
+    EXPECT_TRUE(
+        gpufl::launcher::validateTraceExecutionMode(explicit_args).empty());
+
+    gpufl::launcher::TraceArgs adaptive_args;
+    adaptive_args.deep_requested = true;
+    EXPECT_TRUE(
+        gpufl::launcher::validateTraceExecutionMode(adaptive_args).empty());
+    EXPECT_EQ(gpufl::launcher::resolveCaptureMode(explicit_args),
+              gpufl::launcher::CaptureMode::ExplicitPasses);
+    EXPECT_EQ(gpufl::launcher::resolveCaptureMode(adaptive_args),
+              gpufl::launcher::CaptureMode::AdaptiveDeepWindow);
 }

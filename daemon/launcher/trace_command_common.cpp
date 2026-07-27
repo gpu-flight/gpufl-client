@@ -529,11 +529,9 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
     // have refused. resolvePassPlan() would then honour `passes` while the
     // block below still exported the deep environment, producing a run that is
     // neither mode.
-    if (args.deep_requested && !args.passes.empty()) {
-        std::fprintf(stderr,
-                     "gpufl: internal error - explicit passes and a deep "
-                     "window cannot both be requested
-");
+    if (const std::string mode_error = validateTraceExecutionMode(args);
+        !mode_error.empty()) {
+        std::fprintf(stderr, "gpufl: %s\n", mode_error.c_str());
         return 2;
     }
 
@@ -720,6 +718,16 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
 
     if (!args.quiet) {
         std::fprintf(stderr, "[gpufl] capturing -> %s\n", output_dir.string().c_str());
+        if (args.deep_requested) {
+            const AdaptiveCapturePlan adaptive = resolveAdaptivePlan(args);
+            std::fprintf(stderr, "[gpufl] adaptive capture: base=%s; selected deep=",
+                         adaptive.base.c_str());
+            for (size_t i = 0; i < adaptive.selected_deep.size(); ++i) {
+                std::fprintf(stderr, "%s%s", i == 0 ? "" : ",",
+                             adaptive.selected_deep[i].c_str());
+            }
+            std::fprintf(stderr, "; arm=window-only\n");
+        }
         if (multipass) {
             std::fprintf(stderr, "[gpufl] multi-pass analysis %s - %zu passes:",
                          analysis_id.c_str(), plan.size());

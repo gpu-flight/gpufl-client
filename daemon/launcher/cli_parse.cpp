@@ -489,17 +489,9 @@ TraceParseResult parseTraceArgs(const std::vector<std::string>& argv) {
     // not (making the window arm nothing - which is what
     // `--passes=Trace --deep-after=30s` silently did). Rejected before the
     // target is launched, whichever order the flags came in.
-    if (out.deep_requested && !out.passes.empty()) {
-        return {std::nullopt,
-                "--passes cannot be combined with --deep-* flags.\n"
-                "\n"
-                "  --passes runs the engines you name, relaunching the target "
-                "once per pass.\n"
-                "  --deep-* runs ONE adaptive pass: gpufl selects a compatible "
-                "deep engine\n"
-                "  and arms it only inside the window.\n"
-                "\n"
-                "Drop --passes to use a deep window."};
+    if (const std::string mode_error = validateTraceExecutionMode(out);
+        !mode_error.empty()) {
+        return {std::nullopt, mode_error};
     }
 
     // A deep window with neither bound would arm and never disarm, which is
@@ -805,9 +797,27 @@ InfoParseResult parseInfoArgs(const std::vector<std::string>& argv) {
     return {out, ""};
 }
 
+std::string validateTraceExecutionMode(const TraceArgs& args) {
+    if (!args.deep_requested || args.passes.empty()) return {};
+    return "--passes cannot be combined with --deep-* flags.\n"
+           "\n"
+           "  --passes runs the engines you name, relaunching the target "
+           "once per pass.\n"
+           "  --deep-* runs ONE adaptive pass: gpufl selects a compatible "
+           "deep engine\n"
+           "  and arms it only inside the window.\n"
+           "\n"
+           "Drop --passes to use a deep window.";
+}
+
+CaptureMode resolveCaptureMode(const TraceArgs& args) {
+    return args.deep_requested ? CaptureMode::AdaptiveDeepWindow
+                               : CaptureMode::ExplicitPasses;
+}
+
 AdaptiveCapturePlan resolveAdaptivePlan(const TraceArgs& args) {
     AdaptiveCapturePlan plan;
-    if (!args.deep_requested) return plan;   // prepared_deep stays empty
+    if (!args.deep_requested) return plan;   // selected_deep stays empty
 
     // Trace is pinned as the base rather than left to the deep engine's own
     // policy: kernel_launch_rate and recent_kernel_ms are computed from its
@@ -819,15 +829,11 @@ AdaptiveCapturePlan resolveAdaptivePlan(const TraceArgs& args) {
     // PC sampling fails configuration under injection there and SASS emits no
     // records, so neither has a dormant cost anyone has measured.
     //
-    // What WAS measured is narrower than it first looked. With PM selected but
-    // no window opened, GEMM throughput showed no detectable change against a
-    // Trace base (paired ratio 1.000, bootstrap 95% CI over 15 randomized
-    // blocks) while peak RSS rose 572 -> 797 MiB. But PmSamplingEngine defers
-    // its CUPTI initialisation into the arm path, so that run measured PM
-    // SELECTED, not PM prepared-and-idle - and the RSS delta cannot be
-    // attributed to PM preparation either. The numbers get redone once
-    // prepare and arm are actually separate.
-    plan.prepared_deep = {"PmSampling"};
+    // Earlier overhead measurements covered PM selected-but-not-initialized,
+    // because initialization still lived in the arm path at the time. They are
+    // intentionally not used as a policy budget here; the prepared-and-idle
+    // configuration must be measured again after the lifecycle split.
+    plan.selected_deep = {"PmSampling"};
     plan.arm_window_only = true;
     return plan;
 }
@@ -839,10 +845,10 @@ std::vector<std::string> resolvePassPlan(const TraceArgs& args) {
     // what --passes is for; a window that triggers on a live condition cannot
     // be reproduced across relaunches, so splitting it would change what is
     // being measured.
-    if (args.deep_requested) {
+    if (resolveCaptureMode(args) == CaptureMode::AdaptiveDeepWindow) {
         const AdaptiveCapturePlan plan = resolveAdaptivePlan(args);
         std::string composite = plan.base;
-        for (const std::string& engine : plan.prepared_deep) {
+        for (const std::string& engine : plan.selected_deep) {
             composite += "+" + engine;
         }
         return {composite};

@@ -9,7 +9,7 @@
 // whole run.
 //
 // ── WHAT TO CHECK ────────────────────────────────────────────────────────────
-//   1. Before the trigger: the engine is armed but IDLE, so the session
+//   1. Before the trigger: the engine is prepared but IDLE, so the session
 //      carries no PC / PM / SASS samples from those iterations.
 //   2. During the window: samples appear, bounded to the window.
 //   3. After the window: the process keeps running to completion. A window

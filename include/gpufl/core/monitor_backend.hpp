@@ -166,6 +166,15 @@ class IMonitorBackend {
      */
     virtual bool DeepEnginesPrepared() const { return false; }
 
+    /**
+     * @brief Is preparation waiting for the target's first CUDA context?
+     *
+     * Windows injection installs conditional rules before CONTEXT_CREATED.
+     * Pending is therefore a valid install-time state, but never sufficient to
+     * open a window; actual opens still require DeepEnginesPrepared().
+     */
+    virtual bool DeepEnginePreparationPending() const { return false; }
+
     virtual void OnPerfScopeStart(const char* name) {}
     virtual void OnPerfScopeStop(const char* name) {}
     // Perf-scope counterparts of OnDeepWindowStart/Stop; see those.

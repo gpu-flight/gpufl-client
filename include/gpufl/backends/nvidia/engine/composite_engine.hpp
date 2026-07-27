@@ -109,6 +109,10 @@ class CompositeEngine final : public IProfilingEngine {
         for (auto& e : engines_) if (e && e->stallReasonsUnavailable()) return true;
         return false;
     }
+    bool isPrepared() const override {
+        for (auto& e : engines_) if (e && e->isPrepared()) return true;
+        return false;
+    }
     bool isOperational() const override {
         for (auto& e : engines_) if (e && e->isOperational()) return true;
         return false;

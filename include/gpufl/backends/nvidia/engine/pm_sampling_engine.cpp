@@ -9,6 +9,7 @@
 #include <limits>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdint>
 
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
@@ -37,6 +38,11 @@ bool PmSamplingEngine::initialize(const MonitorOptions& opts,
     opts_ = opts;
     ctx_ = ctx;
     metrics_ = ResolveMetrics_();
+    prepared_.store(false, std::memory_order_relaxed);
+    operational_.store(false, std::memory_order_relaxed);
+    attempted_.store(false, std::memory_order_relaxed);
+    produced_data_.store(false, std::memory_order_relaxed);
+    insufficient_privileges_.store(false, std::memory_order_relaxed);
     GFL_LOG_DEBUG("[PmSamplingEngine] initialized preset=", opts_.pm_sampling_preset,
                   " metrics=", metrics_.size(),
                   " interval_us=", opts_.pm_sampling_interval_us,
@@ -50,12 +56,20 @@ void PmSamplingEngine::start() {
     if (!ScopeGated_()) {
         StartPmSampling_();
     } else {
-        attempted_.store(true, std::memory_order_relaxed);
-        if (!config_emitted_) {
-            EmitConfig_();
-            config_emitted_ = true;
+        // Prepare while the first valid CUDA context is current, but do not
+        // start hardware sampling. CuptiBackend invokes this either directly
+        // from start() or from its CONTEXT_CREATED deferred-start path, then
+        // restores activity subscriptions that Profiler initialization may
+        // reset. A deep-window open therefore performs only the bounded arm.
+        if (PreparePmSampling_()) {
+            if (opts_.deep_arm_mode == DeepArmMode::WindowOnly) {
+                std::fprintf(
+                    stderr,
+                    "[gpufl] deep engine prepared: nvidia.pm_sampling\n");
+            }
+            GFL_LOG_DEBUG("[PmSamplingEngine] prepared; sampling remains "
+                          "idle until a deep window opens");
         }
-        GFL_LOG_DEBUG("[PmSamplingEngine] scope-only mode: PM sampling arms on scope start");
     }
 #else
     GFL_LOG_ERROR("[PmSamplingEngine] Not built with GPUFL_HAS_PERFWORKS");
@@ -82,6 +96,7 @@ void PmSamplingEngine::shutdown() {
     }
 #endif
     operational_.store(false, std::memory_order_relaxed);
+    prepared_.store(false, std::memory_order_release);
 }
 
 void PmSamplingEngine::onScopeStart(const char*) {
@@ -110,6 +125,34 @@ void PmSamplingEngine::EmitConfig_() const {
 }
 
 #if GPUFL_HAS_PERFWORKS
+bool PmSamplingEngine::PreparePmSampling_() {
+    std::lock_guard<std::mutex> lk(pm_mu_);
+    return PreparePmSamplingLocked_();
+}
+
+bool PmSamplingEngine::PreparePmSamplingLocked_() {
+    attempted_.store(true, std::memory_order_relaxed);
+    if (!config_emitted_) {
+        EmitConfig_();
+        config_emitted_ = true;
+    }
+    if (prepared_.load(std::memory_order_relaxed)) return true;
+    if (!InitializePmSampling_()) {
+        prepared_.store(false, std::memory_order_release);
+        return false;
+    }
+    // Allocate the full destination image during preparation. Allocating it
+    // when the window opens would consume the front of the bounded interval
+    // and would make dormant-memory measurements exclude the largest PM-owned
+    // allocation.
+    if (!CreateCounterDataImage_()) {
+        prepared_.store(false, std::memory_order_release);
+        return false;
+    }
+    prepared_.store(true, std::memory_order_release);
+    return true;
+}
+
 bool PmSamplingEngine::InitializePmSampling_() {
     if (pm_initialized_) return true;
     if (!ctx_.cuda_ctx) {
@@ -478,7 +521,12 @@ void PmSamplingEngine::DecodeAndEmit_() {
 
     if (!rows.empty()) {
         Monitor::PushPmSamples(rows);
-        produced_data_.store(true, std::memory_order_relaxed);
+        if (!produced_data_.exchange(true, std::memory_order_acq_rel) &&
+            opts_.deep_arm_mode == DeepArmMode::WindowOnly) {
+            std::fprintf(stderr,
+                         "[gpufl] deep engine produced data: "
+                         "nvidia.pm_sampling\n");
+        }
 
         // Release the scopes no later sample can reach - but only when CUPTI
         // has told us the hardware buffer is actually empty. Sampling is time
@@ -534,21 +582,20 @@ void PmSamplingEngine::DisablePmSampling_() {
     }
     profiler_initialized_ = false;
     profiler_init_owned_ = false;
+    prepared_.store(false, std::memory_order_release);
 }
 
 void PmSamplingEngine::StartPmSampling_() {
     std::lock_guard<std::mutex> lk(pm_mu_);
     if (running_) return;
-    attempted_.store(true, std::memory_order_relaxed);
-    if (!config_emitted_) {
-        EmitConfig_();
-        config_emitted_ = true;
-    }
-    if (!InitializePmSampling_()) {
+    if (!PreparePmSamplingLocked_()) {
         operational_.store(false, std::memory_order_relaxed);
         return;
     }
-    if (!CreateCounterDataImage_()) {
+    // The image was allocated during prepare and is reset after every decode.
+    // Reset again at the arm boundary so a failed/partial prior window cannot
+    // leak samples into this one.
+    if (!ResetCounterDataImage_()) {
         operational_.store(false, std::memory_order_relaxed);
         return;
     }
@@ -566,6 +613,10 @@ void PmSamplingEngine::StartPmSampling_() {
     running_ = true;
     Monitor::BeginPmScopeAttribution(attribution_start_ns);
     operational_.store(true, std::memory_order_relaxed);
+    if (opts_.deep_arm_mode == DeepArmMode::WindowOnly) {
+        std::fprintf(stderr,
+                     "[gpufl] deep window armed: nvidia.pm_sampling\n");
+    }
     GFL_LOG_DEBUG("[PmSamplingEngine] >>> STARTED (Scope Begin) <<<");
 }
 

@@ -198,6 +198,15 @@ bool DeepWindow::Active() {
 
 bool DeepWindow::Open(const DeepWindowSpec& spec) {
     if (const Runtime* rt = runtime(); !rt || !rt->logger) return false;
+    // Scheduled and manual requests do not pass through RequestOpenTagged.
+    // Apply the same real-readiness gate here so they cannot publish a window
+    // that was active in name only and armed no engine.
+    if (IMonitorBackend* backend = Monitor::GetBackend();
+        backend != nullptr && !backend->DeepEnginesPrepared()) {
+        GFL_LOG_ERROR("[DeepWindow] open refused: selected deep engine is not "
+                      "prepared");
+        return false;
+    }
 
     std::string name;
     {
@@ -363,6 +372,17 @@ void DeepWindow::RequestOpen(const DeepWindowSpec& spec) {
 }
 
 uint64_t DeepWindow::RequestOpenTagged(const DeepWindowSpec& spec) {
+    // Rule installation may precede CONTEXT_CREATED under Windows injection,
+    // so it gates on engine selection. By the time a condition fires, require
+    // the context-bound preparation to have really succeeded. Refusing here
+    // returns token 0 and does not consume the rule's window budget.
+    if (IMonitorBackend* backend = Monitor::GetBackend();
+        backend != nullptr && !backend->DeepEnginesPrepared()) {
+        GFL_LOG_ERROR("[DeepWindow] conditional open refused: selected deep "
+                      "engine is not prepared");
+        return 0;
+    }
+
     uint64_t token = 0;
     {
         std::lock_guard lk(g_mu);
