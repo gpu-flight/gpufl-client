@@ -44,6 +44,7 @@ struct TraceArgs {
     // gpufl::deepWindow(), so time is the trigger the launcher can offer.
     // Any of them turns on window-only arming (GPUFL_DEEP_ARM=window).
     int64_t  deep_after_ms = 0;      // --deep-after; 0 = arm at the first launch
+    bool     deep_after_set = false; // distinguishes "--deep-after=0" from absent
     int64_t  deep_for_ms = 0;        // --deep-for; duration bound, 0 = none
     uint64_t deep_launches = 0;      // --deep-launches; launch bound, 0 = none
     // --deep-when: open the window when a metric crosses a threshold, e.g.

@@ -44,6 +44,23 @@ class RangeProfilerEngine final : public IProfilingEngine {
         return operational_.load(std::memory_order_relaxed) ||
                attempted_.load(std::memory_order_relaxed);
     }
+
+    /**
+     * Ready to arm inside a window: the Perfworks session exists AND
+     * cuptiRangeProfilerSetConfig succeeded.
+     *
+     * Cannot reuse isOperational(): that one counts `attempted_`, so a session
+     * whose creation failed still reports true - deliberately, so the pass
+     * reports itself rather than vanishing. A rule asking the same question
+     * would spend a window on it.
+     *
+     * Mirrored into an atomic rather than read from `perf_session_active_`,
+     * which is guarded by a mutex a decode can hold for a long time. The rule
+     * asks this on the collector beat and must not block behind one.
+     */
+    bool isPrepared() const override {
+        return session_ready_.load(std::memory_order_acquire);
+    }
     bool producedData() const override {
         return produced_data_.load(std::memory_order_relaxed);
     }
@@ -79,6 +96,8 @@ class RangeProfilerEngine final : public IProfilingEngine {
     EngineContext  ctx_;
     std::atomic<bool> operational_{false};
     std::atomic<bool> attempted_{false};
+    /// Lock-free mirror of perf_session_active_; see isPrepared().
+    std::atomic<bool> session_ready_{false};
     std::atomic<bool> produced_data_{false};
 };
 

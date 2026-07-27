@@ -70,6 +70,21 @@ class PcSamplingEngine final : public IProfilingEngine {
                && !sampling_api_blocked_.load(std::memory_order_relaxed);
     }
 
+    /**
+     * Ready to arm inside a window.
+     *
+     * Stricter than isOperational() on the SamplingAPI path: picking that
+     * method only records which API is in play, while the enable + configure
+     * that a later cuptiPCSamplingStart needs can still fail - and on this
+     * 3090 it does, with INVALID_OPERATION. ActivityAPI has nothing deferred:
+     * cuptiActivityEnable already succeeded, so selecting it IS being ready.
+     */
+    bool isPrepared() const override {
+        if (sampling_api_blocked_.load(std::memory_order_relaxed)) return false;
+        return pc_sampling_method_ == Method::ActivityAPI ||
+               sampling_api_ready_.load(std::memory_order_acquire);
+    }
+
     /** True once at least one PC sample was emitted this session. */
     bool producedData() const override {
         return produced_data_.load(std::memory_order_relaxed);

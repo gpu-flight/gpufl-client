@@ -280,6 +280,39 @@ DeepWindowSpec RuleEvaluator::specWithTrigger(const MetricSample& sample) const 
     return spec;
 }
 
+bool RuleEvaluator::requestWindow(const MetricSample& sample) {
+    const OpenRequestResult result =
+        hooks_.request_open(hooks_.ctx, specWithTrigger(sample));
+    switch (result.status) {
+        case OpenRequestStatus::Accepted:
+            pending_token_ = result.token;
+            state_ = RuleState::Opening;
+            ++state_sequence_;
+            return true;
+
+        case OpenRequestStatus::EngineUnavailable:
+            // Permanent for this session. Retrying until shutdown would end in
+            // `never_true`, which says the condition was never met - the exact
+            // opposite of what happened.
+            terminal_ = RuleOutcome::Unsupported;
+            reason_ = toString(result.status);
+            state_ = RuleState::Inactive;
+            ++state_sequence_;
+            return false;
+
+        case OpenRequestStatus::PreparationPending:
+        case OpenRequestStatus::Busy:
+        case OpenRequestStatus::Cooldown:
+            // Ordinary and temporary. Back to armed rather than holding
+            // Pending, which would fire the instant the refusal lifted on
+            // evidence gathered long before.
+            reason_ = toString(result.status);
+            toArmed();
+            return false;
+    }
+    return false;
+}
+
 bool RuleEvaluator::conditionHolds(const double value) const {
     return rule_.op == Comparison::LessThan ? value < rule_.threshold
                                             : value > rule_.threshold;
@@ -427,17 +460,8 @@ void RuleEvaluator::poll(const int64_t now_ns) {
                 first_true_observed_ns_ = sample.observed_ns;
                 state_ = RuleState::Pending;
                 ++state_sequence_;
-                // sustained_ms == 0 fires on this same reading, handled below.
-                if (rule_.timing.sustained_ms == 0) {
-                    pending_token_ = hooks_.request_open(hooks_.ctx, specWithTrigger(sample));
-                    if (pending_token_ != 0) {
-                        state_ = RuleState::Opening;
-                        ++state_sequence_;
-                    } else {
-                        reason_ = "open_refused";
-                        toArmed();
-                    }
-                }
+                // sustained_ms == 0 fires on this same reading.
+                if (rule_.timing.sustained_ms == 0) requestWindow(sample);
             }
             break;
 
@@ -455,17 +479,7 @@ void RuleEvaluator::poll(const int64_t now_ns) {
             const int64_t held_ns = sample.observed_ns - *first_true_observed_ns_;
             if (held_ns < rule_.timing.sustained_ms * 1000000) break;
 
-            pending_token_ = hooks_.request_open(hooks_.ctx, specWithTrigger(sample));
-            if (pending_token_ != 0) {
-                state_ = RuleState::Opening;
-                ++state_sequence_;
-            } else {
-                // Refused by cooldown. Back to armed rather than holding
-                // pending, which would fire the instant the cooldown lapsed on
-                // evidence gathered long before.
-                reason_ = "open_refused";
-                toArmed();
-            }
+            requestWindow(sample);
             break;
         }
 

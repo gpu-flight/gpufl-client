@@ -371,16 +371,25 @@ void DeepWindow::RequestOpen(const DeepWindowSpec& spec) {
     ScheduleOpenAfter(0, spec);
 }
 
-uint64_t DeepWindow::RequestOpenTagged(const DeepWindowSpec& spec) {
+OpenRequestResult DeepWindow::RequestOpenTagged(const DeepWindowSpec& spec) {
     // Rule installation may precede CONTEXT_CREATED under Windows injection,
     // so it gates on engine selection. By the time a condition fires, require
-    // the context-bound preparation to have really succeeded. Refusing here
-    // returns token 0 and does not consume the rule's window budget.
+    // the context-bound preparation to have really succeeded.
+    //
+    // Pending and failed are reported apart because they call for opposite
+    // responses: pending means try again shortly, failed means this session
+    // will never open a useful window and the rule should say so rather than
+    // retrying until shutdown and reporting `never_true`.
     if (IMonitorBackend* backend = Monitor::GetBackend();
         backend != nullptr && !backend->DeepEnginesPrepared()) {
+        if (backend->DeepEnginePreparationPending()) {
+            GFL_LOG_DEBUG("[DeepWindow] conditional open deferred: deep engine "
+                          "preparation has not run yet");
+            return {0, OpenRequestStatus::PreparationPending};
+        }
         GFL_LOG_ERROR("[DeepWindow] conditional open refused: selected deep "
                       "engine is not prepared");
-        return 0;
+        return {0, OpenRequestStatus::EngineUnavailable};
     }
 
     uint64_t token = 0;
@@ -388,15 +397,17 @@ uint64_t DeepWindow::RequestOpenTagged(const DeepWindowSpec& spec) {
         std::lock_guard lk(g_mu);
         // Decided here so the caller learns now, rather than discovering later
         // that a window it counted on never opened.
-        if (g_active.load(std::memory_order_relaxed)) return 0;
-        if (InCooldown(spec)) return 0;
+        if (g_active.load(std::memory_order_relaxed)) {
+            return {0, OpenRequestStatus::Busy};
+        }
+        if (InCooldown(spec)) return {0, OpenRequestStatus::Cooldown};
         if (PendingIsQueued()) {
             // Someone else - typically the launcher's --deep-after window - is
             // already waiting. Refusing here means the rule retries later
             // instead of cancelling a window the user explicitly scheduled.
             GFL_LOG_DEBUG("[DeepWindow] tagged open refused: a request is "
                           "already queued");
-            return 0;
+            return {0, OpenRequestStatus::Busy};
         }
 
         token = g_next_open_token.fetch_add(1, std::memory_order_relaxed);
@@ -413,7 +424,18 @@ uint64_t DeepWindow::RequestOpenTagged(const DeepWindowSpec& spec) {
     }
     GFL_LOG_DEBUG("[DeepWindow] tagged open requested token=", token,
                   " duration_ms=", spec.max_duration_ms);
-    return token;
+    return {token, OpenRequestStatus::Accepted};
+}
+
+const char* toString(const OpenRequestStatus status) {
+    switch (status) {
+        case OpenRequestStatus::Accepted:           return "accepted";
+        case OpenRequestStatus::PreparationPending: return "preparation_pending";
+        case OpenRequestStatus::EngineUnavailable:  return "deep_engine_not_prepared";
+        case OpenRequestStatus::Busy:               return "busy";
+        case OpenRequestStatus::Cooldown:           return "cooldown";
+    }
+    return "unknown";
 }
 
 uint64_t DeepWindow::LastOpenedToken() {

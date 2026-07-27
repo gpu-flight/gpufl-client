@@ -729,6 +729,28 @@ TEST(CliParseDeepModeTest, TheRejectionNamesTheWayOut) {
     EXPECT_NE(r.error.find("Drop --passes"), std::string::npos) << r.error;
 }
 
+TEST(CliParseDeepModeTest, TheTwoWindowTriggersAreMutuallyExclusive) {
+    // Both set is not "either may open it". Measured on the 3090: the
+    // scheduled window opens at t=0, the rule is refused behind it, and the
+    // summary then reports `never_true` for a condition that held all run.
+    const auto r = parseTrace({"--deep-when=kernel_launch_rate<10",
+                               "--deep-after=1s", "--deep-for=2s", "--", "app"});
+    ASSERT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("--deep-when"), std::string::npos) << r.error;
+    EXPECT_NE(r.error.find("--deep-after"), std::string::npos) << r.error;
+}
+
+TEST(CliParseDeepModeTest, AConditionalRunDoesNotCarryATimeTrigger) {
+    const auto r = parseTrace({"--deep-when=kernel_launch_rate<10",
+                               "--deep-for=2s", "--", "app"});
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    // deep_after_ms still holds its default 0; what must not happen is the
+    // launcher treating that default as a request. GPUFL_DEEP_AFTER_MS installs
+    // the time trigger by being present at all, so the flag being unset has to
+    // survive as far as the environment.
+    EXPECT_FALSE(r.args->deep_after_set);
+}
+
 TEST(CliParseDeepModeTest, ADeepRunResolvesToExactlyOneAdaptivePass) {
     const auto r = parseTrace({"--deep-for=5s", "--", "app"});
     ASSERT_TRUE(r.args.has_value()) << r.error;

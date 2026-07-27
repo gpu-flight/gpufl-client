@@ -635,7 +635,11 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
     // arming, or the engines would be armed from the first kernel and the
     // window would bound nothing.
     if (args.deep_requested) {
-        if (!setEnvOrPrint(platform, env::kDeepArm, "window") ||
+        if (!setEnvOrPrint(platform, env::kDeepArm, "window")) return 2;
+        // The time trigger is installed by the mere presence of this variable,
+        // so a conditional run must not export it. Exporting the default 0
+        // scheduled a window at t=0 that the rule was then refused behind.
+        if (args.deep_when.empty() &&
             !setEnvOrPrint(platform, env::kDeepAfterMs,
                            std::to_string(args.deep_after_ms))) {
             return 2;

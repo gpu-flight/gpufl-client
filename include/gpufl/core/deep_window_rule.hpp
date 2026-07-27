@@ -199,8 +199,11 @@ class RuleEvaluator {
 public:
     /** @brief Injected so tests drive the coordinator without a GPU. */
     struct Hooks {
-        /// Ask for a window; returns a token, or 0 when refused outright.
-        uint64_t (*request_open)(void* ctx, const DeepWindowSpec&) = nullptr;
+        /// Ask for a window. The REASON matters, not just the refusal:
+        /// cooldown and busy are temporary and worth retrying, a failed
+        /// engine preparation is permanent and retrying it until shutdown
+        /// makes the summary claim the condition never held.
+        OpenRequestResult (*request_open)(void* ctx, const DeepWindowSpec&) = nullptr;
         /// Is a window - any window, whoever opened it - currently open?
         bool (*window_active)(void* ctx) = nullptr;
         /// Monotonic count of windows that have opened. A short launch-bounded
@@ -267,6 +270,14 @@ private:
      * threshold beside it stops being readable the first time the rule changes.
      */
     DeepWindowSpec specWithTrigger(const MetricSample& sample) const;
+    /**
+     * Ask for a window and act on the answer.
+     *
+     * One place, so the two call sites - sustained_ms == 0 and the
+     * held-long-enough path - cannot reach different conclusions about what a
+     * refusal means. Returns true only when a window was actually requested.
+     */
+    bool requestWindow(const MetricSample& sample);
     bool conditionHolds(double value) const;
     bool rearmHolds(double value) const;
     void enterBlackout(int64_t now_ns);

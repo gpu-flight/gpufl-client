@@ -46,6 +46,35 @@ struct DeepWindowSpec {
 };
 
 /**
+ * @brief Why a tagged open was refused, when it was.
+ *
+ * A single "refused" answer is not enough for a rule to act on. Cooldown and a
+ * window already being open are ordinary and temporary - the rule should wait
+ * and try again. A deep engine that failed its context-bound preparation is
+ * permanent, and a rule that keeps retrying it reports `never_true` at
+ * shutdown, which says the condition never held when in fact it held and could
+ * not be acted on.
+ */
+enum class OpenRequestStatus {
+    Accepted,
+    /// The engine has not reached its first CUDA context yet. Temporary:
+    /// under Windows injection a rule is installed before CONTEXT_CREATED.
+    PreparationPending,
+    /// Preparation ran and failed. Permanent for this session.
+    EngineUnavailable,
+    /// A window is already open, or another request is queued.
+    Busy,
+    Cooldown,
+};
+
+const char* toString(OpenRequestStatus status);
+
+struct OpenRequestResult {
+    uint64_t token = 0;                 ///< non-zero only when Accepted
+    OpenRequestStatus status = OpenRequestStatus::Accepted;
+};
+
+/**
  * @brief The profiler scope that deep engines arm on, opened by a trigger
  * and closed by a bound instead of by a destructor.
  *
@@ -98,7 +127,7 @@ class DeepWindow {
      * or the cooldown has not elapsed). A non-zero token matches
      * LastOpenedToken() once, and only once, the requested window opens.
      */
-    static uint64_t RequestOpenTagged(const DeepWindowSpec& spec);
+    static OpenRequestResult RequestOpenTagged(const DeepWindowSpec& spec);
 
     /** @brief Token of the most recent open; 0 when it was not from a request. */
     static uint64_t LastOpenedToken();

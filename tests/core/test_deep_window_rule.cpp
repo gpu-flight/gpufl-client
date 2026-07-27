@@ -27,11 +27,16 @@ struct FakeCoordinator {
     uint64_t pending_token = 0;
     int      opens = 0;
 
-    static uint64_t RequestOpen(void* ctx, const gpufl::DeepWindowSpec&) {
+    /// What the coordinator should answer next. Set per test.
+    gpufl::OpenRequestStatus refusal = gpufl::OpenRequestStatus::Cooldown;
+
+    static gpufl::OpenRequestResult RequestOpen(void* ctx,
+                                                const gpufl::DeepWindowSpec&) {
         auto* self = static_cast<FakeCoordinator*>(ctx);
-        if (self->refuse || self->active) return 0;
+        if (self->refuse) return {0, self->refusal};
+        if (self->active) return {0, gpufl::OpenRequestStatus::Busy};
         self->pending_token = self->next_token++;
-        return self->pending_token;
+        return {self->pending_token, gpufl::OpenRequestStatus::Accepted};
     }
     static bool Active(void* ctx) {
         return static_cast<FakeCoordinator*>(ctx)->active;
@@ -641,6 +646,92 @@ TEST_F(RuleEvaluatorTest, TheSummaryReportsHowMuchDataWasDiscarded) {
 
     EXPECT_GT(ev.finish(2000 * kMs).truncated_samples, 0u)
         << "the session concluded from a subset and never said so";
+}
+
+// ── a refusal has to say WHY ────────────────────────────────────────────────
+//
+// One undifferentiated "refused" made every refusal look temporary, so a rule
+// whose deep engine had permanently failed retried until shutdown and then
+// reported `never_true` - which says the condition was never met, the exact
+// opposite of what happened.
+
+TEST_F(RuleEvaluatorTest, AFailedEnginePreparationEndsTheRuleAsUnsupported) {
+    DeepWindowRule rule = makeRule("kernel_launch_rate<100 for 500ms");
+    MetricSource src(rule.metric, rule.timing, &feeds, ActiveCounterProvider());
+    RuleEvaluator ev(rule, "r1", RuleCapabilities{}, &src, coord.hooks());
+    feeds.seedStartup(0);
+    coord.refuse = true;
+    coord.refusal = gpufl::OpenRequestStatus::EngineUnavailable;
+
+    run(ev, src, 0, 1500 * kMs, 10);
+    run(ev, src, 1510 * kMs, 4000 * kMs, 0);
+
+    EXPECT_EQ(ev.state(), RuleState::Inactive);
+    const RuleSummary s = ev.finish(4000 * kMs);
+    EXPECT_EQ(s.outcome, RuleOutcome::Unsupported)
+        << "a condition that held but could not be acted on is not never_true";
+    EXPECT_EQ(s.reason, "deep_engine_not_prepared");
+    EXPECT_EQ(s.windows_opened, 0u);
+}
+
+TEST_F(RuleEvaluatorTest, PreparationPendingIsRetriedRatherThanConcluded) {
+    // Windows injection installs a rule before CONTEXT_CREATED, so "not ready
+    // yet" is an ordinary startup state. Treating it as failure would kill
+    // every rule on that platform.
+    DeepWindowRule rule = makeRule("kernel_launch_rate<100 for 500ms");
+    MetricSource src(rule.metric, rule.timing, &feeds, ActiveCounterProvider());
+    RuleEvaluator ev(rule, "r1", RuleCapabilities{}, &src, coord.hooks());
+    feeds.seedStartup(0);
+    coord.refuse = true;
+    coord.refusal = gpufl::OpenRequestStatus::PreparationPending;
+
+    run(ev, src, 0, 1500 * kMs, 10);
+    run(ev, src, 1510 * kMs, 4000 * kMs, 0);
+    ASSERT_NE(ev.state(), RuleState::Inactive) << "gave up on a pending engine";
+
+    // Preparation completes; the rule must still be able to fire.
+    coord.refuse = false;
+    run(ev, src, 4010 * kMs, 5200 * kMs, 0);
+    EXPECT_EQ(ev.state(), RuleState::Opening);
+}
+
+TEST_F(RuleEvaluatorTest, ACooldownRefusalIsNotAPermanentFailure) {
+    DeepWindowRule rule = makeRule("kernel_launch_rate<100 for 500ms");
+    MetricSource src(rule.metric, rule.timing, &feeds, ActiveCounterProvider());
+    RuleEvaluator ev(rule, "r1", RuleCapabilities{}, &src, coord.hooks());
+    feeds.seedStartup(0);
+    coord.refuse = true;
+    coord.refusal = gpufl::OpenRequestStatus::Cooldown;
+
+    run(ev, src, 0, 1500 * kMs, 10);
+    run(ev, src, 1510 * kMs, 4000 * kMs, 0);
+
+    EXPECT_NE(ev.state(), RuleState::Inactive);
+    // Recording an ordinary quiet period as a permanent failure would tell the
+    // user their engine is broken when the rule is simply waiting its turn.
+    EXPECT_NE(ev.snapshot(4000 * kMs).outcome, RuleOutcome::Unsupported);
+}
+
+TEST_F(RuleEvaluatorTest, ABusyRefusalStillFiresOnceTheWindowIsFree) {
+    // The scheduled --deep-after window holds the queue; the rule waits.
+    DeepWindowRule rule = makeRule("kernel_launch_rate<100 for 500ms");
+    MetricSource src(rule.metric, rule.timing, &feeds, ActiveCounterProvider());
+    RuleEvaluator ev(rule, "r1", RuleCapabilities{}, &src, coord.hooks());
+    feeds.seedStartup(0);
+    coord.refuse = true;
+    coord.refusal = gpufl::OpenRequestStatus::Busy;
+
+    run(ev, src, 0, 1500 * kMs, 10);
+    run(ev, src, 1510 * kMs, 4000 * kMs, 0);
+    ASSERT_NE(ev.state(), RuleState::Inactive);
+
+    coord.refuse = false;
+    run(ev, src, 4010 * kMs, 5200 * kMs, 0);
+    EXPECT_EQ(ev.state(), RuleState::Opening);
+
+    coord.serviceOpen();
+    ev.poll(5210 * kMs);
+    EXPECT_EQ(ev.windowsOpened(), 1u);
 }
 
 }  // namespace

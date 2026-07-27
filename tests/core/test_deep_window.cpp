@@ -104,7 +104,8 @@ TEST_F(DeepWindowTest, ConcurrentRequestsStillLeaveExactlyOneQueued) {
                 while (!go.load(std::memory_order_acquire)) {
                     std::this_thread::yield();
                 }
-                if (gpufl::DeepWindow::RequestOpenTagged(Spec(60000, 0)) != 0) {
+                if (gpufl::DeepWindow::RequestOpenTagged(Spec(60000, 0)).status ==
+                    gpufl::OpenRequestStatus::Accepted) {
                     accepted.fetch_add(1, std::memory_order_relaxed);
                 }
             });
@@ -345,8 +346,13 @@ TEST_F(DeepWindowTest, ATaggedRequestIsRefusedWhileAnotherIsQueued) {
     gpufl::DeepWindow::ScheduleOpenAfter(/*delay_ms=*/50, Spec(60000, 0));
 
     // A rule asking now must be told no, not silently granted a token for a
-    // window that belongs to the scheduled trigger.
-    EXPECT_EQ(gpufl::DeepWindow::RequestOpenTagged(Spec(1000, 0)), 0u);
+    // window that belongs to the scheduled trigger. `busy` and not one of the
+    // engine statuses: the rule has to keep retrying, since the scheduled
+    // window will release the queue.
+    const gpufl::OpenRequestResult r =
+        gpufl::DeepWindow::RequestOpenTagged(Spec(1000, 0));
+    EXPECT_EQ(r.token, 0u);
+    EXPECT_EQ(r.status, gpufl::OpenRequestStatus::Busy);
 }
 
 TEST_F(DeepWindowTest, ScheduledOpenWaitsOutItsDelay) {

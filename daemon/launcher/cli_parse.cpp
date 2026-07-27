@@ -181,7 +181,9 @@ const char* traceHelp() {
         "                            bounds TIME, which does not bound how much the\n"
         "                            engines actually collect - see --deep-launches.\n"
         "        --deep-when=<EXPR>  Open the window when a metric crosses a threshold,\n"
-        "                            e.g. \"custom.token_rate<1000 for 2s\".\n"
+        "                            e.g. \"custom.token_rate<1000 for 2s\". This and\n"
+        "                            --deep-after are two answers to the same\n"
+        "                            question, so pass one or the other.\n"
         "        --deep-launches=<N> Kernel-launch bound on the deep window; ends it\n"
         "                            at whichever bound is hit first. PREFER THIS:\n"
         "                            wall time does not bound how much an engine\n"
@@ -421,7 +423,10 @@ TraceParseResult parseTraceArgs(const std::vector<std::string>& argv) {
                         "--deep-launches " + v + " to bound it by kernel "
                         "launches instead"};
             }
-            if (key == "--deep-after")         out.deep_after_ms = ms;
+            if (key == "--deep-after") {
+                out.deep_after_ms = ms;
+                out.deep_after_set = true;
+            }
             else if (key == "--deep-for")      out.deep_for_ms = ms;
             else                               out.deep_cooldown_ms = ms;
             out.deep_requested = true;
@@ -492,6 +497,18 @@ TraceParseResult parseTraceArgs(const std::vector<std::string>& argv) {
     if (const std::string mode_error = validateTraceExecutionMode(out);
         !mode_error.empty()) {
         return {std::nullopt, mode_error};
+    }
+
+    // Two answers to "when does the window open" is one too many. Measured on
+    // the 3090: with both set, the scheduled window opens at t=0, the rule's
+    // request is refused as busy, and the rule then waits for a rearm that a
+    // still-busy workload never gives - it reported `never_true` for a
+    // condition that held the whole run.
+    if (!out.deep_when.empty() && out.deep_after_set) {
+        return {std::nullopt,
+                "--deep-when and --deep-after are two different triggers for "
+                "the same window. Pass --deep-when to open it on a metric, or "
+                "--deep-after to open it at a fixed time"};
     }
 
     // A deep window with neither bound would arm and never disarm, which is

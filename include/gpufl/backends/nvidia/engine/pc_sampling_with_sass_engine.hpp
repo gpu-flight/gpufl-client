@@ -85,6 +85,18 @@ class PcSamplingWithSassEngine final : public IProfilingEngine {
         return (pc_ && pc_->isOperational()) || sass_ok_;
     }
 
+    /**
+     * Ready to arm inside a window if ANY sub-engine is.
+     *
+     * Spelled out rather than derived from isOperational(): this engine keeps
+     * whichever of PC / SASS / PM survived start(), and a window that arms one
+     * of the three is still a useful window.
+     */
+    bool isPrepared() const override {
+        return (pc_ && pc_->isPrepared()) || (sass_ && sass_->isPrepared()) ||
+               (pm_ && pm_->isPrepared());
+    }
+
     bool sassActive() const { return sass_ok_; }
     bool pcSamplingActive() const { return pc_ && pc_->isOperational(); }
 
