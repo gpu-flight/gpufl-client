@@ -144,4 +144,22 @@ TEST_F(RuleInstallTest, ARuleCanBeInstalledAgainAfterFinish) {
         << "the second session was left with no rule";
 }
 
+TEST_F(RuleInstallTest, AnOutOfRangeNumericOptionIsRefused) {
+    // Pins the OUTCOME, not the mechanism. Two independent guards reject this:
+    // the ERANGE check on the parse, and the range validator downstream. Either
+    // alone suffices, so removing one does not fail this test - what it fixes
+    // is which reason gets reported, and that is not observable from here.
+    // The reason the ERANGE check still exists is the arithmetic in between:
+    // a saturated LLONG_MAX fed into the derived stale-after sum is signed
+    // overflow, which is undefined rather than merely wrong.
+    setEnv(gpufl::env::kDeepWhen, "kernel_launch_rate<100 for 2s");
+    setEnv(gpufl::env::kDeepWindowMs, "500");
+    setEnv(gpufl::env::kDeepRateWindowMs, "99999999999999999999999999");
+    DeepWindowRules::InstallFromEnv();
+
+    EXPECT_TRUE(DeepWindowRules::Installed());
+    EXPECT_FALSE(DeepWindowRules::WantsLaunchFeed())
+        << "a value too large to represent was accepted";
+}
+
 }  // namespace

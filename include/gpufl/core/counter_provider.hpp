@@ -1,5 +1,8 @@
 #pragma once
 
+#include <string>
+#include <vector>
+
 #include "gpufl/abi/gpufl_counter_abi.h"
 
 namespace gpufl::detail {
@@ -42,6 +45,16 @@ public:
     /** @brief Test seam: forget the binding so the next get() resolves again. */
     static void resetForTesting();
 };
+
+/**
+ * @brief Candidate runtime paths, most specific first. Test seam.
+ *
+ * Takes the two environment inputs explicitly rather than reading them, so a
+ * test can pin the ORDER and the injection-directory rule without mutating
+ * process environment that other tests share.
+ */
+std::vector<std::string> CounterRuntimeCandidatesForTesting(
+    const char* injection_path, const char* explicit_runtime_path);
 
 /**
  * @brief The provider in use: the shared runtime, or this module's own.

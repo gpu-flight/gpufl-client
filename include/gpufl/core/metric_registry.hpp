@@ -104,7 +104,19 @@ public:
     struct DurationFeed {
         std::vector<double> samples;   // durations since the last drain
         int64_t last_event_ns = 0;
+        /// Durations refused because the buffer was full, so a truncated
+        /// percentile is visible rather than silently reported as complete.
+        uint64_t dropped = 0;
     };
+
+    /**
+     * Cap on undrained durations.
+     *
+     * The per-bucket resize only trimmed AFTER draining, which bounds nothing:
+     * between drains the vector grew with every kernel, and a collector that
+     * stalls during a launch storm is exactly when it grows fastest.
+     */
+    static constexpr size_t kMaxPendingDurations = 8192;
     struct GaugeFeed {
         double   value = 0.0;
         int64_t  last_event_ns = 0;
@@ -236,6 +248,9 @@ private:
      */
     int64_t  last_tick_ns_ = 0;
     uint64_t last_published_close_ = 0;
+    /// Durations the feed had to refuse. Surfaced so a truncated percentile is
+    /// not presented as a complete one.
+    uint64_t durations_truncated_ = 0;
 
     MetricSample current_;
     uint64_t     sequence_ = 0;

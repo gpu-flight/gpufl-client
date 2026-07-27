@@ -277,15 +277,31 @@ TEST_F(DeepWindowTest, RequestOpenCarriesItsBounds) {
     EXPECT_FALSE(gpufl::DeepWindow::Active());
 }
 
-TEST_F(DeepWindowTest, NewestPendingSpecWins) {
-    gpufl::DeepWindow::RequestOpen(Spec(0, 1));
-    gpufl::DeepWindow::RequestOpen(Spec(60000, 0));
+TEST_F(DeepWindowTest, TheFirstQueuedRequestWins) {
+    // Policy reversed deliberately. "Newest wins" meant that with both
+    // --deep-after and a conditional rule configured, whichever happened to run
+    // second silently cancelled the other - decided by call order rather than
+    // by anything the user asked for. Refusing the second request at least
+    // leaves the rule able to retry.
+    gpufl::DeepWindow::RequestOpen(Spec(0, 1));      // budget of one launch
+    gpufl::DeepWindow::RequestOpen(Spec(60000, 0));  // must be refused
     Launch();
     ASSERT_TRUE(gpufl::DeepWindow::Active());
 
-    // Had the first spec won, this launch would spend its budget of 1.
+    // The first spec governs, so this launch spends its budget of 1.
     Launch();
-    EXPECT_TRUE(gpufl::DeepWindow::Active());
+    gpufl::DeepWindow::ServicePending();
+    EXPECT_FALSE(gpufl::DeepWindow::Active())
+        << "the second request replaced the first one's bounds";
+}
+
+TEST_F(DeepWindowTest, ATaggedRequestIsRefusedWhileAnotherIsQueued) {
+    // The scheduled window is installed at init, before any rule can fire.
+    gpufl::DeepWindow::ScheduleOpenAfter(/*delay_ms=*/50, Spec(60000, 0));
+
+    // A rule asking now must be told no, not silently granted a token for a
+    // window that belongs to the scheduled trigger.
+    EXPECT_EQ(gpufl::DeepWindow::RequestOpenTagged(Spec(1000, 0)), 0u);
 }
 
 TEST_F(DeepWindowTest, ScheduledOpenWaitsOutItsDelay) {

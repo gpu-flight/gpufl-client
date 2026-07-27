@@ -52,6 +52,15 @@ struct PendingOpen {
     DeepWindowSpec spec;
     uint64_t owner_token = 0;   // 0 = nobody is waiting on this one
 };
+
+// First request wins; a second is refused while one is still queued.
+//
+// The alternative - newest wins - silently discards whichever trigger asked
+// first, and with both --deep-after and a rule configured that is decided by
+// which one happens to run first rather than by anything the user chose. A
+// refusal is at least reported: a rule gets token 0 and goes back to armed,
+// and the scheduled window logs that it kept its place.
+bool PendingIsQueued() { return g_open_requested.load(std::memory_order_acquire); }
 PendingOpen      g_pending;    // guarded by g_mu
 
 // When the last window closed, so a cooldown can be enforced. 0 = never.
@@ -361,6 +370,14 @@ uint64_t DeepWindow::RequestOpenTagged(const DeepWindowSpec& spec) {
         // that a window it counted on never opened.
         if (g_active.load(std::memory_order_relaxed)) return 0;
         if (InCooldown(spec)) return 0;
+        if (PendingIsQueued()) {
+            // Someone else - typically the launcher's --deep-after window - is
+            // already waiting. Refusing here means the rule retries later
+            // instead of cancelling a window the user explicitly scheduled.
+            GFL_LOG_DEBUG("[DeepWindow] tagged open refused: a request is "
+                          "already queued");
+            return 0;
+        }
 
         token = g_next_open_token.fetch_add(1, std::memory_order_relaxed);
         // Spec and token published together, under one lock. Splitting them is
@@ -393,6 +410,14 @@ void DeepWindow::ScheduleOpenAfter(const int64_t delay_ms,
                                    const DeepWindowSpec& spec) {
     {
         std::lock_guard lk(g_mu);
+        if (PendingIsQueued()) {
+            // Keeps the queued request rather than replacing it. Overwriting
+            // would let a scheduled window cancel a rule's window - or the
+            // reverse - purely on call order.
+            GFL_LOG_DEBUG("[DeepWindow] open request ignored: one is already "
+                          "queued (owner_token=", g_pending.owner_token, ")");
+            return;
+        }
         g_pending.spec = spec;
         // Untagged: nobody is counting this window against a budget. Cleared
         // explicitly, so replacing a tagged request cannot leave its owner

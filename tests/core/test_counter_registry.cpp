@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <thread>
 #include <vector>
 
@@ -22,6 +23,39 @@ class CounterRegistryTest : public ::testing::Test {
 
     CounterRegistry& reg() { return CounterRegistry::instance(); }
 };
+
+// ── runtime discovery ───────────────────────────────────────────────────────
+
+TEST_F(CounterRegistryTest, ResolutionLooksBesideTheInjectionLibrary) {
+    // The motivating case: an ordinary C++ target links gpufl STATICALLY, so
+    // the provider's own module directory is the TARGET's directory, which has
+    // no runtime beside it. If that target calls counter() before its first
+    // CUDA call - entirely normal - it binds to a local registry and stays
+    // there, invisible to the evaluator that loads later.
+    //
+    // The launcher puts CUDA_INJECTION64_PATH in the child environment before
+    // exec, so the runtime's location is knowable from the first instruction.
+    // This checks the candidate list uses it; whether the file is actually
+    // there is a deployment question the build rules cover.
+    const auto candidates = gpufl::detail::CounterRuntimeCandidatesForTesting(
+        "/opt/gpufl/lib/libgpufl_inject.so", nullptr);
+
+    const bool beside_inject = std::any_of(
+        candidates.begin(), candidates.end(), [](const std::string& c) {
+            return c.rfind("/opt/gpufl/lib/", 0) == 0;
+        });
+    EXPECT_TRUE(beside_inject)
+        << "a target that ticks before CUDA init can never find the runtime";
+}
+
+TEST_F(CounterRegistryTest, AnExplicitRuntimePathIsTriedFirst) {
+    // Deployment layouts we do not control need a way to say where it is
+    // rather than have us guess.
+    const auto candidates = gpufl::detail::CounterRuntimeCandidatesForTesting(
+        nullptr, "/custom/place/libgpufl_counter_runtime.so");
+    ASSERT_FALSE(candidates.empty());
+    EXPECT_EQ(candidates.front(), "/custom/place/libgpufl_counter_runtime.so");
+}
 
 }  // namespace
 

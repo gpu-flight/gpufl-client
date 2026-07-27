@@ -194,6 +194,9 @@ constexpr const char* kMonitorIntervalMs = "GPUFL_MONITOR_INTERVAL_MS";
 // specific spots - centralized so the exact spelling lives in one place.
 constexpr const char* kCudaModuleLoading   = "CUDA_MODULE_LOADING";
 constexpr const char* kCudaInjection64Path = "CUDA_INJECTION64_PATH";
+// Explicit location of gpufl_counter_runtime, for deployment layouts where it
+// sits beside neither the calling module nor the injection library.
+constexpr const char* kCounterRuntimePath = "GPUFL_COUNTER_RUNTIME_PATH";
 constexpr const char* kNvtxInjection64Path = "NVTX_INJECTION64_PATH";
 constexpr const char* kCudaPath            = "CUDA_PATH";
 constexpr const char* kLdPreload           = "LD_PRELOAD";

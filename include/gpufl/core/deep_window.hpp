@@ -81,7 +81,9 @@ class DeepWindow {
      * records the request here and the next launch performs the open. The
      * mirror of how a deadline reached off the app thread defers its close.
      *
-     * A pending request is replaced, not queued: the newest spec wins.
+     * A request is REFUSED while another is still queued - first one wins.
+     * Replacing it would let a scheduled window cancel a rule's window, or
+     * the reverse, decided by nothing but which ran first.
      */
     static void RequestOpen(const DeepWindowSpec& spec);
 

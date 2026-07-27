@@ -33,7 +33,17 @@ void MetricFeeds::noteKernelLaunch(const int64_t ts_ns) {
 
 void MetricFeeds::noteKernelDuration(const int64_t ts_ns, const double duration_ms) {
     std::lock_guard lk(mu_);
-    durations_.samples.push_back(duration_ms);
+    // Bounded here, at the push. Trimming after a drain left the buffer free to
+    // grow without limit until that drain came - and the case where it grows
+    // fastest is a stalled collector, which is also the case where the drain is
+    // late.
+    if (durations_.samples.size() >= kMaxPendingDurations) {
+        ++durations_.dropped;
+    } else {
+        durations_.samples.push_back(duration_ms);
+    }
+    // Advances even when the sample is dropped: the SOURCE is alive, and
+    // freezing this would report a busy workload as a dead one.
     durations_.last_event_ns = ts_ns;
 }
 
@@ -90,7 +100,9 @@ MetricFeeds::DurationFeed MetricFeeds::drainDurations() {
     DurationFeed out;
     out.samples = std::move(durations_.samples);
     out.last_event_ns = durations_.last_event_ns;
+    out.dropped = durations_.dropped;
     durations_.samples.clear();
+    durations_.dropped = 0;
     return out;
 }
 
@@ -203,6 +215,7 @@ void MetricSource::closeBucket(const int64_t boundary_ns) {
                 drained.samples.resize(kMaxDurationsPerBucket);
             }
             slot = std::move(drained.samples);
+            if (drained.dropped > 0) durations_truncated_ += drained.dropped;
             break;
         }
         case MetricShape::Gauge:
@@ -225,6 +238,11 @@ MetricSample MetricSource::poll(const int64_t now_ns) {
     if (now_ns - next_boundary_ns_ > window_ns_) {
         std::fill(buckets_.begin(), buckets_.end(), 0);
         for (auto& b : bucket_durations_) b.clear();
+        // The FEED as well, not just the local buckets. Durations recorded
+        // before the stall describe a workload from before the gap; letting the
+        // next bucket inherit them would fire a rule on evidence that is
+        // already older than the window it claims to cover.
+        if (id_.shape() == MetricShape::Percentile) feeds_->drainDurations();
         buckets_closed_ = 0;
         baselined_ = false;
         next_boundary_ns_ = now_ns + bucket_ns_;

@@ -549,8 +549,18 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
     // Feed recent_kernel_ms. This is the only place a COMPLETED kernel's
     // duration exists - the launch callback sees a launch, not a result - so a
     // rule watching kernel duration reads nothing at all without this.
-    detail::DeepWindowRules::NoteKernelDuration(
-        wallStartNs, static_cast<double>(out.duration_ns) / 1e6);
+    //
+    // Stamped with when the kernel ENDED, not when it started. Freshness is
+    // measured against the source event, so a two-second kernel reported with
+    // its start time arrives already two seconds old and can read as stale the
+    // moment it lands - the slower the kernel, the more certainly a rule
+    // watching for slow kernels would discard it.
+    if (out.duration_ns >= 0 &&
+        wallStartNs <= INT64_MAX - out.duration_ns) {
+        const int64_t wallEndNs = wallStartNs + out.duration_ns;
+        detail::DeepWindowRules::NoteKernelDuration(
+            wallEndNs, static_cast<double>(out.duration_ns) / 1e6);
+    }
     out.dyn_shared = k->dynamicSharedMemory;
     out.static_shared = k->staticSharedMemory;
     out.num_regs = k->registersPerThread;

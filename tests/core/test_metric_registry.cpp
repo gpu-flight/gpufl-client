@@ -446,4 +446,45 @@ TEST_F(MetricSourceTest, LaunchFeedIsVisibleWithoutTakingALock) {
     EXPECT_EQ(feed.last_event_ns, 1234);
 }
 
+TEST_F(MetricSourceTest, TheDurationFeedIsBoundedBeforeItIsDrained) {
+    // The per-bucket trim only ran AFTER a drain, which bounds nothing: between
+    // drains the buffer grew with every kernel, and the case where it grows
+    // fastest - a launch storm under a stalled collector - is exactly the case
+    // where the drain is late.
+    MetricFeeds f;
+    for (size_t i = 0; i < MetricFeeds::kMaxPendingDurations + 5000; ++i) {
+        f.noteKernelDuration(static_cast<int64_t>(i), 1.0);
+    }
+    const auto drained = f.drainDurations();
+    EXPECT_LE(drained.samples.size(), MetricFeeds::kMaxPendingDurations);
+    EXPECT_GT(drained.dropped, 0u)
+        << "samples were discarded without saying so";
+    // The source is alive even while samples are refused, so freezing this
+    // would report a busy workload as a dead one.
+    EXPECT_EQ(f.durationsLastEventNs(),
+              static_cast<int64_t>(MetricFeeds::kMaxPendingDurations + 4999));
+}
+
+TEST_F(MetricSourceTest, ALongStallDiscardsDurationsRecordedBeforeIt) {
+    const MetricWindowConfig cfg{1000, 2000, 5000};
+    MetricSource src(parse("recent_kernel_ms"), cfg, &feeds, ActiveCounterProvider());
+    feeds.seedStartup(0);
+
+    for (int64_t t = 0; t < 1200 * kMs; t += 10 * kMs) {
+        feeds.noteKernelDuration(t, 4.0);
+        src.poll(t);
+    }
+    ASSERT_EQ(src.poll(1200 * kMs).state, MetricState::Fresh);
+
+    // Kernels recorded just before the collector stalls, then a minute-long gap.
+    for (int i = 0; i < 50; ++i) feeds.noteKernelDuration(1250 * kMs, 900.0);
+    const auto after = src.poll(61200 * kMs);
+
+    // Those 900ms durations describe a workload from before the gap. Letting
+    // the next bucket inherit them would fire a slow-kernel rule on evidence
+    // older than the window it claims to cover.
+    EXPECT_NE(after.state, MetricState::Fresh);
+    EXPECT_LT(after.value, 900.0);
+}
+
 }  // namespace

@@ -1,6 +1,8 @@
 #include "gpufl/core/deep_window_rules.hpp"
 
 #include <atomic>
+#include <cerrno>
+#include <limits>
 #include <cstdlib>
 #include <memory>
 #include <mutex>
@@ -73,8 +75,11 @@ int64_t EnvIntOr(const char* name, const int64_t fallback, std::string* bad) {
     const char* v = EnvOrNull(name);
     if (!v) return fallback;
     char* end = nullptr;
+    errno = 0;
     const long long n = std::strtoll(v, &end, 10);
-    if (end == v || *end != 0) {
+    // ERANGE too: strtoll saturates at LLONG_MAX, and a saturated value then
+    // overflows the derived-default arithmetic below rather than being caught.
+    if (end == v || *end != 0 || errno == ERANGE) {
         if (bad->empty()) *bad = std::string(name) + "='" + v + "' is not an integer";
         return fallback;
     }
@@ -85,8 +90,9 @@ bool EnvDoubleOr(const char* name, double* out, std::string* bad) {
     const char* v = EnvOrNull(name);
     if (!v) return false;
     char* end = nullptr;
+    errno = 0;
     const double d = std::strtod(v, &end);
-    if (end == v || *end != 0) {
+    if (end == v || *end != 0 || errno == ERANGE) {
         if (bad->empty()) *bad = std::string(name) + "='" + v + "' is not a number";
         return false;
     }
@@ -110,6 +116,25 @@ std::string RuleId(const std::string& canonical_input) {
     std::ostringstream oss;
     oss << std::hex << h;
     return oss.str().substr(0, 12);
+}
+
+/** rate_window + sustained + bucket + 1s, or 0 with @p bad set on overflow. */
+int64_t CheckedStaleDefault(const MetricWindowConfig& t, std::string* bad) {
+    constexpr int64_t kMax = INT64_MAX;   // not numeric_limits: windows.h defines max()
+    constexpr int64_t kSlack = 1000;
+    int64_t total = t.rate_window_ms;
+    for (const int64_t term : {t.sustained_ms, t.bucketIntervalMs(), kSlack}) {
+        if (term < 0 || total > kMax - term) {
+            if (bad->empty()) {
+                *bad = "rate window and sustained are too large to derive a "
+                       "stale-after default; set " +
+                       std::string(env::kDeepStaleAfterMs) + " explicitly";
+            }
+            return 0;
+        }
+        total += term;
+    }
+    return total;
 }
 
 std::string CanonicalConfig(const DeepWindowRule& r) {
@@ -246,12 +271,13 @@ void DeepWindowRules::InstallFromEnv() {
     std::string bad_env;
     DeepWindowRule rule = parsed.rule;
     rule.timing.rate_window_ms = EnvIntOr(env::kDeepRateWindowMs, 1000, &bad_env);
-    rule.timing.stale_after_ms = EnvIntOr(
-        env::kDeepStaleAfterMs,
-        // Default derived from the other two so the out-of-the-box combination
-        // is one that CAN fire, rather than one the validator then rejects.
-        rule.timing.rate_window_ms + rule.timing.sustained_ms +
-            rule.timing.bucketIntervalMs() + 1000, &bad_env);
+    // Derived from the other two so the out-of-the-box combination is one that
+    // CAN fire, rather than one the validator then rejects. Summed with checks:
+    // the inputs are attacker- or typo-supplied, and an overflow here would
+    // produce a negative default that then reads as a different error entirely.
+    const int64_t derived_stale = CheckedStaleDefault(rule.timing, &bad_env);
+    rule.timing.stale_after_ms =
+        EnvIntOr(env::kDeepStaleAfterMs, derived_stale, &bad_env);
     double rearm = 0.0;
     if (EnvDoubleOr(env::kDeepRearmAt, &rearm, &bad_env)) rule.rearm_threshold = rearm;
     rule.max_windows = static_cast<int>(EnvIntOr(env::kDeepMaxWindows, 3, &bad_env));
