@@ -666,3 +666,114 @@ TEST(CliParseTopLevel, UnknownSubcommand) {
     auto p = parseTopLevel(2, argv);
     EXPECT_EQ(p.sub, Subcommand::Unknown);
 }
+
+// ── --passes and --deep-* are different execution models ────────────────────
+//
+// They cannot be combined: the deep engines are fixed before the first CUDA
+// call, so a --passes list either already holds what the window would arm, or
+// does not - and `--passes=Trace --deep-after=30s` silently opened a window
+// that armed nothing. Rejected before the target runs, in either flag order.
+
+namespace {
+
+gpufl::launcher::TraceParseResult parseTrace(std::vector<std::string> argv) {
+    return gpufl::launcher::parseTraceArgs(argv);
+}
+
+bool rejectsPassesWithDeep(const std::vector<std::string>& argv) {
+    const auto r = parseTrace(argv);
+    return !r.args.has_value() &&
+           r.error.find("--passes cannot be combined") != std::string::npos;
+}
+
+}  // namespace
+
+TEST(CliParseDeepModeTest, PassesBeforeDeepFlagIsRejected) {
+    EXPECT_TRUE(rejectsPassesWithDeep(
+        {"--passes=Trace", "--deep-after=30s", "--deep-for=5s", "--", "app"}));
+}
+
+TEST(CliParseDeepModeTest, DeepFlagBeforePassesIsRejected) {
+    // Order must not decide: a user who writes the flags the other way round
+    // is making the same mistake.
+    EXPECT_TRUE(rejectsPassesWithDeep(
+        {"--deep-when=custom.token_rate<100", "--deep-for=5s",
+         "--passes=Deep", "--", "app"}));
+}
+
+TEST(CliParseDeepModeTest, SpaceSeparatedFormIsRejectedToo) {
+    EXPECT_TRUE(rejectsPassesWithDeep(
+        {"--passes", "PcSampling", "--deep-for", "5s", "--", "app"}));
+}
+
+TEST(CliParseDeepModeTest, EveryDeepFlagTriggersTheRejection) {
+    // --deep-after is included deliberately, with no grandfather clause: two
+    // rules ("--deep-when refuses, --deep-after tolerates") would be harder to
+    // explain than the break.
+    EXPECT_TRUE(rejectsPassesWithDeep(
+        {"--passes=Trace", "--deep-after=1s", "--deep-for=1s", "--", "app"}));
+    EXPECT_TRUE(rejectsPassesWithDeep(
+        {"--passes=Trace", "--deep-for=1s", "--", "app"}));
+    EXPECT_TRUE(rejectsPassesWithDeep(
+        {"--passes=Trace", "--deep-launches=500", "--", "app"}));
+    EXPECT_TRUE(rejectsPassesWithDeep(
+        {"--passes=Trace", "--deep-when=kernel_launch_rate<10",
+         "--deep-for=1s", "--", "app"}));
+}
+
+TEST(CliParseDeepModeTest, TheRejectionNamesTheWayOut) {
+    const auto r = parseTrace(
+        {"--passes=Trace", "--deep-for=5s", "--", "app"});
+    ASSERT_FALSE(r.args.has_value());
+    // An error that only says "no" leaves the user guessing which flag to drop.
+    EXPECT_NE(r.error.find("Drop --passes"), std::string::npos) << r.error;
+}
+
+TEST(CliParseDeepModeTest, ADeepRunResolvesToExactlyOneAdaptivePass) {
+    const auto r = parseTrace({"--deep-for=5s", "--", "app"});
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+
+    const auto plan = gpufl::launcher::resolvePassPlan(*r.args);
+    // One pass, not one per engine: a window triggered by a live condition
+    // cannot be reproduced across relaunches, so splitting it would change
+    // what is being measured.
+    ASSERT_EQ(plan.size(), 1u);
+    EXPECT_NE(plan[0].find("Trace"), std::string::npos) << plan[0];
+    EXPECT_NE(plan[0].find('+'), std::string::npos)
+        << "the deep engine should be prepared alongside the base: " << plan[0];
+}
+
+TEST(CliParseDeepModeTest, TheAdaptivePlanPinsTheBaseAndArmsOnlyInTheWindow) {
+    const auto r = parseTrace({"--deep-for=5s", "--", "app"});
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+
+    const auto plan = gpufl::launcher::resolveAdaptivePlan(*r.args);
+    // Trace is pinned rather than left to the deep engine's own policy:
+    // kernel_launch_rate and recent_kernel_ms come from its completed-kernel
+    // records, and a rule that loses its metric reads as "never held".
+    EXPECT_EQ(plan.base, "Trace");
+    EXPECT_TRUE(plan.arm_window_only);
+    ASSERT_FALSE(plan.prepared_deep.empty());
+    // PM only for now. PC and SASS join once their dormant cost has been
+    // measured - picking the deepest engine is not the same as picking the
+    // deepest one that fits an overhead budget.
+    EXPECT_EQ(plan.prepared_deep.size(), 1u);
+    EXPECT_EQ(plan.prepared_deep[0], "PmSampling");
+}
+
+TEST(CliParseDeepModeTest, WithoutADeepFlagThereIsNoAdaptivePlan) {
+    const auto r = parseTrace({"--passes=Trace,PcSampling", "--", "app"});
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+
+    EXPECT_TRUE(gpufl::launcher::resolveAdaptivePlan(*r.args).prepared_deep.empty());
+    // The explicit list is honoured untouched.
+    EXPECT_EQ(gpufl::launcher::resolvePassPlan(*r.args).size(), 2u);
+}
+
+TEST(CliParseDeepModeTest, PlainTraceIsStillTheDefault) {
+    const auto r = parseTrace({"--", "app"});
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    const auto plan = gpufl::launcher::resolvePassPlan(*r.args);
+    ASSERT_EQ(plan.size(), 1u);
+    EXPECT_EQ(plan[0], "Trace");
+}

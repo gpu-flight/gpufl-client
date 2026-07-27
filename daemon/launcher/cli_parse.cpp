@@ -175,6 +175,8 @@ const char* traceHelp() {
         "        --deep-for=<DUR>    How long the deep window stays armed. Note this\n"
         "                            bounds TIME, which does not bound how much the\n"
         "                            engines actually collect - see --deep-launches.\n"
+        "        --deep-when=<EXPR>  Open the window when a metric crosses a threshold,\n"
+        "                            e.g. \"custom.token_rate<1000 for 2s\".\n"
         "        --deep-launches=<N> Kernel-launch bound on the deep window; ends it\n"
         "                            at whichever bound is hit first. PREFER THIS.\n"
         "                            For SASS / Range replay re-runs every kernel, so a\n"
@@ -421,6 +423,21 @@ TraceParseResult parseTraceArgs(const std::vector<std::string>& argv) {
             else if (key == "--deep-for")      out.deep_for_ms = ms;
             else                               out.deep_cooldown_ms = ms;
             out.deep_requested = true;
+        } else if (key == "--deep-when") {
+            std::string v;
+            auto err = take_value(v);
+            if (!err.empty()) return {std::nullopt, err};
+            if (v.empty()) {
+                return {std::nullopt,
+                        "--deep-when needs an expression, e.g. "
+                        "--deep-when=\"custom.token_rate<1000 for 2s\""};
+            }
+            // Parsed by the client, not here: telling a misspelled built-in
+            // from a custom counter that has simply not registered yet needs
+            // the metric registry, and duplicating that check would give two
+            // places to disagree about what a metric name means.
+            out.deep_when = v;
+            out.deep_requested = true;
         } else if (key == "--deep-launches") {
             std::string v;
             auto err = take_value(v);
@@ -463,6 +480,26 @@ TraceParseResult parseTraceArgs(const std::vector<std::string>& argv) {
     if (out.command.empty()) {
         return {std::nullopt, "no command specified after `--`"};
     }
+    // Explicit passes and deep windows are different execution models, and
+    // mixing them cannot mean anything coherent: the deep engines have to be
+    // fixed before the first CUDA call, so a --passes list either already
+    // contains what the window would arm (making the flag redundant) or does
+    // not (making the window arm nothing - which is what
+    // `--passes=Trace --deep-after=30s` silently did). Rejected before the
+    // target is launched, whichever order the flags came in.
+    if (out.deep_requested && !out.passes.empty()) {
+        return {std::nullopt,
+                "--passes cannot be combined with --deep-* flags.\n"
+                "\n"
+                "  --passes runs the engines you name, relaunching the target "
+                "once per pass.\n"
+                "  --deep-* runs ONE adaptive pass: gpufl prepares a compatible "
+                "deep engine\n"
+                "  before CUDA initialises and arms it only inside the window.\n"
+                "\n"
+                "Drop --passes to use a deep window."};
+    }
+
     // A deep window with neither bound would arm and never disarm, which is
     // just "profile deeply for the whole run" with extra steps.
     if (out.deep_requested && out.deep_for_ms == 0 && out.deep_launches == 0) {
@@ -766,9 +803,46 @@ InfoParseResult parseInfoArgs(const std::vector<std::string>& argv) {
     return {out, ""};
 }
 
+AdaptiveCapturePlan resolveAdaptivePlan(const TraceArgs& args) {
+    AdaptiveCapturePlan plan;
+    if (!args.deep_requested) return plan;   // prepared_deep stays empty
+
+    // Trace is pinned as the base rather than left to the deep engine's own
+    // policy: kernel_launch_rate and recent_kernel_ms are computed from its
+    // completed-kernel records, and a rule that silently loses its metric
+    // reads as "condition never held".
+    plan.base = "Trace";
+
+    // PM only, for now. It is the one deep engine measured dormant on real
+    // hardware - on a 3090, prepared-but-unarmed PM showed no measurable
+    // throughput cost against a Trace base (paired ratio x1.000, bootstrap
+    // 95% CI [1.000, 1.002] over 15 blocks) at a measurable +225 MiB RSS.
+    // PC sampling and SASS are NOT included: PC fails configuration under
+    // injection on that box and SASS emits no records, so neither has a
+    // dormant cost anyone has measured. Adding them here before that would be
+    // choosing the deepest engine rather than the deepest engine that fits an
+    // overhead budget.
+    plan.prepared_deep = {"PmSampling"};
+    plan.arm_window_only = true;
+    return plan;
+}
+
 std::vector<std::string> resolvePassPlan(const TraceArgs& args) {
-    if (args.passes.empty()) return {"Trace"};
-    return args.passes;
+    if (!args.passes.empty()) return args.passes;
+
+    // Exactly one pass for an adaptive run. Relaunching the target per pass is
+    // what --passes is for; a window that triggers on a live condition cannot
+    // be reproduced across relaunches, so splitting it would change what is
+    // being measured.
+    if (args.deep_requested) {
+        const AdaptiveCapturePlan plan = resolveAdaptivePlan(args);
+        std::string composite = plan.base;
+        for (const std::string& engine : plan.prepared_deep) {
+            composite += "+" + engine;
+        }
+        return {composite};
+    }
+    return {"Trace"};
 }
 
 }  // namespace gpufl::launcher

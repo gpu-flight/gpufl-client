@@ -642,6 +642,10 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
                            std::to_string(args.deep_cooldown_ms))) {
             return 2;
         }
+        if (!args.deep_when.empty() &&
+            !setEnvOrPrint(platform, env::kDeepWhen, args.deep_when)) {
+            return 2;
+        }
     }
 
     // A bounded window stops the target after warmup+window wall-clock;
