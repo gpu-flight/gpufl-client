@@ -816,13 +816,19 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
             config.api_path = args.api_version.empty() ? "" : "/api/" + args.api_version;
             signalSessionsComplete(output_dir, config, args.quiet);
         } else if (wait.exited) {
-            GFL_LOG_ERROR("agent exited before completing the upload (exit code ",
-                          wait.exit_code, "); session-complete was not sent");
+            std::fprintf(
+                stderr,
+                "gpufl trace --upload: agent exited before completing the upload "
+                "(exit code %d); session-complete was not sent\n",
+                wait.exit_code);
             if (overall_rc == 0) overall_rc = 4;
         } else {
             if (!args.quiet) {
-                GFL_LOG_ERROR("agent still running after ", cap / 1000.0,
-                              "s cap - stopping (late windows may need a post-hoc `gpufl upload`) ");
+                std::fprintf(
+                    stderr,
+                    "gpufl trace --upload: agent still running after %.1fs - "
+                    "stopping; late windows may require a post-hoc `gpufl upload`\n",
+                    cap / 1000.0);
             }
             agent.stop();
             if (overall_rc == 0) overall_rc = 4;
