@@ -9,7 +9,6 @@
 #include <limits>
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
 #include <cstdint>
 
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
@@ -63,9 +62,7 @@ void PmSamplingEngine::start() {
         // reset. A deep-window open therefore performs only the bounded arm.
         if (PreparePmSampling_()) {
             if (opts_.deep_arm_mode == DeepArmMode::WindowOnly) {
-                std::fprintf(
-                    stderr,
-                    "[gpufl] deep engine prepared: nvidia.pm_sampling\n");
+                GFL_LOG_INFO("deep engine prepared: nvidia.pm_sampling");
             }
             GFL_LOG_DEBUG("[PmSamplingEngine] prepared; sampling remains "
                           "idle until a deep window opens");
@@ -523,9 +520,7 @@ void PmSamplingEngine::DecodeAndEmit_() {
         Monitor::PushPmSamples(rows);
         if (!produced_data_.exchange(true, std::memory_order_acq_rel) &&
             opts_.deep_arm_mode == DeepArmMode::WindowOnly) {
-            std::fprintf(stderr,
-                         "[gpufl] deep engine produced data: "
-                         "nvidia.pm_sampling\n");
+            GFL_LOG_INFO("deep engine produced data: nvidia.pm_sampling");
         }
 
         // Release the scopes no later sample can reach - but only when CUPTI
@@ -614,8 +609,7 @@ void PmSamplingEngine::StartPmSampling_() {
     Monitor::BeginPmScopeAttribution(attribution_start_ns);
     operational_.store(true, std::memory_order_relaxed);
     if (opts_.deep_arm_mode == DeepArmMode::WindowOnly) {
-        std::fprintf(stderr,
-                     "[gpufl] deep window armed: nvidia.pm_sampling\n");
+        GFL_LOG_INFO("deep window armed: nvidia.pm_sampling");
     }
     GFL_LOG_DEBUG("[PmSamplingEngine] >>> STARTED (Scope Begin) <<<");
 }

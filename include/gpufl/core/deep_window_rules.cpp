@@ -16,6 +16,7 @@
 #include "gpufl/core/events.hpp"
 #include "gpufl/core/logger/logger.hpp"
 #include "gpufl/core/metric_registry.hpp"
+#include "gpufl/core/nvtx_counters.hpp"
 #include "gpufl/core/model/deep_window_model.hpp"
 #include "gpufl.hpp"
 #include "gpufl/core/monitor.hpp"
@@ -221,6 +222,8 @@ void EmitSummary(const RuleSummary& summary, const std::string& expression) {
     ev.samples_seen   = summary.samples_seen;
     ev.windows_opened = summary.windows_opened;
     ev.truncated_samples = summary.truncated_samples;
+    ev.metric_quality_resets = summary.metric_quality_resets;
+    ev.last_quality_reason = summary.last_quality_reason;
     ev.has_last_value = summary.last_value.has_value();
     if (ev.has_last_value) {
         ev.last_value = *summary.last_value;
@@ -409,6 +412,53 @@ void DeepWindowRules::Service() {
     // Outside the lock: the logger write can block, and the launch path must
     // never queue behind it.
     EmitSummary(terminal, expression);
+}
+
+void DeepWindowRules::EmitCounterQuality() {
+    // Separate from Finish() because this event exists WITHOUT a rule: NVTX
+    // counters flow through the bridge whether or not anything watches them,
+    // and a refused registration with no rule configured still needs a place
+    // to be reported.
+    NvtxCounterBridge::QualitySnapshot snap =
+        NvtxCounterBridge::instance().takeSessionSnapshot();
+
+    uint64_t discarded = 0;
+    {
+        std::lock_guard lk(g_mu);
+        if (g_source) discarded = g_source->qualityResets();
+    }
+
+    // Silent when this SESSION had nothing to say. Gating on trackedCount()
+    // was wrong: the table is process-lifetime, so one registration in an
+    // earlier embedded session would emit an all-zero row for every session
+    // after it - and an all-zero row with no denominator cannot tell "clean"
+    // from "nothing was watched". samples_observed is session-scoped, so this
+    // gate is too.
+    if (!snap.any() && discarded == 0 && snap.samples_observed == 0) {
+        return;
+    }
+
+    const Runtime* rt = runtime();
+    if (!rt || !rt->logger) return;
+
+    CounterDataQualitySummaryEvent ev;
+    ev.pid = detail::GetPid();
+    ev.app = rt->app_name;
+    ev.session_id = rt->session_id;
+    ev.tracked_counters = NvtxCounterBridge::instance().trackedCount();
+    ev.samples_observed = snap.samples_observed;
+    ev.registration_rejected = snap.registration_rejected;
+    ev.unknown_id_samples = snap.unknown_id_samples;
+    ev.unavailable_samples = snap.unavailable_samples;
+    ev.negative_delta_samples = snap.negative_delta_samples;
+    ev.rate_windows_discarded = discarded;
+    ev.emitted_ns = detail::GetTimestampNs();
+    rt->logger->write(model::CounterDataQualitySummaryModel(ev));
+    GFL_LOG_DEBUG("[NvtxCounters] quality summary rejected=",
+                  ev.registration_rejected, " unknown=", ev.unknown_id_samples,
+                  " unavailable=", ev.unavailable_samples,
+                  " negative=", ev.negative_delta_samples,
+                  " discarded=", ev.rate_windows_discarded);
 }
 
 void DeepWindowRules::Finish() {

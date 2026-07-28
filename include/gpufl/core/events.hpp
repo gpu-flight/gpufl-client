@@ -730,8 +730,54 @@ struct DeepWindowRuleSummaryEvent {
      * a value alone can never show.
      */
     uint64_t truncated_samples = 0;
+    /// Rate windows THIS rule's metric discarded for failed reads (NVTX
+    /// SAMPLE_UNAVAILABLE), and why the last one was. Per rule, never the
+    /// session total - an unrelated counter's errors must not look like they
+    /// broke this rule.
+    uint64_t    metric_quality_resets = 0;
+    std::string last_quality_reason;
     // Monotonic, so a redelivered or late record cannot overwrite a newer one.
     uint64_t state_sequence = 0;
+    int64_t  emitted_ns = 0;
+};
+
+/**
+ * Session-scoped data quality of application-fed counters.
+ *
+ * NOT capture capability: none of these say what the GPU or driver supports.
+ * They say what the APPLICATION sent - refused registrations, samples for ids
+ * nobody issued, reads the application itself failed, deltas that went
+ * backwards - and how often the metric layer had to discard a rate window
+ * because of it. Each field has ONE meaning; a combined tally is a number
+ * nobody can act on.
+ *
+ * Values are this SESSION's, not the process totals: the tallies live for the
+ * process (like counter slots) and an embedded host re-initialises, so raw
+ * totals would re-report session one's problems as session two's.
+ */
+struct CounterDataQualitySummaryEvent {
+    int pid = 0;
+    std::string app;
+    std::string session_id;
+    /**
+     * Which counter path these tallies observed. Only "nvtx" today: the
+     * gpufl::counter() API's own rejections are not routed through the
+     * bridge, and a generic-looking row would claim coverage it does not
+     * have - a gpufl::counter registration failure beside
+     * registration_rejected: 0 would read as "nothing went wrong".
+     */
+    std::string source = "nvtx";
+    int schema_version = 1;
+    /// Registration-table size at emit (process-lifetime context).
+    uint64_t tracked_counters = 0;
+    /// Valid samples THIS session - the denominator that distinguishes
+    /// "0 failures out of many" from "0 out of 0".
+    uint64_t samples_observed = 0;
+    uint64_t registration_rejected = 0;
+    uint64_t unknown_id_samples = 0;
+    uint64_t unavailable_samples = 0;
+    uint64_t negative_delta_samples = 0;
+    uint64_t rate_windows_discarded = 0;
     int64_t  emitted_ns = 0;
 };
 

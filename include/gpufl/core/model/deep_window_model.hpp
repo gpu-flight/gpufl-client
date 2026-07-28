@@ -25,6 +25,19 @@ struct DeepWindowModel final : IJsonSerializable {
  * itself: the two are read together, and a summary that arrived on a different
  * channel could be ingested after the windows it explains.
  */
+// Lives beside the rule-summary model because its consumer is the same
+// conditional-window feature; the event itself is counter data quality.
+struct CounterDataQualitySummaryModel final : IJsonSerializable {
+    explicit CounterDataQualitySummaryModel(const CounterDataQualitySummaryEvent& e)
+        : e_(e) {}
+    std::string buildJson() const override;
+    // Scope channel, like the rule summary it is read next to.
+    Channel channel() const override { return Channel::Scope; }
+
+   private:
+    const CounterDataQualitySummaryEvent& e_;
+};
+
 struct DeepWindowRuleSummaryModel final : IJsonSerializable {
     explicit DeepWindowRuleSummaryModel(const DeepWindowRuleSummaryEvent& e)
         : e_(e) {}

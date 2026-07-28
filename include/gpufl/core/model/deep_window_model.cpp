@@ -67,6 +67,8 @@ std::string DeepWindowRuleSummaryModel::buildJson() const {
         << ",\"samples_seen\":"     << e_.samples_seen
         << ",\"windows_opened\":"   << e_.windows_opened
         << ",\"truncated_samples\":" << e_.truncated_samples
+        << ",\"metric_quality_resets\":" << e_.metric_quality_resets
+        << ",\"last_quality_reason\":\"" << jsonEscape(e_.last_quality_reason) << "\""
         << ",\"state_sequence\":"   << e_.state_sequence
         << ",\"emitted_ns\":"       << e_.emitted_ns;
     // Written only when there is one. A null would have to be distinguished
@@ -76,6 +78,26 @@ std::string DeepWindowRuleSummaryModel::buildJson() const {
             << ",\"last_observed_ns\":" << e_.last_observed_ns;
     }
     oss << "}";
+    return oss.str();
+}
+
+std::string CounterDataQualitySummaryModel::buildJson() const {
+    std::ostringstream oss;
+    oss << "{\"type\":\"counter_data_quality_summary\""
+        << ",\"pid\":"                    << e_.pid
+        << ",\"app\":\""                 << jsonEscape(e_.app)        << "\""
+        << ",\"session_id\":\""          << jsonEscape(e_.session_id) << "\""
+        << ",\"source\":\""              << jsonEscape(e_.source)     << "\""
+        << ",\"schema_version\":"         << e_.schema_version
+        << ",\"tracked_counters\":"       << e_.tracked_counters
+        << ",\"samples_observed\":"       << e_.samples_observed
+        << ",\"registration_rejected\":"  << e_.registration_rejected
+        << ",\"unknown_id_samples\":"     << e_.unknown_id_samples
+        << ",\"unavailable_samples\":"    << e_.unavailable_samples
+        << ",\"negative_delta_samples\":" << e_.negative_delta_samples
+        << ",\"rate_windows_discarded\":" << e_.rate_windows_discarded
+        << ",\"emitted_ns\":"             << e_.emitted_ns
+        << "}";
     return oss.str();
 }
 

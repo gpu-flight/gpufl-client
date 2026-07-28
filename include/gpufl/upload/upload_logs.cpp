@@ -1280,14 +1280,12 @@ UploadResult uploadLogs(const UploadOptions& opts) {
         // "%zu/%zu session(s)" which read like "F of S sessions
         // complete" but was actually mixing files (numerator) and
         // sessions (denominator) - fixed by labeling both axes.
-        std::fprintf(stderr,
-                     "[gpufl::upload] %zu events uploaded (%zu MB), "
-                     "%zu file(s), %zu session(s), %llds elapsed\n",
-                     result.events_uploaded,
+        GFL_LOG_INFO("[upload] ", result.events_uploaded,
+                     " events uploaded (",
                      result.bytes_uploaded / (1024 * 1024),
-                     result.files_processed,
-                     targets.size(),
-                     static_cast<long long>(total_elapsed));
+                     " MB), ", result.files_processed, " file(s), ",
+                     targets.size(), " session(s), ", total_elapsed,
+                     "s elapsed");
         last_progress_time = now;
         bytes_since_last_progress = 0;
     };

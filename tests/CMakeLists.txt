@@ -19,6 +19,8 @@ set(GPUFL_TEST_SOURCES
     core/test_disabled.cpp
     core/test_wire_contract.cpp
     core/test_counter_registry.cpp
+    core/test_nvtx_counters.cpp
+    core/test_debug_logger.cpp
     core/test_metric_registry.cpp
     core/test_deep_window_rule.cpp
     core/test_deep_window_rules_install.cpp
@@ -74,6 +76,18 @@ if(GPUFL_ENABLE_AMD AND (GPUFL_HAS_ROCM_SMI OR GPUFL_HAS_HIP))
 endif()
 
 add_executable(gpufl_tests ${GPUFL_TEST_SOURCES})
+
+# Standalone target for the Linux injection readiness regression. It
+# intentionally performs its H2D copy immediately after two allocations, before
+# the first launch boundary, so GPUFL_INJECT_INIT_DELAY_MS exposes any missing
+# memcpy wait. The verifier is run explicitly on a CUDA host because this is an
+# injected-process E2E, not a hermetic unit test.
+if(UNIX AND NOT APPLE AND GPUFL_HAS_CUDA AND TARGET gpufl_inject)
+  add_executable(gpufl_early_memcpy_target
+    common/early_memcpy_target.cu
+  )
+  target_link_libraries(gpufl_early_memcpy_target PRIVATE CUDA::cudart)
+endif()
 
 # 3. Enable CUDA-specific test target behavior only when CUDA is available
 if(GPUFL_HAS_CUDA)

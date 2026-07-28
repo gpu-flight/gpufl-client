@@ -4,6 +4,7 @@
 #include <utility>
 
 #include "gpufl/core/events.hpp"
+#include "gpufl/core/nvtx_counters.hpp"
 
 namespace gpufl::detail {
 namespace {
@@ -210,6 +211,7 @@ void MetricSource::closeBucket(const int64_t boundary_ns) {
     switch (id_.shape()) {
         case MetricShape::Rate: {
             uint64_t total = 0;
+            bool source_reported_failure = false;
             if (id_.kind == MetricKind::KernelLaunchRate) {
                 total = feeds_->launchFeed().count;
             } else if (resolveCustomHandle()) {
@@ -220,6 +222,19 @@ void MetricSource::closeBucket(const int64_t boundary_ns) {
                 // this run never saw.
                 total = counters_->load_since_baseline(handle_);
                 if (total > 0) first_tick_seen_ = true;
+                // An NVTX-fed counter can report that the APPLICATION failed to
+                // read it (SAMPLE_UNAVAILABLE). The delta over that stretch is
+                // unknown, not zero; treating it as zero makes the rate sag and
+                // fires a stall rule on a workload that never slowed down.
+                // Returns 0 for counters the bridge does not track, so
+                // gpufl::counter() metrics never pay this branch.
+                const uint64_t unavailable =
+                    NvtxCounterBridge::instance().unavailableCountFor(
+                        id_.custom_name);
+                if (unavailable != last_unavailable_seen_) {
+                    last_unavailable_seen_ = unavailable;
+                    source_reported_failure = true;
+                }
             }
             // Unsigned delta: correct across a wrap, which is why the counter is
             // allowed to wrap rather than saturate.
@@ -228,6 +243,18 @@ void MetricSource::closeBucket(const int64_t boundary_ns) {
             baselined_ = true;
             buckets_[head_] = delta;
             if (delta > 0) last_tick_ns_ = boundary_ns;
+            if (source_reported_failure) {
+                ++quality_resets_;
+                last_quality_reason_ = "counter_unavailable";
+                // Discard the whole window, not just this bucket: the failure
+                // is only observed at bucket close, so any bucket since the
+                // last close may straddle the gap. The window refills from
+                // post-failure data, the sample reads WarmingUp until it does,
+                // and the evaluator already treats a non-Fresh sample as
+                // broken evidence - Pending drops back to Armed.
+                std::fill(buckets_.begin(), buckets_.end(), 0);
+                buckets_closed_ = 0;
+            }
             break;
         }
         case MetricShape::Percentile: {

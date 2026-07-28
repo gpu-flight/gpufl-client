@@ -178,6 +178,14 @@ struct RuleSummary {
      * the workloads this feature targets actually reach.
      */
     uint64_t    truncated_samples = 0;
+    /**
+     * Rate windows THIS rule's metric discarded for failed reads, and why the
+     * last one was. Per rule, never session-wide: copying a session's whole
+     * tally onto every rule would make an unrelated counter's errors look
+     * like they broke this rule.
+     */
+    uint64_t    metric_quality_resets = 0;
+    std::string last_quality_reason;
     std::string reason;
     uint64_t    state_sequence = 0;
     int64_t     emitted_ns = 0;

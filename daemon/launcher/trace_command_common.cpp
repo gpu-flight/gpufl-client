@@ -435,7 +435,10 @@ void signalSessionsComplete(const fs::path& output_dir,
         if (res.second) {
             GFL_LOG_DEBUG("signalled upload-complete for session ", res.first);
         } else if (!quiet) {
-            GFL_LOG_ERROR("failed to signal upload-complete for session ", res.first);
+            std::fprintf(stderr,
+                         "gpufl trace --upload: failed to signal "
+                         "upload-complete for session %s\n",
+                         res.first.c_str());
         }
     }
 }

@@ -538,6 +538,10 @@ void Monitor::Shutdown() {
     // AFTER the collector has stopped, and before the logger goes away. Writing
     // the summary while the collector still runs would let the evaluator open a
     // window the recorded summary never mentions.
+    // Quality BEFORE Finish: Finish releases the rule session, which destroys
+    // the metric source whose discard count the quality event reports. The
+    // collector is already stopped, so nothing advances between the two.
+    detail::DeepWindowRules::EmitCounterQuality();
     detail::DeepWindowRules::Finish();
 
     while (RecordProcessor::processNext()) {}
@@ -571,6 +575,10 @@ void Monitor::DrainAndFinalizeForExit() {
 
     // Same ordering as Shutdown: the collector is stopped first, so nothing can
     // advance the rule past what this summary reports.
+    // Quality BEFORE Finish: Finish releases the rule session, which destroys
+    // the metric source whose discard count the quality event reports. The
+    // collector is already stopped, so nothing advances between the two.
+    detail::DeepWindowRules::EmitCounterQuality();
     detail::DeepWindowRules::Finish();
 
     while (RecordProcessor::processNext()) {}

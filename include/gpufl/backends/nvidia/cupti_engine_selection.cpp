@@ -215,7 +215,7 @@ EngineRuntimeState InspectEngineRuntimeState(const IProfilingEngine* engine,
         if (comboActive) {
             // Keep the matrix log close to the single place that inspects
             // runtime engine state.
-            GFL_LOG_ERROR("[Composite][matrix] ", sub->name(), " armed=",
+            GFL_LOG_DEBUG("[Composite][matrix] ", sub->name(), " armed=",
                           armed ? "yes" : "no", " produced=",
                           produced ? "yes" : "no");
         }

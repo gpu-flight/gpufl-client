@@ -1,7 +1,6 @@
 #include "gpufl/backends/nvidia/cupti_backend.hpp"
 
 #include <atomic>
-#include <cstdio>
 #include <string>
 
 #include "gpufl/backends/nvidia/capture_capability_resolver.hpp"
@@ -83,7 +82,7 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
     // run otherwise gives no local hint that a too-short workload starved the
     // sampler. Point at the remedies.
     for (const std::string& warning : BuildCaptureCapabilityWarnings(input)) {
-        std::fprintf(stderr, "%s\n", warning.c_str());
+        GFL_LOG_WARN(warning);
     }
 
     CaptureCapabilitiesEvent evt = BuildCaptureCapabilitiesEvent(input);

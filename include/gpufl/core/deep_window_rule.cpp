@@ -536,6 +536,10 @@ RuleSummary RuleEvaluator::snapshot(const int64_t now_ns) const {
     s.last_observed_ns = last_observed_ns_;
     s.last_metric_state = last_metric_state_;
     s.truncated_samples = truncated_samples_;
+    if (source_ != nullptr) {
+        s.metric_quality_resets = source_->qualityResets();
+        s.last_quality_reason = source_->lastQualityReason();
+    }
     s.reason = reason_;
     s.state_sequence = state_sequence_;
     s.emitted_ns = now_ns;

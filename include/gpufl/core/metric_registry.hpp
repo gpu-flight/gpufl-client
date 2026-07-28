@@ -227,6 +227,11 @@ public:
     /** @brief True once a custom counter has been resolved to a live handle. */
     bool customResolved() const { return handle_ != nullptr; }
 
+    /** @brief Rate windows discarded because the source reported failed reads. */
+    uint64_t qualityResets() const { return quality_resets_; }
+    /** @brief Why the last window was discarded; empty when none ever was. */
+    const char* lastQualityReason() const { return last_quality_reason_; }
+
 private:
     void closeBucket(int64_t boundary_ns);
     bool resolveCustomHandle();
@@ -278,6 +283,20 @@ private:
      * a dead counter would read as a steady rate of 0 forever.
      */
     int64_t  last_tick_ns_ = 0;
+    /**
+     * Failed-read count last seen from the NVTX counter bridge.
+     *
+     * An UNAVAILABLE sample means the application could not read its own
+     * counter, so the true delta over that stretch is unknown - NOT zero. A
+     * rate computed across the gap sags below any threshold, which is a false
+     * stall. When this advances, the current window is discarded and refills
+     * from post-failure buckets only.
+     */
+    uint64_t last_unavailable_seen_ = 0;
+    /// Rate windows this source discarded because its counter reported a
+    /// failed read. Per source, so a rule only ever wears its own problems.
+    uint64_t quality_resets_ = 0;
+    const char* last_quality_reason_ = "";
     uint64_t last_published_close_ = 0;
     /// Durations the feed had to refuse. Surfaced so a truncated percentile is
     /// not presented as a complete one.

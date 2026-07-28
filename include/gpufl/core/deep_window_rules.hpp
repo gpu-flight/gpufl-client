@@ -53,6 +53,17 @@ public:
      */
     static void Finish();
 
+    /**
+     * @brief Write the session's counter data-quality summary, if any.
+     *
+     * Called at shutdown beside Finish(), but independent of it: the event
+     * reports what the APPLICATION sent (refused registrations, failed reads,
+     * negative deltas) and exists whether or not a rule was configured.
+     * Advances the bridge's session baseline, so an embedded re-init reports
+     * only its own session's problems.
+     */
+    static void EmitCounterQuality();
+
     /** @brief True when a rule is installed - valid or refused. */
     static bool Installed();
 
