@@ -1,5 +1,6 @@
 #include "agent_launcher.hpp"
 
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -170,36 +171,46 @@ bool AgentProcess::start(const std::vector<std::string>& command,
 #endif
 }
 
-bool AgentProcess::waitForExit(int timeoutMs) {
-    if (!running_) return true;
+AgentWaitResult AgentProcess::waitForExit(int timeoutMs) {
+    if (!running_) return {true, 0};
 #ifdef _WIN32
     auto process = process_;
     const DWORD r = WaitForSingleObject(
         process, timeoutMs < 0 ? INFINITE : static_cast<DWORD>(timeoutMs));
     if (r == WAIT_OBJECT_0) {
+        DWORD exit_code = 0;
+        const bool have_exit_code = GetExitCodeProcess(process, &exit_code) != 0;
         CloseHandle(thread_);
         CloseHandle(process);
         process_ = nullptr;
         thread_ = nullptr;
         running_ = false;
-        return true;
+        return {true, have_exit_code ? static_cast<int>(exit_code) : -1};
     }
-    return false;  // timeout/failure - caller falls back to stop()
+    return {};  // timeout/failure - caller falls back to stop()
 #else
     constexpr int step_ms = 100;
     int waited = 0;
     int status = 0;
     while (timeoutMs < 0 || waited < timeoutMs) {
         const pid_t rc = ::waitpid(pid_, &status, WNOHANG);
-        if (rc == pid_ || rc < 0) {  // exited, or already reaped / gone
+        if (rc == pid_) {
             running_ = false;
             pid_ = -1;
-            return true;
+            if (WIFEXITED(status)) return {true, WEXITSTATUS(status)};
+            if (WIFSIGNALED(status)) return {true, 128 + WTERMSIG(status)};
+            return {true, -1};
+        }
+        if (rc < 0) {
+            if (errno == EINTR) continue;
+            running_ = false;
+            pid_ = -1;
+            return {true, -1};
         }
         usleep(step_ms * 1000);
         waited += step_ms;
     }
-    return false;
+    return {};
 #endif
 }
 

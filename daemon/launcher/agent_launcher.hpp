@@ -26,6 +26,15 @@ struct AgentLaunchPlan {
     std::string description;
 };
 
+struct AgentWaitResult {
+    bool exited = false;
+    // Valid when exited=true. A negative value means the platform could not
+    // recover a trustworthy child status and must never be treated as success.
+    int exit_code = -1;
+
+    bool succeeded() const { return exited && exit_code == 0; }
+};
+
 class AgentProcess {
 public:
     AgentProcess() = default;
@@ -35,7 +44,7 @@ public:
 
     bool start(const std::vector<std::string>& command, std::string& error);
     void stop();
-    bool waitForExit(int timeoutMs);
+    AgentWaitResult waitForExit(int timeoutMs);
     bool isRunning() const { return running_; }
 
 private:

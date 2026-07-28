@@ -32,9 +32,11 @@ set(GPUFL_TEST_SOURCES
     launcher/test_cli_parse.cpp
     launcher/test_info_command.cpp
     launcher/test_deep_window_env.cpp
+    launcher/test_agent_launcher.cpp
     ${CMAKE_SOURCE_DIR}/daemon/launcher/cli_parse.cpp
     ${CMAKE_SOURCE_DIR}/daemon/launcher/info_command.cpp
     ${CMAKE_SOURCE_DIR}/daemon/launcher/deep_window_env.cpp
+    ${CMAKE_SOURCE_DIR}/daemon/launcher/agent_launcher.cpp
 )
 
 if(GPUFL_ENABLE_NVIDIA AND GPUFL_HAS_CUPTI)

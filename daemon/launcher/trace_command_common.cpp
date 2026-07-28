@@ -804,7 +804,8 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
         // hard-kill the agent mid-upload and drop its late windows.
         const int cap = args.agent_drain_ms;
         GFL_LOG_DEBUG("waiting up to ", cap / 1000.0, "s for agent to finish uploading");
-        if (agent.waitForExit(cap)) {
+        const AgentWaitResult wait = agent.waitForExit(cap);
+        if (wait.succeeded()) {
             GFL_LOG_DEBUG("agent finished uploading");
             // Clean drain: every window was 202-accepted, so no more chunks are
             // coming. Signal upload-complete from here (outside the agent's racing
@@ -814,12 +815,17 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
             config.api_key = resolveOption(args.api_key, env::kApiKey);
             config.api_path = args.api_version.empty() ? "" : "/api/" + args.api_version;
             signalSessionsComplete(output_dir, config, args.quiet);
+        } else if (wait.exited) {
+            GFL_LOG_ERROR("agent exited before completing the upload (exit code ",
+                          wait.exit_code, "); session-complete was not sent");
+            if (overall_rc == 0) overall_rc = 4;
         } else {
             if (!args.quiet) {
                 GFL_LOG_ERROR("agent still running after ", cap / 1000.0,
                               "s cap - stopping (late windows may need a post-hoc `gpufl upload`) ");
             }
             agent.stop();
+            if (overall_rc == 0) overall_rc = 4;
         }
     }
 
