@@ -31,8 +31,10 @@ set(GPUFL_TEST_SOURCES
     # need to depend on the launcher target (which is Linux-only).
     launcher/test_cli_parse.cpp
     launcher/test_info_command.cpp
+    launcher/test_deep_window_env.cpp
     ${CMAKE_SOURCE_DIR}/daemon/launcher/cli_parse.cpp
     ${CMAKE_SOURCE_DIR}/daemon/launcher/info_command.cpp
+    ${CMAKE_SOURCE_DIR}/daemon/launcher/deep_window_env.cpp
 )
 
 if(GPUFL_ENABLE_NVIDIA AND GPUFL_HAS_CUPTI)

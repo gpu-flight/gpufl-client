@@ -78,6 +78,15 @@ class PosixTracePlatform final : public TracePlatform {
         return false;
     }
 
+    bool unsetEnv(const char* key, std::string& error) const override {
+        // unsetenv succeeds when the name is not set, which is the outcome
+        // being asked for either way.
+        if (::unsetenv(key) == 0) return true;
+        error = "unsetenv " + std::string(key) + " failed: " +
+                std::strerror(errno);
+        return false;
+    }
+
     bool prepareInjectionEnv(const fs::path& inject_lib,
                              std::string& error) const override {
         std::string ld_preload = inject_lib.string();

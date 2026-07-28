@@ -434,6 +434,7 @@ const char* toString(const OpenRequestStatus status) {
         case OpenRequestStatus::EngineUnavailable:  return "deep_engine_not_prepared";
         case OpenRequestStatus::Busy:               return "busy";
         case OpenRequestStatus::Cooldown:           return "cooldown";
+        case OpenRequestStatus::InvalidResult:      return "invalid_open_result";
     }
     return "unknown";
 }

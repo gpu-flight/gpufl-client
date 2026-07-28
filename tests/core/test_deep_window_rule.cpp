@@ -30,9 +30,15 @@ struct FakeCoordinator {
     /// What the coordinator should answer next. Set per test.
     gpufl::OpenRequestStatus refusal = gpufl::OpenRequestStatus::Cooldown;
 
+    /// A broken coordinator: says yes and hands back nothing to wait on.
+    bool accept_without_token = false;
+
     static gpufl::OpenRequestResult RequestOpen(void* ctx,
                                                 const gpufl::DeepWindowSpec&) {
         auto* self = static_cast<FakeCoordinator*>(ctx);
+        if (self->accept_without_token) {
+            return {0, gpufl::OpenRequestStatus::Accepted};
+        }
         if (self->refuse) return {0, self->refusal};
         if (self->active) return {0, gpufl::OpenRequestStatus::Busy};
         self->pending_token = self->next_token++;
@@ -732,6 +738,71 @@ TEST_F(RuleEvaluatorTest, ABusyRefusalStillFiresOnceTheWindowIsFree) {
     coord.serviceOpen();
     ev.poll(5210 * kMs);
     EXPECT_EQ(ev.windowsOpened(), 1u);
+}
+
+// ── refused to the end is not "never true" ──────────────────────────────────
+
+TEST_F(RuleEvaluatorTest, ARunRefusedToTheEndReportsBlockedNotNeverTrue) {
+    // The refusal is temporary and correctly retried, but the run ends before
+    // it lifts - a manual window held for the rest of the session, or a
+    // cooldown longer than the time left. The condition held throughout.
+    DeepWindowRule rule = makeRule("kernel_launch_rate<100 for 500ms");
+    MetricSource src(rule.metric, rule.timing, &feeds, ActiveCounterProvider());
+    RuleEvaluator ev(rule, "r1", RuleCapabilities{}, &src, coord.hooks());
+    feeds.seedStartup(0);
+    coord.refuse = true;
+    coord.refusal = gpufl::OpenRequestStatus::Cooldown;
+
+    run(ev, src, 0, 1500 * kMs, 10);
+    run(ev, src, 1510 * kMs, 4000 * kMs, 0);
+
+    const RuleSummary s = ev.finish(4000 * kMs);
+    EXPECT_EQ(s.outcome, RuleOutcome::Blocked)
+        << "never_true sends the user to their threshold; the threshold was fine";
+    EXPECT_EQ(s.reason, "cooldown") << "and it has to name what was in the way";
+    EXPECT_EQ(s.windows_opened, 0u);
+}
+
+TEST_F(RuleEvaluatorTest, AConditionThatNeverHeldIsStillNeverTrue) {
+    // The other side of the same line: nothing was ever asked for, so
+    // `blocked` would be inventing an obstacle that did not exist.
+    DeepWindowRule rule = makeRule("kernel_launch_rate>10000 for 500ms");
+    MetricSource src(rule.metric, rule.timing, &feeds, ActiveCounterProvider());
+    RuleEvaluator ev(rule, "r1", RuleCapabilities{}, &src, coord.hooks());
+    feeds.seedStartup(0);
+
+    run(ev, src, 0, 4000 * kMs, 1);
+
+    const RuleSummary s = ev.finish(4000 * kMs);
+    EXPECT_EQ(s.outcome, RuleOutcome::NeverTrue);
+    EXPECT_EQ(s.reason, "condition_never_held");
+}
+
+TEST_F(RuleEvaluatorTest, AnAcceptedRequestWithNoTokenIsAFaultNotAWait) {
+    // A coordinator that answers "accepted, token 0" has a bug. Waiting on it
+    // parks the evaluator in Opening for the rest of the run, watching a
+    // request that was never queued - no window, no error, no explanation.
+    DeepWindowRule rule = makeRule("kernel_launch_rate<100 for 500ms");
+    MetricSource src(rule.metric, rule.timing, &feeds, ActiveCounterProvider());
+    RuleEvaluator ev(rule, "r1", RuleCapabilities{}, &src, coord.hooks());
+    feeds.seedStartup(0);
+    coord.accept_without_token = true;
+
+    run(ev, src, 0, 1500 * kMs, 10);
+    run(ev, src, 1510 * kMs, 4000 * kMs, 0);
+
+    EXPECT_NE(ev.state(), RuleState::Opening) << "stalled on a phantom request";
+    const RuleSummary s = ev.finish(4000 * kMs);
+    EXPECT_EQ(s.outcome, RuleOutcome::Unsupported);
+    EXPECT_EQ(s.reason, "invalid_open_result");
+}
+
+TEST_F(RuleEvaluatorTest, ADefaultConstructedResultIsARefusal) {
+    // Nobody writes {} on purpose; a hook that forgets a return path produces
+    // it. Defaulting the status to Accepted made that silently mean "yes".
+    const gpufl::OpenRequestResult unset;
+    EXPECT_FALSE(unset.accepted());
+    EXPECT_NE(unset.status, gpufl::OpenRequestStatus::Accepted);
 }
 
 }  // namespace

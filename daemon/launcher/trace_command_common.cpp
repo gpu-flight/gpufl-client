@@ -39,15 +39,6 @@ fs::path findInjectLib(const TracePlatform& platform, const fs::path& exe) {
     return {};
 }
 
-bool setEnvOrPrint(const TracePlatform& platform,
-                   const char* key,
-                   const std::string& value) {
-    std::string error;
-    if (platform.setEnv(key, value, error)) return true;
-    std::fprintf(stderr, "gpufl: %s\n", error.c_str());
-    return false;
-}
-
 // A '+'-joined pass token ("Trace+PcSampling") runs those engines together in
 // one process via GPUFL_ENGINE_COMBO. Returns the comma-joined combo for a
 // composite token, or "" for a single-engine token.
@@ -629,41 +620,7 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
         return 2;
     }
 
-    // --deep-*: bound how long the DEEP engines stay armed inside a target
-    // that keeps running. Distinct from --window above, which bounds the
-    // target's lifetime. Asking for a deep window implies window-only
-    // arming, or the engines would be armed from the first kernel and the
-    // window would bound nothing.
-    if (args.deep_requested) {
-        if (!setEnvOrPrint(platform, env::kDeepArm, "window")) return 2;
-        // The time trigger is installed by the mere presence of this variable,
-        // so a conditional run must not export it. Exporting the default 0
-        // scheduled a window at t=0 that the rule was then refused behind.
-        if (args.deep_when.empty() &&
-            !setEnvOrPrint(platform, env::kDeepAfterMs,
-                           std::to_string(args.deep_after_ms))) {
-            return 2;
-        }
-        if (args.deep_for_ms > 0 &&
-            !setEnvOrPrint(platform, env::kDeepWindowMs,
-                           std::to_string(args.deep_for_ms))) {
-            return 2;
-        }
-        if (args.deep_launches > 0 &&
-            !setEnvOrPrint(platform, env::kDeepWindowMaxLaunches,
-                           std::to_string(args.deep_launches))) {
-            return 2;
-        }
-        if (args.deep_cooldown_ms > 0 &&
-            !setEnvOrPrint(platform, env::kDeepWindowCooldownMs,
-                           std::to_string(args.deep_cooldown_ms))) {
-            return 2;
-        }
-        if (!args.deep_when.empty() &&
-            !setEnvOrPrint(platform, env::kDeepWhen, args.deep_when)) {
-            return 2;
-        }
-    }
+    if (!applyDeepWindowEnv(args, platform)) return 2;
 
     // A bounded window stops the target after warmup+window wall-clock;
     // run_ms == 0 keeps the historical "run until the target exits" behavior.

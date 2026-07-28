@@ -114,6 +114,16 @@ const char* toString(RuleState s);
 enum class RuleOutcome {
     None,
     NeverTrue,
+    /**
+     * The condition held and a window was asked for, but none ever opened.
+     *
+     * Separate from NeverTrue because the two send the user to opposite
+     * places: never_true says look at your threshold, blocked says look at
+     * what is holding the window - a manual window, a cooldown longer than
+     * the run, an engine still preparing. Both leave windows_opened at 0, so
+     * one field cannot carry them.
+     */
+    Blocked,
     Fired,
     Exhausted,
     Unsupported,
@@ -308,6 +318,9 @@ private:
     MetricState last_metric_state_ = MetricState::Missing;
     uint64_t    truncated_samples_ = 0;
 
+    /// Whether this rule ever got as far as asking for a window. Decides
+    /// `blocked` against `never_true` at shutdown; never cleared.
+    bool     open_was_attempted_ = false;
     uint64_t pending_token_ = 0;
     bool     window_was_active_ = false;
     uint64_t opens_seen_ = 0;

@@ -65,13 +65,26 @@ enum class OpenRequestStatus {
     /// A window is already open, or another request is queued.
     Busy,
     Cooldown,
+    /// The coordinator answered with something that cannot be acted on -
+    /// accepted but no token. Its own value rather than a silent fallback: it
+    /// means a coordinator is broken, and reporting it as cooldown would hide
+    /// that behind a state the user would read as normal.
+    InvalidResult,
 };
 
 const char* toString(OpenRequestStatus status);
 
 struct OpenRequestResult {
     uint64_t token = 0;                 ///< non-zero only when Accepted
-    OpenRequestStatus status = OpenRequestStatus::Accepted;
+    /// Defaults to a refusal, not to Accepted. A default-constructed result is
+    /// one nobody filled in, and taking that as "yes, token 0" left the
+    /// evaluator waiting in Opening for a window that was never asked for.
+    OpenRequestStatus status = OpenRequestStatus::InvalidResult;
+
+    /// True only when this result can actually be waited on.
+    bool accepted() const {
+        return status == OpenRequestStatus::Accepted && token != 0;
+    }
 };
 
 /**

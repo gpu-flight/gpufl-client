@@ -5,6 +5,8 @@
 #include <cstdlib>
 #include <utility>
 
+#include "gpufl/core/debug_logger.hpp"
+
 namespace gpufl::detail {
 namespace {
 
@@ -94,6 +96,7 @@ const char* toString(const RuleOutcome o) {
     switch (o) {
         case RuleOutcome::None:          return "none";
         case RuleOutcome::NeverTrue:     return "never_true";
+        case RuleOutcome::Blocked:       return "blocked";
         case RuleOutcome::Fired:         return "fired";
         case RuleOutcome::Exhausted:     return "exhausted";
         case RuleOutcome::Unsupported:   return "unsupported";
@@ -283,6 +286,27 @@ DeepWindowSpec RuleEvaluator::specWithTrigger(const MetricSample& sample) const 
 bool RuleEvaluator::requestWindow(const MetricSample& sample) {
     const OpenRequestResult result =
         hooks_.request_open(hooks_.ctx, specWithTrigger(sample));
+
+    // Reaching here at all means the condition held long enough to act on.
+    // Never cleared: what it answers at shutdown is "did this rule ever get as
+    // far as asking", which decides whether `never_true` is an honest verdict.
+    // Set before the answer is known on purpose - an accepted request whose
+    // window is later dropped also asked and also got nothing.
+    open_was_attempted_ = true;
+
+    // Accepted with no token is not a yes. Waiting on token 0 leaves the
+    // evaluator in Opening for the rest of the run, watching a request that
+    // was never queued - a silent stall rather than a reported fault.
+    if (result.status == OpenRequestStatus::Accepted && !result.accepted()) {
+        GFL_LOG_ERROR("[DeepWindowRule] window coordinator accepted a request "
+                      "without a token; treating the rule as unsupported");
+        terminal_ = RuleOutcome::Unsupported;
+        reason_ = toString(OpenRequestStatus::InvalidResult);
+        state_ = RuleState::Inactive;
+        ++state_sequence_;
+        return false;
+    }
+
     switch (result.status) {
         case OpenRequestStatus::Accepted:
             pending_token_ = result.token;
@@ -291,6 +315,7 @@ bool RuleEvaluator::requestWindow(const MetricSample& sample) {
             return true;
 
         case OpenRequestStatus::EngineUnavailable:
+        case OpenRequestStatus::InvalidResult:
             // Permanent for this session. Retrying until shutdown would end in
             // `never_true`, which says the condition was never met - the exact
             // opposite of what happened.
@@ -530,6 +555,15 @@ RuleSummary RuleEvaluator::finish(const int64_t now_ns) {
         s.outcome = RuleOutcome::Exhausted;
     } else if (windows_opened_ > 0) {
         s.outcome = RuleOutcome::Fired;
+    } else if (open_was_attempted_) {
+        // The condition held long enough to ask, and every ask was turned
+        // down - by a manual window holding the coordinator, by a cooldown
+        // longer than the run had left, or by preparation that never
+        // completed. `never_true` would say the condition never occurred,
+        // which is the opposite, and would send the user to look at their
+        // threshold instead of at what was blocking the window.
+        s.outcome = RuleOutcome::Blocked;
+        if (s.reason.empty()) s.reason = "open_refused";
     } else {
         s.outcome = RuleOutcome::NeverTrue;
         if (s.reason.empty()) {
