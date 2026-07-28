@@ -221,14 +221,14 @@ CUptiResult (*CuptiBackend::get_value())(CUpti_ActivityKind) {
 
 void CuptiBackend::start() {
     if (!initialized_) return;
-    // SASS safe mode keeps kernel-activity OFF (it deadlocks), so orphan launch
-    // metas would become synthetic kernels with host-dispatch timing only. Keep
-    // suppressing that path for SASS. PC sampling intentionally leaves the
-    // synthetic drain enabled so callback-derived kernel rows can be emitted
-    // when kernel activity is unavailable; drainSyntheticKernels filters
-    // non-kernel memcpy/memset API metas before emitting rows.
+    // Establish the timing-provenance contract before any launch callback can
+    // arrive. Real-record modes never convert an unmatched launch into a kernel
+    // row: the launch-to-launch host gap is not GPU execution time. Synthetic
+    // rows remain available only in modes that explicitly use callback-derived
+    // kernels (for example PC sampling).
     SetSuppressOrphanSyntheticKernels(
-        opts_.profiling_engine == ProfilingEngine::SassMetrics);
+        ShouldSuppressOrphanKernelSynthesis(collectsKernelEvents(),
+                                            WillEmitSyntheticKernels()));
     // Windows-injection PC sampling AND Deep both lose their final flush to the
     // process-exit teardown race (gpufl::shutdown runs during DLL detach, after
     // the OS starts tearing the process down, so the shutdown drain can be cut

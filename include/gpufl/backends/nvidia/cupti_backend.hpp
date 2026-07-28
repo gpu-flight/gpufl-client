@@ -37,9 +37,18 @@ class ICuptiHandler;
 inline bool KernelActivityExpectedButMissing(bool collects_kernel_events,
                                              bool will_emit_synthetic,
                                              uint64_t launch_callbacks,
-                                             uint64_t activity_records_seen) {
+                                             uint64_t valid_activity_rows) {
     return collects_kernel_events && !will_emit_synthetic &&
-           launch_callbacks > 0 && activity_records_seen == 0;
+           launch_callbacks > 0 && valid_activity_rows == 0;
+}
+
+// Host launch-to-launch gaps are not kernel durations. A mode that requested
+// real CUPTI kernel activity must therefore drop every unmatched launch meta,
+// even if some other launches produced valid activity rows. Only modes whose
+// explicit product is callback-derived kernel rows may synthesize orphans.
+inline bool ShouldSuppressOrphanKernelSynthesis(bool collects_kernel_events,
+                                                bool will_emit_synthetic) {
+    return collects_kernel_events || !will_emit_synthetic;
 }
 
 /**
@@ -94,16 +103,14 @@ class CuptiBackend : public IMonitorBackend {
         }
         return opts_.profiling_engine == ProfilingEngine::RangeProfilerKernelReplay;
     }
-    // True when CUPTI kernel ACTIVITY records won't be collected, so every
-    // launch must be reported from its callback as a synthetic kernel (PC
-    // Sampling, or SASS profiler safe mode without GPUFL_SASS_ALLOW_KERNEL_
-    // ACTIVITY). Mirrors KernelLaunchHandler::requiredActivityKinds() returning
-    // {}. In these modes the launch callback precomputes the simplified kernel
-    // occupancy (the activity record that would otherwise carry it never
-    // arrives); see KernelLaunchHandler::handle + drainSyntheticKernels.
+    // True only when callback-derived kernel rows are the selected mode's
+    // deliberate product. If real CUPTI kernel activity is enabled, unmatched
+    // launches are data loss and must never be turned into host-gap durations.
+    // SASSMetrics safe mode also suppresses synthetic rows because its
+    // execution signature is carried separately.
     bool WillEmitSyntheticKernels() const {
-        return opts_.profiling_engine == ProfilingEngine::PcSampling ||
-               !AllowSassKernelActivity();
+        if (collectsKernelEvents()) return false;
+        return opts_.profiling_engine != ProfilingEngine::SassMetrics;
     }
     // See IMonitorBackend. Observed live (Linux 3090, Trace+PM adaptive,
     // NVTX-counter targets, ~1/4 runs): every cuptiActivityEnable succeeds,
@@ -113,7 +120,7 @@ class CuptiBackend : public IMonitorBackend {
         return KernelActivityExpectedButMissing(
             collectsKernelEvents(), WillEmitSyntheticKernels(),
             kernel_launch_callback_count_.load(std::memory_order_acquire),
-            kernel_activity_seen_.load(std::memory_order_relaxed));
+            kernel_activity_emitted_.load(std::memory_order_relaxed));
     }
     bool AllowSassMarkerActivity() const {
         return resolved_plan_.allow_sass_marker_activity;

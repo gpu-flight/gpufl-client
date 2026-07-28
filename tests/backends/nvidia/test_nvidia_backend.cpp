@@ -24,7 +24,11 @@ TEST(KernelActivityExpectedButMissing, TruthTable) {
     // One single missing-record launch is still a fully-lost session.
     EXPECT_TRUE(KernelActivityExpectedButMissing(true, false, 1, 0));
 
-    // Any real record arrived: keep the drain - tail orphans stay best-effort.
+    // The final argument is accepted/valid rows, not records merely observed
+    // before timestamp validation. A rejected record therefore leaves it zero.
+    EXPECT_TRUE(KernelActivityExpectedButMissing(true, false, 100000, 0));
+    // Any valid real row means the all-records-missing diagnostic is false.
+    // Orphan synthesis is still independently disabled for the whole session.
     EXPECT_FALSE(KernelActivityExpectedButMissing(true, false, 100000, 1));
     EXPECT_FALSE(KernelActivityExpectedButMissing(true, false, 100000, 99999));
 
@@ -38,6 +42,19 @@ TEST(KernelActivityExpectedButMissing, TruthTable) {
 
     // Kernel activity was never enabled: absence of records is expected.
     EXPECT_FALSE(KernelActivityExpectedButMissing(false, false, 100000, 0));
+}
+
+TEST(OrphanKernelSynthesisPolicy, RealRecordModesAlwaysSuppressOrphans) {
+    using gpufl::ShouldSuppressOrphanKernelSynthesis;
+
+    EXPECT_TRUE(ShouldSuppressOrphanKernelSynthesis(true, false));
+    // Even a contradictory caller cannot opt a real-record mode into
+    // host-gap timing.
+    EXPECT_TRUE(ShouldSuppressOrphanKernelSynthesis(true, true));
+    // SASS metrics-only: neither real rows nor synthetic timing is wanted.
+    EXPECT_TRUE(ShouldSuppressOrphanKernelSynthesis(false, false));
+    // PC sampling / other synthesize-by-design modes.
+    EXPECT_FALSE(ShouldSuppressOrphanKernelSynthesis(false, true));
 }
 
 TEST_F(CuptiBackendTest, Lifecycle) {

@@ -231,12 +231,9 @@ struct PmSampleInput {
 };
 
 // Session-level switch (set by the active backend at start): when true the
-// collector DROPS orphaned launch metas at shutdown instead of emitting them as
-// synthetic kernel rows. Used for engines where kernel-activity is intentionally
-// off and the synthetic host-dispatch durations would mislead - SASS safe mode,
-// where real kernel activity deadlocks (NVIDIA CUPTI/driver bug). The Execution
-// Signature is accumulated separately, so a multi-pass merge is unaffected.
-// Default false: normal / PC modes keep best-effort synthesis.
+// collector DROPS unmatched launch metas instead of emitting host launch gaps
+// as kernel durations. All real-record modes enable it; callback-derived rows
+// remain available only for synthesize-by-design modes such as PC sampling.
 void SetSuppressOrphanSyntheticKernels(bool suppress);
 
 // Session-level switch (set by the active backend at start): when true the
@@ -245,6 +242,10 @@ void SetSuppressOrphanSyntheticKernels(bool suppress);
 // process-exit teardown drops the final flush - mid-run emission is the only way
 // those kernel rows survive. Default false (other modes emit at shutdown).
 void SetDrainSyntheticKernelsMidRun(bool enable);
+
+// Test seam for the process-lifetime session policy. Production code should
+// only set the policy through the two functions above.
+bool SuppressOrphanSyntheticKernelsForTesting();
 
 /**
  * @brief The central monitoring engine.

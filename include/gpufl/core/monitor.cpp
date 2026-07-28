@@ -500,6 +500,12 @@ void CollectorLoop() {
 void Monitor::Initialize(const MonitorOptions& opts) {
     if (g_state.initialized.exchange(true)) return;
 
+    // Process-lifetime state must not leak a prior session's capture policy.
+    // The active backend's start() replaces these defaults before callbacks
+    // begin. Monitor/no-backend sessions keep both disabled.
+    SetSuppressOrphanSyntheticKernels(false);
+    SetDrainSyntheticKernelsMidRun(false);
+
     // The engine AFTER env overrides. InitOptions::profiling_engine is the
     // pre-override request, and `gpufl trace --passes X` overrides only the
     // MonitorOptions copy - so anything reporting which engine ran must read
@@ -548,7 +554,6 @@ void Monitor::Shutdown() {
                 "but no kernel activity record arrived this session. Kernel "
                 "rows are omitted (a synthetic fallback would carry host-gap "
                 "durations, not kernel time).");
-            SetSuppressOrphanSyntheticKernels(true);
         }
         g_state.adapter->shutdown();
     }
@@ -812,5 +817,8 @@ void Monitor::EmitPmSamplingConfig(uint32_t device_id, uint32_t interval_us, uin
 
 void SetSuppressOrphanSyntheticKernels(const bool suppress) { g_state.suppressOrphanSyntheticKernels = suppress; }
 void SetDrainSyntheticKernelsMidRun(const bool enable) { g_state.drainSyntheticMidRun = enable; }
+bool SuppressOrphanSyntheticKernelsForTesting() {
+    return g_state.suppressOrphanSyntheticKernels.load(std::memory_order_acquire);
+}
 
 }  // namespace gpufl

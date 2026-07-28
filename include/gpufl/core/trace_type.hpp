@@ -99,8 +99,9 @@ enum class TraceType : uint8_t {
     //   API_ENTER. The collector stores it in g_launchMetaByCorr keyed by
     //   corr_id; the matching KERNEL / MEMCPY / MEMSET activity record later
     //   joins scope path, stack id, and API timestamps from it. Entries with no
-    //   activity record by shutdown become synthetic kernels (drainSynthetic
-    //   Kernels). Fields used on ActivityRecord: corr_id, name (raw), device_id,
+    //   activity record by shutdown are dropped in real-record modes. Only
+    //   synthesize-by-design modes turn them into callback-derived kernel rows.
+    //   Fields used on ActivityRecord: corr_id, name (raw), device_id,
     //   api_start_ns (= API_ENTER ns), user_scope, scope_depth, stack_id, plus
     //   has_details + grid/block/dyn_shared and the precomputed simplified
     //   occupancy (synthetic-kernel modes only).

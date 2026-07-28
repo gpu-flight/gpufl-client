@@ -77,6 +77,30 @@ TEST_F(MonitorTest, MultipleInitialize) {
     gpufl::Monitor::Shutdown();  // Should be safe
 }
 
+TEST_F(MonitorTest, InitializeClearsThePreviousSessionsSynthesisPolicy) {
+    gpufl::SetSuppressOrphanSyntheticKernels(true);
+
+    gpufl::MonitorOptions opts;
+    opts.profiling_engine = gpufl::ProfilingEngine::Monitor;
+    opts.backend_kind = gpufl::MonitorBackendKind::None;
+    gpufl::Monitor::Initialize(opts);
+
+    EXPECT_FALSE(gpufl::SuppressOrphanSyntheticKernelsForTesting())
+        << "a prior session's suppression state must not leak into a new one";
+}
+
+TEST_F(MonitorTest, TraceEnablesTrustworthyOrphanPolicyBeforeCollection) {
+    SKIP_IF_NO_CUDA();
+
+    gpufl::MonitorOptions opts;
+    opts.profiling_engine = gpufl::ProfilingEngine::Trace;
+    gpufl::Monitor::Initialize(opts);
+    gpufl::Monitor::Start();
+
+    EXPECT_TRUE(gpufl::SuppressOrphanSyntheticKernelsForTesting())
+        << "Trace must drop unmatched launches instead of inventing GPU time";
+}
+
 // ── scope name stack ────────────────────────────────────────────────────────
 //
 // The active scope name is what stamps every profile and PM sample. It has to
