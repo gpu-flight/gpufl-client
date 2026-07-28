@@ -158,8 +158,11 @@ struct MonitorState {
     detail::MonitorBatchManager batches;
     MetadataManager metadata;
 
-    bool suppressOrphanSyntheticKernels = false;
-    bool drainSyntheticMidRun = false;
+    // Atomic: set by the backend's start() thread and (since the
+    // missing-records suppression) by Monitor::Shutdown while the collector
+    // thread may still be reading it at a drain site.
+    std::atomic<bool> suppressOrphanSyntheticKernels{false};
+    std::atomic<bool> drainSyntheticMidRun{false};
 };
 
 MonitorState g_state;
@@ -529,6 +532,24 @@ void Monitor::Shutdown() {
 
     if (g_state.adapter) {
         g_state.adapter->stop();
+        // stop() has disabled and flushed activity, so "zero kernel records"
+        // is final. When a real-record session lost every record (observed:
+        // Trace+PM adaptive on Linux, ~1/4 of NVTX-counter-target runs -
+        // enables succeed, sync records flow, kernel records never arrive),
+        // the teardown drains below would resurrect every launch meta as a
+        // synthetic row whose "duration" is the host gap to the next launch,
+        // fabricating a full kernel timeline. Suppress instead: no kernel
+        // rows, and the capability event already says
+        // enabled_but_no_records, so the session stays self-describing.
+        if (IMonitorBackend* b = g_state.adapter->backend();
+            b && b->kernelActivityExpectedButMissing()) {
+            GFL_LOG_ERROR(
+                "[Monitor] Kernel activity was enabled and launches happened, "
+                "but no kernel activity record arrived this session. Kernel "
+                "rows are omitted (a synthetic fallback would carry host-gap "
+                "durations, not kernel time).");
+            SetSuppressOrphanSyntheticKernels(true);
+        }
         g_state.adapter->shutdown();
     }
 
@@ -563,6 +584,11 @@ void Monitor::Shutdown() {
 void Monitor::DrainAndFinalizeForExit() {
     if (!g_state.initialized.exchange(false)) return;
 
+    // No missing-records suppression here (unlike Shutdown): this path runs
+    // BEFORE the backend's stop(), so activity was never flushed and
+    // "zero records seen" may just mean a short run whose only buffer is
+    // still pending - suppressing would drop the synthetic fallback that is
+    // this path's whole reason to exist.
     // The backend's PC sampling cycle thread stops issuing CUPTI reads as soon
     // as process-exit teardown is flagged (PcSamplingEngine::drainData), so it
     // sits idle here and can't fault mid-flush. We deliberately do NOT join it

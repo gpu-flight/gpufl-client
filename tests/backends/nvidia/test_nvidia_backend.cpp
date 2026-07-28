@@ -11,6 +11,35 @@ class CuptiBackendTest : public ::testing::Test {
     void SetUp() override { SKIP_IF_NO_CUDA(); }
 };
 
+// Pure decision for Monitor::Shutdown's orphan-synthesis suppression. No CUDA
+// needed. The case this exists for: a real-record session (kernel activity
+// enabled, not PC/SASS synthesize-by-design) where launches happened but zero
+// activity records arrived - the orphan drain would otherwise fabricate every
+// kernel row from host launch-to-launch gaps.
+TEST(KernelActivityExpectedButMissing, TruthTable) {
+    using gpufl::KernelActivityExpectedButMissing;
+
+    // The broken session: real records expected, launches happened, none came.
+    EXPECT_TRUE(KernelActivityExpectedButMissing(true, false, 100000, 0));
+    // One single missing-record launch is still a fully-lost session.
+    EXPECT_TRUE(KernelActivityExpectedButMissing(true, false, 1, 0));
+
+    // Any real record arrived: keep the drain - tail orphans stay best-effort.
+    EXPECT_FALSE(KernelActivityExpectedButMissing(true, false, 100000, 1));
+    EXPECT_FALSE(KernelActivityExpectedButMissing(true, false, 100000, 99999));
+
+    // No launches: nothing was lost (and nothing to suppress).
+    EXPECT_FALSE(KernelActivityExpectedButMissing(true, false, 0, 0));
+
+    // Synthesize-by-design modes (PC sampling / SASS safe): synthetic rows
+    // are the product, never suppressed here.
+    EXPECT_FALSE(KernelActivityExpectedButMissing(true, true, 100000, 0));
+    EXPECT_FALSE(KernelActivityExpectedButMissing(false, true, 100000, 0));
+
+    // Kernel activity was never enabled: absence of records is expected.
+    EXPECT_FALSE(KernelActivityExpectedButMissing(false, false, 100000, 0));
+}
+
 TEST_F(CuptiBackendTest, Lifecycle) {
     gpufl::MonitorOptions opts;
     opts.enable_debug_output = true;

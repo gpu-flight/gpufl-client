@@ -87,6 +87,19 @@ class IMonitorBackend {
      */
     virtual bool IsProfilingOperational() const { return true; }
 
+    /**
+     * @brief True when this session expected REAL kernel activity records
+     *        (kernel activity enabled, not a synthesize-by-design mode),
+     *        launches happened, and yet zero records arrived. Only
+     *        meaningful after stop() has disabled + flushed activity, when
+     *        "zero" is final. Monitor::Shutdown consults this to suppress
+     *        the orphan synthetic-kernel drain: with every record missing,
+     *        that drain would fabricate a full kernel timeline out of
+     *        host launch-to-launch gaps (sleeps included) and present it
+     *        as measured kernel time. Default: false (nothing to suppress).
+     */
+    virtual bool kernelActivityExpectedButMissing() const { return false; }
+
     virtual void OnScopeStart(const char* name) {}
     virtual void OnScopeStop(const char* name) {}
 

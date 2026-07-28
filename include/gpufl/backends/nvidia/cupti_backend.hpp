@@ -27,6 +27,21 @@ namespace gpufl {
 
 class ICuptiHandler;
 
+// Decision for Monitor::Shutdown's orphan-synthesis suppression, kept as a
+// pure function so the truth table is unit-testable without a CUPTI session.
+// True = this session expected real kernel activity records, launches
+// happened, and none arrived - so orphan launch metas must NOT be resurrected
+// as synthetic kernel rows (their "durations" would be host dispatch gaps).
+// Modes that synthesize by design (PC sampling / SASS safe mode) pass
+// will_emit_synthetic=true and are never suppressed here.
+inline bool KernelActivityExpectedButMissing(bool collects_kernel_events,
+                                             bool will_emit_synthetic,
+                                             uint64_t launch_callbacks,
+                                             uint64_t activity_records_seen) {
+    return collects_kernel_events && !will_emit_synthetic &&
+           launch_callbacks > 0 && activity_records_seen == 0;
+}
+
 /**
  * @brief CUPTI-based monitoring backend for NVIDIA GPUs.
  *
@@ -89,6 +104,16 @@ class CuptiBackend : public IMonitorBackend {
     bool WillEmitSyntheticKernels() const {
         return opts_.profiling_engine == ProfilingEngine::PcSampling ||
                !AllowSassKernelActivity();
+    }
+    // See IMonitorBackend. Observed live (Linux 3090, Trace+PM adaptive,
+    // NVTX-counter targets, ~1/4 runs): every cuptiActivityEnable succeeds,
+    // SYNCHRONIZATION records flow, but zero KERNEL/CONCURRENT_KERNEL
+    // records ever arrive. Valid only after stop()'s disable + flush.
+    bool kernelActivityExpectedButMissing() const override {
+        return KernelActivityExpectedButMissing(
+            collectsKernelEvents(), WillEmitSyntheticKernels(),
+            kernel_launch_callback_count_.load(std::memory_order_acquire),
+            kernel_activity_seen_.load(std::memory_order_relaxed));
     }
     bool AllowSassMarkerActivity() const {
         return resolved_plan_.allow_sass_marker_activity;
