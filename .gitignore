@@ -8,7 +8,6 @@ build/
 build-*/
 build_tests/
 cmake-build-*/
-cmake/
 CMakeFiles/
 CMakeCache.txt
 wget-log*

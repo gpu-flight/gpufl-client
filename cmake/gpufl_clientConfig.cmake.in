@@ -1,0 +1,24 @@
+@PACKAGE_INIT@
+
+# find_package(gpufl_client) entry point. What it guarantees is the counters
+# layer:
+#
+#     find_package(gpufl_client REQUIRED)
+#     target_link_libraries(app PRIVATE gpufl::counters)
+#
+# Threads is the one real dependency in its link interface, resolved here so
+# the consumer does not have to know.
+#
+# The full SDK target is NOT loaded by this file. Its targets file records
+# private dependencies (httplib, zlib, OpenSSL, CUDA) and refuses to load
+# unless the consumer already provides those imported targets - publishing it
+# as a component would be documenting a flow that only works by accident.
+# Consuming the SDK from an install tree needs find_dependency() wiring that
+# does not exist yet.
+
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+
+include("${CMAKE_CURRENT_LIST_DIR}/gpufl_countersTargets.cmake")
+
+check_required_components(gpufl_client)
