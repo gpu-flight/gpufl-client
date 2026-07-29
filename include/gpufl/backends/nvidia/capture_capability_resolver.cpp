@@ -36,7 +36,7 @@ std::vector<std::string> BuildCaptureCapabilityWarnings(
         // for a deep window those differ by a lot, and quoting the wrong one
         // contradicts the advice.
         warnings.push_back(
-            "[gpufl] PC sampling collected 0 stall samples - too few kernel "
+            "PC sampling collected 0 stall samples - too few kernel "
             "launches were sampled. PC sampling accumulates per kernel and "
             "needs a few thousand launches before any samples are readable. "
             "Sample more launches - note that a longer wall-clock window is "
@@ -47,14 +47,14 @@ std::vector<std::string> BuildCaptureCapabilityWarnings(
     if (input.requests.sass && input.engine_state.sass.active &&
         !input.engine_state.sass.has_data) {
         warnings.push_back(
-            "[gpufl] SASS metrics collected 0 instruction samples - the "
+            "SASS metrics collected 0 instruction samples - the "
             "profiled kernels were too short. Run more iterations / a "
             "longer-running kernel to collect instruction-level data.");
     }
     if (input.requests.pm && input.engine_state.pm.active &&
         !input.engine_state.pm.has_data) {
         warnings.push_back(
-            "[gpufl] PM sampling collected 0 hardware samples - the profiled "
+            "PM sampling collected 0 hardware samples - the profiled "
             "workload was too short for the sampling interval.");
     }
     return warnings;

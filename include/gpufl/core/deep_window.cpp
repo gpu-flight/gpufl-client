@@ -39,15 +39,48 @@ std::atomic     g_close_requested{false};
 std::atomic<int> g_close_reason{static_cast<int>(DeepWindowClose::Deadline)};
 
 // An open asked for by a thread that can't arm one itself. Checked lock-free
-// on the launch beat; g_pending_spec is only read once this is set, so the
+// on the launch beat; g_pending is only read once this is set, so the
 // hot path pays for it exactly when a trigger is waiting.
 std::atomic       g_open_requested{false};
 std::atomic<int64_t> g_pending_open_at_ns{0};  // 0 = at the next launch
-DeepWindowSpec    g_pending_spec;              // guarded by g_mu
+
+// The queued request, as ONE record. Spec and owner token were separate fields
+// once, and an untagged request arriving after a tagged one then replaced only
+// the spec - so a manual window opened carrying a rule's token and was charged
+// to that rule's budget. Replacing the record replaces both or neither.
+struct PendingOpen {
+    DeepWindowSpec spec;
+    uint64_t owner_token = 0;   // 0 = nobody is waiting on this one
+};
+
+// First request wins; a second is refused while one is still queued.
+//
+// The alternative - newest wins - silently discards whichever trigger asked
+// first, and with both --deep-after and a rule configured that is decided by
+// which one happens to run first rather than by anything the user chose. A
+// refusal is at least reported: a rule gets token 0 and goes back to armed,
+// and the scheduled window logs that it kept its place.
+bool PendingIsQueued() { return g_open_requested.load(std::memory_order_acquire); }
+PendingOpen      g_pending;    // guarded by g_mu
 
 // When the last window closed, so a cooldown can be enforced. 0 = never.
 std::atomic<int64_t> g_last_close_ns{0};
 
+// Attribution for windows opened through a tagged request.
+//
+// A plain "a window opened" counter is not enough: a manual or scheduled
+// window opening while a rule's request is outstanding would be counted
+// against that rule's budget, and the budget is meant to bound what the RULE
+// costs. Tokens start at 1 so 0 keeps its meaning of "not from a request".
+std::atomic<uint64_t> g_next_open_token{1};
+std::atomic<uint64_t> g_last_opened_token{0};
+std::atomic<uint64_t> g_opens_completed{0};
+// Token of the request currently being serviced. Only TakePendingOpen_ sets
+// it, and only for the duration of the Open() call it drives, so a direct
+// Open() can never inherit someone else's attribution.
+thread_local uint64_t g_claimed_token = 0;
+
+DeepWindowTrigger g_trigger;   // guarded by g_mu
 int64_t     g_opened_ns = 0;
 int64_t     g_requested_duration_ms = 0;
 uint64_t    g_requested_max_launches = 0;
@@ -165,6 +198,15 @@ bool DeepWindow::Active() {
 
 bool DeepWindow::Open(const DeepWindowSpec& spec) {
     if (const Runtime* rt = runtime(); !rt || !rt->logger) return false;
+    // Scheduled and manual requests do not pass through RequestOpenTagged.
+    // Apply the same real-readiness gate here so they cannot publish a window
+    // that was active in name only and armed no engine.
+    if (IMonitorBackend* backend = Monitor::GetBackend();
+        backend != nullptr && !backend->DeepEnginesPrepared()) {
+        GFL_LOG_ERROR("[DeepWindow] open refused: selected deep engine is not "
+                      "prepared");
+        return false;
+    }
 
     std::string name;
     {
@@ -182,7 +224,14 @@ bool DeepWindow::Open(const DeepWindowSpec& spec) {
             return false;
         }
 
+        // Publish who this open belongs to, then clear the claim so a later
+        // direct Open() cannot inherit it. The claim is taken only by
+        // RequestOpenTagged and consumed exactly once, here.
+        g_last_opened_token.store(g_claimed_token, std::memory_order_release);
+        g_opens_completed.fetch_add(1, std::memory_order_acq_rel);
+
         g_opened_ns = detail::GetTimestampNs();
+        g_trigger = spec.trigger;
         g_name = spec.name.empty() ? "deep_window" : spec.name;
         g_requested_duration_ms = spec.max_duration_ms;
         g_requested_max_launches = spec.max_launches;
@@ -250,6 +299,7 @@ void DeepWindow::Close(const DeepWindowClose reason) {
         // the engine teardown, so a slow disarm doesn't shorten the quiet time.
         g_last_close_ns.store(end_ns, std::memory_order_relaxed);
 
+        ev.trigger                = g_trigger;
         ev.pid                    = detail::GetPid();
         ev.name                   = g_name;
         ev.close_reason           = DeepWindowCloseName(reason);
@@ -296,6 +346,10 @@ void DeepWindow::Close(const DeepWindowClose reason) {
             close_row.name_id = Monitor::InternScopeName(name);
             close_row.event_type = 1;
             close_row.depth = 0;   // ignored on close; the open row carries it
+            // end_ns intentionally precedes engine disarm so the window event
+            // measures the requested boundary. Publish it only after the final
+            // drain above, immediately before the scope-state transition.
+            Monitor::MarkScopeClosePending(g_scope_instance_id, end_ns);
             Monitor::PushScopeRow(close_row);
             g_scope_instance_id = 0;
         }
@@ -317,17 +371,113 @@ void DeepWindow::RequestOpen(const DeepWindowSpec& spec) {
     ScheduleOpenAfter(0, spec);
 }
 
+OpenRequestResult DeepWindow::RequestOpenTagged(const DeepWindowSpec& spec) {
+    // Rule installation may precede CONTEXT_CREATED under Windows injection,
+    // so it gates on engine selection. By the time a condition fires, require
+    // the context-bound preparation to have really succeeded.
+    //
+    // Pending and failed are reported apart because they call for opposite
+    // responses: pending means try again shortly, failed means this session
+    // will never open a useful window and the rule should say so rather than
+    // retrying until shutdown and reporting `never_true`.
+    if (IMonitorBackend* backend = Monitor::GetBackend();
+        backend != nullptr && !backend->DeepEnginesPrepared()) {
+        if (backend->DeepEnginePreparationPending()) {
+            GFL_LOG_DEBUG("[DeepWindow] conditional open deferred: deep engine "
+                          "preparation has not run yet");
+            return {0, OpenRequestStatus::PreparationPending};
+        }
+        GFL_LOG_ERROR("[DeepWindow] conditional open refused: selected deep "
+                      "engine is not prepared");
+        return {0, OpenRequestStatus::EngineUnavailable};
+    }
+
+    uint64_t token = 0;
+    {
+        std::lock_guard lk(g_mu);
+        // Decided here so the caller learns now, rather than discovering later
+        // that a window it counted on never opened.
+        if (g_active.load(std::memory_order_relaxed)) {
+            return {0, OpenRequestStatus::Busy};
+        }
+        if (InCooldown(spec)) return {0, OpenRequestStatus::Cooldown};
+        if (PendingIsQueued()) {
+            // Someone else - typically the launcher's --deep-after window - is
+            // already waiting. Refusing here means the rule retries later
+            // instead of cancelling a window the user explicitly scheduled.
+            GFL_LOG_DEBUG("[DeepWindow] tagged open refused: a request is "
+                          "already queued");
+            return {0, OpenRequestStatus::Busy};
+        }
+
+        token = g_next_open_token.fetch_add(1, std::memory_order_relaxed);
+        // Spec and token published together, under one lock. Splitting them is
+        // how an untagged request could inherit a rule's attribution.
+        g_pending.spec = spec;
+        g_pending.owner_token = token;
+        g_pending_open_at_ns.store(0, std::memory_order_relaxed);
+        // Published INSIDE the lock. Releasing first left a window where a
+        // second caller took the lock, saw no request queued, and overwrote
+        // this one - which is precisely the first-wins rule this is meant to
+        // enforce, defeated by two threads asking at once.
+        g_open_requested.store(true, std::memory_order_release);
+    }
+    GFL_LOG_DEBUG("[DeepWindow] tagged open requested token=", token,
+                  " duration_ms=", spec.max_duration_ms);
+    return {token, OpenRequestStatus::Accepted};
+}
+
+const char* toString(const OpenRequestStatus status) {
+    switch (status) {
+        case OpenRequestStatus::Accepted:           return "accepted";
+        case OpenRequestStatus::PreparationPending: return "preparation_pending";
+        case OpenRequestStatus::EngineUnavailable:  return "deep_engine_not_prepared";
+        case OpenRequestStatus::Busy:               return "busy";
+        case OpenRequestStatus::Cooldown:           return "cooldown";
+        case OpenRequestStatus::InvalidResult:      return "invalid_open_result";
+    }
+    return "unknown";
+}
+
+uint64_t DeepWindow::LastOpenedToken() {
+    return g_last_opened_token.load(std::memory_order_acquire);
+}
+
+uint64_t DeepWindow::PendingOpenToken() {
+    if (!g_open_requested.load(std::memory_order_acquire)) return 0;
+    std::lock_guard lk(g_mu);
+    return g_pending.owner_token;
+}
+
+uint64_t DeepWindow::OpensCompleted() {
+    return g_opens_completed.load(std::memory_order_acquire);
+}
+
 void DeepWindow::ScheduleOpenAfter(const int64_t delay_ms,
                                    const DeepWindowSpec& spec) {
     {
         std::lock_guard lk(g_mu);
-        g_pending_spec = spec;
+        if (PendingIsQueued()) {
+            // Keeps the queued request rather than replacing it. Overwriting
+            // would let a scheduled window cancel a rule's window - or the
+            // reverse - purely on call order.
+            GFL_LOG_DEBUG("[DeepWindow] open request ignored: one is already "
+                          "queued (owner_token=", g_pending.owner_token, ")");
+            return;
+        }
+        g_pending.spec = spec;
+        // Untagged: nobody is counting this window against a budget. Cleared
+        // explicitly, so replacing a tagged request cannot leave its owner
+        // attached to somebody else's window.
+        g_pending.owner_token = 0;
         g_pending_open_at_ns.store(
             delay_ms > 0 ? detail::GetTimestampNs() + delay_ms * 1000000 : 0,
             std::memory_order_relaxed);
+        // Under the lock, for the same reason as the tagged path: the launch
+        // beat still reads the spec only once this is set, and a concurrent
+        // caller can no longer slip in between the two.
+        g_open_requested.store(true, std::memory_order_release);
     }
-    // Published last: the launch beat reads the spec only once this is set.
-    g_open_requested.store(true, std::memory_order_release);
     GFL_LOG_DEBUG("[DeepWindow] open requested delay_ms=", delay_ms,
                   " duration_ms=", spec.max_duration_ms,
                   " max_launches=", spec.max_launches);
@@ -336,15 +486,27 @@ void DeepWindow::ScheduleOpenAfter(const int64_t delay_ms,
 // Runs on the collector, off the CUPTI callback path. Claims the request
 // before opening so nothing can act on it twice.
 void DeepWindow::TakePendingOpen_() {
-    if (!g_open_requested.exchange(false, std::memory_order_acq_rel)) return;
-
     DeepWindowSpec spec;
     {
         std::lock_guard lk(g_mu);
-        spec = g_pending_spec;
+        // The flag and the record are claimed TOGETHER. Clearing the flag
+        // first and then taking the lock left a gap: a producer could acquire
+        // the lock, see nothing queued, and store its own request - which this
+        // collector then consumed believing it was the earlier one, while the
+        // producer's flag stayed set and let the same request open a second
+        // window later.
+        if (!g_open_requested.exchange(false, std::memory_order_acq_rel)) return;
+        spec = g_pending.spec;
+        // Claim the token here, not in Open(): Open can still refuse, and a
+        // token left behind would keep reading as "queued" for the rest of the
+        // run, so a rule would wait forever for a window that was already
+        // turned down.
+        g_claimed_token = g_pending.owner_token;
+        g_pending.owner_token = 0;
     }
     // Outside the lock: Open takes it too.
     Open(spec);
+    g_claimed_token = 0;
 }
 
 void DeepWindow::OnLaunch() {
@@ -410,6 +572,10 @@ void DeepWindow::ServicePending() {
 void DeepWindow::ResetForTesting() {
     std::lock_guard<std::mutex> lk(g_mu);
     g_active.store(false, std::memory_order_release);
+    g_next_open_token.store(1, std::memory_order_relaxed);
+    g_last_opened_token.store(0, std::memory_order_relaxed);
+    g_opens_completed.store(0, std::memory_order_relaxed);
+    g_pending = PendingOpen{};
     g_deadline_ns.store(0, std::memory_order_relaxed);
     g_launches_remaining.store(0, std::memory_order_relaxed);
     g_launches_covered.store(0, std::memory_order_relaxed);
@@ -418,7 +584,7 @@ void DeepWindow::ResetForTesting() {
                          std::memory_order_relaxed);
     g_open_requested.store(false, std::memory_order_relaxed);
     g_pending_open_at_ns.store(0, std::memory_order_relaxed);
-    g_pending_spec = DeepWindowSpec{};
+    g_pending = PendingOpen{};
     g_last_close_ns.store(0, std::memory_order_relaxed);
     g_opened_ns = 0;
     g_requested_duration_ms = 0;

@@ -45,12 +45,42 @@ class TracePlatform {
 
     virtual bool setEnv(const char* key, const std::string& value,
                         std::string& error) const = 0;
+    /**
+     * Remove a variable from the environment the target will inherit.
+     *
+     * Needed because some GPUFL variables are triggers that install by
+     * EXISTING, not by their value: not setting one is not the same as the
+     * target not seeing one. Not-present is the only way to say "off", so a
+     * mode that owns a trigger has to be able to take the other one away.
+     *
+     * Removing a variable that is not set is success, not an error.
+     */
+    virtual bool unsetEnv(const char* key, std::string& error) const = 0;
     virtual bool prepareInjectionEnv(const fs::path& inject_lib,
                                      std::string& error) const = 0;
     virtual TraceProcessResult runProcess(
             const std::vector<std::string>& command,
             const RunOptions& opts) const = 0;
 };
+
+/** @brief platform.setEnv, printing the platform's reason on failure. */
+bool setEnvOrPrint(const TracePlatform& platform, const char* key,
+                   const std::string& value);
+/** @brief platform.unsetEnv, printing the platform's reason on failure. */
+bool unsetEnvOrPrint(const TracePlatform& platform, const char* key);
+
+/**
+ * @brief Publish the deep-window options into the target's environment.
+ *
+ * Separate from runTraceCommon so the trigger-ownership rule can be tested
+ * without launching a process: which variable a mode sets is only half of it,
+ * and the half that bit - which one it REMOVES - is invisible in any test that
+ * only inspects what was set.
+ *
+ * @return false when the platform refused an environment change; the reason is
+ *         already on stderr.
+ */
+bool applyDeepWindowEnv(const TraceArgs& args, const TracePlatform& platform);
 
 int runTraceCommon(const TraceArgs& args, const TracePlatform& platform);
 

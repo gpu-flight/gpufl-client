@@ -134,6 +134,18 @@ class WindowsTracePlatform final : public TracePlatform {
         return false;
     }
 
+    bool unsetEnv(const char* key, std::string& error) const override {
+        // A null value deletes the variable. Deleting one that was never set
+        // reports ERROR_ENVVAR_NOT_FOUND, which is the state being asked for.
+        if (SetEnvironmentVariableA(key, nullptr)) return true;
+        const DWORD err = GetLastError();
+        if (err == ERROR_ENVVAR_NOT_FOUND) return true;
+        error = "SetEnvironmentVariable(" + std::string(key) +
+                ", null) failed (err=" +
+                std::to_string(static_cast<unsigned long>(err)) + ")";
+        return false;
+    }
+
     bool prepareInjectionEnv(const fs::path& inject_lib,
                              std::string& error) const override {
         std::string path = inject_lib.parent_path().string();

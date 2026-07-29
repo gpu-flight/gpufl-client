@@ -231,12 +231,9 @@ struct PmSampleInput {
 };
 
 // Session-level switch (set by the active backend at start): when true the
-// collector DROPS orphaned launch metas at shutdown instead of emitting them as
-// synthetic kernel rows. Used for engines where kernel-activity is intentionally
-// off and the synthetic host-dispatch durations would mislead - SASS safe mode,
-// where real kernel activity deadlocks (NVIDIA CUPTI/driver bug). The Execution
-// Signature is accumulated separately, so a multi-pass merge is unaffected.
-// Default false: normal / PC modes keep best-effort synthesis.
+// collector DROPS unmatched launch metas instead of emitting host launch gaps
+// as kernel durations. All real-record modes enable it; callback-derived rows
+// remain available only for synthesize-by-design modes such as PC sampling.
 void SetSuppressOrphanSyntheticKernels(bool suppress);
 
 // Session-level switch (set by the active backend at start): when true the
@@ -245,6 +242,10 @@ void SetSuppressOrphanSyntheticKernels(bool suppress);
 // process-exit teardown drops the final flush - mid-run emission is the only way
 // those kernel rows survive. Default false (other modes emit at shutdown).
 void SetDrainSyntheticKernelsMidRun(bool enable);
+
+// Test seam for the process-lifetime session policy. Production code should
+// only set the policy through the two functions above.
+bool SuppressOrphanSyntheticKernelsForTesting();
 
 /**
  * @brief The central monitoring engine.
@@ -387,6 +388,10 @@ class Monitor {
     static uint64_t AllocateScopeInstanceId();
     /** @brief Depth a scope opened right now would nest at. */
     static int OpenScopeDepth();
+    /** @brief Capture and publish a close timestamp before scope-state locking. */
+    static int64_t CaptureScopeCloseTimestamp(uint64_t instance_id);
+    /** @brief Publish an existing close timestamp before pushing its row. */
+    static void MarkScopeClosePending(uint64_t instance_id, int64_t end_ns);
 
     /**
      *  Push a raw activity record into the monitor ring buffer.
@@ -419,6 +424,22 @@ class Monitor {
      * @brief Push decoded PM sampling time-series rows.
      */
     static void PushPmSamples(const std::vector<PmSampleInput>& samples);
+    /**
+     * @brief Release completed scopes that no future sample can reach.
+     *
+     * Call only after a decode that SUCCEEDED. A failed or overflowed decode
+     * means samples were lost rather than delivered, and advancing past them
+     * would drop the scopes they still need.
+     */
+    static void PublishScopeRetentionWatermark(int64_t ts_ns);
+    /** @brief Mark the wall-clock boundary from which PM samples may be pending. */
+    static void BeginPmScopeAttribution(int64_t start_ns);
+    /** @brief Mark that the final PM decode completed. */
+    static void EndPmScopeAttribution();
+    /** @brief Scope history evicted while PM attribution was active. */
+    static uint64_t ScopeAttributionTruncated();
+    /** @brief PM metric rows that passed through scope attribution. */
+    static uint64_t PmSampleRowsSeen();
 
     /**
      * @brief Emit PM sampling configuration metadata for readers/UI.

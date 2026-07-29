@@ -39,15 +39,6 @@ fs::path findInjectLib(const TracePlatform& platform, const fs::path& exe) {
     return {};
 }
 
-bool setEnvOrPrint(const TracePlatform& platform,
-                   const char* key,
-                   const std::string& value) {
-    std::string error;
-    if (platform.setEnv(key, value, error)) return true;
-    std::fprintf(stderr, "gpufl: %s\n", error.c_str());
-    return false;
-}
-
 // A '+'-joined pass token ("Trace+PcSampling") runs those engines together in
 // one process via GPUFL_ENGINE_COMBO. Returns the comma-joined combo for a
 // composite token, or "" for a single-engine token.
@@ -444,7 +435,10 @@ void signalSessionsComplete(const fs::path& output_dir,
         if (res.second) {
             GFL_LOG_DEBUG("signalled upload-complete for session ", res.first);
         } else if (!quiet) {
-            GFL_LOG_ERROR("failed to signal upload-complete for session ", res.first);
+            std::fprintf(stderr,
+                         "gpufl trace --upload: failed to signal "
+                         "upload-complete for session %s\n",
+                         res.first.c_str());
         }
     }
 }
@@ -522,6 +516,19 @@ int repairUncompressedLogs(const fs::path& root) {
 }  // namespace
 
 int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
+    // Re-checked here, not only in the parser. The two modes are enforced by
+    // the CLI, but TraceArgs is a plain struct: anything constructing one
+    // directly - a test, a future caller, a refactor that reorders parsing -
+    // can set both fields and reach this function in a state the parser would
+    // have refused. resolvePassPlan() would then honour `passes` while the
+    // block below still exported the deep environment, producing a run that is
+    // neither mode.
+    if (const std::string mode_error = validateTraceExecutionMode(args);
+        !mode_error.empty()) {
+        std::fprintf(stderr, "gpufl: %s\n", mode_error.c_str());
+        return 2;
+    }
+
     const fs::path exe = platform.selfExe();
     if (exe.empty()) {
         std::fprintf(stderr, "gpufl: cannot resolve launcher path (%s)\n",
@@ -616,33 +623,7 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
         return 2;
     }
 
-    // --deep-*: bound how long the DEEP engines stay armed inside a target
-    // that keeps running. Distinct from --window above, which bounds the
-    // target's lifetime. Asking for a deep window implies window-only
-    // arming, or the engines would be armed from the first kernel and the
-    // window would bound nothing.
-    if (args.deep_requested) {
-        if (!setEnvOrPrint(platform, env::kDeepArm, "window") ||
-            !setEnvOrPrint(platform, env::kDeepAfterMs,
-                           std::to_string(args.deep_after_ms))) {
-            return 2;
-        }
-        if (args.deep_for_ms > 0 &&
-            !setEnvOrPrint(platform, env::kDeepWindowMs,
-                           std::to_string(args.deep_for_ms))) {
-            return 2;
-        }
-        if (args.deep_launches > 0 &&
-            !setEnvOrPrint(platform, env::kDeepWindowMaxLaunches,
-                           std::to_string(args.deep_launches))) {
-            return 2;
-        }
-        if (args.deep_cooldown_ms > 0 &&
-            !setEnvOrPrint(platform, env::kDeepWindowCooldownMs,
-                           std::to_string(args.deep_cooldown_ms))) {
-            return 2;
-        }
-    }
+    if (!applyDeepWindowEnv(args, platform)) return 2;
 
     // A bounded window stops the target after warmup+window wall-clock;
     // run_ms == 0 keeps the historical "run until the target exits" behavior.
@@ -701,6 +682,16 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
 
     if (!args.quiet) {
         std::fprintf(stderr, "[gpufl] capturing -> %s\n", output_dir.string().c_str());
+        if (args.deep_requested) {
+            const AdaptiveCapturePlan adaptive = resolveAdaptivePlan(args);
+            std::fprintf(stderr, "[gpufl] adaptive capture: base=%s; selected deep=",
+                         adaptive.base.c_str());
+            for (size_t i = 0; i < adaptive.selected_deep.size(); ++i) {
+                std::fprintf(stderr, "%s%s", i == 0 ? "" : ",",
+                             adaptive.selected_deep[i].c_str());
+            }
+            std::fprintf(stderr, "; arm=window-only\n");
+        }
         if (multipass) {
             std::fprintf(stderr, "[gpufl] multi-pass analysis %s - %zu passes:",
                          analysis_id.c_str(), plan.size());
@@ -816,7 +807,8 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
         // hard-kill the agent mid-upload and drop its late windows.
         const int cap = args.agent_drain_ms;
         GFL_LOG_DEBUG("waiting up to ", cap / 1000.0, "s for agent to finish uploading");
-        if (agent.waitForExit(cap)) {
+        const AgentWaitResult wait = agent.waitForExit(cap);
+        if (wait.succeeded()) {
             GFL_LOG_DEBUG("agent finished uploading");
             // Clean drain: every window was 202-accepted, so no more chunks are
             // coming. Signal upload-complete from here (outside the agent's racing
@@ -826,12 +818,23 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
             config.api_key = resolveOption(args.api_key, env::kApiKey);
             config.api_path = args.api_version.empty() ? "" : "/api/" + args.api_version;
             signalSessionsComplete(output_dir, config, args.quiet);
+        } else if (wait.exited) {
+            std::fprintf(
+                stderr,
+                "gpufl trace --upload: agent exited before completing the upload "
+                "(exit code %d); session-complete was not sent\n",
+                wait.exit_code);
+            if (overall_rc == 0) overall_rc = 4;
         } else {
             if (!args.quiet) {
-                GFL_LOG_ERROR("agent still running after ", cap / 1000.0,
-                              "s cap - stopping (late windows may need a post-hoc `gpufl upload`) ");
+                std::fprintf(
+                    stderr,
+                    "gpufl trace --upload: agent still running after %.1fs - "
+                    "stopping; late windows may require a post-hoc `gpufl upload`\n",
+                    cap / 1000.0);
             }
             agent.stop();
+            if (overall_rc == 0) overall_rc = 4;
         }
     }
 

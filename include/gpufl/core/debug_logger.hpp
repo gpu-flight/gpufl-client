@@ -3,6 +3,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <utility>
 
 namespace gpufl {
 
@@ -19,6 +20,22 @@ class DebugLogger {
             (ss << ... << std::forward<Args>(args));
             std::cout << ss.str() << std::endl;
         }
+    }
+
+    template <typename... Args>
+    static void info(const char* prefix, Args&&... args) {
+        std::stringstream ss;
+        ss << prefix;
+        (ss << ... << std::forward<Args>(args));
+        std::cerr << ss.str() << std::endl;
+    }
+
+    template <typename... Args>
+    static void warn(const char* prefix, Args&&... args) {
+        std::stringstream ss;
+        ss << prefix;
+        (ss << ... << std::forward<Args>(args));
+        std::cerr << ss.str() << std::endl;
     }
 
     template <typename... Args>
@@ -39,6 +56,8 @@ class DebugLogger {
 };
 
 #define GFL_LOG_DEBUG(...) ::gpufl::DebugLogger::log("[GPUFL] ", __VA_ARGS__)
+#define GFL_LOG_INFO(...) ::gpufl::DebugLogger::info("[GPUFL] ", __VA_ARGS__)
+#define GFL_LOG_WARN(...) ::gpufl::DebugLogger::warn("[GPUFL-WARN] ", __VA_ARGS__)
 #define GFL_LOG_ERROR(...) \
     ::gpufl::DebugLogger::error("[GPUFL-ERROR] " __FILE__ ":", __LINE__, ": ", __VA_ARGS__)
 

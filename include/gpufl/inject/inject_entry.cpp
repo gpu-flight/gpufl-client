@@ -26,6 +26,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -53,12 +54,34 @@
 #define NVTX_NO_IMPL
 #endif
 #include <nvtx3/nvToolsExt.h>
+// Counters extension types (nvtxCounterAttr_t, the CBID list, module id) and
+// the injection-side nvtxExtModuleInfo_t it pulls in. NVTX_NO_IMPL above keeps
+// this types-only, same as the core header. The semantics header is separate
+// and NOT pulled in by the counters one, but it is what says whether a sample
+// is a delta or an absolute reading - the difference between a correct rate
+// and a plausible wrong one.
+//
+// Guarded because the header-only NVTX3 distribution CMake falls back to when
+// the toolkit ships no NVTX predates the counters extension. Without counters
+// the injection simply does not export the extension entry, and NVTX counters
+// stay tool-less no-ops in the target.
+#if defined(__has_include)
+#  if __has_include(<nvtx3/nvToolsExtCounters.h>) && \
+      __has_include(<nvtx3/nvToolsExtSemanticsCounters.h>)
+#    define GPUFL_HAS_NVTX_COUNTERS 1
+#  endif
+#endif
+#ifdef GPUFL_HAS_NVTX_COUNTERS
+#  include <nvtx3/nvToolsExtCounters.h>
+#  include <nvtx3/nvToolsExtSemanticsCounters.h>
+#endif
 
 #include "gpufl/gpufl.hpp"
 #include "gpufl/core/activity_record.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"  // GFL_LOG_DEBUG (teardown tracing)
 #include "gpufl/core/monitor.hpp"
+#include "gpufl/core/nvtx_counters.hpp"
 #include "gpufl/core/teardown_flag.hpp"  // setProcessExitTeardown (Windows)
 #include "gpufl/upload/upload_logs.hpp"  // gpufl::uploadLogs for --upload
 
@@ -73,6 +96,11 @@ std::atomic<bool> g_deferred_init_finished{false};
 std::atomic<bool> g_shutdown_started{false};
 std::mutex g_deferred_init_mutex;
 std::condition_variable g_deferred_init_cv;
+// A CUDA call made by gpufl's own deferred-init worker must never wait for
+// that worker to finish. Most CUPTI setup does not call the runtime copy
+// APIs, but the interpose layer must be safe if a driver/toolkit revision
+// does: waiting here would be a self-deadlock.
+thread_local bool g_is_deferred_init_worker = false;
 
 // Captured during init for the atexit upload path (--upload). g_log_path
 // mirrors InitOptions.log_path; both are read only in shutdownAndSignal,
@@ -136,11 +164,11 @@ void endProcessScope() {
     if (!state.active) return;
 
     gpufl::ScopeBatchRow row;
-    row.ts_ns = gpufl::detail::GetTimestampNs();
     row.scope_instance_id = state.instance_id;
     row.name_id = state.name_id;
     row.event_type = 1;
     row.depth = 0;
+    row.ts_ns = gpufl::Monitor::CaptureScopeCloseTimestamp(state.instance_id);
     gpufl::Monitor::PushScopeRow(row);
     gpufl::Monitor::EndProfilerScope(state.name.c_str());
     if (state.perf_scope) gpufl::Monitor::EndPerfScope(state.name.c_str());
@@ -242,6 +270,7 @@ void waitForDeferredInit() {
 // these are compiled out to avoid unused-function diagnostics.
 void waitForDeferredInitForMs(const int wait_ms) {
     if (wait_ms <= 0) return;
+    if (g_is_deferred_init_worker) return;
     if (g_deferred_init_started.load(std::memory_order_acquire) &&
         !g_deferred_init_finished.load(std::memory_order_acquire)) {
         std::unique_lock lock(g_deferred_init_mutex);
@@ -257,6 +286,14 @@ void waitAtCudaSyncBoundary() {
 }
 
 void waitAtCudaLaunchBoundary() {
+    waitForDeferredInitForMs(envIntOrDefault(gpufl::env::kInjectLaunchWaitMs, 15000));
+}
+
+void waitAtCudaMemoryBoundary() {
+    // A memory transfer is an activity-capture boundary for the same reason a
+    // launch is: if it crosses the target before CUPTI subscription completes,
+    // it is gone permanently. Reuse the launch timeout rather than introduce a
+    // second knob with identical semantics.
     waitForDeferredInitForMs(envIntOrDefault(gpufl::env::kInjectLaunchWaitMs, 15000));
 }
 #endif  // !_WIN32
@@ -393,6 +430,101 @@ int DomainRangePop(nvtxDomainHandle_t) {
     return nvtxPopRange();
 }
 }  // namespace nvtx_injection_impl
+
+// ── NVTX Counters extension (module 4) ────────────────────────────
+//
+// The extension loader resolves InitializeInjectionNvtxExtension from the SAME
+// NVTX_INJECTION64_PATH the launcher already sets for range injection
+// (nvtxDetail/nvtxExtInit.h), so counters arrive as direct function calls into
+// this library - no CUPTI activity records, and no second injection tool. That
+// is what makes the standard NVIDIA API usable for a rule that fires thousands
+// of times a second.
+//
+// These are the NVTX-shaped half only. Everything that decides what a sample
+// MEANS lives in NvtxCounterBridge, which has no NVTX types in it and is unit
+// tested without an injected process.
+#ifdef GPUFL_HAS_NVTX_COUNTERS
+namespace nvtx_counters_impl {
+
+using gpufl::detail::NvtxCounterBridge;
+
+// Every struct here was written by the CLIENT's copy of the NVTX headers,
+// which can be a different version from ours. structSize gates every read: a
+// smaller struct simply does not contain the field, and reading past it is
+// reading someone else's memory that happens to parse.
+bool AttrReadable(const nvtxCounterAttr_t* attr) {
+    return attr != nullptr && attr->structSize >= sizeof(nvtxCounterAttr_t);
+}
+
+// Walk the semantics list for the counters extension and read the value type.
+// Absent semantics stay Unspecified rather than defaulting to Delta: an
+// absolute series accumulated as deltas produces a plausible wrong rate, which
+// is worse than refusing the counter.
+NvtxCounterBridge::ValueType valueTypeOf(const nvtxCounterAttr_t* attr) {
+    if (!AttrReadable(attr)) return NvtxCounterBridge::ValueType::Unspecified;
+    // Bounded walk: the list is application-built, and a cycle or a garbage
+    // `next` must not hang the register call. Nobody chains more than a
+    // handful of semantics; 16 is generous.
+    //
+    // The HEADER has to be readable before anything else is touched -
+    // including `next`, which the previous shape read in the loop increment
+    // even for a node it had just rejected as too short to contain it. A node
+    // that cannot hold its own header ends the walk rather than being skipped.
+    int walked = 0;
+    const nvtxSemanticsHeader_t* h = attr->semantics;
+    while (h != nullptr && walked++ < 16) {
+        if (h->structSize < sizeof(nvtxSemanticsHeader_t)) break;
+        const nvtxSemanticsHeader_t* next = h->next;
+
+        // Exactly the version whose layout this build was compiled against.
+        // `>=` would read a future version's bytes through today's struct -
+        // the same plausible-wrong-value failure the DELTA check refuses.
+        if (h->semanticId == NVTX_SEMANTIC_ID_COUNTERS_V1 &&
+            h->version == NVTX_COUNTER_SEMANTIC_VERSION &&
+            h->structSize >= sizeof(nvtxSemanticsCounter_t)) {
+            const auto* sem = reinterpret_cast<const nvtxSemanticsCounter_t*>(h);
+            switch (sem->flags & NVTX_COUNTER_FLAG_VALUETYPE_DELTA_SINCE_START) {
+                case NVTX_COUNTER_FLAG_VALUETYPE_ABSOLUTE:
+                    return NvtxCounterBridge::ValueType::Absolute;
+                case NVTX_COUNTER_FLAG_VALUETYPE_DELTA:
+                    return NvtxCounterBridge::ValueType::Delta;
+                case NVTX_COUNTER_FLAG_VALUETYPE_DELTA_SINCE_START:
+                    return NvtxCounterBridge::ValueType::DeltaSinceStart;
+                default:
+                    break;   // a counters semantic with no value type; keep walking
+            }
+        }
+        h = next;
+    }
+    return NvtxCounterBridge::ValueType::Unspecified;
+}
+
+uint64_t NVTX_API CounterRegister(nvtxDomainHandle_t domain,
+                                  const nvtxCounterAttr_t* attr) {
+    const bool readable = AttrReadable(attr);
+    const char* name = (readable && attr->name != nullptr) ? attr->name : "";
+    const uint64_t requested =
+        readable ? attr->counterId : NVTX_COUNTER_ID_NONE;
+    const auto result = NvtxCounterBridge::instance().registerCounter(
+        nvtxDomainName(domain), name, requested, valueTypeOf(attr));
+    // 0 is a refusal the application can see: the header documents a register
+    // that could not be honoured, and every later sample carrying 0 is then
+    // dropped by the bridge instead of landing on someone else's slot.
+    return result.id;
+}
+
+void NVTX_API CounterSampleInt64(nvtxDomainHandle_t, const uint64_t id,
+                                 const int64_t value) {
+    NvtxCounterBridge::instance().sampleDelta(id, value);
+}
+
+void NVTX_API CounterSampleNoValue(nvtxDomainHandle_t, const uint64_t id,
+                                   const uint8_t reason) {
+    NvtxCounterBridge::instance().sampleNoValue(id, reason);
+}
+
+}  // namespace nvtx_counters_impl
+#endif  // GPUFL_HAS_NVTX_COUNTERS
 
 void registerDeferredWaitAtexit() {
     std::call_once(g_deferred_wait_atexit_once, [] {
@@ -546,6 +678,7 @@ void startDeferredInjectInit() {
     }
 
     std::thread([] {
+        g_is_deferred_init_worker = true;
         // NVIDIA calls InitializeInjection from inside the CUDA driver's own
         // initialization. cuptiSubscribe probes driver state, so reaching it
         // while that initialization is still running faults inside libcuda.
@@ -567,6 +700,7 @@ void startDeferredInjectInit() {
             // Injection must never throw through libcuda's callback path.
         }
         markDeferredInitFinished();
+        g_is_deferred_init_worker = false;
     }).detach();
 }
 
@@ -574,6 +708,24 @@ void startDeferredInjectInit() {
 
 extern "C" {
 
+#ifndef _WIN32
+// Cross-TU boundary hooks used by the typed CUDA interpose translation unit.
+// They remain hidden inside libgpufl_inject; only CUDA ABI symbols are public.
+__attribute__((visibility("hidden")))
+void GpuFlightWaitAtCudaLaunchBoundary() {
+    waitAtCudaLaunchBoundary();
+}
+
+__attribute__((visibility("hidden")))
+void GpuFlightWaitAtCudaSyncBoundary() {
+    waitAtCudaSyncBoundary();
+}
+
+__attribute__((visibility("hidden")))
+void GpuFlightWaitAtCudaMemoryBoundary() {
+    waitAtCudaMemoryBoundary();
+}
+#endif
 
 GPUFL_INJECT_EXPORT int InitializeInjectionNvtx2(
     const NvtxGetExportTableFunc_t getExportTable) {
@@ -606,6 +758,59 @@ GPUFL_INJECT_EXPORT int InitializeInjectionNvtx2(
         reinterpret_cast<NvtxFunctionPointer>(nvtx_injection_impl::DomainRangePop);
     return 1;
 }
+
+// NVTX extension-module entry: called once per extension module, on that
+// module's first API call in the target, with a slot table to fill. Slots left
+// untouched are turned into no-ops by the loader.
+//
+// Always returns success. Returning 0 makes the loader dlclose an injection
+// library it loaded dynamically, and in a no-CUDA target this library can be
+// held by exactly that reference while the deferred-init thread is still
+// running. A module this build does not recognize gets no slots filled, which
+// ends in the same no-ops as a failure return - without the unload.
+#ifdef GPUFL_HAS_NVTX_COUNTERS
+GPUFL_INJECT_EXPORT
+int NVTX_API InitializeInjectionNvtxExtension(nvtxExtModuleInfo_t* module_info) {
+    // Every field below is written by the CLIENT's copy of the NVTX headers,
+    // which can be a different version from ours. Nothing is trusted before it
+    // is checked: structSize first, because it is what says the rest of the
+    // struct is even there to read.
+    if (module_info == nullptr ||
+        module_info->structSize < sizeof(nvtxExtModuleInfo_t)) {
+        return 1;
+    }
+    if (module_info->moduleId != NVTX_EXT_COUNTERS_MODULEID ||
+        module_info->compatId != NVTX_EXT_COUNTERS_COMPATID ||
+        module_info->segments == nullptr) {
+        return 1;
+    }
+
+    for (size_t s = 0; s < module_info->segmentsCount; ++s) {
+        nvtxExtModuleSegment_t* segment = module_info->segments + s;
+        // Counters declares exactly one segment (id 0). Filling slots in a
+        // segment we cannot name would be writing function pointers into a
+        // table whose layout we are guessing at.
+        if (segment->segmentId != 0 || segment->functionSlots == nullptr) {
+            continue;
+        }
+        const auto install = [segment](const size_t cbid, const intptr_t fn) {
+            if (cbid < segment->slotCount) segment->functionSlots[cbid] = fn;
+        };
+        install(NVTX3EXT_CBID_nvtxCounterRegister,
+                reinterpret_cast<intptr_t>(&nvtx_counters_impl::CounterRegister));
+        install(NVTX3EXT_CBID_nvtxCounterSampleInt64,
+                reinterpret_cast<intptr_t>(&nvtx_counters_impl::CounterSampleInt64));
+        install(NVTX3EXT_CBID_nvtxCounterSampleNoValue,
+                reinterpret_cast<intptr_t>(&nvtx_counters_impl::CounterSampleNoValue));
+        // Float64, by-reference and batch stay unfilled: the registry is an
+        // unsigned integer accumulator, and the loader turns an unfilled slot
+        // into a no-op, which is the honest answer for a shape we cannot
+        // represent. Filling them to "not lose data" is how a float counter
+        // would start reporting a truncated rate nobody asked for.
+    }
+    return 1;
+}
+#endif  // GPUFL_HAS_NVTX_COUNTERS
 
 // First-chance entry: ld.so runs us before main().
 //
@@ -688,7 +893,7 @@ int GpuFlightInitializeInjectionAfterCuda() {
     return g_init_ok.load(std::memory_order_acquire) ? 1 : 0;
 }
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(GPUFL_TYPED_CUDA_INTERPOSE)
 // Launch/sync symbol interposition (wait-for-init + forward) is Linux/glibc
 // only: it relies on LD_PRELOAD shadowing libcudart's symbols. Windows has
 // no preload interposition, so these wrappers don't exist there - Windows
@@ -772,6 +977,6 @@ int cudaStreamSynchronize(void* stream) {
     static auto* fn = reinterpret_cast<CudaStreamSyncFn>(dlsym(RTLD_NEXT, "cudaStreamSynchronize"));
     return fn ? fn(stream) : 0;
 }
-#endif  // !_WIN32
+#endif  // !defined(_WIN32) && !defined(GPUFL_TYPED_CUDA_INTERPOSE)
 
 }  // extern "C"

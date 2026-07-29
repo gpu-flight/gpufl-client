@@ -1,7 +1,6 @@
 #include "gpufl/backends/nvidia/cupti_backend.hpp"
 
 #include <atomic>
-#include <cstdio>
 #include <string>
 
 #include "gpufl/backends/nvidia/capture_capability_resolver.hpp"
@@ -83,10 +82,30 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
     // run otherwise gives no local hint that a too-short workload starved the
     // sampler. Point at the remedies.
     for (const std::string& warning : BuildCaptureCapabilityWarnings(input)) {
-        std::fprintf(stderr, "%s\n", warning.c_str());
+        GFL_LOG_WARN(warning);
     }
 
-    const CaptureCapabilitiesEvent evt = BuildCaptureCapabilitiesEvent(input);
+    CaptureCapabilitiesEvent evt = BuildCaptureCapabilitiesEvent(input);
+
+    // Scope attribution gave up on some samples. Reported through the
+    // capability matrix rather than the local log alone: a log line is invisible
+    // to whoever reads the session later, and the samples still upload - they
+    // just carry no scope. Without this the dashboard presents partial
+    // attribution as though it were complete.
+    const uint64_t truncated = Monitor::ScopeAttributionTruncated();
+    if (truncated > 0 && Monitor::PmSampleRowsSeen() > 0) {
+        CaptureCapability cap;
+        cap.feature = "scope_attribution";
+        cap.requested = true;
+        cap.status = "partial";
+        cap.reason_code = "scope_attribution_truncated";
+        cap.message = "Evicted " + std::to_string(truncated) +
+                      " completed scope records after the retention cap was reached; "
+                      "PM scope attribution may be incomplete. Raise pm_sampling_max_samples "
+                      "or lengthen the sampling interval so decodes keep up.";
+        evt.capabilities.push_back(std::move(cap));
+    }
+
     rt->logger->write(model::CaptureCapabilitiesModel(evt));
 }
 

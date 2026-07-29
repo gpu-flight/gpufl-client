@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <string>
 
+#include "gpufl/core/events.hpp"
+
 namespace gpufl {
 
 /**
@@ -37,6 +39,52 @@ struct DeepWindowSpec {
     // here rather than in the caller's trigger.
     int64_t     cooldown_ms     = 0;
     std::string name = "deep_window";
+    // What asked for this window, when a rule did. Travels with the spec so the
+    // window carries its own explanation rather than needing a lookup that
+    // would have to survive the window closing.
+    DeepWindowTrigger trigger;
+};
+
+/**
+ * @brief Why a tagged open was refused, when it was.
+ *
+ * A single "refused" answer is not enough for a rule to act on. Cooldown and a
+ * window already being open are ordinary and temporary - the rule should wait
+ * and try again. A deep engine that failed its context-bound preparation is
+ * permanent, and a rule that keeps retrying it reports `never_true` at
+ * shutdown, which says the condition never held when in fact it held and could
+ * not be acted on.
+ */
+enum class OpenRequestStatus {
+    Accepted,
+    /// The engine has not reached its first CUDA context yet. Temporary:
+    /// under Windows injection a rule is installed before CONTEXT_CREATED.
+    PreparationPending,
+    /// Preparation ran and failed. Permanent for this session.
+    EngineUnavailable,
+    /// A window is already open, or another request is queued.
+    Busy,
+    Cooldown,
+    /// The coordinator answered with something that cannot be acted on -
+    /// accepted but no token. Its own value rather than a silent fallback: it
+    /// means a coordinator is broken, and reporting it as cooldown would hide
+    /// that behind a state the user would read as normal.
+    InvalidResult,
+};
+
+const char* toString(OpenRequestStatus status);
+
+struct OpenRequestResult {
+    uint64_t token = 0;                 ///< non-zero only when Accepted
+    /// Defaults to a refusal, not to Accepted. A default-constructed result is
+    /// one nobody filled in, and taking that as "yes, token 0" left the
+    /// evaluator waiting in Opening for a window that was never asked for.
+    OpenRequestStatus status = OpenRequestStatus::InvalidResult;
+
+    /// True only when this result can actually be waited on.
+    bool accepted() const {
+        return status == OpenRequestStatus::Accepted && token != 0;
+    }
 };
 
 /**
@@ -75,9 +123,39 @@ class DeepWindow {
      * records the request here and the next launch performs the open. The
      * mirror of how a deadline reached off the app thread defers its close.
      *
-     * A pending request is replaced, not queued: the newest spec wins.
+     * A request is REFUSED while another is still queued - first one wins.
+     * Replacing it would let a scheduled window cancel a rule's window, or
+     * the reverse, decided by nothing but which ran first.
      */
     static void RequestOpen(const DeepWindowSpec& spec);
+
+    /**
+     * @brief Request an open and get back a token identifying it.
+     *
+     * For callers that must know whether the window they asked for actually
+     * happened - a rule with a window budget cannot count a window that never
+     * opened, and cannot let a manual one consume its budget either.
+     *
+     * Returns 0 when the request is refused outright (a window is already open,
+     * or the cooldown has not elapsed). A non-zero token matches
+     * LastOpenedToken() once, and only once, the requested window opens.
+     */
+    static OpenRequestResult RequestOpenTagged(const DeepWindowSpec& spec);
+
+    /** @brief Token of the most recent open; 0 when it was not from a request. */
+    static uint64_t LastOpenedToken();
+
+    /**
+     * @brief Token of the request still queued, or 0 when none is.
+     *
+     * An open is serviced on a later beat, so "has not opened yet" and "will
+     * never open" look identical without this. A caller that treated the first
+     * as the second would abandon a window that was about to open.
+     */
+    static uint64_t PendingOpenToken();
+
+    /** @brief Monotonic count of windows that actually opened. */
+    static uint64_t OpensCompleted();
 
     /**
      * @brief Same, but not before `delay_ms` have passed.

@@ -44,8 +44,12 @@ struct TraceArgs {
     // gpufl::deepWindow(), so time is the trigger the launcher can offer.
     // Any of them turns on window-only arming (GPUFL_DEEP_ARM=window).
     int64_t  deep_after_ms = 0;      // --deep-after; 0 = arm at the first launch
+    bool     deep_after_set = false; // distinguishes "--deep-after=0" from absent
     int64_t  deep_for_ms = 0;        // --deep-for; duration bound, 0 = none
     uint64_t deep_launches = 0;      // --deep-launches; launch bound, 0 = none
+    // --deep-when: open the window when a metric crosses a threshold, e.g.
+    // "custom.token_rate<1000 for 2s". Empty = time/launch triggered only.
+    std::string deep_when;
     int64_t  deep_cooldown_ms = 0;   // --deep-cooldown; quiet time between windows
     bool     deep_requested = false; // any --deep-* flag was given
     // PC sampling period as a log2 exponent (2^N GPU cycles/sample, valid 5..31;
@@ -124,11 +128,65 @@ struct TraceParseResult {
 
 TraceParseResult parseTraceArgs(const std::vector<std::string>& argv);
 
+/**
+ * Validate execution-mode invariants independently of argument parsing.
+ *
+ * TraceArgs is intentionally a simple value type and is also constructed by
+ * tests and shared launcher code. Keep this check at both the parser boundary
+ * and the execution boundary so those callers cannot create a mixed mode.
+ * Returns an empty string when valid, otherwise a user-facing error.
+ */
+std::string validateTraceExecutionMode(const TraceArgs& args);
+
+/**
+ * How a run decides which engines to select - two modes, never mixed.
+ *
+ * ExplicitPasses is the caller saying "run exactly these engines, relaunching
+ * the target once per pass". AdaptiveDeepWindow is the caller saying "watch for
+ * a condition and profile deeply when it happens" and leaving the engines to
+ * gpufl.
+ *
+ * They cannot be combined because the engine set is fixed before the trigger:
+ * an adaptive window may arm only engines selected when the target starts.
+ * Accepting a --passes list alongside a deep flag would let a user ask for a
+ * base with nothing a window could arm - `--passes=Trace --deep-after=30s`
+ * silently produced a window that armed nothing.
+ */
+enum class CaptureMode {
+    ExplicitPasses,
+    AdaptiveDeepWindow,
+};
+
+CaptureMode resolveCaptureMode(const TraceArgs& args);
+
+/**
+ * The engines an adaptive run SELECTS, and when it arms them.
+ *
+ * Deliberately NOT `ProfilingEngine::Deep`. That enum means "the deepest
+ * analysis this GPU supports" and picks SASS-or-PC plus PM; it does not
+ * guarantee the base Trace activity that `recent_kernel_ms` and
+ * `kernel_launch_rate` are computed from, and its base policy varies with the
+ * path chosen. An adaptive run needs the base pinned.
+ */
+struct AdaptiveCapturePlan {
+    // Always on for the whole run. Kernel-timing conditions need it.
+    std::string base = "Trace";
+    // Selected by the launcher. The engine prepares after the first valid CUDA
+    // context exists and remains idle until a window opens.
+    std::vector<std::string> selected_deep;
+    bool arm_window_only = true;
+};
+
+/** The plan for an adaptive run. Empty selected_deep if mode is explicit. */
+AdaptiveCapturePlan resolveAdaptivePlan(const TraceArgs& args);
+
 // Resolves the ordered capture plan (one isolated CUPTI engine per pass) from
 // parsed trace args. Precedence:
 //   1. explicit --passes    -> the listed engines, one pass each (Deep is the
 //                             Deep engine, not an expansion);
-//   2. otherwise            -> a single Trace pass.
+//   2. any --deep-* flag    -> a single adaptive pass, engines chosen by
+//                             resolveAdaptivePlan;
+//   3. otherwise            -> a single Trace pass.
 // A returned size() > 1 is a multi-pass run (the launcher assigns one
 // analysis_id and labels each pass), shared by the Linux and Windows launchers.
 std::vector<std::string> resolvePassPlan(const TraceArgs& args);

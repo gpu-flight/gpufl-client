@@ -23,6 +23,7 @@
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/deep_window.hpp"
+#include "gpufl/core/deep_window_rules.hpp"
 #include "gpufl/core/logger/logger.hpp"
 #include "gpufl/core/monitor.hpp"  // Monitor::RequestSyntheticDrainAndWait
 #include "gpufl/core/model/perf_metric_model.hpp"
@@ -220,14 +221,14 @@ CUptiResult (*CuptiBackend::get_value())(CUpti_ActivityKind) {
 
 void CuptiBackend::start() {
     if (!initialized_) return;
-    // SASS safe mode keeps kernel-activity OFF (it deadlocks), so orphan launch
-    // metas would become synthetic kernels with host-dispatch timing only. Keep
-    // suppressing that path for SASS. PC sampling intentionally leaves the
-    // synthetic drain enabled so callback-derived kernel rows can be emitted
-    // when kernel activity is unavailable; drainSyntheticKernels filters
-    // non-kernel memcpy/memset API metas before emitting rows.
+    // Establish the timing-provenance contract before any launch callback can
+    // arrive. Real-record modes never convert an unmatched launch into a kernel
+    // row: the launch-to-launch host gap is not GPU execution time. Synthetic
+    // rows remain available only in modes that explicitly use callback-derived
+    // kernels (for example PC sampling).
     SetSuppressOrphanSyntheticKernels(
-        opts_.profiling_engine == ProfilingEngine::SassMetrics);
+        ShouldSuppressOrphanKernelSynthesis(collectsKernelEvents(),
+                                            WillEmitSyntheticKernels()));
     // Windows-injection PC sampling AND Deep both lose their final flush to the
     // process-exit teardown race (gpufl::shutdown runs during DLL detach, after
     // the OS starts tearing the process down, so the shutdown drain can be cut
@@ -746,6 +747,11 @@ void CuptiBackend::EngineLaunchTick() {
     // stop/collect. Closing before the engine tick also spares the engine a
     // beat it would only spend on a window that is already over.
     DeepWindow::OnLaunch();
+    // The HOST launch rate a rule may watch. Gated on a rule wanting it, so a
+    // run without one pays a single relaxed atomic load per launch.
+    if (detail::DeepWindowRules::WantsLaunchFeed()) {
+        detail::DeepWindowRules::NoteKernelLaunch(detail::GetTimestampNs());
+    }
     if (engine_) engine_->onLaunchTick();
 }
 
@@ -760,6 +766,10 @@ void CuptiBackend::DrainProfilingData() {
                          cuCtxSetCurrent(ctx_) == CUDA_SUCCESS;
     engine_->drainData();
     if (rebound) cuCtxSetCurrent(prev);
+}
+
+bool CuptiBackend::DeepEnginesPrepared() const {
+    return engine_ != nullptr && engine_->isPrepared();
 }
 
 std::vector<std::string> CuptiBackend::ArmedEngineWireNames_() const {

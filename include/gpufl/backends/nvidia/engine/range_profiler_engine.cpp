@@ -173,6 +173,10 @@ void RangeProfilerEngine::stop() {
 }
 
 void RangeProfilerEngine::shutdown() {
+    // Cleared first, not with operational_ at the end: the profiler object is
+    // disabled below, and a window opened in between would arm a session that
+    // is already being torn down.
+    session_ready_.store(false, std::memory_order_release);
 #if GPUFL_HAS_PERFWORKS
     if (mode_ == Mode::KernelReplay && kernel_replay_running_) {
         stop();
@@ -606,6 +610,7 @@ bool RangeProfilerEngine::InitPerfworksSession_(bool require_single_pass) {
     }
 
     perf_session_active_ = true;
+    session_ready_.store(true, std::memory_order_release);
     operational_.store(true, std::memory_order_relaxed);
     GFL_LOG_DEBUG("[RangeProfilerEngine] Session initialized for chip: ",
                   ctx_.chip_name);

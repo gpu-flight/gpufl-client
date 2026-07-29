@@ -1,5 +1,7 @@
 #include "gpufl/core/monitor.hpp"
 
+#include "gpufl/core/deep_window_rules.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -13,6 +15,7 @@
 #include <vector>
 
 #include "gpufl/core/activity_record.hpp"
+#include "gpufl/core/counter_provider.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/logger/logger.hpp"
@@ -155,8 +158,11 @@ struct MonitorState {
     detail::MonitorBatchManager batches;
     MetadataManager metadata;
 
-    bool suppressOrphanSyntheticKernels = false;
-    bool drainSyntheticMidRun = false;
+    // Atomic: set by the backend's start() thread and (since the
+    // missing-records suppression) by Monitor::Shutdown while the collector
+    // thread may still be reading it at a drain site.
+    std::atomic<bool> suppressOrphanSyntheticKernels{false};
+    std::atomic<bool> drainSyntheticMidRun{false};
 };
 
 MonitorState g_state;
@@ -458,6 +464,9 @@ void CollectorLoop() {
         // decides how closely a deep window tracks its deadline, and it is a
         // lock-free check when no window is closing.
         if (g_state.adapter) g_state.adapter->serviceDeepWindow();
+        // Immediately after, so a rule that decides to open is serviced on the
+        // very next beat rather than a full loop later.
+        detail::DeepWindowRules::Service();
 
         if (!RecordProcessor::processNext()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -491,6 +500,12 @@ void CollectorLoop() {
 void Monitor::Initialize(const MonitorOptions& opts) {
     if (g_state.initialized.exchange(true)) return;
 
+    // Process-lifetime state must not leak a prior session's capture policy.
+    // The active backend's start() replaces these defaults before callbacks
+    // begin. Monitor/no-backend sessions keep both disabled.
+    SetSuppressOrphanSyntheticKernels(false);
+    SetDrainSyntheticKernelsMidRun(false);
+
     // The engine AFTER env overrides. InitOptions::profiling_engine is the
     // pre-override request, and `gpufl trace --passes X` overrides only the
     // MonitorOptions copy - so anything reporting which engine ran must read
@@ -499,6 +514,10 @@ void Monitor::Initialize(const MonitorOptions& opts) {
                                     std::memory_order_release);
 
     g_monitorBuffer.resetDroppedCount();
+    // Counter slots live for the process, so this session has to baseline them
+    // or it would inherit the previous session's ticks plus anything added
+    // while gpufl was shut down.
+    detail::ActiveCounterProvider()->begin_session();
     g_state.batches.reset();
     g_state.metadata.reset();
     g_state.batches.setSourceCollectionEnabled(opts.enable_source_collection);
@@ -519,11 +538,37 @@ void Monitor::Shutdown() {
 
     if (g_state.adapter) {
         g_state.adapter->stop();
+        // stop() has disabled and flushed activity, so "zero kernel records"
+        // is final. When a real-record session lost every record (observed:
+        // Trace+PM adaptive on Linux, ~1/4 of NVTX-counter-target runs -
+        // enables succeed, sync records flow, kernel records never arrive),
+        // the teardown drains below would resurrect every launch meta as a
+        // synthetic row whose "duration" is the host gap to the next launch,
+        // fabricating a full kernel timeline. Suppress instead: no kernel
+        // rows, and the capability event already says
+        // enabled_but_no_records, so the session stays self-describing.
+        if (IMonitorBackend* b = g_state.adapter->backend();
+            b && b->kernelActivityExpectedButMissing()) {
+            GFL_LOG_ERROR(
+                "[Monitor] Kernel activity was enabled and launches happened, "
+                "but no kernel activity record arrived this session. Kernel "
+                "rows are omitted (a synthetic fallback would carry host-gap "
+                "durations, not kernel time).");
+        }
         g_state.adapter->shutdown();
     }
 
     g_state.collectorRunning.store(false);
     if (g_state.collectorThread.joinable()) g_state.collectorThread.join();
+
+    // AFTER the collector has stopped, and before the logger goes away. Writing
+    // the summary while the collector still runs would let the evaluator open a
+    // window the recorded summary never mentions.
+    // Quality BEFORE Finish: Finish releases the rule session, which destroys
+    // the metric source whose discard count the quality event reports. The
+    // collector is already stopped, so nothing advances between the two.
+    detail::DeepWindowRules::EmitCounterQuality();
+    detail::DeepWindowRules::Finish();
 
     while (RecordProcessor::processNext()) {}
     if (Runtime* rt = runtime(); rt && rt->logger) {
@@ -535,11 +580,20 @@ void Monitor::Shutdown() {
     g_monitorBuffer.resetDroppedCount();
     g_state.batches.clearFlushSink();
     g_state.adapter.reset();
+    // Slots keep their values on purpose: a handle held across this stays
+    // valid. What stops those adds counting twice is the baseline the next
+    // Initialize takes, not clearing them here.
+    detail::ActiveCounterProvider()->end_session();
 }
 
 void Monitor::DrainAndFinalizeForExit() {
     if (!g_state.initialized.exchange(false)) return;
 
+    // No missing-records suppression here (unlike Shutdown): this path runs
+    // BEFORE the backend's stop(), so activity was never flushed and
+    // "zero records seen" may just mean a short run whose only buffer is
+    // still pending - suppressing would drop the synthetic fallback that is
+    // this path's whole reason to exist.
     // The backend's PC sampling cycle thread stops issuing CUPTI reads as soon
     // as process-exit teardown is flagged (PcSamplingEngine::drainData), so it
     // sits idle here and can't fault mid-flush. We deliberately do NOT join it
@@ -549,6 +603,14 @@ void Monitor::DrainAndFinalizeForExit() {
     // the drain/flush/capabilities read already-captured state.
     g_state.collectorRunning.store(false);
     if (g_state.collectorThread.joinable()) g_state.collectorThread.join();
+
+    // Same ordering as Shutdown: the collector is stopped first, so nothing can
+    // advance the rule past what this summary reports.
+    // Quality BEFORE Finish: Finish releases the rule session, which destroys
+    // the metric source whose discard count the quality event reports. The
+    // collector is already stopped, so nothing advances between the two.
+    detail::DeepWindowRules::EmitCounterQuality();
+    detail::DeepWindowRules::Finish();
 
     while (RecordProcessor::processNext()) {}
     if (Runtime* rt = runtime(); rt && rt->logger) {
@@ -570,6 +632,10 @@ void Monitor::DrainAndFinalizeForExit() {
         }
     }
     g_state.batches.clearFlushSink();
+    // Same close-out as Shutdown(). Without it a process that exits through
+    // this path leaves the session marked active, and an embedded host that
+    // re-initialised afterwards would inherit its ticks.
+    detail::ActiveCounterProvider()->end_session();
 }
 
 void Monitor::ReleaseBackendForExit() {
@@ -667,6 +733,14 @@ uint64_t Monitor::AllocateScopeInstanceId() {
 
 int Monitor::OpenScopeDepth() { return g_state.batches.openScopeDepth(); }
 
+int64_t Monitor::CaptureScopeCloseTimestamp(uint64_t instance_id) {
+    return g_state.batches.captureScopeCloseTimestamp(instance_id);
+}
+
+void Monitor::MarkScopeClosePending(uint64_t instance_id, int64_t end_ns) {
+    g_state.batches.markScopeClosePending(instance_id, end_ns);
+}
+
 void Monitor::PushProfileSamples(const std::vector<ProfileSampleInput>& samples) {
     if (samples.empty()) return;
     const uint32_t scope_name_id = g_state.batches.activeScopeNameId();
@@ -711,6 +785,26 @@ void Monitor::PushPmSamples(const std::vector<PmSampleInput>& samples) {
     g_state.batches.pushPmSamplesResolvingScopes(rows);
 }
 
+void Monitor::PublishScopeRetentionWatermark(int64_t ts_ns) {
+    g_state.batches.publishScopeRetentionWatermark(ts_ns);
+}
+
+void Monitor::BeginPmScopeAttribution(int64_t start_ns) {
+    g_state.batches.beginPmScopeAttribution(start_ns);
+}
+
+void Monitor::EndPmScopeAttribution() {
+    g_state.batches.endPmScopeAttribution();
+}
+
+uint64_t Monitor::ScopeAttributionTruncated() {
+    return g_state.batches.scopeAttributionTruncated();
+}
+
+uint64_t Monitor::PmSampleRowsSeen() {
+    return g_state.batches.pmSampleRowsSeen();
+}
+
 void Monitor::EmitPmSamplingConfig(uint32_t device_id, uint32_t interval_us, uint32_t max_samples, const std::string& preset, const std::vector<std::string>& metrics) {
     const Runtime* rt = runtime();
     if (!(rt && rt->logger)) return;
@@ -723,5 +817,8 @@ void Monitor::EmitPmSamplingConfig(uint32_t device_id, uint32_t interval_us, uin
 
 void SetSuppressOrphanSyntheticKernels(const bool suppress) { g_state.suppressOrphanSyntheticKernels = suppress; }
 void SetDrainSyntheticKernelsMidRun(const bool enable) { g_state.drainSyntheticMidRun = enable; }
+bool SuppressOrphanSyntheticKernelsForTesting() {
+    return g_state.suppressOrphanSyntheticKernels.load(std::memory_order_acquire);
+}
 
 }  // namespace gpufl

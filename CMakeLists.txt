@@ -51,6 +51,71 @@ option(BUILD_TESTING "Build the testing tree." ON)
 add_library(gpufl STATIC)
 add_library(gpufl::gpufl ALIAS gpufl)
 
+# One counter registry per PROCESS, not per module. `gpufl` is static and is
+# linked separately into gpufl_inject, the Python extension and any host
+# application, so without this each would hold its own registry - a profiled
+# target would tick one and the injected evaluator would read another. Only a C
+# ABI crosses this boundary; see include/gpufl/abi/gpufl_counter_abi.h.
+add_library(gpufl_counter_runtime SHARED
+    runtime/counter_runtime.cpp
+    include/gpufl/core/counter_registry.cpp
+)
+target_include_directories(gpufl_counter_runtime PUBLIC include)
+
+# Installed unconditionally, NOT only with the Python bindings. A launcher-only
+# install that omits it leaves the injected evaluator and the target application
+# each falling back to their own in-process registry - the exact split this
+# library exists to prevent, and one that shows up as a counter reading Missing
+# forever rather than as a missing file.
+install(TARGETS gpufl_counter_runtime
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
+set_target_properties(gpufl_counter_runtime PROPERTIES
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
+)
+
+# Counters WITHOUT the profiler. What an application links to tick counters a
+# rule can watch (`gpufl::counter("tokens").add(n)`), while the profiling
+# itself arrives from outside via `gpufl trace`. Linking gpufl::gpufl for two
+# lines of instrumentation reads as "I am embedding the SDK" - and the target
+# name is most of the answer to that confusion; nothing here starts a session,
+# and none of the SDK's dependencies (CUPTI, NVML, zlib, OpenSSL, the
+# uploader) are in it.
+#
+# `gpufl` layers ON TOP of this rather than compiling the same sources again:
+# two archives both defining the registry is a duplicate-symbol error for
+# anyone who links both.
+add_library(gpufl_counters STATIC
+    include/gpufl/core/counter_registry.cpp
+    include/gpufl/core/counter_api.cpp
+    include/gpufl/core/counter_provider.cpp
+    include/gpufl/core/debug_logger.cpp
+)
+add_library(gpufl::counters ALIAS gpufl_counters)
+# The ALIAS above only exists in this build tree. The INSTALLED name comes
+# from EXPORT_NAME plus the export namespace, and without this the package
+# would ship the target as gpufl::gpufl_counters while every document says
+# gpufl::counters.
+set_target_properties(gpufl_counters PROPERTIES EXPORT_NAME counters)
+target_include_directories(gpufl_counters
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+)
+target_compile_features(gpufl_counters INTERFACE cxx_std_17)
+# The provider dlopens the shared runtime and the registry uses std::mutex;
+# consumers must not have to know either. Threads::Threads rather than a raw
+# `pthread`: the raw name would be exported verbatim into the targets file and
+# bypass whatever the consumer's toolchain says threading means there.
+find_package(Threads REQUIRED)
+target_link_libraries(gpufl_counters PUBLIC Threads::Threads)
+if(UNIX)
+    target_link_libraries(gpufl_counters PUBLIC ${CMAKE_DL_LIBS})
+endif()
+set_target_properties(gpufl_counters PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 target_include_directories(gpufl
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -78,6 +143,11 @@ target_compile_definitions(gpufl PUBLIC
 
 # Enable PIC for static library (required when linking into shared libraries like Python modules)
 set_target_properties(gpufl PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# PUBLIC: consumers of the full SDK get the counter layer through this link,
+# and the counter sources live in gpufl_counters ONLY - see that target for
+# why they must not be compiled into both archives.
+target_link_libraries(gpufl PUBLIC gpufl_counters)
 
 target_sources(gpufl PRIVATE
     include/gpufl/core/dictionary_manager.cpp
@@ -107,12 +177,16 @@ target_sources(gpufl PRIVATE
     include/gpufl/core/runtime.cpp
     include/gpufl/core/backend_factory.cpp
     include/gpufl/core/monitor_adapter.cpp
+    include/gpufl/core/nvtx_counters.cpp
+    include/gpufl/core/metric_id.cpp
+    include/gpufl/core/deep_window_rule.cpp
+    include/gpufl/core/deep_window_rules.cpp
+    include/gpufl/core/metric_registry.cpp
     include/gpufl/core/monitor_batch_manager.cpp
     include/gpufl/core/monitor_record_builders.cpp
     include/gpufl/core/monitor.cpp
     include/gpufl/core/gpufl.cpp
     include/gpufl/core/common.cpp
-    include/gpufl/core/debug_logger.cpp
     include/gpufl/core/stack_trace.cpp
     include/gpufl/core/itanium_demangle.cpp
     include/gpufl/core/scope_registry.cpp
@@ -147,7 +221,15 @@ else()
         GIT_REPOSITORY https://github.com/madler/zlib.git
         GIT_TAG        v1.3.1
     )
+    # zlib's own install rules cache ABSOLUTE destinations at configure time
+    # (INSTALL_LIB_DIR = ${CMAKE_INSTALL_PREFIX}/lib), so they ignore
+    # `cmake --install --prefix` and try to write into Program Files - which is
+    # how the install-tree consumer test failed before this. Skip them all; the
+    # archive is installed below with a relative destination that the prefix
+    # override can move.
+    set(SKIP_INSTALL_ALL ON)
     FetchContent_MakeAvailable(zlib)
+    unset(SKIP_INSTALL_ALL)
     # zlib.h lives in the source dir; zconf.h is generated in the binary dir.
     # Add both privately to gpufl - consumers never include zlib headers directly.
     target_link_libraries(gpufl PRIVATE zlibstatic)
@@ -188,6 +270,12 @@ FetchContent_Declare(
 # cpp-httplib's CMakeLists defines build flags for its own tests / examples.
 # Turn them off so we only build the header-only interface target.
 set(HTTPLIB_COMPILE OFF CACHE BOOL "" FORCE)
+# HTTPLIB_INSTALL stays ON, deliberately: gpufl's link interface records
+# httplib::httplib, and install(EXPORT gpufl_clientTargets) refuses to
+# generate unless that target is in SOME export set - httplib's own is what
+# satisfies the check. Turning it off fails the whole configure. The price is
+# cpp-httplib's headers and package files landing in the install prefix; the
+# fix that removes them is reworking the SDK export, not this switch.
 FetchContent_MakeAvailable(httplib)
 
 find_package(OpenSSL QUIET)
@@ -635,7 +723,28 @@ if(BUILD_GPUFL_INJECT AND ((UNIX AND NOT APPLE) OR WIN32))
     add_library(gpufl_inject SHARED
         include/gpufl/inject/inject_entry.cpp
     )
+    if(UNIX AND NOT APPLE AND GPUFL_HAS_CUDA)
+        # Compile CUDA boundary wrappers against the toolkit's official ABI.
+        # inject_entry.cpp keeps its header-free fallback for no-CUDA builds.
+        target_sources(gpufl_inject PRIVATE
+            include/gpufl/inject/cuda_interpose_linux.cpp
+        )
+        target_compile_definitions(gpufl_inject PRIVATE
+            GPUFL_TYPED_CUDA_INTERPOSE=1
+        )
+    endif()
     target_link_libraries(gpufl_inject PRIVATE gpufl::gpufl)
+
+    # The injected DLL is loaded by the CUDA driver into the profiled target,
+    # whose DLL search path has no reason to include our bin directory. The
+    # provider resolves the runtime from the injection DLL's own location, so
+    # it has to be there.
+    add_custom_command(TARGET gpufl_inject POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:gpufl_counter_runtime>
+                $<TARGET_FILE_DIR:gpufl_inject>
+        COMMENT "Colocating gpufl_counter_runtime with gpufl_inject"
+    )
     if(CUDAToolkit_INCLUDE_DIRS)
         target_include_directories(gpufl_inject PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
     endif()
@@ -731,6 +840,10 @@ endfunction()
 
 if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR AND BUILD_TESTING)
     enable_testing()
+    # Keep googletest's install rules out of the package: the install-tree
+    # consumer test installs this build into a scratch prefix, and gtest
+    # headers and archives are not something gpufl_client ships.
+    set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
     add_subdirectory(tests)
 endif()
 
@@ -758,6 +871,15 @@ if(BUILD_PYTHON)
 
     target_link_libraries(_gpufl_client PRIVATE gpufl::gpufl)
 
+    # Same for the Python extension: it may be the first module to bind, in
+    # which case it is the one that loads the runtime for the whole process.
+    add_custom_command(TARGET _gpufl_client POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:gpufl_counter_runtime>
+                $<TARGET_FILE_DIR:_gpufl_client>
+        COMMENT "Colocating gpufl_counter_runtime with _gpufl_client"
+    )
+
     # If CUDA is available, link it to the Python module
     if(GPUFL_HAS_CUDA)
         target_link_libraries(_gpufl_client PRIVATE CUDA::cudart)
@@ -776,6 +898,28 @@ include(GNUInstallDirs)
 # Install header files
 install(DIRECTORY include/
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    COMPONENT counters
+)
+
+# Two export sets, deliberately. The generated targets file REFUSES to load
+# when any imported target it references is absent, and the SDK records its
+# private dependencies (httplib, zlib, OpenSSL, CUDA) in its link interface -
+# so shipping counters in the SDK's set made `find_package(gpufl_client)` fail
+# for a counters-only consumer with "httplib::httplib is missing". Measured,
+# not theoretical. The counters set references nothing but system dl/pthread
+# and loads anywhere; the SDK set loads only for consumers that opt in AND
+# have its dependencies.
+install(TARGETS gpufl_counters
+    EXPORT gpufl_countersTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    COMPONENT counters
+    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+install(EXPORT gpufl_countersTargets
+    FILE gpufl_countersTargets.cmake
+    NAMESPACE gpufl::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/gpufl_client
+    COMPONENT counters
 )
 
 install(TARGETS gpufl
@@ -791,3 +935,95 @@ install(EXPORT gpufl_clientTargets
     NAMESPACE gpufl::
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/gpufl_client
 )
+
+# What makes `find_package(gpufl_client)` actually resolve: CMake looks for
+# gpufl_clientConfig.cmake, and a bare Targets file is not one. Version file
+# alongside so `find_package(gpufl_client 1.2)` can hold a floor.
+include(CMakePackageConfigHelpers)
+configure_package_config_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/gpufl_clientConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/gpufl_clientConfig.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/gpufl_client
+)
+write_basic_package_version_file(
+    ${CMAKE_CURRENT_BINARY_DIR}/gpufl_clientConfigVersion.cmake
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
+)
+install(FILES
+    ${CMAKE_CURRENT_BINARY_DIR}/gpufl_clientConfig.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/gpufl_clientConfigVersion.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/gpufl_client
+    COMPONENT counters
+)
+
+# Cross-module counter sharing. Cannot be proven from inside one executable - it
+# needs the Python extension AND the shared runtime as separate modules - so it
+# runs as its own process rather than as a gtest case.
+#
+# Lives here, not in tests/, because tests/ is processed before _gpufl_client is
+# defined; gating on that target there is always false and the check silently
+# never registers - which is how it went unrun in the first place.
+#
+# Staged into the build tree rather than run against the source tree: the
+# extension has to sit INSIDE the package to be importable, and copying a build
+# artifact into source would leave it there for every later run.
+if(BUILD_TESTING AND BUILD_PYTHON AND TARGET _gpufl_client
+   AND TARGET gpufl_counter_runtime
+   AND CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+    # The interpreter the EXTENSION was built for, not whichever one a fresh
+    # find_package picks. A different minor version cannot import a cp3XX
+    # module at all, so the check would silently run against the stub and
+    # report that the registries are split when nothing of the sort happened.
+    if(DEFINED Python_EXECUTABLE)
+        set(GPUFL_XMOD_PYTHON "${Python_EXECUTABLE}")
+    elseif(DEFINED PYTHON_EXECUTABLE)
+        set(GPUFL_XMOD_PYTHON "${PYTHON_EXECUTABLE}")
+    endif()
+    if(GPUFL_XMOD_PYTHON)
+        set(GPUFL_XMOD_STAGE ${CMAKE_BINARY_DIR}/xmod_stage)
+        add_custom_target(counter_xmod_stage ALL
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    ${CMAKE_SOURCE_DIR}/python/gpufl
+                    ${GPUFL_XMOD_STAGE}/python/gpufl
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_FILE:_gpufl_client>
+                    ${GPUFL_XMOD_STAGE}/python/gpufl/
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_FILE:gpufl_counter_runtime>
+                    ${GPUFL_XMOD_STAGE}/python/gpufl/
+            COMMENT "Staging the cross-module counter check")
+        add_dependencies(counter_xmod_stage _gpufl_client gpufl_counter_runtime)
+
+        add_test(NAME counter_cross_module
+                 COMMAND ${GPUFL_XMOD_PYTHON}
+                         ${CMAKE_SOURCE_DIR}/scripts/counter_cross_module_check.py)
+        set_tests_properties(counter_cross_module PROPERTIES
+            ENVIRONMENT "GPUFL_REPO=${GPUFL_XMOD_STAGE}")
+    endif()
+endif()
+
+# The install-tree consumer, as CTest rather than a manual run: install into a
+# scratch prefix, configure the fixture consumer against it with find_package,
+# build it, run it. This is the only test that can see EXPORT_NAME, the Config
+# file install, and the counters export set's isolation from the SDK's
+# dependencies - the unit suite links the build tree and passes no matter what
+# the package ships.
+if(BUILD_TESTING)
+    enable_testing()
+    add_test(NAME counters_package_consumer
+             COMMAND ${CMAKE_COMMAND}
+                     -DGPUFL_BINARY_DIR=${CMAKE_BINARY_DIR}
+                     -DGPUFL_SOURCE_DIR=${CMAKE_SOURCE_DIR}
+                     -DGPUFL_CONFIG=$<CONFIG>
+                     -DGPUFL_GENERATOR=${CMAKE_GENERATOR}
+                     -DGPUFL_PLATFORM=${CMAKE_GENERATOR_PLATFORM}
+                     -DGPUFL_TOOLSET=${CMAKE_GENERATOR_TOOLSET}
+                     -P ${CMAKE_SOURCE_DIR}/tests/package/counters_consumer_check.cmake)
+    # Self-contained: the script builds gpufl_counters itself and installs
+    # ONLY the counters component, so this test does not depend on - and
+    # cannot be broken by - the rest of the project's install rules. A Debug
+    # run without gpufl_counter_runtime built proved why that isolation
+    # matters.
+    set_tests_properties(counters_package_consumer PROPERTIES TIMEOUT 300)
+endif()

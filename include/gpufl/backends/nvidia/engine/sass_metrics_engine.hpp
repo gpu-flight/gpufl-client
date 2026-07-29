@@ -41,6 +41,13 @@ class SassMetricsEngine final : public IProfilingEngine {
 
     bool isOperational() const override { return isEnabled(); }
 
+    /**
+     * Ready to arm inside a window: the profiler is initialized and the metric
+     * config is set. `enabled_` - the actual arm - is deliberately not part of
+     * this; a WindowOnly run is prepared precisely while it is NOT armed.
+     */
+    bool isPrepared() const override { return isEnabled(); }
+
     /** True once at least one SASS metric sample was pushed this session. */
     bool producedData() const override {
         return produced_data_.load(std::memory_order_relaxed);

@@ -109,6 +109,13 @@ class CompositeEngine final : public IProfilingEngine {
         for (auto& e : engines_) if (e && e->stallReasonsUnavailable()) return true;
         return false;
     }
+    /// Any, not all: a combo whose PM prepared and whose SASS did not still
+    /// has something for a window to arm, and refusing there would give up a
+    /// window that would have collected data.
+    bool isPrepared() const override {
+        for (auto& e : engines_) if (e && e->isPrepared()) return true;
+        return false;
+    }
     bool isOperational() const override {
         for (auto& e : engines_) if (e && e->isOperational()) return true;
         return false;

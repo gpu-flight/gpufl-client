@@ -128,6 +128,23 @@ class IProfilingEngine {
     virtual bool stallReasonsUnavailable() const { return false; }
 
     /**
+     * @brief True once all context-bound configuration and storage needed to
+     * arm this engine have been created successfully.
+     *
+     * Window-gated engines use this to distinguish "selected" from "ready to
+     * arm". A conditional rule asks this before it spends a window, so the
+     * default is `false` and every engine that can be armed says so itself.
+     *
+     * Deferring to isOperational() was the wrong default: that one answers
+     * "did this pass start", it defaults to true, and a new engine would
+     * silently inherit a yes it had never earned - the rule would spend its
+     * budget on windows that arm nothing and report `fired` for a window with
+     * no data in it. An engine that forgets to override this collects nothing
+     * from windows, which is visible; the other way round is not.
+     */
+    virtual bool isPrepared() const { return false; }
+
+    /**
      * @brief True if this engine started successfully and is producing
      * data. False if start() was skipped, failed, or the engine is None.
      */

@@ -36,9 +36,11 @@ class PmSamplingEngine final : public IProfilingEngine {
     bool hasInsufficientPrivileges() const override {
         return insufficient_privileges_.load(std::memory_order_relaxed);
     }
+    bool isPrepared() const override {
+        return prepared_.load(std::memory_order_acquire);
+    }
     bool isOperational() const override {
-        return operational_.load(std::memory_order_relaxed) ||
-               attempted_.load(std::memory_order_relaxed);
+        return operational_.load(std::memory_order_relaxed);
     }
     bool producedData() const override {
         return produced_data_.load(std::memory_order_relaxed);
@@ -56,6 +58,8 @@ class PmSamplingEngine final : public IProfilingEngine {
     void EmitConfig_() const;
 
 #if GPUFL_HAS_PERFWORKS
+    bool PreparePmSampling_();
+    bool PreparePmSamplingLocked_();
     bool InitializePmSampling_();
     bool BuildConfigImage_();
     bool ResetCounterDataImage_();
@@ -90,6 +94,7 @@ class PmSamplingEngine final : public IProfilingEngine {
     std::vector<std::string> metrics_;
     bool running_ = false;
     std::atomic<bool> operational_{false};
+    std::atomic<bool> prepared_{false};
     std::atomic<bool> attempted_{false};
     std::atomic<bool> produced_data_{false};
     std::atomic<bool> insufficient_privileges_{false};

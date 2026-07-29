@@ -148,6 +148,24 @@ constexpr const char* kDeepWindowCooldownMs = "GPUFL_DEEP_WINDOW_COOLDOWN_MS";
 // it from --deep-after. Unset = no scheduled window.
 constexpr const char* kDeepAfterMs         = "GPUFL_DEEP_AFTER_MS";
 
+// ── Conditional deep window ─────────────────────────────────────────────────
+// Open a window when a metric crosses a threshold, e.g.
+// "custom.token_rate<1000 for 2s". Separate options rather than one grammar:
+// the rule carries more fields than an expression can hold readably, and each
+// one needs its own validation message when it is refused.
+constexpr const char* kDeepWhen            = "GPUFL_DEEP_WHEN";
+// Window the rate is measured over. Also sizes the warm-up.
+constexpr const char* kDeepRateWindowMs    = "GPUFL_DEEP_RATE_WINDOW_MS";
+// How long the source may go quiet before its readings stop counting as
+// evidence. Validated against rate window + sustained, since a value shorter
+// than those can never fire.
+constexpr const char* kDeepStaleAfterMs    = "GPUFL_DEEP_STALE_AFTER_MS";
+// Hysteresis: the value the metric must recover past before the rule may fire
+// again. Defaults to the trigger threshold, which is plain "condition false".
+constexpr const char* kDeepRearmAt         = "GPUFL_DEEP_REARM_AT";
+// How many windows one rule may open in a session.
+constexpr const char* kDeepMaxWindows      = "GPUFL_DEEP_MAX_WINDOWS";
+
 // ── SASS metrics knobs ──────────────────────────────────────────────────────
 constexpr const char* kSassMetricsOnly              = "GPUFL_SASS_METRICS_ONLY";
 constexpr const char* kSassForceSafeActivity        = "GPUFL_SASS_FORCE_SAFE_ACTIVITY";
@@ -176,6 +194,9 @@ constexpr const char* kMonitorIntervalMs = "GPUFL_MONITOR_INTERVAL_MS";
 // specific spots - centralized so the exact spelling lives in one place.
 constexpr const char* kCudaModuleLoading   = "CUDA_MODULE_LOADING";
 constexpr const char* kCudaInjection64Path = "CUDA_INJECTION64_PATH";
+// Explicit location of gpufl_counter_runtime, for deployment layouts where it
+// sits beside neither the calling module nor the injection library.
+constexpr const char* kCounterRuntimePath = "GPUFL_COUNTER_RUNTIME_PATH";
 constexpr const char* kNvtxInjection64Path = "NVTX_INJECTION64_PATH";
 constexpr const char* kCudaPath            = "CUDA_PATH";
 constexpr const char* kLdPreload           = "LD_PRELOAD";

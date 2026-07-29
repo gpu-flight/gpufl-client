@@ -87,6 +87,19 @@ class IMonitorBackend {
      */
     virtual bool IsProfilingOperational() const { return true; }
 
+    /**
+     * @brief True when this session expected REAL kernel activity records
+     *        (kernel activity enabled, not a synthesize-by-design mode),
+     *        launches happened, and yet zero records arrived. Only
+     *        meaningful after stop() has disabled + flushed activity, when
+     *        "zero" is final. Monitor::Shutdown consults this to suppress
+     *        the orphan synthetic-kernel drain: with every record missing,
+     *        that drain would fabricate a full kernel timeline out of
+     *        host launch-to-launch gaps (sleeps included) and present it
+     *        as measured kernel time. Default: false (nothing to suppress).
+     */
+    virtual bool kernelActivityExpectedButMissing() const { return false; }
+
     virtual void OnScopeStart(const char* name) {}
     virtual void OnScopeStop(const char* name) {}
 
@@ -151,6 +164,29 @@ class IMonitorBackend {
      * context current itself.
      */
     virtual void ServiceDeepWindow() {}
+
+    /**
+     * @brief Is any engine that a window could arm actually prepared?
+     *
+     * The capability gate for conditional windows. Checking the configured
+     * engine enum is necessary but not sufficient: a Trace-only run resolves to
+     * a valid engine and still arms nothing inside a window, so a rule would
+     * spend its whole budget opening windows that collect no deep data.
+     *
+     * Answers about what was PREPARED, not what is currently armed - under
+     * WindowOnly nothing is armed until a window opens, which is precisely when
+     * the answer is needed.
+     */
+    virtual bool DeepEnginesPrepared() const { return false; }
+
+    /**
+     * @brief Is preparation waiting for the target's first CUDA context?
+     *
+     * Windows injection installs conditional rules before CONTEXT_CREATED.
+     * Pending is therefore a valid install-time state, but never sufficient to
+     * open a window; actual opens still require DeepEnginesPrepared().
+     */
+    virtual bool DeepEnginePreparationPending() const { return false; }
 
     virtual void OnPerfScopeStart(const char* name) {}
     virtual void OnPerfScopeStop(const char* name) {}

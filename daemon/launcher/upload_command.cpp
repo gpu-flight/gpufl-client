@@ -121,9 +121,17 @@ int runUpload(const UploadArgs& args) {
         return 3;
     }
     const int cap_ms = args.timeout_s > 0 ? args.timeout_s * 1000 : 300000;
-    if (agent.waitForExit(cap_ms)) {
-        if (!args.quiet) std::printf("Upload complete.\n");
-        return 0;
+    const AgentWaitResult wait = agent.waitForExit(cap_ms);
+    if (wait.exited) {
+        if (wait.succeeded()) {
+            if (!args.quiet) std::printf("Upload complete.\n");
+            return 0;
+        }
+        std::fprintf(stderr,
+                     "gpufl upload: agent exited before completing the upload "
+                     "(exit code %d)\n",
+                     wait.exit_code);
+        return 4;
     }
     agent.stop();
     std::fprintf(stderr,
