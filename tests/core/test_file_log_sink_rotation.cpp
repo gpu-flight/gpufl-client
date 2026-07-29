@@ -786,11 +786,11 @@ TEST_F(FileLogSinkRotationTest, CloseDrainsPendingExports) {
     EXPECT_FALSE(fs::exists(tmpDir()));
 }
 
-// The max_files cap deletes the OLDEST published windows regardless of
-// whether anything uploaded them - that is potential data loss and must be
-// counted, never silent. (10 s cadence at the default cap of 100 is only
-// ~17 min of agent outage tolerance.)
-TEST_F(FileLogSinkRotationTest, PruneOnPublishIsCountedAsDataLoss) {
+// The writer cannot know whether the backend durably accepted a window.
+// Even a deliberately tiny legacy max_files setting must not delete data;
+// the agent removes ACKed payloads and leaves metadata tombstones.
+TEST_F(FileLogSinkRotationTest,
+       ClientNeverPrunesPublishedWindowsBeforeAgentAck) {
     gpufl::FileLogSink sink(options(/*rotate_after_ms=*/5000,
                                     /*rotate_bytes=*/0,
                                     /*max_files=*/2));
@@ -799,13 +799,13 @@ TEST_F(FileLogSinkRotationTest, PruneOnPublishIsCountedAsDataLoss) {
         sink.write(gpufl::Channel::Device, R"({"w":1})");
         fake_now_ms_ += 5000;
         sink.rotateDueWindows();
-    sink.waitForPendingExports();
+        sink.waitForPendingExports();
     }
-    // Three windows published, cap 2: the oldest was pruned.
-    EXPECT_EQ(publishedWindows("device"), 2u);
+    EXPECT_EQ(publishedWindows("device"), 3u);
     EXPECT_EQ(sink.rotationStats().by_time, 3u);
-    EXPECT_EQ(sink.rotationStats().pruned_windows, 1u);
-    EXPECT_FALSE(fs::exists(sessionDir() / "device.1.log.gz"));
+    EXPECT_EQ(sink.rotationStats().pruned_windows, 0u);
+    EXPECT_TRUE(fs::exists(sessionDir() / "device.1.log.gz"));
+    EXPECT_TRUE(fs::exists(sessionDir() / "device.2.log.gz"));
     EXPECT_TRUE(fs::exists(sessionDir() / "device.3.log.gz"));
 }
 

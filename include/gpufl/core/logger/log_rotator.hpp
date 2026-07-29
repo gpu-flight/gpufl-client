@@ -74,9 +74,10 @@ class LogFileRotator {
      * truncate the raw authority, then publish. This is the same crash-safe
      * transaction used by the asynchronous mid-run path.
      *
-     * `pruned_windows` (optional out): how many OLD published windows the
-     * max_files cap deleted while publishing this one - un-uploaded data
-     * loss the caller must surface, not swallow.
+     * `pruned_windows` is retained as a compatibility out-parameter and is
+     * left unchanged. Published payload deletion belongs to the agent after
+     * a durable backend ACK; the writer must never infer delivery from a
+     * local file-count limit.
      *
      * SYNCHRONOUS - compression and publish retries happen on the calling
      * thread. Used by the shutdown path only. Mid-run rotation splits this

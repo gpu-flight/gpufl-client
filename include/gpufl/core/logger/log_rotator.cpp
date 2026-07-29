@@ -107,21 +107,13 @@ LogFileRotator::RetireResult LogFileRotator::retireActiveWindow(
 LogFileRotator::ExportWindowResult LogFileRotator::exportRetiredWindow(
     const std::size_t index, std::size_t* pruned_windows,
     const WindowTiming& timing) const {
+    // Compatibility-only out parameter. Published payload retention is no
+    // longer inferred from a local file-count cap: the agent deletes a
+    // payload only after the backend ACKs its immutable window identity.
+    (void)pruned_windows;
     const std::string retired = retiredPath(index);
     std::error_code ec;
     if (!fs::exists(retired, ec)) return ExportWindowResult::NoData;
-
-    const auto prune = [&]() {
-        const std::size_t removed = pruneLogWindows(
-            fs::path(sessionDir()), opt_.channel_name, opt_.max_files);
-        if (removed > 0) {
-            if (pruned_windows) *pruned_windows += removed;
-            GFL_LOG_ERROR("[Logger] window cap (max_files=", opt_.max_files,
-                          ") deleted ", removed, " old '", opt_.channel_name,
-                          "' window(s) that may not have been uploaded yet. "
-                          "Raise max_files or drain windows faster.");
-        }
-    };
 
     if (!compressor_) {
         const std::string published = rotatedPath(index);
@@ -140,7 +132,6 @@ LogFileRotator::ExportWindowResult LogFileRotator::exportRetiredWindow(
             // tombstone and must match this same staged payload.
             return ExportWindowResult::StagedForSalvage;
         }
-        prune();
         return ExportWindowResult::Published;
     }
 
@@ -200,7 +191,6 @@ LogFileRotator::ExportWindowResult LogFileRotator::exportRetiredWindow(
     if (!publishWithRetry_(staging, published)) {
         return ExportWindowResult::StagedForSalvage;
     }
-    prune();
     return ExportWindowResult::Published;
 }
 
