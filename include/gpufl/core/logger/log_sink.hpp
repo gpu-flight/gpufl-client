@@ -48,6 +48,15 @@ class ILogSink {
      * Must not throw.
      */
     virtual void close() = 0;
+
+    /**
+     * Periodic service beat: publish any transport window whose deadline
+     * has passed even though no new write arrived (a channel that wrote
+     * once and went quiet would otherwise hold its window open until the
+     * next write or shutdown). Called from the collector's flush beat.
+     * Default: no-op - only sinks with time-windowed output care.
+     */
+    virtual void rotateDueWindows() {}
 };
 
 }  // namespace gpufl

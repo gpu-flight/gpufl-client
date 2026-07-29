@@ -49,6 +49,7 @@
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/host_info.hpp"
 #include "gpufl/core/json/json.hpp"
+#include "gpufl/core/logger/file_compressor.hpp"
 #include "gpufl/core/logger/log_salvage.hpp"
 #include "gpufl/core/logger/logger.hpp"
 #include "gpufl/core/version.hpp"
@@ -199,12 +200,26 @@ RepairResult repairOrphanLogIfNeeded(const fs::path& log_path) {
     if (!fs::exists(log_path, ec)) return {RepairResult::Keep, log_path};
     const fs::path gz_path = fs::path(log_path.string() + ".gz");
     if (fs::exists(gz_path, ec)) {
-        // Both files exist - .log is the stale duplicate from a
-        // failed compress-on-shutdown. Remove it and skip; the .gz
-        // entry will be added by the iterator's other pass.
+        // Both files exist. The `.gz` is only the authoritative copy if it
+        // actually decodes: a compress that died midway, or a rename that
+        // reached the disk before its data, leaves a truncated or empty
+        // `.gz` whose mere EXISTENCE used to be enough to delete the raw -
+        // destroying the only complete copy of the window.
+        if (gpufl::isValidGzipFile(gz_path)) {
+            std::error_code rm_ec;
+            fs::remove(log_path, rm_ec);
+            return {RepairResult::Skip, log_path};
+        }
+        GFL_LOG_ERROR("[Upload] '", gz_path.string(),
+                      "' is not a readable gzip; rebuilding it from the raw "
+                      "window '", log_path.string(), "'.");
         std::error_code rm_ec;
-        fs::remove(log_path, rm_ec);
-        return {RepairResult::Skip, log_path};
+        fs::remove(gz_path, rm_ec);
+        if (fs::exists(gz_path, rm_ec)) {
+            // Cannot replace it and cannot trust it - keep both rather than
+            // choose one, and let the operator see the raw file.
+            return {RepairResult::Keep, log_path};
+        }
     }
 
     // Empty file → just remove. No data to preserve.
@@ -213,36 +228,19 @@ RepairResult repairOrphanLogIfNeeded(const fs::path& log_path) {
         return {RepairResult::Skip, log_path};
     }
 
-    // Inline gzip using zlib. Read source, compress, write dest, then
-    // remove source on success.
-    std::ifstream in(log_path, std::ios::binary);
-    if (!in) return {RepairResult::Keep, log_path};
-    gzFile out = gzopen(gz_path.string().c_str(), "wb");
-    if (!out) return {RepairResult::Keep, log_path};
-    char buf[64 * 1024];
-    bool ok = true;
-    while (in) {
-        in.read(buf, sizeof(buf));
-        const auto n = in.gcount();
-        if (n > 0) {
-            if (gzwrite(out, buf, static_cast<unsigned>(n)) != static_cast<int>(n)) {
-                ok = false;
-                break;
-            }
-        }
-    }
-    gzclose(out);
-    in.close();
-    if (!ok) {
-        fs::remove(gz_path, ec);
+    // Use the shared compressor contract. The old inline copy ignored input
+    // read errors and gzclose(), wrote under the completed name, and deleted
+    // the raw even when finalization failed.
+    GzipFileCompressor compressor;
+    if (!compressor.compress(log_path.string())) {
         return {RepairResult::Keep, log_path};
     }
-    fs::remove(log_path, ec);
     return {RepairResult::Keep, gz_path};
 }
 
 std::vector<DiscoveredFile> discoverFiles(const PathParts& parts) {
     std::vector<DiscoveredFile> out;
+    std::unordered_set<std::string> discovered_paths;
     std::error_code ec;
     if (!fs::exists(parts.directory, ec) || !fs::is_directory(parts.directory, ec)) {
         return out;
@@ -288,6 +286,12 @@ std::vector<DiscoveredFile> discoverFiles(const PathParts& parts) {
             }
             df.path = final_path;
             df.session_id = sid;
+            // A raw entry repaired into `.gz` can be followed by that newly
+            // created gzip in the same directory iterator. Treat the path as
+            // one transport window, not two upload jobs.
+            const std::string path_key =
+                final_path.lexically_normal().generic_string();
+            if (!discovered_paths.insert(path_key).second) continue;
             out.push_back(std::move(df));
         }
     }
@@ -1037,6 +1041,7 @@ std::vector<SessionInfo> discoverSessions(const std::vector<DiscoveredFile>& fil
 
 UploadResult uploadLogs(const UploadOptions& opts) {
     UploadResult result;
+    bool transport_loss_detected = false;
     const auto upload_start = std::chrono::steady_clock::now();
     auto elapsedMs = [&]() -> long long {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1127,23 +1132,38 @@ UploadResult uploadLogs(const UploadOptions& opts) {
         GFL_LOG_DEBUG("[uploadLogs] salvaged ", salvaged.salvaged,
                       " temp log file(s), deferred ", salvaged.deferred);
     }
+    const auto reportTransportLoss = [&](const std::size_t lost_windows) {
+        if (lost_windows == 0) return;
+        transport_loss_detected = true;
+        result.warnings.emplace_back(
+            "uploadLogs: " + std::to_string(lost_windows) +
+            " transport window(s) were unrecoverable and discarded before "
+            "upload; the selected session data is incomplete.");
+        GFL_LOG_ERROR("[uploadLogs] ", lost_windows,
+                      " unrecoverable window(s) discarded - uploaded data is "
+                      "incomplete.");
+    };
 
     auto files = discoverFiles(parts);
     if (files.empty()) {
+        reportTransportLoss(
+            static_cast<std::size_t>(salvaged.lost_windows));
         GFL_LOG_DEBUG("[uploadLogs] no session subdirs found in ",
                       parts.directory.string());
-        result.success = true;
+        result.success = !transport_loss_detected;
         result.elapsed_ms = elapsedMs();
         return result;
     }
 
     const auto all_sessions = discoverSessions(files);
     if (all_sessions.empty()) {
+        reportTransportLoss(
+            static_cast<std::size_t>(salvaged.lost_windows));
         result.warnings.emplace_back(
             "uploadLogs: no job_start events found in " + parts.directory.string() +
             " - the directory has files matching the prefix but none carry "
             "a session header. Was the session aborted before init?");
-        result.success = true;  // nothing to upload → not a failure, just a no-op
+        result.success = !transport_loss_detected;
         result.elapsed_ms = elapsedMs();
         return result;
     }
@@ -1197,7 +1217,7 @@ UploadResult uploadLogs(const UploadOptions& opts) {
             if (targets.empty()) {
                 // Every session in the dir is already in the cursor.
                 // No work to do - that's a success, not a failure.
-                result.success = true;
+                result.success = !transport_loss_detected;
                 result.elapsed_ms = elapsedMs();
                 GFL_LOG_DEBUG("[uploadLogs] all sessions already in cursor - no-op.");
                 return result;
@@ -1224,6 +1244,18 @@ UploadResult uploadLogs(const UploadOptions& opts) {
     }
 
     // ── HTTP client setup ────────────────────────────────────────────
+    // Salvage scans every session under the spool root, but a default upload
+    // targets only the newest session. Do not let an unrelated old session's
+    // durable loss marker fail a healthy selected upload. Conversely, count
+    // markers after cursor filtering so already-completed sessions skipped by
+    // --all-sessions do not become incomplete retroactively.
+    std::size_t selected_lost_windows = 0;
+    for (const auto& target : targets) {
+        selected_lost_windows +=
+            transportLossMarkerCount(parts.directory / target.session_id);
+    }
+    reportTransportLoss(selected_lost_windows);
+
     UrlParts url;
     if (!parseUrl(opts.backend_url, url)) {
         result.warnings.emplace_back(
@@ -1538,7 +1570,10 @@ UploadResult uploadLogs(const UploadOptions& opts) {
         // file shipped (a skipped file is a hole - leave the session
         // incomplete so a re-run retries it). Persisted after each
         // session so a mid-run crash keeps the finished ones skipped.
-        if (session_ok && posted_anything && !session_had_skips) {
+        const bool session_has_transport_loss =
+            transportLossMarkerCount(parts.directory / current_sid) > 0;
+        if (session_ok && posted_anything && !session_had_skips &&
+            !session_has_transport_loss) {
             CompletedSession cs;
             cs.completed_at_iso8601 = nowIso8601Utc();
             cs.events = events_from_session;
@@ -1563,7 +1598,8 @@ UploadResult uploadLogs(const UploadOptions& opts) {
     // wasn't an ancient pre-v1.2 one missing the /stream endpoint. The
     // 404 case has already pushed a clear migration-hint warning into
     // result.warnings via flushChunk's OldBackend404 branch.
-    result.success = !auth_failed && !budget_aborted && !old_backend_404;
+    result.success = !auth_failed && !budget_aborted && !old_backend_404 &&
+                     !transport_loss_detected;
     result.elapsed_ms = elapsedMs();
     maybeLogProgress(/*force=*/true);
 

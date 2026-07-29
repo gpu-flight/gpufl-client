@@ -1025,6 +1025,94 @@ TEST(UploadLogs, SalvagesSessionTmpBeforeDiscovery) {
     fs::remove_all(tmp);
 }
 
+TEST(UploadLogs, DurableTransportLossMarkerPreventsSuccessfulCompletion) {
+    const fs::path tmp =
+        fs::temp_directory_path() / "gpufl_upload_test_transport_loss";
+    fs::remove_all(tmp);
+    const std::string log_path = makeMinimalSession(tmp, "lost");
+    writeLog(tmp / "lost" / ".gpufl-transport-loss.device.3.json", {
+        R"({"schema_version":1,"type":"transport_window_loss","channel":"device","window_index":3,"reason":"empty_gzip_no_raw"})",
+    });
+
+    CaptureServer srv;
+    gpufl::UploadOptions opts;
+    opts.log_path        = log_path;
+    opts.backend_url     = srv.base_url();
+    opts.api_key         = "x";
+    opts.report_progress = false;
+
+    const auto result = gpufl::uploadLogs(opts);
+
+    EXPECT_FALSE(result.success);
+    EXPECT_FALSE(result.warnings.empty());
+    EXPECT_EQ(srv.snapshot().size(), 3u)
+        << "healthy windows should still upload even though completion fails";
+    EXPECT_TRUE(fs::exists(
+        tmp / "lost" / ".gpufl-transport-loss.device.3.json"));
+
+    fs::remove_all(tmp);
+}
+
+TEST(UploadLogs, OldSessionLossDoesNotFailTheSelectedLatestSession) {
+    const fs::path tmp =
+        fs::temp_directory_path() / "gpufl_upload_test_unrelated_loss";
+    fs::remove_all(tmp);
+    (void)makeMinimalSession(tmp, "old");
+    (void)makeMinimalSession(tmp, "z_latest");
+    writeLog(tmp / "old" / ".gpufl-transport-loss.device.3.json", {
+        R"({"schema_version":1,"type":"transport_window_loss","channel":"device","window_index":3,"reason":"empty_gzip_no_raw"})",
+    });
+
+    CaptureServer srv;
+    gpufl::UploadOptions opts;
+    opts.log_path        = tmp.string();
+    opts.backend_url     = srv.base_url();
+    opts.api_key         = "x";
+    opts.report_progress = false;
+
+    const auto result = gpufl::uploadLogs(opts);
+
+    EXPECT_TRUE(result.success);
+    EXPECT_TRUE(result.warnings.empty());
+    EXPECT_EQ(srv.allEvents().size(), 6u)
+        << "the default upload should contain only the healthy latest session";
+    for (const auto& [type, session_id] : srv.allEvents()) {
+        (void)type;
+        EXPECT_EQ(session_id, "z_latest");
+    }
+
+    fs::remove_all(tmp);
+}
+
+TEST(UploadLogs, OrphanRawRepairProducesOneValidatedUploadFile) {
+    const fs::path tmp =
+        fs::temp_directory_path() / "gpufl_upload_test_orphan_repair";
+    fs::remove_all(tmp);
+    fs::create_directories(tmp / "orphan");
+    writeLog(tmp / "orphan" / "device.log", {
+        R"({"type":"job_start","session_id":"orphan","ts_ns":1})",
+        R"({"type":"shutdown","session_id":"orphan","ts_ns":2})",
+    });
+
+    CaptureServer srv;
+    gpufl::UploadOptions opts;
+    opts.log_path        = tmp.string();
+    opts.backend_url     = srv.base_url();
+    opts.api_key         = "x";
+    opts.report_progress = false;
+
+    const auto result = gpufl::uploadLogs(opts);
+
+    EXPECT_TRUE(result.success);
+    EXPECT_EQ(srv.snapshot().size(), 1u)
+        << "the repaired path and its directory entry must be deduplicated";
+    EXPECT_TRUE(fs::exists(tmp / "orphan" / "device.log.gz"));
+    EXPECT_FALSE(fs::exists(tmp / "orphan" / "device.log"));
+    EXPECT_EQ(srv.allEvents().size(), 2u);
+
+    fs::remove_all(tmp);
+}
+
 TEST(UploadLogs, ManyEventsShipInOneRequestPerFile) {
     // U1 regression guard: a file with far more lines than the old
     // 5000-line chunk cap still ships in exactly ONE request - the

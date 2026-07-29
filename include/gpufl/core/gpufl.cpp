@@ -331,6 +331,11 @@ bool init(const InitOptions& opts) {
             logOpts.rotate_bytes = static_cast<std::size_t>(bytes);
         }
     }
+    if (const char* v = std::getenv(env::kLogRotateAfterMs)) {
+        if (const auto ms = std::strtoll(v, nullptr, 10); ms > 0) {
+            logOpts.rotate_after_ms = static_cast<std::int64_t>(ms);
+        }
+    }
 
     g_lastLogPath = logPath;
     g_lastSessionId = rt->session_id;

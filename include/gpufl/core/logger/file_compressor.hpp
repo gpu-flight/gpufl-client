@@ -4,6 +4,16 @@
 
 namespace gpufl {
 
+/**
+ * Remove a file with the short Windows sharing-violation retry used by the
+ * logger, falling back to truncation when a holder prevents unlinking.
+ *
+ * Returns true only when the path is gone or is an empty husk. Callers use
+ * this to preserve the single-authority spool contract: a completed gzip
+ * must never be published while an identical non-empty raw window remains.
+ */
+bool removeOrTruncateFile(const std::string& path);
+
 class IFileCompressor {
    public:
     virtual ~IFileCompressor() = default;

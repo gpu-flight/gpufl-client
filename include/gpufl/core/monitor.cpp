@@ -479,6 +479,12 @@ void CollectorLoop() {
                     drainSyntheticKernels(rt, detail::GetTimestampNs() - kMidRunSyntheticGraceNs);
                 }
                 g_state.batches.flushAll();
+                // AFTER the batch flush, so this beat's data lands in the
+                // window being closed. This is the deadline path for the
+                // time trigger: without it a channel that wrote once and
+                // went quiet keeps its window in `.tmp` until the next
+                // write or shutdown.
+                rt->logger->rotateDueWindows();
             }
             if (g_state.adapter) g_state.adapter->drainProfilingData();
             lastFlush = std::chrono::steady_clock::now();

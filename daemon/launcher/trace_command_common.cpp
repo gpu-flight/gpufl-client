@@ -288,37 +288,21 @@ bool appendLineToGzipLog(const fs::path& gz_path, const std::string& line) {
     return true;
 }
 
-// Highest existing system.<k>.log[.gz] window index under session_dir (0 if none).
-int highestSystemWindowIndex(const fs::path& session_dir) {
-    int max_idx = 0;
-    std::error_code ec;
-    for (const auto& entry : fs::directory_iterator(session_dir, ec)) {
-        if (ec) break;
-        if (!entry.is_regular_file(ec)) continue;
-        std::string name = entry.path().filename().string();
-        if (name.size() > 3 && name.compare(name.size() - 3, 3, ".gz") == 0) {
-            name.resize(name.size() - 3);
-        }
-        if (name.size() <= 4 || name.compare(name.size() - 4, 4, ".log") != 0) continue;
-        name.resize(name.size() - 4);                  // "system" or "system.<k>"
-        if (name.rfind("system.", 0) != 0) continue;   // skip the non-indexed "system"
-        const std::string suffix = name.substr(std::string("system.").size());
-        if (suffix.empty() ||
-            !std::all_of(suffix.begin(), suffix.end(),
-                         [](unsigned char c) { return std::isdigit(c); })) {
-            continue;
-        }
-        try { max_idx = std::max(max_idx, std::stoi(suffix)); } catch (...) {}
-    }
-    return max_idx;
-}
-
 bool appendSyntheticShutdown(const fs::path& session_dir,
                              const std::string& session_id,
                              const SessionLifecycleInfo& info,
                              const SyntheticShutdownContext& context) {
     const std::string line = syntheticShutdownLine(session_id, info, context);
-    const std::string base = "system." + std::to_string(highestSystemWindowIndex(session_dir) + 1) + ".log";
+    // Allocate through the shared allocator, which also counts windows still
+    // sitting in `.tmp`. highestSystemWindowIndex() only scans the session
+    // ROOT, so a deferred window in `.tmp` did not reserve its index and the
+    // marker could be written onto it - one of the two then gets deleted as
+    // a "duplicate", losing either a full window or the shutdown record the
+    // backend needs to finalize the session.
+    const std::string base =
+        "system." +
+        std::to_string(gpufl::nextLogWindowIndex(session_dir, "system")) +
+        ".log";
     const fs::path window_gz = session_dir / (base + ".gz");
     std::error_code ec;
     if (fs::exists(window_gz, ec)) {
@@ -425,6 +409,17 @@ void signalSessionsComplete(const fs::path& output_dir,
         if (!isSessionDirectory(entry)) continue;
 
         const std::string session_id = entry.path().filename().string();
+        const auto lost_windows = transportLossMarkerCount(entry.path());
+        if (lost_windows > 0) {
+            if (!quiet) {
+                std::fprintf(
+                    stderr,
+                    "gpufl trace --upload: NOT signalling session-complete "
+                    "for %s: %zu transport window(s) are known lost\n",
+                    session_id.c_str(), lost_windows);
+            }
+            continue;
+        }
         futures.push_back(std::async(std::launch::async, [config, session_id]() {
             return std::make_pair(session_id, postSessionComplete(config, session_id));
         }));
@@ -486,6 +481,19 @@ int repairUncompressedLogs(const fs::path& root) {
 
         const fs::path gz_path(path.string() + ".gz");
         std::error_code exists_ec;
+        // EXISTS is not VALID. A compress that died midway - or a rename that
+        // hit the disk before its data - leaves a truncated or empty `.gz`,
+        // and deleting the raw because that file is merely present destroys
+        // the only complete copy of the window. Re-compress from the raw
+        // instead when the `.gz` does not decode.
+        if (fs::exists(gz_path, exists_ec) && !isValidGzipFile(gz_path)) {
+            std::fprintf(stderr,
+                         "[gpufl] warning: %s is not a readable gzip - "
+                         "rebuilding it from %s\n",
+                         gz_path.string().c_str(), path.string().c_str());
+            std::error_code rm_ec;
+            fs::remove(gz_path, rm_ec);
+        }
         if (fs::exists(gz_path, exists_ec)) {
             std::error_code remove_ec;
             if (!removeWithRetry(path, remove_ec)) {

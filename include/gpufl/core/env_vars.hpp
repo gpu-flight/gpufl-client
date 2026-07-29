@@ -82,6 +82,13 @@ constexpr const char* kDebugOutput          = "GPUFL_DEBUG";
 // exercises rotation without writing tens of MB.
 constexpr const char* kLogRotateBytes       = "GPUFL_LOG_ROTATE_BYTES";
 
+// Opt-in (>0): also rotate a channel window once the data in it spans this
+// many milliseconds (monotonic clock, measured from the window's first
+// write). Publishes transport windows on a time cadence so low-volume
+// channels stop sitting in `.tmp` until 64 MiB accumulates - the agent
+// ships each finished window mid-run. An empty window is never rotated.
+constexpr const char* kLogRotateAfterMs     = "GPUFL_LOG_ROTATE_AFTER_MS";
+
 // Opt-in ("1", "true", "yes", "on"): flush each log line immediately.
 // Useful when diagnosing whether missing records are buffered in userspace.
 constexpr const char* kFlushLogsAlways      = "GPUFL_FLUSH_LOGS_ALWAYS";

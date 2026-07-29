@@ -1,9 +1,7 @@
 #include "gpufl/core/logger/log_rotator.hpp"
 
-#include <algorithm>
 #include <chrono>
 #include <filesystem>
-#include <fstream>
 #include <sstream>
 #include <thread>
 
@@ -44,99 +42,185 @@ std::string LogFileRotator::rotatedPath(std::size_t index) const {
     return oss.str();
 }
 
-LogFileRotator::ExportWindowResult LogFileRotator::exportWindow_() const {
-    const std::string active = activePath();
+std::string LogFileRotator::retiredPath(std::size_t index) const {
+    std::ostringstream oss;
+    oss << tempDir() << "/" << opt_.channel_name << "." << index << ".log";
+    return oss.str();
+}
+
+std::size_t LogFileRotator::nextWindowIndex() const {
+    return nextLogWindowIndex(fs::path(sessionDir()), opt_.channel_name);
+}
+
+bool LogFileRotator::publishWithRetry_(const std::string& from,
+                                       const std::string& to) const {
     std::error_code ec;
-    if (!fs::exists(active, ec)) return ExportWindowResult::NoData;
-    if (fs::file_size(active, ec) == 0) return ExportWindowResult::NoData;
-
-    // Append-style monotonic index (higher = newer). Published files and
-    // unpublished .tmp staging both count, so a failed publish cannot be
-    // overwritten by the next rotation.
-    const std::size_t next =
-        nextLogWindowIndex(fs::path(sessionDir()), opt_.channel_name);
-
-    if (!compressor_) {
-        const std::string target = rotatedPath(next);
-        fs::rename(active, target, ec);
-        if (ec) {
-            GFL_LOG_ERROR("[Logger] window export: publish failed for '",
-                          active, "' (", ec.message(),
-                          ") - deferred in the active file.");
-            return ExportWindowResult::DeferredInActive;
-        }
-        pruneLogWindows(fs::path(sessionDir()), opt_.channel_name,
-                        opt_.max_files);
-        return ExportWindowResult::Published;
-    }
-
-    const std::string target = rotatedPath(next) + ".gz";
-    std::ostringstream stg;
-    stg << tempDir() << "/" << opt_.channel_name << "." << next << ".log.gz";
-    const std::string staging = stg.str();
-
-    // 1. gzip the active file into staging (inside .tmp) - a pure READ of
-    // the active file, immune to holders. The session root never sees a
-    // partial file.
-    if (!compressor_->compressTo(active, staging)) {
-        std::error_code rm_ec;
-        fs::remove(staging, rm_ec);
-        GFL_LOG_ERROR("[Logger] window export: compress failed for '", active,
-                      "' - deferred to the next write.");
-        return ExportWindowResult::DeferredInActive;
-    }
-
-    // 2. Truncate the active file BEFORE publishing the export: if this
-    // is denied (holder without write sharing - rare), drop staging and
-    // defer. The data then exists exactly once, in the active file.
-    {
-        std::ofstream trunc(active, std::ios::out | std::ios::trunc);
-        if (!trunc) {
-            std::error_code rm_ec;
-            fs::remove(staging, rm_ec);
-            GFL_LOG_ERROR("[Logger] window export: truncate denied for '",
-                          active, "' - deferred to the next write.");
-            return ExportWindowResult::DeferredInActive;
-        }
-    }
-
-    // 3. Publish: staging → <channel>.<N>.log.gz in the session root.
-    // Consumers only ever see the finished file. If the rename is blocked
-    // (AV grabbing brand-new files), the data survives in staging and the
-    // launcher's salvage pass publishes it later.
-    bool published = false;
+    // The no-replace operation closes the exists()->rename() TOCTOU window:
+    // a concurrent salvage/uploader can claim `to` after a pre-check. A
+    // collision must leave `from` visible, never replace the older window.
     for (int attempt = 0; attempt < 3; ++attempt) {
-        fs::rename(staging, target, ec);
-        if (!ec) {
-            published = true;
-            break;
+        const auto moved = moveFileNoReplace(from, to, ec);
+        if (moved == MoveFileNoReplaceResult::Moved) return true;
+        if (moved == MoveFileNoReplaceResult::DestinationExists) {
+            GFL_LOG_ERROR("[Logger] window export: refusing to publish '",
+                          from, "' over the existing window '", to,
+                          "' - window indices must be unique. Left in `.tmp` "
+                          "for the salvage pass.");
+            return false;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100 << attempt));
     }
-    if (!published) {
-        GFL_LOG_ERROR("[Logger] window export: publish failed for '", staging,
+    GFL_LOG_ERROR("[Logger] window export: publish failed for '", from, "' (",
+                  ec.message(), ") - left for the salvage pass.");
+    return false;
+}
+
+LogFileRotator::RetireResult LogFileRotator::retireActiveWindow(
+    const std::size_t index) const {
+    const std::string active = activePath();
+    std::error_code ec;
+    if (!fs::exists(active, ec)) return RetireResult::NoData;
+    if (fs::file_size(active, ec) == 0) return RetireResult::NoData;
+
+    // Same reasoning as publishWithRetry_: claim the retired name atomically.
+    // A pre-check followed by rename still permits another actor to create
+    // the destination between the two operations.
+    const auto retired =
+        moveFileNoReplace(active, retiredPath(index), ec);
+    if (retired == MoveFileNoReplaceResult::DestinationExists) {
+        GFL_LOG_ERROR("[Logger] window cutover: index ", index,
+                      " is already taken by '", retiredPath(index),
+                      "' - refusing to overwrite it.");
+        return RetireResult::Blocked;
+    }
+    if (retired != MoveFileNoReplaceResult::Moved) {
+        GFL_LOG_ERROR("[Logger] window cutover: could not retire '", active,
                       "' (", ec.message(),
-                      ") - left for the salvage pass.");
+                      ") - the data stays in the active window and the next "
+                      "beat retries.");
+        return RetireResult::Blocked;
+    }
+    return RetireResult::Retired;
+}
+
+LogFileRotator::ExportWindowResult LogFileRotator::exportRetiredWindow(
+    const std::size_t index, std::size_t* pruned_windows) const {
+    const std::string retired = retiredPath(index);
+    std::error_code ec;
+    if (!fs::exists(retired, ec)) return ExportWindowResult::NoData;
+
+    const auto prune = [&]() {
+        const std::size_t removed = pruneLogWindows(
+            fs::path(sessionDir()), opt_.channel_name, opt_.max_files);
+        if (removed > 0) {
+            if (pruned_windows) *pruned_windows += removed;
+            GFL_LOG_ERROR("[Logger] window cap (max_files=", opt_.max_files,
+                          ") deleted ", removed, " old '", opt_.channel_name,
+                          "' window(s) that may not have been uploaded yet. "
+                          "Raise max_files or drain windows faster.");
+        }
+    };
+
+    if (!compressor_) {
+        if (!publishWithRetry_(retired, rotatedPath(index))) {
+            // The retired file is still in `.tmp`, indexed and complete -
+            // the salvage pass publishes it.
+            return ExportWindowResult::StagedForSalvage;
+        }
+        prune();
+        return ExportWindowResult::Published;
+    }
+
+    const std::string staging = retired + ".gz";
+    const std::string partial = staging + ".part";
+    // A name ending in `.part` is deliberately NOT a transport window.
+    // `compressTo` closes and validates the gzip before the atomic rename
+    // below makes it visible to salvage. A crash during compression leaves
+    // the raw authoritative source plus an explicitly incomplete artifact.
+    //
+    // SCOPE: this is PROCESS-CRASH safe (SIGKILL, an unhandled fault, a
+    // teardown that never runs shutdown) - at every point the window's bytes
+    // exist in exactly one place salvage can name. It is NOT power-loss
+    // durable: nothing here fsyncs the gzip or the directory, so a rename
+    // can reach the disk before the data it names. Salvage is defensive
+    // about that (it re-validates every gzip and rejects empty or truncated
+    // ones) but the guarantee itself needs file sync -> rename -> directory
+    // sync, which is not implemented.
+    fs::remove(partial, ec);
+    if (!compressor_->compressTo(retired, partial)) {
+        std::error_code rm_ec;
+        fs::remove(partial, rm_ec);
+        GFL_LOG_ERROR("[Logger] window export: compress failed for '", retired,
+                      "' - left in `.tmp` for the salvage pass.");
+        return ExportWindowResult::DeferredInActive;
+    }
+
+    fs::rename(partial, staging, ec);
+    if (ec) {
+        std::error_code rm_ec;
+        fs::remove(partial, rm_ec);
+        GFL_LOG_ERROR("[Logger] window export: could not promote completed "
+                      "gzip '", partial, "' to '", staging, "' (",
+                      ec.message(), ") - raw source remains authoritative.");
         return ExportWindowResult::StagedForSalvage;
     }
 
-    pruneLogWindows(fs::path(sessionDir()), opt_.channel_name, opt_.max_files);
+    // The completed staging gzip is now authoritative only after the raw
+    // source is gone or empty. Never publish both: shutdown salvage would
+    // otherwise assign the leftover raw a new index and duplicate every row.
+    if (!removeOrTruncateFile(retired)) {
+        GFL_LOG_ERROR("[Logger] window export: completed gzip '", staging,
+                      "' but could not remove or truncate raw source '",
+                      retired, "' - left both in `.tmp` for exact-once "
+                      "salvage reconciliation.");
+        return ExportWindowResult::StagedForSalvage;
+    }
+
+    if (!publishWithRetry_(staging, rotatedPath(index) + ".gz")) {
+        return ExportWindowResult::StagedForSalvage;
+    }
+    prune();
     return ExportWindowResult::Published;
 }
 
-void LogFileRotator::rotate() const { exportWindow_(); }
+LogFileRotator::ExportWindowResult LogFileRotator::exportWindow_(
+    std::size_t* pruned_windows) const {
+    return exportWindowAt_(nextWindowIndex(), pruned_windows);
+}
 
-void LogFileRotator::compressActive() const {
-    const ExportWindowResult result = exportWindow_();
+LogFileRotator::ExportWindowResult LogFileRotator::exportWindowAt_(
+    const std::size_t index, std::size_t* pruned_windows) const {
+    switch (retireActiveWindow(index)) {
+        case RetireResult::NoData:
+            return ExportWindowResult::NoData;
+        case RetireResult::Blocked:
+            return ExportWindowResult::DeferredInActive;
+        case RetireResult::Retired:
+            // Shutdown uses the same crash-safe raw -> .part -> completed
+            // gzip transaction as mid-run retirement; only the thread differs.
+            return exportRetiredWindow(index, pruned_windows);
+    }
+    return ExportWindowResult::DeferredInActive;
+}
+
+LogFileRotator::ExportWindowResult LogFileRotator::rotate(
+    std::size_t* pruned_windows) const {
+    return exportWindow_(pruned_windows);
+}
+
+LogFileRotator::ExportWindowResult LogFileRotator::compressActive(
+    const std::size_t index) const {
+    const ExportWindowResult result = exportWindowAt_(index, nullptr);
     // Best-effort removal of this channel's (now exported) active file.
     // If exportWindow_ deferred in the active file, leave it for the salvage
     // path instead of deleting the only copy of the window.
-    if (result == ExportWindowResult::DeferredInActive) return;
+    if (result == ExportWindowResult::DeferredInActive) return result;
     // The shared .tmp dir itself is removed once by FileLogSink::close()
     // after EVERY channel has closed - other channels' actives are still
     // open while the first one finalizes.
     std::error_code ec;
     fs::remove(activePath(), ec);
+    return result;
 }
 
 

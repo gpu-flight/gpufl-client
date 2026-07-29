@@ -17,6 +17,7 @@ set(GPUFL_TEST_SOURCES
     core/test_bench_invoker.cpp
     core/test_deep_window.cpp
     core/test_disabled.cpp
+    core/test_file_log_sink_rotation.cpp
     core/test_wire_contract.cpp
     core/test_counter_registry.cpp
     core/test_nvtx_counters.cpp
