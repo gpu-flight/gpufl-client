@@ -7,6 +7,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -192,7 +193,8 @@ class FileLogSink final : public ILogSink {
     void enqueueRetired(FileChannel* channel, std::size_t index,
                         std::uint64_t bytes, WindowTiming timing);
     void stopRetirementWorker();
-    void checkSpoolBudget(bool force = false);
+    void checkSpoolBudget(bool force = false,
+                          std::uint64_t incoming_bytes = 0);
     void markSpoolSaturated(std::uint64_t spool_bytes,
                             std::uint64_t available_bytes,
                             const char* reason);
@@ -217,6 +219,11 @@ class FileLogSink final : public ILogSink {
     mutable std::mutex spool_budget_mu_;
     std::int64_t last_spool_check_ms_ = -1;
     std::atomic<std::uint64_t> spool_estimated_bytes_{0};
+    // Conservative free-space estimate from the last fs::space() scan,
+    // decremented by accepted writes. Agent deletions can only make the real
+    // value larger; approaching the reserve forces a fresh scan.
+    std::atomic<std::uint64_t> available_bytes_estimate_{
+        std::numeric_limits<std::uint64_t>::max()};
     std::atomic<bool> spool_saturated_{false};
     std::atomic<std::uint64_t> spool_bytes_at_saturation_{0};
     std::atomic<std::uint64_t> dropped_events_{0};

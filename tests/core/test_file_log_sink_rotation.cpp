@@ -818,13 +818,63 @@ TEST_F(FileLogSinkRotationTest,
         fs::file_size(tmpDir() / "device.log");
     sink.write(gpufl::Channel::Device, R"({"must":"drop"})");
     EXPECT_EQ(fs::file_size(tmpDir() / "device.log"), bytes_before);
-    EXPECT_EQ(sink.rotationStats().dropped_events, 1u);
+    EXPECT_EQ(sink.rotationStats().dropped_events, 2u)
+        << "the write that crosses the cap and every later write are both "
+           "rejected";
     EXPECT_GT(sink.rotationStats().dropped_bytes, 0u);
 
     sink.close();
     EXPECT_EQ(gpufl::transportLossMarkerCount(sessionDir()), 1u)
         << "clean shutdown must not erase the durable incomplete-session "
            "signal";
+}
+
+TEST_F(FileLogSinkRotationTest,
+       FilesystemReserveIsCheckedBeforeTheFirstEvent) {
+    std::error_code ec;
+    const auto available = fs::space(base_, ec).available;
+    ASSERT_FALSE(ec);
+
+    auto opt = options(/*rotate_after_ms=*/0);
+    opt.max_spool_bytes = 0;
+    opt.min_free_bytes = available;
+    gpufl::FileLogSink sink(opt);
+
+    ASSERT_TRUE(sink.rotationStats().spool_saturated);
+    sink.write(gpufl::Channel::Device, std::string(1024, 'x'));
+    EXPECT_EQ(sink.rotationStats().dropped_events, 1u);
+    EXPECT_EQ(fs::file_size(tmpDir() / "device.log"), 0u);
+    EXPECT_EQ(gpufl::transportLossMarkerCount(sessionDir()), 1u);
+}
+
+TEST_F(FileLogSinkRotationTest,
+       ProjectedWriteCannotCrossTheRealFilesystemReserve) {
+    constexpr std::uint64_t kMargin = 8ull * 1024 * 1024;
+    constexpr std::uint64_t kWrite = 16ull * 1024 * 1024;
+    std::error_code ec;
+    const auto available = fs::space(base_, ec).available;
+    ASSERT_FALSE(ec);
+    if (available <= kMargin * 2) {
+        GTEST_SKIP() << "test filesystem has too little headroom";
+    }
+
+    auto opt = options(/*rotate_after_ms=*/0);
+    opt.max_spool_bytes = 0;
+    opt.min_free_bytes = available - kMargin;
+    gpufl::FileLogSink sink(opt);
+    ASSERT_FALSE(sink.rotationStats().spool_saturated)
+        << "external disk use consumed the test margin during setup";
+
+    sink.write(
+        gpufl::Channel::Device,
+        std::string(static_cast<std::size_t>(kWrite), 'x'));
+
+    EXPECT_TRUE(sink.rotationStats().spool_saturated);
+    EXPECT_EQ(sink.rotationStats().dropped_events, 1u);
+    EXPECT_EQ(fs::file_size(tmpDir() / "device.log"), 0u)
+        << "the write that would cross the reserve must be rejected before "
+           "touching the active window";
+    EXPECT_EQ(gpufl::transportLossMarkerCount(sessionDir()), 1u);
 }
 
 TEST_F(FileLogSinkRotationTest, ZeroSpoolLimitsExplicitlyDisableTheGuard) {

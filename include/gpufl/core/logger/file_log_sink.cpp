@@ -357,6 +357,10 @@ FileLogSink::FileLogSink(const Logger::Options& opt) {
     temp_dir_ = LogFileRotator(r, nullptr).tempDir();
     spool_estimated_bytes_.store(
         spoolBytesOnDisk(), std::memory_order_relaxed);
+    // Establish the real filesystem reserve before the first profiling event.
+    // Waiting for the collector beat lets a large first event fill an already
+    // constrained filesystem before the guard ever runs.
+    checkSpoolBudget(/*force=*/true);
 }
 
 FileLogSink::~FileLogSink() { close(); }
@@ -467,7 +471,8 @@ std::int64_t FileLogSink::spoolNowMs() const {
         .count();
 }
 
-void FileLogSink::checkSpoolBudget(const bool force) {
+void FileLogSink::checkSpoolBudget(
+    const bool force, const std::uint64_t incoming_bytes) {
     if (spool_saturated_.load(std::memory_order_acquire) ||
         (max_spool_bytes_ == 0 && min_free_bytes_ == 0)) {
         return;
@@ -492,10 +497,24 @@ void FileLogSink::checkSpoolBudget(const bool force) {
     const std::uint64_t available =
         space_ec ? std::numeric_limits<std::uint64_t>::max()
                  : static_cast<std::uint64_t>(space.available);
-    if (max_spool_bytes_ > 0 && spool_bytes >= max_spool_bytes_) {
-        markSpoolSaturated(spool_bytes, available, "spool_budget_exceeded");
+    available_bytes_estimate_.store(available, std::memory_order_relaxed);
+    const auto reaches = [](const std::uint64_t current,
+                            const std::uint64_t added,
+                            const std::uint64_t limit) {
+        return current >= limit || added >= limit - current;
+    };
+    if (max_spool_bytes_ > 0 &&
+        reaches(spool_bytes, incoming_bytes, max_spool_bytes_)) {
+        const std::uint64_t projected =
+            incoming_bytes >
+                    std::numeric_limits<std::uint64_t>::max() - spool_bytes
+                ? std::numeric_limits<std::uint64_t>::max()
+                : spool_bytes + incoming_bytes;
+        markSpoolSaturated(
+            projected, available, "spool_budget_exceeded");
     } else if (min_free_bytes_ > 0 && !space_ec &&
-               available <= min_free_bytes_) {
+               (available <= min_free_bytes_ ||
+                incoming_bytes >= available - min_free_bytes_)) {
         markSpoolSaturated(spool_bytes, available, "filesystem_reserve_reached");
     }
 }
@@ -660,6 +679,43 @@ void FileLogSink::write(Channel ch, std::string_view json) {
             std::memory_order_relaxed);
         return;
     }
+    const std::uint64_t planned_copies =
+        ch == Channel::All
+            ? static_cast<std::uint64_t>(
+                  (chanDevice_ ? 1 : 0) + (chanScope_ ? 1 : 0) +
+                  (chanSystem_ ? 1 : 0) + (chanSass_ ? 1 : 0))
+            : (resolveChannel(ch) ? 1u : 0u);
+    if (planned_copies == 0) return;
+    const std::uint64_t event_bytes =
+        static_cast<std::uint64_t>(json.size() + 1);
+    const std::uint64_t incoming_bytes =
+        event_bytes >
+                std::numeric_limits<std::uint64_t>::max() / planned_copies
+            ? std::numeric_limits<std::uint64_t>::max()
+            : event_bytes * planned_copies;
+    const std::uint64_t estimated =
+        spool_estimated_bytes_.load(std::memory_order_relaxed);
+    const std::uint64_t available_estimate =
+        available_bytes_estimate_.load(std::memory_order_relaxed);
+    const bool near_spool_limit =
+        max_spool_bytes_ > 0 &&
+        (estimated >= max_spool_bytes_ ||
+         incoming_bytes >= max_spool_bytes_ - estimated);
+    const bool needs_space_baseline =
+        min_free_bytes_ > 0 &&
+        available_estimate == std::numeric_limits<std::uint64_t>::max();
+    const bool near_space_reserve =
+        min_free_bytes_ > 0 && !needs_space_baseline &&
+        (available_estimate <= min_free_bytes_ ||
+         incoming_bytes >= available_estimate - min_free_bytes_);
+    if (near_spool_limit || needs_space_baseline || near_space_reserve) {
+        checkSpoolBudget(/*force=*/true, incoming_bytes);
+        if (spool_saturated_.load(std::memory_order_acquire)) {
+            dropped_events_.fetch_add(1, std::memory_order_relaxed);
+            dropped_bytes_.fetch_add(event_bytes, std::memory_order_relaxed);
+            return;
+        }
+    }
     std::uint64_t copies_written = 0;
     if (ch == Channel::All) {
         if (chanDevice_ && chanDevice_->write(json)) ++copies_written;
@@ -683,8 +739,15 @@ void FileLogSink::write(Channel ch, std::string_view json) {
             spool_estimated_bytes_.fetch_add(
                 bytes, std::memory_order_relaxed) +
             bytes;
-        if (max_spool_bytes_ > 0 && estimated >= max_spool_bytes_) {
-            checkSpoolBudget(/*force=*/true);
+        auto available =
+            available_bytes_estimate_.load(std::memory_order_relaxed);
+        while (available != std::numeric_limits<std::uint64_t>::max()) {
+            const std::uint64_t reduced =
+                bytes >= available ? 0 : available - bytes;
+            if (available_bytes_estimate_.compare_exchange_weak(
+                    available, reduced, std::memory_order_relaxed)) {
+                break;
+            }
         }
     }
 }
