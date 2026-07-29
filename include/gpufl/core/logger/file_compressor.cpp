@@ -28,6 +28,24 @@ bool removeWithRetry(const fs::path& p, std::error_code& ec) {
 }
 }  // namespace
 
+bool removeOrTruncateFile(const std::string& path) {
+    if (path.empty()) return true;
+
+    const fs::path p(path);
+    std::error_code ec;
+    if (removeWithRetry(p, ec)) return true;
+
+    // Windows can deny delete sharing while still allowing the owner to
+    // truncate. An empty husk is harmless and the temp-dir cleanup removes it
+    // once the holder lets go.
+    std::ofstream trunc(p, std::ios::out | std::ios::trunc);
+    if (!trunc) return false;
+    trunc.close();
+
+    std::error_code size_ec;
+    return fs::file_size(p, size_ec) == 0 && !size_ec;
+}
+
 bool GzipFileCompressor::compressTo(const std::string& src,
                                     const std::string& dst) {
     if (src.empty() || dst.empty()) return false;
@@ -71,25 +89,17 @@ bool GzipFileCompressor::compress(const std::string& path) {
     const bool ok = compressTo(path, outPath);
     if (!ok) return false;
 
-    std::error_code ec;
-    if (!removeWithRetry(path, ec)) {
-        // A holder outlived the retries (a tail, an editor, an AV scan).
-        // Windows lets nobody delete a file held without delete sharing -
-        // but write sharing is common, so TRUNCATE the original instead:
-        // the data then exists exactly once (in the .gz) and the leftover
-        // is an empty husk that any later cleanup removes once the holder
-        // lets go.
-        std::ofstream trunc(path, std::ios::out | std::ios::trunc);
-        if (trunc) {
-            GFL_LOG_DEBUG("[Logger] compressed '", path,
-                          "' - original was held, truncated to empty "
-                          "instead of removed.");
-        } else {
-            GFL_LOG_ERROR("[Logger] compressed '", path,
-                          "' but could not remove or truncate the original "
-                          "(", ec.message(),
-                          ") - stale .log left next to the .gz.");
-        }
+    if (!removeOrTruncateFile(path)) {
+        // Keep the source authoritative when the exact-once transition could
+        // not complete. A caller seeing false may retry safely; leaving both
+        // a non-empty raw file and a successful gzip would invite duplicate
+        // salvage/upload.
+        std::error_code rm_ec;
+        fs::remove(outPath, rm_ec);
+        GFL_LOG_ERROR("[Logger] compressed '", path,
+                      "' but could not remove or truncate the original; "
+                      "discarded the gzip and kept the raw source.");
+        return false;
     }
     return true;
 }

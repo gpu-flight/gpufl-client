@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -41,6 +43,14 @@ class Logger {
      * lockstep.
      */
     static constexpr std::size_t kDefaultRotateBytes = 64 * 1024 * 1024;
+    // A profiler must not exhaust the filesystem used by the target
+    // application during a prolonged agent/backend outage. These are
+    // session-wide safety limits, not retention policy: acknowledged
+    // payload deletion still belongs exclusively to the agent.
+    static constexpr std::uint64_t kDefaultMaxSpoolBytes =
+        4ull * 1024 * 1024 * 1024;
+    static constexpr std::uint64_t kDefaultMinFreeBytes =
+        512ull * 1024 * 1024;
 
     struct Options {
         std::string base_path;
@@ -65,7 +75,49 @@ class Logger {
          * backend's decompressed body cap - see kDefaultRotateBytes.
          */
         std::size_t rotate_bytes = kDefaultRotateBytes;
-        std::size_t max_files = 100;
+        /**
+         * Also rotate once the data in the current window spans more
+         * than this many milliseconds, measured on the MONOTONIC clock
+         * from the window's first write. 0 disables the time trigger
+         * (default). An EMPTY window is never rotated, so idle channels
+         * produce no empty files.
+         *
+         * Two paths reach the deadline: the check before each write
+         * (immediate on busy channels) and the collector's periodic
+         * rotateDueWindows() beat, which is what publishes a window
+         * whose channel has gone quiet. Worst-case publish latency is
+         * therefore roughly rotate_after_ms + one beat interval
+         * (~250 ms) + the cutover rename; compression and the publish
+         * retry happen afterwards on the retirement worker, so they add
+         * to the window's arrival time but never to the caller's.
+         */
+        std::int64_t rotate_after_ms = 0;
+        /**
+         * Monotonic now() in milliseconds, injectable so unit tests
+         * drive rotation with a fake clock instead of sleeps. Unset
+         * (default) → std::chrono::steady_clock. Never wall clock:
+         * NTP/DST jumps must not fire or starve rotation windows.
+         */
+        std::function<std::int64_t()> now_ms;
+        /**
+         * Test-only synchronization hook invoked by the retirement worker
+         * immediately before it starts a slow export. Production leaves this
+         * empty. It lets concurrency tests block gzip deterministically and
+         * prove the cutover caller has already returned.
+         */
+        std::function<void()> before_retired_export;
+        /**
+         * Stop accepting new profiling events once this session's on-disk
+         * spool reaches the limit. 0 disables the per-session byte limit.
+         * Saturation is terminal for the session and is recorded durably so
+         * upload cannot later claim the resulting partial profile is complete.
+         */
+        std::uint64_t max_spool_bytes = kDefaultMaxSpoolBytes;
+        /**
+         * Also stop before the filesystem's available space drops below this
+         * reserve. 0 disables the free-space guard.
+         */
+        std::uint64_t min_free_bytes = kDefaultMinFreeBytes;
         bool compress_rotated = true;
         bool flush_always = false;
         int system_sample_rate_ms = 0;
@@ -99,6 +151,12 @@ class Logger {
      * declared channel(s).
      */
     void write(const IJsonSerializable& model);
+
+    /**
+     * Forward the collector's periodic beat to every sink so overdue
+     * transport windows publish without waiting for the next write.
+     */
+    void rotateDueWindows();
 
    private:
     Options opt_;

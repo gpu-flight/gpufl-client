@@ -48,6 +48,13 @@ void Logger::addSink(std::unique_ptr<ILogSink> sink) {
     sinks_.push_back(std::move(sink));
 }
 
+void Logger::rotateDueWindows() {
+    std::lock_guard<std::mutex> lk(sinks_mu_);
+    for (auto& sink : sinks_) {
+        if (sink) sink->rotateDueWindows();
+    }
+}
+
 void Logger::write(const IJsonSerializable& model) {
     const std::string json = model.buildJson();
     const Channel ch = model.channel();
