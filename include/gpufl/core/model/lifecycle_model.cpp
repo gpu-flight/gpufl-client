@@ -47,6 +47,14 @@ std::string InitEventModel::buildJson() const {
             << ",\"pass_count\":" << e_.pass_count;
     }
 
+    // Segmentation grouping is also all-or-nothing. run_id is the presence
+    // discriminator so segment_index==0 remains a valid first segment rather
+    // than being confused with an unset value.
+    if (!e_.run_id.empty()) {
+        oss << ",\"run_id\":\"" << jsonEscape(e_.run_id) << "\""
+            << ",\"segment_index\":" << e_.segment_index;
+    }
+
     oss << "}";
     return oss.str();
 }
@@ -58,6 +66,77 @@ std::string ShutdownEventModel::buildJson() const {
         << ",\"app\":\""        << jsonEscape(e_.app)        << "\""
         << ",\"session_id\":\"" << jsonEscape(e_.session_id) << "\""
         << ",\"ts_ns\":"        << e_.ts_ns << "}";
+    return oss.str();
+}
+
+std::string SegmentStartEventModel::buildJson() const {
+    std::ostringstream oss;
+    oss << "{\"version\":1,\"type\":\"segment_start\""
+        << ",\"session_id\":\"" << jsonEscape(e_.session_id) << "\""
+        << ",\"run_id\":\"" << jsonEscape(e_.run_id) << "\""
+        << ",\"segment_index\":" << e_.segment_index
+        << ",\"ts_ns\":" << e_.ts_ns
+        << ",\"actual_start_ns\":" << e_.actual_start_ns
+        << ",\"previous_session_id\":";
+    if (e_.previous_session_id.empty()) {
+        oss << "null";
+    } else {
+        oss << "\"" << jsonEscape(e_.previous_session_id) << "\"";
+    }
+    oss << ",\"requested_boundary_ns\":";
+    if (e_.has_requested_boundary) {
+        oss << e_.requested_boundary_ns;
+    } else {
+        oss << "null";
+    }
+    oss << ",\"boundary_delay_ns\":" << e_.boundary_delay_ns
+        << ",\"deferred_by\":";
+    if (e_.deferred_by.empty()) {
+        oss << "null";
+    } else {
+        oss << "\"" << jsonEscape(e_.deferred_by) << "\"";
+    }
+    oss << "}";
+    return oss.str();
+}
+
+std::string SegmentEndEventModel::buildJson() const {
+    std::ostringstream oss;
+    oss << "{\"version\":1,\"type\":\"segment_end\""
+        << ",\"session_id\":\"" << jsonEscape(e_.session_id) << "\""
+        << ",\"run_id\":\"" << jsonEscape(e_.run_id) << "\""
+        << ",\"segment_index\":" << e_.segment_index
+        << ",\"ts_ns\":" << e_.ts_ns
+        << ",\"actual_end_ns\":" << e_.actual_end_ns
+        << ",\"requested_boundary_ns\":";
+    if (e_.has_requested_boundary) {
+        oss << e_.requested_boundary_ns;
+    } else {
+        oss << "null";
+    }
+    oss << ",\"boundary_delay_ns\":" << e_.boundary_delay_ns
+        << ",\"end_reason\":\"" << jsonEscape(e_.end_reason) << "\""
+        << ",\"deferred_by\":";
+    if (e_.deferred_by.empty()) {
+        oss << "null";
+    } else {
+        oss << "\"" << jsonEscape(e_.deferred_by) << "\"";
+    }
+    oss << ",\"records_outside_segment_window\":"
+        << e_.records_outside_segment_window
+        << "}";
+    return oss.str();
+}
+
+std::string RunEndEventModel::buildJson() const {
+    std::ostringstream oss;
+    oss << "{\"version\":1,\"type\":\"run_end\""
+        << ",\"session_id\":\"" << jsonEscape(e_.session_id) << "\""
+        << ",\"run_id\":\"" << jsonEscape(e_.run_id) << "\""
+        << ",\"final_segment_index\":" << e_.final_segment_index
+        << ",\"ts_ns\":" << e_.ts_ns
+        << ",\"ended_ns\":" << e_.ended_ns
+        << "}";
     return oss.str();
 }
 

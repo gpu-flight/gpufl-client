@@ -139,6 +139,13 @@ struct InitEvent {
     std::string analysis_id;
     int pass_index = 0;
     int pass_count = 0;
+
+    // Long-running session segmentation. Emitted together only when run_id is
+    // non-empty; ordinary sessions remain byte-compatible with the existing
+    // job_start wire. This is orthogonal to analysis_id: analysis passes
+    // overlay one interval, while segments concatenate adjacent intervals.
+    std::string run_id;
+    uint32_t segment_index = 0;
 };
 
 struct ShutdownEvent {
@@ -146,6 +153,45 @@ struct ShutdownEvent {
     std::string app;
     std::string session_id;
     int64_t ts_ns = 0;
+};
+
+// Segment lifecycle records are defined now, but runtime segmentation remains
+// disabled until the coordinator and backend contracts are implemented.
+// Empty nullable strings and has_requested_boundary=false serialize as JSON
+// null, preserving a single exact wire shape for segment zero.
+struct SegmentStartEvent {
+    std::string session_id;
+    std::string run_id;
+    uint32_t segment_index = 0;
+    int64_t ts_ns = 0;
+    int64_t actual_start_ns = 0;
+    std::string previous_session_id;
+    bool has_requested_boundary = false;
+    int64_t requested_boundary_ns = 0;
+    int64_t boundary_delay_ns = 0;
+    std::string deferred_by;
+};
+
+struct SegmentEndEvent {
+    std::string session_id;
+    std::string run_id;
+    uint32_t segment_index = 0;
+    int64_t ts_ns = 0;
+    int64_t actual_end_ns = 0;
+    bool has_requested_boundary = false;
+    int64_t requested_boundary_ns = 0;
+    int64_t boundary_delay_ns = 0;
+    std::string end_reason;
+    std::string deferred_by;
+    uint64_t records_outside_segment_window = 0;
+};
+
+struct RunEndEvent {
+    std::string session_id;
+    std::string run_id;
+    uint32_t final_segment_index = 0;
+    int64_t ts_ns = 0;
+    int64_t ended_ns = 0;
 };
 
 struct SassConfigEvent {
