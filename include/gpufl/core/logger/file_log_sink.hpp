@@ -12,11 +12,13 @@
 
 #include "gpufl/core/logger/log_sink.hpp"
 #include "gpufl/core/logger/logger.hpp"
+#include "gpufl/core/logger/window_metadata.hpp"
 
 namespace gpufl {
 
 class IFileCompressor;
 class LogFileRotator;
+class SessionOwnershipLock;
 
 /**
  * Sink that writes NDJSON lines to per-channel files on disk.
@@ -139,7 +141,7 @@ class FileLogSink final : public ILogSink {
          * touches files nothing writes to any more - and takes the lock
          * just to fold the outcome into the stats.
          */
-        void exportRetired(std::size_t index);
+        void exportRetired(std::size_t index, WindowTiming timing);
 
        private:
         void ensureOpenLocked();
@@ -184,13 +186,17 @@ class FileLogSink final : public ILogSink {
      * spawn a thread.
      */
     void enqueueRetired(FileChannel* channel, std::size_t index,
-                        std::uint64_t bytes);
+                        std::uint64_t bytes, WindowTiming timing);
     void stopRetirementWorker();
 
     std::unique_ptr<FileChannel> chanDevice_;
     std::unique_ptr<FileChannel> chanScope_;
     std::unique_ptr<FileChannel> chanSystem_;
     std::unique_ptr<FileChannel> chanSass_;
+    // Held for the complete writer lifetime. Root windows remain readable to
+    // the agent, but no other process may salvage `.tmp` or finalize this
+    // session until the handle is released.
+    std::unique_ptr<SessionOwnershipLock> session_ownership_;
     // The shared session `.tmp` dir, removed once in close() after every
     // channel has finalized (its own actives would block earlier removal).
     std::string temp_dir_;
@@ -204,6 +210,7 @@ class FileLogSink final : public ILogSink {
         FileChannel* channel;
         std::size_t index;
         std::uint64_t bytes;
+        WindowTiming timing;
     };
     mutable std::mutex retire_mu_;
     std::condition_variable retire_cv_;

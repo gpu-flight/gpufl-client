@@ -26,6 +26,8 @@
 #include "gpufl/core/logger/file_log_sink.hpp"
 #include "gpufl/core/logger/log_rotator.hpp"
 #include "gpufl/core/logger/log_salvage.hpp"
+#include "gpufl/core/logger/session_ownership.hpp"
+#include "gpufl/core/logger/window_metadata.hpp"
 #include "gpufl/core/logger/log_sink.hpp"
 #include "gpufl/core/logger/logger.hpp"
 
@@ -805,6 +807,170 @@ TEST_F(FileLogSinkRotationTest, PruneOnPublishIsCountedAsDataLoss) {
     EXPECT_EQ(sink.rotationStats().pruned_windows, 1u);
     EXPECT_FALSE(fs::exists(sessionDir() / "device.1.log.gz"));
     EXPECT_TRUE(fs::exists(sessionDir() / "device.3.log.gz"));
+}
+
+TEST_F(FileLogSinkRotationTest, SessionOwnershipIsExclusiveAndCrashReleased) {
+    std::string first_error;
+    auto first =
+        gpufl::SessionOwnershipLock::tryAcquire(sessionDir(), &first_error);
+    ASSERT_NE(first, nullptr) << first_error;
+
+    std::string second_error;
+    auto second =
+        gpufl::SessionOwnershipLock::tryAcquire(sessionDir(), &second_error);
+    EXPECT_EQ(second, nullptr);
+    EXPECT_NE(second_error.find("owned by another live process"),
+              std::string::npos);
+
+    first.reset();
+    auto after_release =
+        gpufl::SessionOwnershipLock::tryAcquire(sessionDir(), &second_error);
+    EXPECT_NE(after_release, nullptr) << second_error;
+}
+
+TEST_F(FileLogSinkRotationTest, SalvageNeverTouchesALiveOwnedSession) {
+    fs::create_directories(sessionDir() / ".tmp");
+    writeText(sessionDir() / ".tmp" / "device.1.log",
+              "payload-from-live-writer\n");
+
+    auto owner = gpufl::SessionOwnershipLock::tryAcquire(sessionDir());
+    ASSERT_NE(owner, nullptr);
+
+    const auto while_live = gpufl::salvageSessionTempDir(sessionDir());
+    EXPECT_EQ(while_live.active_sessions_skipped, 1);
+    EXPECT_EQ(while_live.salvaged, 0);
+    EXPECT_TRUE(fs::exists(sessionDir() / ".tmp" / "device.1.log"));
+    EXPECT_FALSE(fs::exists(sessionDir() / "device.1.log.gz"));
+
+    owner.reset();
+    const auto after_exit = gpufl::salvageSessionTempDir(sessionDir());
+    EXPECT_EQ(after_exit.active_sessions_skipped, 0);
+    EXPECT_EQ(after_exit.salvaged, 1);
+    EXPECT_TRUE(fs::exists(sessionDir() / "device.1.log.gz"));
+}
+
+TEST_F(FileLogSinkRotationTest, PublishedWindowHasImmutableIdentityMetadata) {
+    {
+        gpufl::FileLogSink sink(options(/*rotate_after_ms=*/5000));
+        fake_now_ms_ = 100;
+        sink.write(gpufl::Channel::Device, R"({"event":1})");
+        fake_now_ms_ = 5100;
+        sink.rotateDueWindows();
+        sink.waitForPendingExports();
+    }
+
+    const fs::path metadata =
+        gpufl::windowMetadataPath(sessionDir(), "device", 1);
+    ASSERT_TRUE(fs::exists(metadata));
+    std::ifstream input(metadata, std::ios::binary);
+    const std::string json(
+        (std::istreambuf_iterator<char>(input)),
+        std::istreambuf_iterator<char>());
+    EXPECT_NE(json.find(R"("type":"transport_window")"),
+              std::string::npos);
+    EXPECT_NE(json.find(R"("window_sequence":1)"),
+              std::string::npos);
+    EXPECT_NE(json.find(R"("opened_mono_ms":100)"),
+              std::string::npos);
+    EXPECT_NE(json.find(R"("closed_mono_ms":5100)"),
+              std::string::npos);
+    EXPECT_NE(json.find(R"("payload_crc32":)"), std::string::npos);
+}
+
+TEST_F(FileLogSinkRotationTest,
+       MetadataFailureKeepsPayloadStagedAndInvisibleToTheAgent) {
+    // A directory at the immutable sidecar name is a deterministic,
+    // cross-platform publication failure. It must not be mistaken for an
+    // already-published metadata file or silently downgrade this window to
+    // the legacy, non-idempotent upload path.
+    const fs::path metadata =
+        gpufl::windowMetadataPath(sessionDir(), "device", 1);
+    ASSERT_TRUE(fs::create_directories(metadata));
+
+    {
+        gpufl::FileLogSink sink(options(/*rotate_after_ms=*/5000));
+        fake_now_ms_ = 100;
+        sink.write(gpufl::Channel::Device, R"({"event":1})");
+        fake_now_ms_ = 5100;
+        sink.rotateDueWindows();
+        sink.waitForPendingExports();
+    }
+
+    EXPECT_FALSE(fs::exists(sessionDir() / "device.1.log.gz"))
+        << "a current-client payload must never become visible without its "
+           "identity sidecar";
+    EXPECT_TRUE(fs::exists(tmpDir() / "device.1.log.gz"))
+        << "the complete payload is recoverable once metadata publication "
+           "can succeed";
+    EXPECT_EQ(gpufl::transportLossMarkerCount(sessionDir()), 0u)
+        << "metadata publication failure is deferred, not data loss";
+}
+
+TEST_F(FileLogSinkRotationTest,
+       FailedPayloadPublishStillLeavesIdentityAheadOfTheStagedWindow) {
+    // Occupy the final payload name so the no-replace publish fails after
+    // metadata creation. This pins the ordering contract without racing a
+    // polling thread: moving metadata after publish makes this test fail.
+    std::promise<void> worker_entered_promise;
+    auto worker_entered = worker_entered_promise.get_future();
+    std::promise<void> release_worker_promise;
+    auto release_worker = release_worker_promise.get_future().share();
+    auto opt = options(/*rotate_after_ms=*/5000);
+    opt.before_retired_export = [&] {
+        worker_entered_promise.set_value();
+        release_worker.wait();
+    };
+
+    {
+        gpufl::FileLogSink sink(std::move(opt));
+        fake_now_ms_ = 100;
+        sink.write(gpufl::Channel::Device, R"({"event":"new"})");
+        fake_now_ms_ = 5100;
+        sink.rotateDueWindows();
+        ASSERT_EQ(worker_entered.wait_for(std::chrono::seconds(2)),
+                  std::future_status::ready);
+        writeText(sessionDir() / "device.1.log.gz", "older-window");
+        release_worker_promise.set_value();
+        sink.waitForPendingExports();
+    }
+
+    EXPECT_TRUE(fs::exists(
+        gpufl::windowMetadataPath(sessionDir(), "device", 1)));
+    EXPECT_TRUE(fs::exists(tmpDir() / "device.1.log.gz"));
+}
+
+TEST_F(FileLogSinkRotationTest,
+       ExistingMetadataWithDifferentPayloadRefusesSequenceReuse) {
+    const fs::path staged = tmpDir() / "device.1.log";
+    writeText(staged, "first-payload");
+    ASSERT_TRUE(gpufl::ensureWindowMetadata(
+        sessionDir(), "s1", "device", 1, staged));
+
+    writeText(staged, "different-payload");
+    gpufl::LogFileRotator rotator(rotatorOptions(), nullptr);
+    EXPECT_EQ(
+        rotator.exportRetiredWindow(1, nullptr),
+        gpufl::LogFileRotator::ExportWindowResult::StagedForSalvage);
+    EXPECT_FALSE(fs::exists(sessionDir() / "device.1.log"))
+        << "an immutable identity must never be rebound to different bytes";
+    EXPECT_TRUE(fs::exists(staged));
+}
+
+TEST_F(FileLogSinkRotationTest,
+       MetadataTombstonePreventsSequenceReuseAfterPayloadDeletion) {
+    {
+        gpufl::FileLogSink sink(options(/*rotate_after_ms=*/5000));
+        sink.write(gpufl::Channel::Device, R"({"event":1})");
+    }
+    ASSERT_TRUE(fs::exists(
+        gpufl::windowMetadataPath(sessionDir(), "device", 1)));
+    ASSERT_TRUE(fs::remove(sessionDir() / "device.1.log.gz"));
+
+    gpufl::GzipFileCompressor compressor;
+    gpufl::LogFileRotator rotator(rotatorOptions(), &compressor);
+    EXPECT_EQ(rotator.nextWindowIndex(), 2u)
+        << "ACK cleanup may delete the payload, but its metadata tombstone "
+           "must keep the sequence consumed.";
 }
 
 // Wiring: the collector beat calls Logger::rotateDueWindows(), which must

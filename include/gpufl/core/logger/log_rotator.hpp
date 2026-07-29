@@ -4,6 +4,7 @@
 #include <string>
 
 #include "gpufl/core/logger/file_compressor.hpp"
+#include "gpufl/core/logger/window_metadata.hpp"
 
 namespace gpufl {
 
@@ -109,7 +110,8 @@ class LogFileRotator {
      * publish retry/backoff for transient holders lives here.
      */
     ExportWindowResult exportRetiredWindow(std::size_t index,
-                                           std::size_t* pruned_windows) const;
+                                           std::size_t* pruned_windows,
+                                           const WindowTiming& timing = {}) const;
 
     /**
      * Finalize this channel on clean shutdown (FileLogSink::close →
@@ -126,7 +128,8 @@ class LogFileRotator {
      * already have been acknowledged and removed, but their indices remain
      * consumed for the lifetime of the session.
      */
-    ExportWindowResult compressActive(std::size_t index) const;
+    ExportWindowResult compressActive(
+        std::size_t index, const WindowTiming& timing = {}) const;
 
     /**
      * The session temp dir: `<base_path>/<session_id>/.tmp`. Removed

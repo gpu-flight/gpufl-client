@@ -35,6 +35,8 @@
 
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/logger/file_compressor.hpp"
+#include "gpufl/core/logger/session_ownership.hpp"
+#include "gpufl/core/logger/window_metadata.hpp"
 
 namespace gpufl {
 namespace fs = std::filesystem;
@@ -444,6 +446,7 @@ std::size_t nextLogWindowIndex(const fs::path& session_dir,
     std::size_t max_index = 0;
     scanMaxIndex(session_dir / ".tmp", channel, max_index);
     scanMaxIndex(session_dir, channel, max_index);
+    scanWindowMetadataMaxSequence(session_dir, channel, max_index);
     return max_index + 1;
 }
 
@@ -468,7 +471,7 @@ std::size_t pruneLogWindows(const fs::path& session_dir,
     return removed;
 }
 
-LogSalvageResult salvageSessionTempDir(const fs::path& session_dir) {
+LogSalvageResult salvageOwnedSessionTempDir(const fs::path& session_dir) {
     LogSalvageResult result;
     // A prior pass may already have discarded an unrecoverable artifact.
     // Count the durable marker even when `.tmp` is gone so an uploader that
@@ -654,6 +657,12 @@ LogSalvageResult salvageSessionTempDir(const fs::path& session_dir) {
                 ++result.deferred;
                 continue;
             }
+            if (!ensureWindowMetadata(
+                    session_dir, session_dir.filename().string(), channel,
+                    idx, path)) {
+                ++result.deferred;
+                continue;
+            }
             std::error_code mv_ec;
             const auto moved = moveFileNoReplace(path, target, mv_ec);
             if (moved != MoveFileNoReplaceResult::Moved) {
@@ -739,6 +748,12 @@ LogSalvageResult salvageSessionTempDir(const fs::path& session_dir) {
             ++result.deferred;
             continue;
         }
+        if (!ensureWindowMetadata(
+                session_dir, session_dir.filename().string(), channel, idx,
+                staging)) {
+            ++result.deferred;
+            continue;
+        }
         std::error_code publish_ec;
         const auto published =
             moveFileNoReplace(staging, target, publish_ec);
@@ -757,6 +772,22 @@ LogSalvageResult salvageSessionTempDir(const fs::path& session_dir) {
     return result;
 }
 
+LogSalvageResult salvageSessionTempDir(const fs::path& session_dir) {
+    std::string lock_error;
+    auto ownership =
+        SessionOwnershipLock::tryAcquire(session_dir, &lock_error);
+    if (!ownership) {
+        LogSalvageResult result;
+        result.active_sessions_skipped = 1;
+        result.lost_windows =
+            static_cast<int>(transportLossMarkerCount(session_dir));
+        GFL_LOG_DEBUG("[Logger] salvage skipped active session '",
+                      session_dir.string(), "': ", lock_error);
+        return result;
+    }
+    return salvageOwnedSessionTempDir(session_dir);
+}
+
 LogSalvageResult salvageSessionTempDirs(const fs::path& root) {
     LogSalvageResult total;
     std::error_code ec;
@@ -770,6 +801,7 @@ LogSalvageResult salvageSessionTempDirs(const fs::path& root) {
         total.salvaged += r.salvaged;
         total.deferred += r.deferred;
         total.lost_windows += r.lost_windows;
+        total.active_sessions_skipped += r.active_sessions_skipped;
     }
     return total;
 }

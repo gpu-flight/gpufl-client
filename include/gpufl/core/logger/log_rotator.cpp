@@ -7,6 +7,7 @@
 
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/logger/log_salvage.hpp"
+#include "gpufl/core/logger/window_metadata.hpp"
 
 namespace gpufl {
 namespace fs = std::filesystem;
@@ -104,7 +105,8 @@ LogFileRotator::RetireResult LogFileRotator::retireActiveWindow(
 }
 
 LogFileRotator::ExportWindowResult LogFileRotator::exportRetiredWindow(
-    const std::size_t index, std::size_t* pruned_windows) const {
+    const std::size_t index, std::size_t* pruned_windows,
+    const WindowTiming& timing) const {
     const std::string retired = retiredPath(index);
     std::error_code ec;
     if (!fs::exists(retired, ec)) return ExportWindowResult::NoData;
@@ -122,9 +124,20 @@ LogFileRotator::ExportWindowResult LogFileRotator::exportRetiredWindow(
     };
 
     if (!compressor_) {
-        if (!publishWithRetry_(retired, rotatedPath(index))) {
+        const std::string published = rotatedPath(index);
+        // Identity must become visible BEFORE the payload. The agent polls
+        // the session root concurrently; publishing the payload first opens
+        // a race where a current-client window looks legacy and bypasses
+        // checksum/idempotency headers.
+        if (!ensureWindowMetadata(
+                fs::path(sessionDir()), opt_.session_id, opt_.channel_name,
+                index, retired, timing)) {
+            return ExportWindowResult::StagedForSalvage;
+        }
+        if (!publishWithRetry_(retired, published)) {
             // The retired file is still in `.tmp`, indexed and complete -
-            // the salvage pass publishes it.
+            // the salvage pass publishes it. Its sidecar is an intentional
+            // tombstone and must match this same staged payload.
             return ExportWindowResult::StagedForSalvage;
         }
         prune();
@@ -176,7 +189,15 @@ LogFileRotator::ExportWindowResult LogFileRotator::exportRetiredWindow(
         return ExportWindowResult::StagedForSalvage;
     }
 
-    if (!publishWithRetry_(staging, rotatedPath(index) + ".gz")) {
+    const std::string published = rotatedPath(index) + ".gz";
+    // Same ordering invariant as the uncompressed path: once `published`
+    // appears in the session root, its immutable identity already exists.
+    if (!ensureWindowMetadata(
+            fs::path(sessionDir()), opt_.session_id, opt_.channel_name, index,
+            staging, timing)) {
+        return ExportWindowResult::StagedForSalvage;
+    }
+    if (!publishWithRetry_(staging, published)) {
         return ExportWindowResult::StagedForSalvage;
     }
     prune();
@@ -209,8 +230,20 @@ LogFileRotator::ExportWindowResult LogFileRotator::rotate(
 }
 
 LogFileRotator::ExportWindowResult LogFileRotator::compressActive(
-    const std::size_t index) const {
-    const ExportWindowResult result = exportWindowAt_(index, nullptr);
+    const std::size_t index, const WindowTiming& timing) const {
+    const auto retired = retireActiveWindow(index);
+    ExportWindowResult result = ExportWindowResult::DeferredInActive;
+    switch (retired) {
+        case RetireResult::NoData:
+            result = ExportWindowResult::NoData;
+            break;
+        case RetireResult::Blocked:
+            result = ExportWindowResult::DeferredInActive;
+            break;
+        case RetireResult::Retired:
+            result = exportRetiredWindow(index, nullptr, timing);
+            break;
+    }
     // Best-effort removal of this channel's (now exported) active file.
     // If exportWindow_ deferred in the active file, leave it for the salvage
     // path instead of deleting the only copy of the window.

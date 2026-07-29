@@ -24,6 +24,12 @@ struct LogSalvageResult {
      * unreported loss here looks exactly like a clean session downstream.
      */
     int lost_windows = 0;
+    /**
+     * Session directories deliberately not touched because another live
+     * process owns their OS lock. This is not a salvage failure and must not
+     * be treated as an orphan or completion signal.
+     */
+    int active_sessions_skipped = 0;
 };
 
 /**
@@ -90,6 +96,13 @@ std::size_t pruneLogWindows(const std::filesystem::path& session_dir,
 
 /** Publish staged `.tmp/*.log.gz` files and export non-empty `.tmp/*.log`. */
 LogSalvageResult salvageSessionTempDir(
+    const std::filesystem::path& session_dir);
+
+/**
+ * Salvage one session while its writer-owned SessionOwnershipLock is held by
+ * the caller. Only FileLogSink's clean-shutdown path may use this bypass.
+ */
+LogSalvageResult salvageOwnedSessionTempDir(
     const std::filesystem::path& session_dir);
 
 /** Apply salvageSessionTempDir() to each session directory under `root`. */

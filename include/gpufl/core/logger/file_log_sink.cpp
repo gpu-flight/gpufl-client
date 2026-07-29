@@ -8,6 +8,7 @@
 #include "gpufl/core/logger/file_compressor.hpp"
 #include "gpufl/core/logger/log_rotator.hpp"
 #include "gpufl/core/logger/log_salvage.hpp"
+#include "gpufl/core/logger/session_ownership.hpp"
 
 namespace gpufl {
 namespace fs = std::filesystem;
@@ -61,6 +62,9 @@ void FileLogSink::FileChannel::close() {
 }
 
 void FileLogSink::FileChannel::closeLocked() {
+    const WindowTiming timing{
+        window_first_write_ms_,
+        window_first_write_ms_ >= 0 ? nowMs() : -1};
     if (stream_.is_open()) {
         stream_.flush();
         stream_.close();
@@ -79,7 +83,7 @@ void FileLogSink::FileChannel::closeLocked() {
         if (next_window_index_ == 0) {
             next_window_index_ = rotator_->nextWindowIndex();
         }
-        (void)rotator_->compressActive(next_window_index_);
+        (void)rotator_->compressActive(next_window_index_, timing);
     }
     opened_ = false;
 }
@@ -156,6 +160,7 @@ void FileLogSink::FileChannel::rotateLocked(RotateTrigger trigger) {
         next_window_index_ = rotator_->nextWindowIndex();
     }
     const std::size_t index = next_window_index_;
+    const WindowTiming timing{window_first_write_ms_, nowMs()};
     const auto result = rotator_->retireActiveWindow(index);
     const char* trigger_name =
         trigger == RotateTrigger::Size ? "size" : "time";
@@ -178,7 +183,9 @@ void FileLogSink::FileChannel::rotateLocked(RotateTrigger trigger) {
             ensureOpenLocked();  // fresh, empty active window
             // Enqueue AFTER reopening so the channel is immediately
             // writable again even if the worker starts exporting at once.
-            if (owner_) owner_->enqueueRetired(this, index, retired_bytes);
+            if (owner_) {
+                owner_->enqueueRetired(this, index, retired_bytes, timing);
+            }
             return;
         }
         case LogFileRotator::RetireResult::Blocked:
@@ -193,14 +200,16 @@ void FileLogSink::FileChannel::rotateLocked(RotateTrigger trigger) {
     ensureOpenLocked();
 }
 
-void FileLogSink::FileChannel::exportRetired(const std::size_t index) {
+void FileLogSink::FileChannel::exportRetired(
+    const std::size_t index, const WindowTiming timing) {
     if (opt_.before_retired_export) opt_.before_retired_export();
     const auto started = std::chrono::steady_clock::now();
     std::size_t pruned = 0;
     // No channel lock held: the retired file is immutable and nothing
     // writes to it any more, so gzip and the publish backoff cost this
     // worker thread only.
-    const auto result = rotator_->exportRetiredWindow(index, &pruned);
+    const auto result =
+        rotator_->exportRetiredWindow(index, &pruned, timing);
     const auto elapsed_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - started)
@@ -314,6 +323,23 @@ FileLogSink::RotationStats FileLogSink::FileChannel::rotationStats() const {
 
 FileLogSink::FileLogSink(const Logger::Options& opt) {
     if (opt.base_path.empty()) return;
+    if (opt.session_id.empty()) {
+        GFL_LOG_ERROR("FileLogSink: session_id is required for session "
+                      "ownership.");
+        return;
+    }
+    const fs::path session_dir =
+        fs::path(opt.base_path) / opt.session_id;
+    std::string lock_error;
+    session_ownership_ =
+        SessionOwnershipLock::tryAcquire(session_dir, &lock_error);
+    if (!session_ownership_) {
+        GFL_LOG_ERROR("FileLogSink: cannot own session directory '",
+                      session_dir.string(), "': ", lock_error,
+                      ". Refusing to open channels so two live processes "
+                      "cannot mutate the same spool.");
+        return;
+    }
     chanDevice_ = std::make_unique<FileChannel>("device", opt, this);
     chanScope_  = std::make_unique<FileChannel>("scope",  opt, this);
     chanSystem_ = std::make_unique<FileChannel>("system", opt, this);
@@ -370,7 +396,8 @@ void FileLogSink::rotateDueWindows() {
 
 void FileLogSink::enqueueRetired(FileChannel* channel,
                                  const std::size_t index,
-                                 const std::uint64_t bytes) {
+                                 const std::uint64_t bytes,
+                                 const WindowTiming timing) {
     if (!channel) return;
     std::lock_guard<std::mutex> lk(retire_mu_);
     if (retire_stop_) {
@@ -382,7 +409,7 @@ void FileLogSink::enqueueRetired(FileChannel* channel,
                      "window ", index, " in `.tmp` for salvage.");
         return;
     }
-    retire_queue_.push_back({channel, index, bytes});
+    retire_queue_.push_back({channel, index, bytes, timing});
     ++pending_exports_;
     pending_export_bytes_ += bytes;
     max_pending_exports_ =
@@ -412,7 +439,7 @@ void FileLogSink::enqueueRetired(FileChannel* channel,
                     ++exports_in_flight_;
                 }
                 // Outside every lock: gzip + publish retries live here.
-                item.channel->exportRetired(item.index);
+                item.channel->exportRetired(item.index, item.timing);
                 {
                     std::lock_guard<std::mutex> lk(retire_mu_);
                     --exports_in_flight_;
@@ -464,7 +491,7 @@ void FileLogSink::close() {
     // launcher's salvage pass otherwise).
     if (!temp_dir_.empty()) {
         const fs::path session_dir = fs::path(temp_dir_).parent_path();
-        const auto salvage = salvageSessionTempDir(session_dir);
+        const auto salvage = salvageOwnedSessionTempDir(session_dir);
         if (salvage.lost_windows > 0) {
             // Terminal: those events are gone. Say so where an operator will
             // see it AND keep it in the stats, because everything downstream
@@ -484,6 +511,7 @@ void FileLogSink::close() {
                           salvage.salvaged, ", deferred=", salvage.deferred,
                           ") - leaving it for the next salvage pass.");
             temp_dir_.clear();
+            session_ownership_.reset();
             return;
         }
         std::error_code ec;
@@ -495,6 +523,9 @@ void FileLogSink::close() {
         }
         temp_dir_.clear();
     }
+    // Release only after every active/raw/staged artifact has been reconciled
+    // and `.tmp` has either been removed or deliberately left visible.
+    session_ownership_.reset();
 }
 
 FileLogSink::FileChannel* FileLogSink::resolveChannel(Channel ch) const {
