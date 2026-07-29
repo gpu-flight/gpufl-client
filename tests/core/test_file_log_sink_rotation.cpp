@@ -84,14 +84,12 @@ class FileLogSinkRotationTest : public ::testing::Test {
     }
 
     gpufl::Logger::Options options(std::int64_t rotate_after_ms,
-                                   std::size_t rotate_bytes = 0,
-                                   std::size_t max_files = 100) {
+                                   std::size_t rotate_bytes = 0) {
         gpufl::Logger::Options o;
         o.base_path = base_.string();
         o.session_id = "s1";
         o.rotate_bytes = rotate_bytes;  // 0 = size trigger off
         o.rotate_after_ms = rotate_after_ms;
-        o.max_files = max_files;
         o.now_ms = [this] { return fake_now_ms_; };
         return o;
     }
@@ -133,7 +131,6 @@ class FileLogSinkRotationTest : public ::testing::Test {
         r.base_path = base_.string();
         r.session_id = "s1";
         r.channel_name = "device";
-        r.max_files = 100;
         r.compress_rotated = true;
         return r;
     }
@@ -613,8 +610,7 @@ TEST_F(FileLogSinkRotationTest, ExportRefusesToOverwriteAPublishedWindow) {
     writeText(sessionDir() / "device.1.log.gz", "the already-published window");
     writeText(tmpDir() / "device.1.log", R"({"w":"second"})");
 
-    std::size_t pruned = 0;
-    const auto result = rotator.exportRetiredWindow(1, &pruned);
+    const auto result = rotator.exportRetiredWindow(1);
 
     EXPECT_EQ(result,
               gpufl::LogFileRotator::ExportWindowResult::StagedForSalvage);
@@ -640,8 +636,7 @@ TEST_F(FileLogSinkRotationTest,
     fs::remove(published_raw);
 
     gpufl::LogFileRotator rotator(rotatorOptions(), &compressor);
-    std::size_t pruned = 0;
-    ASSERT_EQ(rotator.exportRetiredWindow(1, &pruned),
+    ASSERT_EQ(rotator.exportRetiredWindow(1),
               gpufl::LogFileRotator::ExportWindowResult::StagedForSalvage);
     ASSERT_TRUE(fs::exists(tmpDir() / "device.1.log.gz"));
 
@@ -718,8 +713,7 @@ TEST_F(FileLogSinkRotationTest, ExportOnlyEverCompressesToAPartFile) {
     gpufl::LogFileRotator rotator(rotatorOptions(), &compressor);
     writeText(tmpDir() / "device.1.log", R"({"window":1})");
 
-    std::size_t pruned = 0;
-    const auto result = rotator.exportRetiredWindow(1, &pruned);
+    const auto result = rotator.exportRetiredWindow(1);
 
     EXPECT_EQ(result, gpufl::LogFileRotator::ExportWindowResult::Published);
     ASSERT_EQ(compressor.targets.size(), 1u);
@@ -740,8 +734,7 @@ TEST_F(FileLogSinkRotationTest, FailedCompressionLeavesNoCompletedGzip) {
     const std::string payload = R"({"window":1})";
     writeText(tmpDir() / "device.1.log", payload);
 
-    std::size_t pruned = 0;
-    const auto result = rotator.exportRetiredWindow(1, &pruned);
+    const auto result = rotator.exportRetiredWindow(1);
 
     EXPECT_EQ(result,
               gpufl::LogFileRotator::ExportWindowResult::DeferredInActive);
@@ -762,8 +755,7 @@ TEST_F(FileLogSinkRotationTest, ExportRefusesToPublishWhileTheRawSurvives) {
     fs::create_directories(tmpDir() / "device.1.log" / "holder");
     writeText(tmpDir() / "device.1.log" / "holder" / "pin", "x");
 
-    std::size_t pruned = 0;
-    const auto result = rotator.exportRetiredWindow(1, &pruned);
+    const auto result = rotator.exportRetiredWindow(1);
 
     EXPECT_EQ(result,
               gpufl::LogFileRotator::ExportWindowResult::StagedForSalvage);
@@ -787,13 +779,11 @@ TEST_F(FileLogSinkRotationTest, CloseDrainsPendingExports) {
 }
 
 // The writer cannot know whether the backend durably accepted a window.
-// Even a deliberately tiny legacy max_files setting must not delete data;
-// the agent removes ACKed payloads and leaves metadata tombstones.
+// It never deletes published data; the agent removes ACKed payloads and
+// leaves metadata tombstones.
 TEST_F(FileLogSinkRotationTest,
        ClientNeverPrunesPublishedWindowsBeforeAgentAck) {
-    gpufl::FileLogSink sink(options(/*rotate_after_ms=*/5000,
-                                    /*rotate_bytes=*/0,
-                                    /*max_files=*/2));
+    gpufl::FileLogSink sink(options(/*rotate_after_ms=*/5000));
 
     for (int i = 1; i <= 3; ++i) {
         sink.write(gpufl::Channel::Device, R"({"w":1})");
@@ -803,10 +793,52 @@ TEST_F(FileLogSinkRotationTest,
     }
     EXPECT_EQ(publishedWindows("device"), 3u);
     EXPECT_EQ(sink.rotationStats().by_time, 3u);
-    EXPECT_EQ(sink.rotationStats().pruned_windows, 0u);
     EXPECT_TRUE(fs::exists(sessionDir() / "device.1.log.gz"));
     EXPECT_TRUE(fs::exists(sessionDir() / "device.2.log.gz"));
     EXPECT_TRUE(fs::exists(sessionDir() / "device.3.log.gz"));
+}
+
+TEST_F(FileLogSinkRotationTest,
+       SpoolBudgetStopsNewWritesAndPersistsTerminalLoss) {
+    auto opt = options(/*rotate_after_ms=*/0);
+    opt.flush_always = true;
+    opt.max_spool_bytes = 32;
+    opt.min_free_bytes = 0;
+    gpufl::FileLogSink sink(opt);
+
+    sink.write(gpufl::Channel::Device, std::string(64, 'x'));
+    sink.rotateDueWindows();  // collector beat performs the disk check
+
+    const auto saturated = sink.rotationStats();
+    ASSERT_TRUE(saturated.spool_saturated);
+    EXPECT_GE(saturated.spool_bytes_at_saturation, 32u);
+    EXPECT_EQ(gpufl::transportLossMarkerCount(sessionDir()), 1u);
+
+    const auto bytes_before =
+        fs::file_size(tmpDir() / "device.log");
+    sink.write(gpufl::Channel::Device, R"({"must":"drop"})");
+    EXPECT_EQ(fs::file_size(tmpDir() / "device.log"), bytes_before);
+    EXPECT_EQ(sink.rotationStats().dropped_events, 1u);
+    EXPECT_GT(sink.rotationStats().dropped_bytes, 0u);
+
+    sink.close();
+    EXPECT_EQ(gpufl::transportLossMarkerCount(sessionDir()), 1u)
+        << "clean shutdown must not erase the durable incomplete-session "
+           "signal";
+}
+
+TEST_F(FileLogSinkRotationTest, ZeroSpoolLimitsExplicitlyDisableTheGuard) {
+    auto opt = options(/*rotate_after_ms=*/0);
+    opt.flush_always = true;
+    opt.max_spool_bytes = 0;
+    opt.min_free_bytes = 0;
+    gpufl::FileLogSink sink(opt);
+
+    sink.write(gpufl::Channel::Device, std::string(64, 'x'));
+    sink.rotateDueWindows();
+
+    EXPECT_FALSE(sink.rotationStats().spool_saturated);
+    EXPECT_EQ(gpufl::transportLossMarkerCount(sessionDir()), 0u);
 }
 
 TEST_F(FileLogSinkRotationTest, SessionOwnershipIsExclusiveAndCrashReleased) {
@@ -949,7 +981,7 @@ TEST_F(FileLogSinkRotationTest,
     writeText(staged, "different-payload");
     gpufl::LogFileRotator rotator(rotatorOptions(), nullptr);
     EXPECT_EQ(
-        rotator.exportRetiredWindow(1, nullptr),
+        rotator.exportRetiredWindow(1),
         gpufl::LogFileRotator::ExportWindowResult::StagedForSalvage);
     EXPECT_FALSE(fs::exists(sessionDir() / "device.1.log"))
         << "an immutable identity must never be rebound to different bytes";

@@ -89,6 +89,13 @@ constexpr const char* kLogRotateBytes       = "GPUFL_LOG_ROTATE_BYTES";
 // ships each finished window mid-run. An empty window is never rotated.
 constexpr const char* kLogRotateAfterMs     = "GPUFL_LOG_ROTATE_AFTER_MS";
 
+// Hard safety limits for the per-session transport spool. Once either limit
+// is reached, GPUFlight stops accepting new profiling events and writes a
+// durable transport-loss marker instead of filling the application's disk.
+// The marker prevents a later uploader from reporting the session complete.
+constexpr const char* kLogMaxSpoolBytes     = "GPUFL_LOG_MAX_SPOOL_BYTES";
+constexpr const char* kLogMinFreeBytes      = "GPUFL_LOG_MIN_FREE_BYTES";
+
 // Opt-in ("1", "true", "yes", "on"): flush each log line immediately.
 // Useful when diagnosing whether missing records are buffered in userspace.
 constexpr const char* kFlushLogsAlways      = "GPUFL_FLUSH_LOGS_ALWAYS";

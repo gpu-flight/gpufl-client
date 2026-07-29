@@ -25,7 +25,6 @@ struct LogRotationOptions {
      */
     std::string session_id;
     std::string channel_name;
-    std::size_t max_files = 100;
     bool compress_rotated = true;
 };
 
@@ -74,17 +73,12 @@ class LogFileRotator {
      * truncate the raw authority, then publish. This is the same crash-safe
      * transaction used by the asynchronous mid-run path.
      *
-     * `pruned_windows` is retained as a compatibility out-parameter and is
-     * left unchanged. Published payload deletion belongs to the agent after
-     * a durable backend ACK; the writer must never infer delivery from a
-     * local file-count limit.
-     *
      * SYNCHRONOUS - compression and publish retries happen on the calling
      * thread. Used by the shutdown path only. Mid-run rotation splits this
      * into retireActiveWindow() + exportRetiredWindow() so no collector or
      * writer thread ever waits on gzip.
      */
-    ExportWindowResult rotate(std::size_t* pruned_windows = nullptr) const;
+    ExportWindowResult rotate() const;
 
     /** Next append-style window index for this channel (root + `.tmp`). */
     [[nodiscard]] std::size_t nextWindowIndex() const;
@@ -111,7 +105,6 @@ class LogFileRotator {
      * publish retry/backoff for transient holders lives here.
      */
     ExportWindowResult exportRetiredWindow(std::size_t index,
-                                           std::size_t* pruned_windows,
                                            const WindowTiming& timing = {}) const;
 
     /**
@@ -152,9 +145,8 @@ class LogFileRotator {
                                          const std::string& to) const;
 
     /** Shared body of rotate()/compressActive(). */
-    ExportWindowResult exportWindow_(std::size_t* pruned_windows) const;
-    ExportWindowResult exportWindowAt_(std::size_t index,
-                                       std::size_t* pruned_windows) const;
+    ExportWindowResult exportWindow_() const;
+    ExportWindowResult exportWindowAt_(std::size_t index) const;
 
     LogRotationOptions opt_;
     IFileCompressor* compressor_ = nullptr;  // non-owning

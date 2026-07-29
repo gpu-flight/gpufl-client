@@ -1,9 +1,11 @@
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <filesystem>
 #include <fstream>
 #include <memory>
 #include <mutex>
@@ -69,8 +71,8 @@ class FileLogSink final : public ILogSink {
      *
      * by_size / by_time count durable CUTOVERS keyed by which trigger fired
      * first. published / staged / export_failed describe the later worker
-     * outcome; pruned_windows counts old published windows the max_files cap
-     * DELETED, i.e. potential un-uploaded data loss.
+     * outcome. Spool saturation is terminal: new events are dropped only
+     * after a durable marker makes the incomplete session visible.
      */
     struct RotationStats {
         // Windows CUT OVER by each trigger. A cutover is the boundary
@@ -86,14 +88,11 @@ class FileLogSink final : public ILogSink {
         std::size_t published = 0;      // finished file in the session root
         std::size_t staged = 0;         // compressed, publish blocked
         std::size_t export_failed = 0;  // compression failed
-        // Old published windows the max_files cap DELETED - potential
-        // un-uploaded data loss, surfaced rather than swallowed.
-        std::size_t pruned_windows = 0;
         // Slowest single export, for sizing the compression cost that the
         // worker now absorbs instead of the collector.
         std::int64_t max_export_ms = 0;
-        // Retirement-worker backlog. Unlike max_files (published windows),
-        // these cover immutable raw windows still waiting for gzip/publish.
+        // Retirement-worker backlog: immutable raw windows still waiting for
+        // gzip/publish.
         std::size_t pending_exports = 0;
         std::size_t max_pending_exports = 0;
         std::uint64_t pending_export_bytes = 0;
@@ -102,6 +101,10 @@ class FileLogSink final : public ILogSink {
         // nothing on disk could still yield them. Terminal, unlike
         // `staged`/`export_failed`, which salvage still recovers.
         std::size_t lost_windows = 0;
+        bool spool_saturated = false;
+        std::uint64_t spool_bytes_at_saturation = 0;
+        std::uint64_t dropped_events = 0;
+        std::uint64_t dropped_bytes = 0;
     };
     RotationStats rotationStats() const;
 
@@ -130,9 +133,10 @@ class FileLogSink final : public ILogSink {
         FileChannel(std::string name, Logger::Options opt, FileLogSink* owner);
         ~FileChannel();
 
-        void write(std::string_view line);
+        bool write(std::string_view line);
         void close();
         bool isOpen() const;
+        std::uint64_t currentBytes() const;
         RotationStats rotationStats() const;
         void rotateIfDue();
         /**
@@ -188,6 +192,12 @@ class FileLogSink final : public ILogSink {
     void enqueueRetired(FileChannel* channel, std::size_t index,
                         std::uint64_t bytes, WindowTiming timing);
     void stopRetirementWorker();
+    void checkSpoolBudget(bool force = false);
+    void markSpoolSaturated(std::uint64_t spool_bytes,
+                            std::uint64_t available_bytes,
+                            const char* reason);
+    std::uint64_t spoolBytesOnDisk() const;
+    std::int64_t spoolNowMs() const;
 
     std::unique_ptr<FileChannel> chanDevice_;
     std::unique_ptr<FileChannel> chanScope_;
@@ -200,6 +210,17 @@ class FileLogSink final : public ILogSink {
     // The shared session `.tmp` dir, removed once in close() after every
     // channel has finalized (its own actives would block earlier removal).
     std::string temp_dir_;
+    std::filesystem::path session_dir_;
+    std::uint64_t max_spool_bytes_ = 0;
+    std::uint64_t min_free_bytes_ = 0;
+    std::function<std::int64_t()> spool_now_ms_;
+    mutable std::mutex spool_budget_mu_;
+    std::int64_t last_spool_check_ms_ = -1;
+    std::atomic<std::uint64_t> spool_estimated_bytes_{0};
+    std::atomic<bool> spool_saturated_{false};
+    std::atomic<std::uint64_t> spool_bytes_at_saturation_{0};
+    std::atomic<std::uint64_t> dropped_events_{0};
+    std::atomic<std::uint64_t> dropped_bytes_{0};
 
     // Retirement queue: cutover happens on whichever thread hit the
     // boundary (fast, metadata-only), compression and publish retries

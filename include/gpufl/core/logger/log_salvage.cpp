@@ -95,28 +95,6 @@ void scanMaxIndex(const fs::path& dir,
     }
 }
 
-std::vector<std::size_t> publishedWindowIndices(const fs::path& session_dir,
-                                                const std::string& channel) {
-    std::set<std::size_t> indices;
-    std::error_code ec;
-    if (!fs::exists(session_dir, ec) || !fs::is_directory(session_dir, ec)) {
-        return {};
-    }
-    for (const auto& entry : fs::directory_iterator(session_dir, ec)) {
-        std::error_code e_ec;
-        if (!entry.is_regular_file(e_ec)) continue;
-        std::string ch;
-        std::size_t idx = 0;
-        bool compressed = false;
-        if (parseWindowName(entry.path().filename().string(), ch, idx,
-                            compressed) &&
-            ch == channel && idx > 0) {
-            indices.insert(idx);
-        }
-    }
-    return {indices.begin(), indices.end()};
-}
-
 bool endsWith(const std::string& value, const std::string& suffix) {
     return value.size() >= suffix.size() &&
            value.compare(value.size() - suffix.size(), suffix.size(),
@@ -262,10 +240,10 @@ std::string jsonEscape(const std::string& value) {
     return escaped;
 }
 
-bool recordTransportLoss(const fs::path& session_dir,
-                         const std::string& channel,
-                         const std::size_t index,
-                         const std::string& reason) {
+bool recordTransportLossImpl(const fs::path& session_dir,
+                             const std::string& channel,
+                             const std::size_t index,
+                             const std::string& reason) {
     const fs::path marker =
         session_dir /
         (std::string(kTransportLossPrefix) + markerSafe(channel) + "." +
@@ -430,6 +408,13 @@ std::size_t transportLossMarkerCount(const fs::path& session_dir) {
     return count;
 }
 
+bool recordTransportLossMarker(const fs::path& session_dir,
+                               const std::string& channel,
+                               const std::size_t index,
+                               const std::string& reason) {
+    return recordTransportLossImpl(session_dir, channel, index, reason);
+}
+
 std::size_t nextLogWindowIndex(const fs::path& session_dir,
                                const std::string& channel) {
     // Scan `.tmp` FIRST, the session root SECOND - the reverse of the
@@ -448,27 +433,6 @@ std::size_t nextLogWindowIndex(const fs::path& session_dir,
     scanMaxIndex(session_dir, channel, max_index);
     scanWindowMetadataMaxSequence(session_dir, channel, max_index);
     return max_index + 1;
-}
-
-std::size_t pruneLogWindows(const fs::path& session_dir,
-                            const std::string& channel,
-                            const std::size_t max_files) {
-    if (max_files == 0) return 0;
-    auto indices = publishedWindowIndices(session_dir, channel);
-    if (indices.size() <= max_files) return 0;
-    const std::size_t remove_count = indices.size() - max_files;
-    std::size_t removed = 0;
-    for (std::size_t i = 0; i < remove_count; ++i) {
-        const auto idx = indices[i];
-        const fs::path base =
-            session_dir / (channel + "." + std::to_string(idx) + ".log");
-        std::error_code ec;
-        const bool got_log = fs::remove(base, ec);
-        std::error_code gz_ec;
-        const bool got_gz = fs::remove(base.string() + ".gz", gz_ec);
-        if (got_log || got_gz) ++removed;
-    }
-    return removed;
 }
 
 LogSalvageResult salvageOwnedSessionTempDir(const fs::path& session_dir) {
@@ -580,7 +544,7 @@ LogSalvageResult salvageOwnedSessionTempDir(const fs::path& session_dir) {
                 // Persist BEFORE deleting the last artifact. If the marker
                 // cannot be made durable, leave the empty file deferred: an
                 // unfinished session is preferable to invisible loss.
-                loss_recorded = recordTransportLoss(
+                loss_recorded = recordTransportLossImpl(
                     session_dir, channel, idx, "empty_gzip_no_raw");
             }
             if ((raw_recoverable || empty_artifact) && loss_recorded) {

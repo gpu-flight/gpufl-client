@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <limits>
+#include <sstream>
 
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/logger/file_compressor.hpp"
@@ -25,7 +27,6 @@ FileLogSink::FileChannel::FileChannel(std::string name, Logger::Options opt,
     r.base_path = opt_.base_path;
     r.session_id = opt_.session_id;
     r.channel_name = name_;
-    r.max_files = opt_.max_files;
     r.compress_rotated = opt_.compress_rotated;
     rotator_ = std::make_unique<LogFileRotator>(r, compressor_.get());
 
@@ -89,6 +90,11 @@ void FileLogSink::FileChannel::closeLocked() {
 }
 
 bool FileLogSink::FileChannel::isOpen() const { return opened_; }
+
+std::uint64_t FileLogSink::FileChannel::currentBytes() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return static_cast<std::uint64_t>(current_bytes_);
+}
 
 void FileLogSink::FileChannel::ensureOpenLocked() {
     if (!opened_) return;
@@ -204,19 +210,16 @@ void FileLogSink::FileChannel::exportRetired(
     const std::size_t index, const WindowTiming timing) {
     if (opt_.before_retired_export) opt_.before_retired_export();
     const auto started = std::chrono::steady_clock::now();
-    std::size_t pruned = 0;
     // No channel lock held: the retired file is immutable and nothing
     // writes to it any more, so gzip and the publish backoff cost this
     // worker thread only.
-    const auto result =
-        rotator_->exportRetiredWindow(index, &pruned, timing);
+    const auto result = rotator_->exportRetiredWindow(index, timing);
     const auto elapsed_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - started)
             .count();
 
     std::lock_guard<std::mutex> lk(mu_);
-    rotation_stats_.pruned_windows += pruned;
     if (elapsed_ms > rotation_stats_.max_export_ms) {
         rotation_stats_.max_export_ms = elapsed_ms;
     }
@@ -250,16 +253,16 @@ void FileLogSink::FileChannel::rotateIfDue() {
     rotateLocked(RotateTrigger::Time);
 }
 
-void FileLogSink::FileChannel::write(std::string_view line) {
+bool FileLogSink::FileChannel::write(std::string_view line) {
     std::lock_guard<std::mutex> lk(mu_);
     if (!opened_) {
         GFL_LOG_ERROR("Write failed: Channel '", name_, "' is not opened");
-        return;
+        return false;
     }
     ensureOpenLocked();
     if (!stream_.good()) {
         GFL_LOG_ERROR("Write failed: Stream bad for '", name_, "'");
-        return;
+        return false;
     }
     const size_t bytesToWrite = line.size() + 1;
     // Two rotation triggers, whichever is due first. Time is evaluated
@@ -281,7 +284,7 @@ void FileLogSink::FileChannel::write(std::string_view line) {
         rotateLocked(time_due ? RotateTrigger::Time : RotateTrigger::Size);
         if (!stream_.good()) {
             GFL_LOG_ERROR("Write failed after rotate for '", name_, "'");
-            return;
+            return false;
         }
     }
     // Write line + newline. Per-write flush is gated behind
@@ -312,6 +315,7 @@ void FileLogSink::FileChannel::write(std::string_view line) {
         window_first_write_ms_ = now;
     }
     current_bytes_ += bytesToWrite;
+    return true;
 }
 
 FileLogSink::RotationStats FileLogSink::FileChannel::rotationStats() const {
@@ -328,8 +332,11 @@ FileLogSink::FileLogSink(const Logger::Options& opt) {
                       "ownership.");
         return;
     }
-    const fs::path session_dir =
-        fs::path(opt.base_path) / opt.session_id;
+    const fs::path session_dir = fs::path(opt.base_path) / opt.session_id;
+    session_dir_ = session_dir;
+    max_spool_bytes_ = opt.max_spool_bytes;
+    min_free_bytes_ = opt.min_free_bytes;
+    spool_now_ms_ = opt.now_ms;
     std::string lock_error;
     session_ownership_ =
         SessionOwnershipLock::tryAcquire(session_dir, &lock_error);
@@ -348,6 +355,8 @@ FileLogSink::FileLogSink(const Logger::Options& opt) {
     r.base_path = opt.base_path;
     r.session_id = opt.session_id;
     temp_dir_ = LogFileRotator(r, nullptr).tempDir();
+    spool_estimated_bytes_.store(
+        spoolBytesOnDisk(), std::memory_order_relaxed);
 }
 
 FileLogSink::~FileLogSink() { close(); }
@@ -372,7 +381,6 @@ FileLogSink::RotationStats FileLogSink::rotationStats() const {
         total.published += s.published;
         total.staged += s.staged;
         total.export_failed += s.export_failed;
-        total.pruned_windows += s.pruned_windows;
         total.max_export_ms =
             std::max(total.max_export_ms, s.max_export_ms);
     }
@@ -384,10 +392,116 @@ FileLogSink::RotationStats FileLogSink::rotationStats() const {
         total.max_pending_export_bytes = max_pending_export_bytes_;
         total.lost_windows = lost_windows_;
     }
+    total.spool_saturated =
+        spool_saturated_.load(std::memory_order_acquire);
+    total.spool_bytes_at_saturation =
+        spool_bytes_at_saturation_.load(std::memory_order_relaxed);
+    total.dropped_events =
+        dropped_events_.load(std::memory_order_relaxed);
+    total.dropped_bytes =
+        dropped_bytes_.load(std::memory_order_relaxed);
     return total;
 }
 
+std::uint64_t FileLogSink::spoolBytesOnDisk() const {
+    std::uint64_t total = 0;
+    std::error_code ec;
+    if (session_dir_.empty() || !fs::exists(session_dir_, ec)) return 0;
+    fs::recursive_directory_iterator it(
+        session_dir_, fs::directory_options::skip_permission_denied, ec);
+    const fs::recursive_directory_iterator end;
+    while (!ec && it != end) {
+        std::error_code entry_ec;
+        if (it->is_regular_file(entry_ec)) {
+            const fs::path path = it->path();
+            const bool active_channel =
+                path.parent_path().filename() == ".tmp" &&
+                (path.filename() == "device.log" ||
+                 path.filename() == "scope.log" ||
+                 path.filename() == "system.log" ||
+                 path.filename() == "sass.log");
+            if (!active_channel) {
+                const auto bytes = it->file_size(entry_ec);
+                if (!entry_ec) total += static_cast<std::uint64_t>(bytes);
+            }
+        }
+        it.increment(ec);
+    }
+    for (const FileChannel* ch :
+         {chanDevice_.get(), chanScope_.get(), chanSystem_.get(),
+          chanSass_.get()}) {
+        if (ch) total += ch->currentBytes();
+    }
+    return total;
+}
+
+void FileLogSink::markSpoolSaturated(
+    const std::uint64_t spool_bytes,
+    const std::uint64_t available_bytes,
+    const char* reason) {
+    if (spool_saturated_.exchange(true, std::memory_order_acq_rel)) return;
+    spool_bytes_at_saturation_.store(
+        spool_bytes, std::memory_order_relaxed);
+
+    std::ostringstream detail;
+    detail << reason << ":spool_bytes=" << spool_bytes
+           << ",max_spool_bytes=" << max_spool_bytes_
+           << ",available_bytes=" << available_bytes
+           << ",min_free_bytes=" << min_free_bytes_;
+    const bool marker_written = recordTransportLossMarker(
+        session_dir_, "spool", 0, detail.str());
+    GFL_LOG_ERROR(
+        "[Logger] transport spool saturated for session '",
+        session_dir_.string(), "' (", detail.str(),
+        "). GPUFlight stopped accepting new profiling events to protect "
+        "the target application's filesystem. The profile is incomplete.",
+        marker_written
+            ? " A durable transport-loss marker was written."
+            : " WARNING: the durable loss marker could not be written.");
+}
+
+std::int64_t FileLogSink::spoolNowMs() const {
+    if (spool_now_ms_) return spool_now_ms_();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+void FileLogSink::checkSpoolBudget(const bool force) {
+    if (spool_saturated_.load(std::memory_order_acquire) ||
+        (max_spool_bytes_ == 0 && min_free_bytes_ == 0)) {
+        return;
+    }
+    std::lock_guard<std::mutex> lk(spool_budget_mu_);
+    if (spool_saturated_.load(std::memory_order_relaxed)) return;
+    const std::int64_t now = spoolNowMs();
+    // Directory scans are intentionally not on the 250 ms collector cadence.
+    // One scan per second reconciles agent-side ACK deletions and filesystem
+    // free space; the cheap write-byte estimate forces an immediate scan when
+    // this process approaches its session limit.
+    if (!force && last_spool_check_ms_ >= 0 &&
+        now - last_spool_check_ms_ < 1000) {
+        return;
+    }
+    last_spool_check_ms_ = now;
+
+    const std::uint64_t spool_bytes = spoolBytesOnDisk();
+    spool_estimated_bytes_.store(spool_bytes, std::memory_order_relaxed);
+    std::error_code space_ec;
+    const auto space = fs::space(session_dir_, space_ec);
+    const std::uint64_t available =
+        space_ec ? std::numeric_limits<std::uint64_t>::max()
+                 : static_cast<std::uint64_t>(space.available);
+    if (max_spool_bytes_ > 0 && spool_bytes >= max_spool_bytes_) {
+        markSpoolSaturated(spool_bytes, available, "spool_budget_exceeded");
+    } else if (min_free_bytes_ > 0 && !space_ec &&
+               available <= min_free_bytes_) {
+        markSpoolSaturated(spool_bytes, available, "filesystem_reserve_reached");
+    }
+}
+
 void FileLogSink::rotateDueWindows() {
+    checkSpoolBudget();
     for (FileChannel* ch : {chanDevice_.get(), chanScope_.get(),
                             chanSystem_.get(), chanSass_.get()}) {
         if (ch) ch->rotateIfDue();
@@ -501,9 +615,9 @@ void FileLogSink::close() {
             lost_windows_ += static_cast<std::size_t>(salvage.lost_windows);
             GFL_LOG_ERROR("[Logger] session '", session_dir.string(), "': ",
                           salvage.lost_windows,
-                          " transport window(s) were unrecoverable and have "
-                          "been discarded. Their events are LOST - the "
-                          "uploaded session is incomplete.");
+                          " durable transport-loss marker(s) are present. "
+                          "Some profiling events are LOST and the uploaded "
+                          "session must remain incomplete.");
         }
         if (salvage.deferred > 0 || sessionTempDirHasDeferredData(session_dir)) {
             GFL_LOG_ERROR("[Logger] session temp dir '", temp_dir_,
@@ -539,19 +653,38 @@ FileLogSink::FileChannel* FileLogSink::resolveChannel(Channel ch) const {
 }
 
 void FileLogSink::write(Channel ch, std::string_view json) {
+    if (spool_saturated_.load(std::memory_order_acquire)) {
+        dropped_events_.fetch_add(1, std::memory_order_relaxed);
+        dropped_bytes_.fetch_add(
+            static_cast<std::uint64_t>(json.size() + 1),
+            std::memory_order_relaxed);
+        return;
+    }
+    std::uint64_t copies_written = 0;
     if (ch == Channel::All) {
-        if (chanDevice_) chanDevice_->write(json);
-        if (chanScope_)  chanScope_->write(json);
-        if (chanSystem_) chanSystem_->write(json);
+        if (chanDevice_ && chanDevice_->write(json)) ++copies_written;
+        if (chanScope_ && chanScope_->write(json)) ++copies_written;
+        if (chanSystem_ && chanSystem_->write(json)) ++copies_written;
         // Sass is part of the fan-out so each sass.log is self-ordered:
         // dictionary_update lines land in the file BEFORE the
         // source_file_content/cubin_disassembly lines that reference their
         // IDs - live tailers (agent) read channels independently and have
         // no cross-file ordering.
-        if (chanSass_) chanSass_->write(json);
+        if (chanSass_ && chanSass_->write(json)) ++copies_written;
     } else {
         if (FileChannel* channel = resolveChannel(ch)) {
-            channel->write(json);
+            if (channel->write(json)) ++copies_written;
+        }
+    }
+    if (copies_written > 0) {
+        const std::uint64_t bytes =
+            copies_written * static_cast<std::uint64_t>(json.size() + 1);
+        const std::uint64_t estimated =
+            spool_estimated_bytes_.fetch_add(
+                bytes, std::memory_order_relaxed) +
+            bytes;
+        if (max_spool_bytes_ > 0 && estimated >= max_spool_bytes_) {
+            checkSpoolBudget(/*force=*/true);
         }
     }
 }

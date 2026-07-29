@@ -105,12 +105,7 @@ LogFileRotator::RetireResult LogFileRotator::retireActiveWindow(
 }
 
 LogFileRotator::ExportWindowResult LogFileRotator::exportRetiredWindow(
-    const std::size_t index, std::size_t* pruned_windows,
-    const WindowTiming& timing) const {
-    // Compatibility-only out parameter. Published payload retention is no
-    // longer inferred from a local file-count cap: the agent deletes a
-    // payload only after the backend ACKs its immutable window identity.
-    (void)pruned_windows;
+    const std::size_t index, const WindowTiming& timing) const {
     const std::string retired = retiredPath(index);
     std::error_code ec;
     if (!fs::exists(retired, ec)) return ExportWindowResult::NoData;
@@ -194,13 +189,12 @@ LogFileRotator::ExportWindowResult LogFileRotator::exportRetiredWindow(
     return ExportWindowResult::Published;
 }
 
-LogFileRotator::ExportWindowResult LogFileRotator::exportWindow_(
-    std::size_t* pruned_windows) const {
-    return exportWindowAt_(nextWindowIndex(), pruned_windows);
+LogFileRotator::ExportWindowResult LogFileRotator::exportWindow_() const {
+    return exportWindowAt_(nextWindowIndex());
 }
 
 LogFileRotator::ExportWindowResult LogFileRotator::exportWindowAt_(
-    const std::size_t index, std::size_t* pruned_windows) const {
+    const std::size_t index) const {
     switch (retireActiveWindow(index)) {
         case RetireResult::NoData:
             return ExportWindowResult::NoData;
@@ -209,14 +203,13 @@ LogFileRotator::ExportWindowResult LogFileRotator::exportWindowAt_(
         case RetireResult::Retired:
             // Shutdown uses the same crash-safe raw -> .part -> completed
             // gzip transaction as mid-run retirement; only the thread differs.
-            return exportRetiredWindow(index, pruned_windows);
+            return exportRetiredWindow(index);
     }
     return ExportWindowResult::DeferredInActive;
 }
 
-LogFileRotator::ExportWindowResult LogFileRotator::rotate(
-    std::size_t* pruned_windows) const {
-    return exportWindow_(pruned_windows);
+LogFileRotator::ExportWindowResult LogFileRotator::rotate() const {
+    return exportWindow_();
 }
 
 LogFileRotator::ExportWindowResult LogFileRotator::compressActive(
@@ -231,7 +224,7 @@ LogFileRotator::ExportWindowResult LogFileRotator::compressActive(
             result = ExportWindowResult::DeferredInActive;
             break;
         case RetireResult::Retired:
-            result = exportRetiredWindow(index, nullptr, timing);
+            result = exportRetiredWindow(index, timing);
             break;
     }
     // Best-effort removal of this channel's (now exported) active file.

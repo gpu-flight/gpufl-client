@@ -76,23 +76,25 @@ std::size_t transportLossMarkerCount(
     const std::filesystem::path& session_dir);
 
 /**
+ * Persist one idempotent terminal-loss marker outside `.tmp`.
+ *
+ * `channel` may be a transport channel or a session-level category such as
+ * "spool". A marker prevents upload from reporting a partial session as
+ * complete.
+ */
+bool recordTransportLossMarker(
+    const std::filesystem::path& session_dir,
+    const std::string& channel,
+    std::size_t index,
+    const std::string& reason);
+
+/**
  * Return the next append-style window index for `channel` in a session.
  * Both published root files and unpublished `.tmp` staging files count, so
  * a failed publish cannot be overwritten by the next rotation.
  */
 std::size_t nextLogWindowIndex(const std::filesystem::path& session_dir,
                                const std::string& channel);
-
-/**
- * Remove oldest published windows once more than `max_files` exist, and
- * return how many were deleted. A nonzero return is DATA LOSS for any
- * window the agent had not uploaded yet - callers surface it loudly
- * (short rotation cadences reach the cap in minutes: 100 files at a 10 s
- * cadence is ~17 min of agent/backend outage tolerance).
- */
-std::size_t pruneLogWindows(const std::filesystem::path& session_dir,
-                            const std::string& channel,
-                            std::size_t max_files);
 
 /** Publish staged `.tmp/*.log.gz` files and export non-empty `.tmp/*.log`. */
 LogSalvageResult salvageSessionTempDir(

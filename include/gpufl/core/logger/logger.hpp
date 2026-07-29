@@ -43,6 +43,14 @@ class Logger {
      * lockstep.
      */
     static constexpr std::size_t kDefaultRotateBytes = 64 * 1024 * 1024;
+    // A profiler must not exhaust the filesystem used by the target
+    // application during a prolonged agent/backend outage. These are
+    // session-wide safety limits, not retention policy: acknowledged
+    // payload deletion still belongs exclusively to the agent.
+    static constexpr std::uint64_t kDefaultMaxSpoolBytes =
+        4ull * 1024 * 1024 * 1024;
+    static constexpr std::uint64_t kDefaultMinFreeBytes =
+        512ull * 1024 * 1024;
 
     struct Options {
         std::string base_path;
@@ -98,7 +106,18 @@ class Logger {
          * prove the cutover caller has already returned.
          */
         std::function<void()> before_retired_export;
-        std::size_t max_files = 100;
+        /**
+         * Stop accepting new profiling events once this session's on-disk
+         * spool reaches the limit. 0 disables the per-session byte limit.
+         * Saturation is terminal for the session and is recorded durably so
+         * upload cannot later claim the resulting partial profile is complete.
+         */
+        std::uint64_t max_spool_bytes = kDefaultMaxSpoolBytes;
+        /**
+         * Also stop before the filesystem's available space drops below this
+         * reserve. 0 disables the free-space guard.
+         */
+        std::uint64_t min_free_bytes = kDefaultMinFreeBytes;
         bool compress_rotated = true;
         bool flush_always = false;
         int system_sample_rate_ms = 0;
