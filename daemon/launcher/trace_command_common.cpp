@@ -16,6 +16,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -25,6 +26,7 @@
 #include "gpufl/core/json/json.hpp"
 #include "gpufl/core/logger/file_compressor.hpp"
 #include "gpufl/core/logger/log_salvage.hpp"
+#include "gpufl/core/logger/window_metadata.hpp"
 #include "gpufl/inject/inject_entry.hpp"
 #include "gpufl/upload/upload_logs.hpp"
 
@@ -154,10 +156,14 @@ void readLogLines(const fs::path& path, Fn&& fn) {
 
 struct SessionLifecycleInfo {
     bool saw_job_start = false;
+    bool saw_segment_end = false;
+    bool saw_run_end = false;
     bool saw_shutdown = false;
     int pid = 0;
     std::string app = "unknown";
     int64_t job_start_ts_ns = 0;
+    std::string run_id;
+    int segment_index = -1;
 };
 
 bool isSessionDirectory(const fs::directory_entry& entry) {
@@ -175,6 +181,14 @@ struct SyntheticShutdownContext {
 };
 
 void inspectLifecycleLine(const std::string& line, SessionLifecycleInfo& info) {
+    if (line.find("\"type\":\"segment_end\"") != std::string::npos) {
+        info.saw_segment_end = true;
+        return;
+    }
+    if (line.find("\"type\":\"run_end\"") != std::string::npos) {
+        info.saw_run_end = true;
+        return;
+    }
     if (line.find("\"type\":\"shutdown\"") != std::string::npos) {
         info.saw_shutdown = true;
         return;
@@ -194,6 +208,8 @@ void inspectLifecycleLine(const std::string& line, SessionLifecycleInfo& info) {
     info.pid = doc.value<int>("pid", 0);
     info.app = doc.value<std::string>("app", "unknown");
     info.job_start_ts_ns = doc.value<int64_t>("ts_ns", 0);
+    info.run_id = doc.value<std::string>("run_id", "");
+    info.segment_index = doc.value<int>("segment_index", -1);
 }
 
 bool decompressGzipToFile(const fs::path& gz_path, const fs::path& out_path) {
@@ -234,6 +250,56 @@ std::string syntheticShutdownLine(const std::string& session_id,
        << ",\"crashed\":" << (crashed ? "true" : "false")
        << "}";
     return os.str();
+}
+
+std::vector<std::string> syntheticCompletionLines(
+    const std::string& session_id, const SessionLifecycleInfo& info,
+    const SyntheticShutdownContext& context,
+    const bool may_synthesize_run_end) {
+    std::vector<std::string> lines;
+    const int64_t ended_ns = nowNs();
+    const bool normal_segmented_exit =
+        context.exit_code == 0 && !context.signaled &&
+        !context.window_stopped && !info.run_id.empty() &&
+        info.segment_index >= 0;
+
+    // A Windows injection atexit may be unable to drain outstanding CUPTI
+    // writers safely. SegmentRuntime then deliberately omits false finality,
+    // but the launcher knows whether the process itself exited normally.
+    // Repair only that normal-exit case. Crashes and forced window stops must
+    // remain without run_end so backend liveness marks them incomplete.
+    if (normal_segmented_exit && !info.saw_segment_end) {
+        std::ostringstream os;
+        os << "{\"version\":1,\"type\":\"segment_end\""
+           << ",\"session_id\":\"" << json::escape(session_id) << "\""
+           << ",\"run_id\":\"" << json::escape(info.run_id) << "\""
+           << ",\"segment_index\":" << info.segment_index
+           << ",\"ts_ns\":" << ended_ns
+           << ",\"actual_end_ns\":" << ended_ns
+           << ",\"requested_boundary_ns\":null"
+           << ",\"boundary_delay_ns\":0"
+           << ",\"end_reason\":\"process_shutdown\""
+           << ",\"deferred_by\":null"
+           << ",\"records_outside_segment_window\":0"
+           << ",\"synthetic\":true}";
+        lines.push_back(os.str());
+    }
+    if (normal_segmented_exit && may_synthesize_run_end &&
+        !info.saw_run_end) {
+        std::ostringstream os;
+        os << "{\"version\":1,\"type\":\"run_end\""
+           << ",\"session_id\":\"" << json::escape(session_id) << "\""
+           << ",\"run_id\":\"" << json::escape(info.run_id) << "\""
+           << ",\"final_segment_index\":" << info.segment_index
+           << ",\"ts_ns\":" << ended_ns
+           << ",\"ended_ns\":" << ended_ns
+           << ",\"synthetic\":true}";
+        lines.push_back(os.str());
+    }
+    if (!info.saw_shutdown) {
+        lines.push_back(syntheticShutdownLine(session_id, info, context));
+    }
+    return lines;
 }
 
 bool appendLine(const fs::path& path, const std::string& line) {
@@ -288,11 +354,15 @@ bool appendLineToGzipLog(const fs::path& gz_path, const std::string& line) {
     return true;
 }
 
-bool appendSyntheticShutdown(const fs::path& session_dir,
-                             const std::string& session_id,
-                             const SessionLifecycleInfo& info,
-                             const SyntheticShutdownContext& context) {
-    const std::string line = syntheticShutdownLine(session_id, info, context);
+bool appendSyntheticCompletion(const fs::path& session_dir,
+                               const std::string& session_id,
+                               const SessionLifecycleInfo& info,
+                               const SyntheticShutdownContext& context,
+                               const bool may_synthesize_run_end) {
+    const std::vector<std::string> lines =
+        syntheticCompletionLines(
+            session_id, info, context, may_synthesize_run_end);
+    if (lines.empty()) return false;
     // Allocate through the shared allocator, which also counts windows still
     // sitting in `.tmp`. highestSystemWindowIndex() only scans the session
     // ROOT, so a deferred window in `.tmp` did not reserve its index and the
@@ -306,9 +376,16 @@ bool appendSyntheticShutdown(const fs::path& session_dir,
     const fs::path window_gz = session_dir / (base + ".gz");
     std::error_code ec;
     if (fs::exists(window_gz, ec)) {
-        return appendLineToGzipLog(window_gz, line);
+        for (const auto& line : lines) {
+            if (!appendLineToGzipLog(window_gz, line)) return false;
+        }
+        return true;
     }
-    return appendLine(session_dir / base, line);
+    const fs::path raw = session_dir / base;
+    for (const auto& line : lines) {
+        if (!appendLine(raw, line)) return false;
+    }
+    return true;
 }
 
 bool isSystemLog(const fs::path& path) {
@@ -337,7 +414,6 @@ void inspectLifecycleFiles(const std::vector<fs::path>& paths,
         readLogLines(path, [&](const std::string& line) {
             inspectLifecycleLine(line, info);
         });
-        if (info.saw_shutdown) break;
     }
 }
 
@@ -347,7 +423,13 @@ int ensureTraceCompletionMarkers(const fs::path& output_dir,
     std::error_code ec;
     if (output_dir.empty() || !fs::exists(output_dir, ec)) return 0;
 
-    int synthesized = 0;
+    struct SessionCandidate {
+        fs::path session_dir;
+        std::string session_id;
+        SessionLifecycleInfo info;
+    };
+    std::vector<SessionCandidate> candidates;
+
     for (const auto& session_entry : fs::directory_iterator(output_dir, ec)) {
         if (ec) break;
         if (!isSessionDirectory(session_entry)) continue;
@@ -377,9 +459,45 @@ int ensureTraceCompletionMarkers(const fs::path& output_dir,
             inspectLifecycleFiles(fallback_logs, info);
         }
 
-        if (info.saw_job_start && !info.saw_shutdown &&
-            info.job_start_ts_ns >= min_job_start_ts_ns &&
-            appendSyntheticShutdown(session_dir, session_id, info, context)) {
+        if (info.saw_job_start &&
+            info.job_start_ts_ns >= min_job_start_ts_ns) {
+            candidates.push_back(
+                SessionCandidate{session_dir, session_id, std::move(info)});
+        }
+    }
+
+    // run_end is one logical-run terminal marker, not one marker per segment.
+    // Repair it only in the highest observed segment from this launcher
+    // invocation. Earlier segments still receive a missing segment_end or
+    // shutdown, but can never truncate final_segment_index when the actual tail
+    // window is delayed or lost.
+    std::unordered_map<std::string, int> highest_segment_by_run;
+    for (const auto& candidate : candidates) {
+        const auto& info = candidate.info;
+        if (info.run_id.empty() || info.segment_index < 0) continue;
+        auto [it, inserted] = highest_segment_by_run.emplace(
+            info.run_id, info.segment_index);
+        if (!inserted) {
+            it->second = std::max(it->second, info.segment_index);
+        }
+    }
+
+    int synthesized = 0;
+    for (const auto& candidate : candidates) {
+        const auto& info = candidate.info;
+        const auto highest = highest_segment_by_run.find(info.run_id);
+        const bool may_synthesize_run_end =
+            highest != highest_segment_by_run.end() &&
+            info.segment_index == highest->second;
+        const bool needs_normal_finality =
+            context.exit_code == 0 && !context.signaled &&
+            !context.window_stopped && !info.run_id.empty() &&
+            (!info.saw_segment_end ||
+             (may_synthesize_run_end && !info.saw_run_end));
+        if ((!info.saw_shutdown || needs_normal_finality) &&
+            appendSyntheticCompletion(
+                candidate.session_dir, candidate.session_id, info, context,
+                may_synthesize_run_end)) {
             ++synthesized;
         }
     }
@@ -458,6 +576,7 @@ int repairUncompressedLogs(const fs::path& root) {
     int repaired = salvaged.salvaged;
 
     GzipFileCompressor compressor;
+    bool staged_indexed_window = false;
     std::error_code iter_ec;
     for (fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, iter_ec), end;
          !iter_ec && it != end;
@@ -465,8 +584,10 @@ int repairUncompressedLogs(const fs::path& root) {
         std::error_code entry_ec;
         if (!it->is_regular_file(entry_ec)) continue;
         const fs::path path = it->path();
-        // .tmp contents were handled by the salvage pass above; a dir
-        // that survived it is still held - leave it alone.
+        // The first salvage pass handled artifacts already under `.tmp`.
+        // Indexed raw files found below are moved into `.tmp` deliberately and
+        // consumed by the second salvage pass after this traversal. Skipping
+        // `.tmp` here prevents those staged files from being compressed twice.
         if (path.parent_path().filename() == ".tmp") continue;
         if (path.extension() != ".log") continue;
 
@@ -480,6 +601,10 @@ int repairUncompressedLogs(const fs::path& root) {
         }
 
         const fs::path gz_path(path.string() + ".gz");
+        std::string channel;
+        std::size_t sequence = 0;
+        const bool indexed_window = parsePublishedWindowName(
+            gz_path.filename().string(), channel, sequence);
         std::error_code exists_ec;
         // EXISTS is not VALID. A compress that died midway - or a rename that
         // hit the disk before its data - leaves a truncated or empty `.gz`,
@@ -495,6 +620,20 @@ int repairUncompressedLogs(const fs::path& root) {
             fs::remove(gz_path, rm_ec);
         }
         if (fs::exists(gz_path, exists_ec)) {
+            // A completed indexed gzip is not authoritative until its immutable
+            // sidecar exists. Write/validate the identity before removing the
+            // duplicate raw source; otherwise a current agent sees an
+            // identity-less payload and permanently escalates it.
+            if (indexed_window &&
+                !ensureWindowMetadata(path.parent_path(),
+                                      path.parent_path().filename().string(),
+                                      channel, sequence, gz_path)) {
+                std::fprintf(stderr,
+                             "[gpufl] warning: could not write metadata for "
+                             "%s; preserving its raw source\n",
+                             gz_path.string().c_str());
+                continue;
+            }
             std::error_code remove_ec;
             if (!removeWithRetry(path, remove_ec)) {
                 // Held without delete sharing - truncate so the data
@@ -512,11 +651,53 @@ int repairUncompressedLogs(const fs::path& root) {
             continue;
         }
 
+        if (indexed_window) {
+            // Do not compress directly into the published name. The agent is
+            // polling this directory concurrently, and payload-before-metadata
+            // would briefly downgrade a current-client window to the legacy
+            // path. Move the raw source back under `.tmp` and let the shared
+            // salvage transaction do:
+            //
+            //   compress -> immutable metadata -> payload publish.
+            //
+            // This also makes launcher-created synthetic shutdown windows use
+            // exactly the same crash/collision handling as normal windows.
+            const fs::path tmp_dir = path.parent_path() / ".tmp";
+            std::error_code mkdir_ec;
+            fs::create_directories(tmp_dir, mkdir_ec);
+            if (mkdir_ec) {
+                std::fprintf(stderr,
+                             "[gpufl] warning: could not create %s to stage "
+                             "repaired window %s: %s\n",
+                             tmp_dir.string().c_str(), path.string().c_str(),
+                             mkdir_ec.message().c_str());
+                continue;
+            }
+            const fs::path staged = tmp_dir / path.filename();
+            std::error_code move_ec;
+            const auto moved = moveFileNoReplace(path, staged, move_ec);
+            if (moved != MoveFileNoReplaceResult::Moved) {
+                std::fprintf(stderr,
+                             "[gpufl] warning: could not stage repaired "
+                             "window %s under .tmp: %s\n",
+                             path.string().c_str(),
+                             move_ec.message().c_str());
+                continue;
+            }
+            staged_indexed_window = true;
+            continue;
+        }
+
+        // Legacy, unindexed logs predate transport-window identity. Preserve
+        // their historical repair behavior; current segmented windows always
+        // take the indexed transaction above.
         if (compressor.compress(path.string())) {
-            // compress() removes (or truncates) the original itself and
-            // logs when it can't - nothing left to do here.
             ++repaired;
         }
+    }
+    if (staged_indexed_window) {
+        const auto staged = salvageSessionTempDirs(root);
+        repaired += staged.salvaged;
     }
     return repaired;
 }
@@ -836,6 +1017,15 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
         }
     }
 
+    // Completion repair must happen while the upload agent is still alive.
+    // In particular, ensureTraceCompletionMarkers() may append an indexed raw
+    // system window after a crash or a bounded stop. Repairing it only after
+    // the agent drained left the final segment permanently local.
+    const int repaired_logs = repairUncompressedLogs(output_dir);
+    if (repaired_logs > 0) {
+        GFL_LOG_DEBUG("compressed ", repaired_logs, " log file(s)");
+    }
+
     if (!args.quiet) {
         std::fprintf(stderr, "[gpufl] inspect: %s\n", output_dir.string().c_str());
     }
@@ -875,11 +1065,6 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
             agent.stop();
             if (overall_rc == 0) overall_rc = 4;
         }
-    }
-
-    const int repaired_logs = repairUncompressedLogs(output_dir);
-    if (repaired_logs > 0) {
-        GFL_LOG_DEBUG("compressed ", repaired_logs, " log file(s)");
     }
 
     return overall_rc;

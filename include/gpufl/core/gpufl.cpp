@@ -706,7 +706,12 @@ bool init(const InitOptions& opts) {
     if (g_opts.system_sample_rate_ms > 0 && rt_ptr->collector) {
         rt_ptr->sampler.configure(
             rt_ptr->app_name,
-            [rt_ptr] { return rt_ptr->acquireSegmentContext(); },
+            [rt_ptr] {
+                return rt_ptr->acquireSegmentContext("sampler");
+            },
+            [rt_ptr] {
+                return rt_ptr->peekSegmentContext();
+            },
             rt_ptr->collector, g_opts.system_sample_rate_ms,
             rt_ptr->host_collector.get(),
             [rt_ptr](const uint32_t index, const uint64_t rows,
@@ -847,7 +852,7 @@ void shutdown() {
         Monitor::Shutdown();
     }
     GFL_LOG_DEBUG("Shutdown: monitor drained -> finalize logs");
-    auto final_segment = rt->acquireSegmentContext();
+    auto final_segment = rt->acquireSegmentContext("shutdown");
     if (!final_segment || !final_segment->logger) {
         GFL_LOG_ERROR("Shutdown: active segment context disappeared");
         set_runtime(nullptr);

@@ -81,7 +81,8 @@ void MonitorBatchManager::flushAll(FlushMode mode) {
         return;
     }
 
-    const auto context = flushSink_.runtime->acquireSegmentContext();
+    const auto context =
+        flushSink_.runtime->acquireSegmentContext("monitor_batch");
     if (!context || !context->logger) {
         GFL_LOG_ERROR(
             "MonitorBatchManager::flushAll: active segment context is missing");
@@ -110,7 +111,11 @@ void MonitorBatchManager::flushAll(FlushMode mode) {
         flushDictionary();
         logger.write(model::KernelEventBatchModel(kernelBatch_, session_id, ++kernelBatchId_));
         kernelBatch_.clear();
-        for (const auto& d : pendingDetails_) {
+        for (auto& d : pendingDetails_) {
+            // Details may have been queued before a segment publication. The
+            // flush lease is the linearization point and therefore the sole
+            // authority for the session identity written with this batch.
+            d.session_id = session_id;
             logger.write(model::KernelDetailModel(d));
         }
         pendingDetails_.clear();
@@ -201,7 +206,8 @@ void MonitorBatchManager::enqueueDisassembly(uint64_t crc, const uint8_t* data, 
 
 void MonitorBatchManager::flushDisassembly() {
     if (!flushSink_.available()) return;
-    const auto context = flushSink_.runtime->acquireSegmentContext();
+    const auto context =
+        flushSink_.runtime->acquireSegmentContext("monitor_batch");
     if (!context || !context->logger) return;
     dictManager_.flushDisassembly(*context->logger, context->session_id);
 }

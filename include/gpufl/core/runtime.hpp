@@ -32,7 +32,8 @@ struct Runtime {
     std::shared_ptr<const SegmentContext> active_segment_context;
     std::shared_ptr<SegmentRuntime> segment_runtime;
 
-    SegmentWriteLease acquireSegmentContext() const noexcept;
+    SegmentWriteLease acquireSegmentContext(
+        const char* owner = "general") const noexcept;
     /** Liveness check only; does not participate in writer drainage. */
     bool hasSegmentContext() const noexcept;
     /** Coordinator-only read. This does not protect a write operation. */

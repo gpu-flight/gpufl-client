@@ -77,7 +77,7 @@ bool existingMetadataMatches(
     const std::string& session_id,
     const std::string& channel,
     const std::size_t sequence,
-    const fs::path& payload,
+    const std::string& published_name,
     const std::uint64_t payload_bytes,
     const std::uint32_t payload_crc32) {
     const auto metadata = json::loadFile(metadata_path.string());
@@ -90,8 +90,7 @@ bool existingMetadataMatches(
         metadata.value<std::string>("channel", "") != channel ||
         metadata.value<std::uint64_t>("window_sequence", kMissing) !=
             sequence ||
-        metadata.value<std::string>("payload_file", "") !=
-            payload.filename().string() ||
+        metadata.value<std::string>("payload_file", "") != published_name ||
         metadata.value<std::uint64_t>("payload_bytes", kMissing) !=
             payload_bytes ||
         metadata.value<std::uint64_t>("payload_crc32", kMissing) !=
@@ -121,21 +120,37 @@ bool ensureWindowMetadata(const fs::path& session_dir,
                           const std::size_t sequence,
                           const fs::path& payload,
                           const WindowTiming& timing) {
+    return ensureWindowMetadata(session_dir, session_id, channel, sequence,
+                                payload, payload.filename().string(), timing);
+}
+
+bool ensureWindowMetadata(const fs::path& session_dir,
+                          const std::string& session_id,
+                          const std::string& channel,
+                          const std::size_t sequence,
+                          const fs::path& fingerprint_source,
+                          const std::string& published_name,
+                          const WindowTiming& timing) {
     const fs::path target =
         windowMetadataPath(session_dir, channel, sequence);
     std::uint64_t payload_bytes = 0;
     std::uint32_t payload_crc32 = 0;
-    if (!payloadFingerprint(payload, payload_bytes, payload_crc32)) {
+    // Read the file that exists NOW; record the name it will have when a
+    // consumer sees it. A publish is a rename of these exact bytes, so the
+    // fingerprint stays valid across it.
+    if (!payloadFingerprint(fingerprint_source, payload_bytes,
+                            payload_crc32)) {
         GFL_LOG_ERROR("[Logger] cannot fingerprint window payload '",
-                      payload.string(), "'; metadata not published.");
+                      fingerprint_source.string(),
+                      "'; metadata not published.");
         return false;
     }
 
     std::error_code state_ec;
     if (fs::is_regular_file(target, state_ec)) {
         return existingMetadataMatches(
-            target, session_id, channel, sequence, payload, payload_bytes,
-            payload_crc32);
+            target, session_id, channel, sequence, published_name,
+            payload_bytes, payload_crc32);
     }
 
     WindowMetadata metadata;
@@ -148,7 +163,7 @@ bool ensureWindowMetadata(const fs::path& session_dir,
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch())
             .count();
-    metadata.payload_file = payload.filename().string();
+    metadata.payload_file = published_name;
     metadata.payload_bytes = payload_bytes;
     metadata.payload_crc32 = payload_crc32;
 
@@ -188,7 +203,7 @@ bool ensureWindowMetadata(const fs::path& session_dir,
         std::error_code target_ec;
         if (fs::is_regular_file(target, target_ec)) {
             return existingMetadataMatches(
-                target, session_id, channel, sequence, payload,
+                target, session_id, channel, sequence, published_name,
                 payload_bytes, payload_crc32);
         }
         GFL_LOG_ERROR("[Logger] immutable window metadata path '",

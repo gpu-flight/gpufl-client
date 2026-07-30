@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <string>
 
 namespace gpufl {
@@ -46,18 +47,25 @@ struct SegmentContext {
    private:
     friend class SegmentWriteLease;
     friend class SegmentRuntime;
+    friend class Sampler;
     friend struct Runtime;
 
-    bool tryAcquireWriter() const noexcept;
-    void releaseWriter() const noexcept;
+    bool tryAcquireWriter(const char* owner) const noexcept;
+    void releaseWriter(const char* owner) const noexcept;
     void sealForRetirement() const noexcept;
     bool waitForWriters(std::chrono::milliseconds timeout,
                         uint64_t* remaining) const noexcept;
+    std::string activeWriterSummary() const;
 
     mutable std::atomic<bool> accepting_writers_{true};
     mutable std::atomic<uint64_t> active_writers_{0};
     mutable std::mutex writer_drain_mu_;
     mutable std::condition_variable writer_drain_cv_;
+    // Segmentation is opt-in, so retaining owner counts here adds no cost to
+    // ordinary sessions. When a drain times out this turns "one writer leaked"
+    // into an actionable producer name instead of an untraceable hang.
+    mutable std::mutex writer_owner_mu_;
+    mutable std::unordered_map<std::string, uint64_t> writer_owners_;
 };
 
 /**
@@ -94,10 +102,12 @@ class SegmentWriteLease {
    private:
     friend struct Runtime;
     explicit SegmentWriteLease(
-        std::shared_ptr<const SegmentContext> context) noexcept
-        : context_(std::move(context)) {}
+        std::shared_ptr<const SegmentContext> context,
+        const char* owner) noexcept
+        : context_(std::move(context)), owner_(owner) {}
 
     std::shared_ptr<const SegmentContext> context_;
+    const char* owner_ = "general";
 };
 
 }  // namespace gpufl

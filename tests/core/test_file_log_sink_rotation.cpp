@@ -105,6 +105,12 @@ class FileLogSinkRotationTest : public ::testing::Test {
         out.close();
     }
 
+    static std::string readText(const fs::path& path) {
+        std::ifstream in(path, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)),
+                           std::istreambuf_iterator<char>());
+    }
+
     static void writeEmptyFile(const fs::path& path) {
         fs::create_directories(path.parent_path());
         std::ofstream out(path, std::ios::binary | std::ios::trunc);
@@ -487,6 +493,81 @@ TEST_F(FileLogSinkRotationTest,
     EXPECT_TRUE(fs::is_regular_file(sessionDir() / "device.1.log.gz"));
     EXPECT_FALSE(fs::exists(sessionDir() / "device.2.log.gz"));
     EXPECT_FALSE(fs::exists(tmpDir()));
+}
+
+// The sidecar must name the window the agent will actually see. Salvage
+// fingerprints a STAGED file and then renames it, so recording
+// `payload.filename()` wrote the staging name ("device.log.gz") while the
+// published window was "device.1.log.gz". The agent's isValidFor() compared
+// the two, rejected the pair as a contract violation, wrote a durable loss
+// marker, and refused to upload - observed on every final segment of a real
+// segmented run.
+TEST_F(FileLogSinkRotationTest,
+       SalvagedWindowMetadataNamesThePublishedFileNotTheStagingFile) {
+    fs::create_directories(tmpDir());
+    const std::string payload = R"({"window":"active"})";
+    writeText(tmpDir() / "device.log", payload);   // un-indexed active file
+
+    const auto result = gpufl::salvageSessionTempDir(sessionDir());
+
+    ASSERT_EQ(result.deferred, 0u);
+    ASSERT_EQ(publishedWindows("device"), 1u);
+    ASSERT_TRUE(fs::is_regular_file(sessionDir() / "device.1.log.gz"));
+
+    const fs::path sidecar = sessionDir() / ".gpufl-window.device.1.json";
+    ASSERT_TRUE(fs::is_regular_file(sidecar));
+    const std::string json = readText(sidecar);
+    EXPECT_NE(json.find("\"payload_file\":\"device.1.log.gz\""),
+              std::string::npos)
+        << "sidecar must name the published window; got: " << json;
+    EXPECT_EQ(json.find("\"payload_file\":\"device.log.gz\""),
+              std::string::npos)
+        << "sidecar names the staging file, which the agent will reject";
+}
+
+// The other salvage publish path: an UN-INDEXED gzip in `.tmp`
+// (`device.log.gz`), which salvage publishes under a freshly assigned index.
+// The name split only appears when the staged basename differs from the
+// target's - an already-indexed staged file has the same basename in both
+// places, so it cannot expose this. The final segment of a real segmented run
+// leaves exactly this shape behind.
+TEST_F(FileLogSinkRotationTest,
+       UnindexedStagedGzipSalvageMetadataNamesThePublishedFile) {
+    fs::create_directories(tmpDir());
+    const fs::path raw = tmpDir() / "device.log";
+    const fs::path staged = tmpDir() / "device.log.gz";
+    writeText(raw, R"({"window":"active","payload":"staged before publish"})");
+    gpufl::GzipFileCompressor compressor;
+    ASSERT_TRUE(compressor.compressTo(raw.string(), staged.string()));
+    fs::remove(raw);   // the rotator had already consumed its raw source
+
+    const auto result = gpufl::salvageSessionTempDir(sessionDir());
+
+    ASSERT_EQ(result.deferred, 0u);
+    ASSERT_TRUE(fs::is_regular_file(sessionDir() / "device.1.log.gz"));
+
+    const fs::path sidecar = sessionDir() / ".gpufl-window.device.1.json";
+    ASSERT_TRUE(fs::is_regular_file(sidecar));
+    const std::string json = readText(sidecar);
+    EXPECT_NE(json.find("\"payload_file\":\"device.1.log.gz\""),
+              std::string::npos)
+        << "sidecar must name the published window; got: " << json;
+    EXPECT_EQ(json.find("\"payload_file\":\"device.log.gz\""),
+              std::string::npos)
+        << "sidecar names the staging file, which the agent will reject";
+}
+
+TEST_F(FileLogSinkRotationTest,
+       PublishedWindowParserRejectsTheUnindexedActiveFilename) {
+    std::string channel;
+    std::size_t sequence = 99;
+
+    EXPECT_FALSE(gpufl::parsePublishedWindowName(
+        "device.log.gz", channel, sequence));
+    EXPECT_TRUE(gpufl::parsePublishedWindowName(
+        "device.7.log.gz", channel, sequence));
+    EXPECT_EQ(channel, "device");
+    EXPECT_EQ(sequence, 7u);
 }
 
 TEST_F(FileLogSinkRotationTest,
