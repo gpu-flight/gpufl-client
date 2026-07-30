@@ -280,6 +280,7 @@ set(HTTPLIB_COMPILE OFF CACHE BOOL "" FORCE)
 # satisfies the check. Turning it off fails the whole configure. The price is
 # cpp-httplib's headers and package files landing in the install prefix; the
 # fix that removes them is reworking the SDK export, not this switch.
+set(HTTPLIB_INSTALL ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(httplib)
 
 find_package(OpenSSL QUIET)

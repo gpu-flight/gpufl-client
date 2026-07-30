@@ -173,8 +173,10 @@ class FileLogSink final : public ILogSink {
         // destination silently. 0 = not seeded yet.
         std::size_t next_window_index_ = 0;
         // Monotonic time of the current window's FIRST write; -1 = the
-        // window is empty. Drives the rotate_after_ms trigger: an empty
-        // window has no age, so it can never rotate.
+        // window is empty. Recorded for every non-empty window so its
+        // immutable metadata has real timing even when time rotation is
+        // disabled. It also drives rotate_after_ms: an empty window has no
+        // age, so it can never rotate.
         std::int64_t window_first_write_ms_ = -1;
         RotationStats rotation_stats_;
 

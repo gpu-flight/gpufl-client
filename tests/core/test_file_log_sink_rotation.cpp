@@ -214,6 +214,58 @@ TEST_F(FileLogSinkRotationTest, SizeTriggerStillRotatesAndRecordsSize) {
     EXPECT_EQ(sink.rotationStats().by_time, 0u);
 }
 
+TEST_F(FileLogSinkRotationTest,
+       ShutdownWindowRecordsTimingWhenTimeRotationIsDisabled) {
+    fake_now_ms_ = 100;
+    {
+        gpufl::FileLogSink sink(options(/*rotate_after_ms=*/0));
+        sink.write(gpufl::Channel::Device, R"({"event":1})");
+        fake_now_ms_ = 5100;
+    }
+
+    const fs::path metadata =
+        gpufl::windowMetadataPath(sessionDir(), "device", 1);
+    ASSERT_TRUE(fs::exists(metadata));
+    std::ifstream input(metadata, std::ios::binary);
+    const std::string json(
+        (std::istreambuf_iterator<char>(input)),
+        std::istreambuf_iterator<char>());
+    EXPECT_NE(json.find(R"("opened_mono_ms":100)"), std::string::npos);
+    EXPECT_NE(json.find(R"("closed_mono_ms":5100)"), std::string::npos);
+}
+
+TEST_F(FileLogSinkRotationTest,
+       SizeRotatedWindowsEachRecordTheirOwnFirstWriteTimestamp) {
+    fake_now_ms_ = 100;
+    {
+        gpufl::FileLogSink sink(options(/*rotate_after_ms=*/0,
+                                        /*rotate_bytes=*/64));
+        const std::string line(40, 'x');
+        sink.write(gpufl::Channel::Device, line);
+        fake_now_ms_ = 200;
+        sink.write(gpufl::Channel::Device, line);
+        sink.waitForPendingExports();
+        fake_now_ms_ = 300;
+    }
+
+    const auto read_metadata = [](const fs::path& path) {
+        std::ifstream input(path, std::ios::binary);
+        return std::string(
+            (std::istreambuf_iterator<char>(input)),
+            std::istreambuf_iterator<char>());
+    };
+    const std::string first = read_metadata(
+        gpufl::windowMetadataPath(sessionDir(), "device", 1));
+    const std::string second = read_metadata(
+        gpufl::windowMetadataPath(sessionDir(), "device", 2));
+    ASSERT_FALSE(first.empty());
+    ASSERT_FALSE(second.empty());
+    EXPECT_NE(first.find(R"("opened_mono_ms":100)"), std::string::npos);
+    EXPECT_NE(first.find(R"("closed_mono_ms":200)"), std::string::npos);
+    EXPECT_NE(second.find(R"("opened_mono_ms":200)"), std::string::npos);
+    EXPECT_NE(second.find(R"("closed_mono_ms":300)"), std::string::npos);
+}
+
 TEST_F(FileLogSinkRotationTest, TimeRecordedWhenBothTriggersDue) {
     gpufl::FileLogSink sink(options(/*rotate_after_ms=*/5000,
                                     /*rotate_bytes=*/64));

@@ -58,7 +58,7 @@ FileLogSink::FileChannel::FileChannel(std::string name, Logger::Options opt,
 FileLogSink::FileChannel::~FileChannel() { close(); }
 
 void FileLogSink::FileChannel::close() {
-    std::lock_guard<std::mutex> lk(mu_);
+    std::lock_guard lk(mu_);
     closeLocked();
 }
 
@@ -92,8 +92,8 @@ void FileLogSink::FileChannel::closeLocked() {
 bool FileLogSink::FileChannel::isOpen() const { return opened_; }
 
 std::uint64_t FileLogSink::FileChannel::currentBytes() const {
-    std::lock_guard<std::mutex> lk(mu_);
-    return static_cast<std::uint64_t>(current_bytes_);
+    std::lock_guard lk(mu_);
+    return current_bytes_;
 }
 
 void FileLogSink::FileChannel::ensureOpenLocked() {
@@ -176,7 +176,7 @@ void FileLogSink::FileChannel::rotateLocked(RotateTrigger trigger) {
             // the active window, so the same index must be retried.
             ++next_window_index_;
             const std::uint64_t retired_bytes =
-                static_cast<std::uint64_t>(current_bytes_);
+                current_bytes_;
             if (trigger == RotateTrigger::Size) {
                 ++rotation_stats_.by_size;
             } else {
@@ -219,7 +219,7 @@ void FileLogSink::FileChannel::exportRetired(
             std::chrono::steady_clock::now() - started)
             .count();
 
-    std::lock_guard<std::mutex> lk(mu_);
+    std::lock_guard lk(mu_);
     if (elapsed_ms > rotation_stats_.max_export_ms) {
         rotation_stats_.max_export_ms = elapsed_ms;
     }
@@ -243,18 +243,18 @@ void FileLogSink::FileChannel::exportRetired(
 
 bool FileLogSink::FileChannel::timeDueLocked(const std::int64_t now) const {
     return opt_.rotate_after_ms > 0 && window_first_write_ms_ >= 0 &&
-           (now - window_first_write_ms_) >= opt_.rotate_after_ms;
+           now - window_first_write_ms_ >= opt_.rotate_after_ms;
 }
 
 void FileLogSink::FileChannel::rotateIfDue() {
-    std::lock_guard<std::mutex> lk(mu_);
+    std::lock_guard lk(mu_);
     if (!opened_) return;
     if (!timeDueLocked(nowMs())) return;
     rotateLocked(RotateTrigger::Time);
 }
 
 bool FileLogSink::FileChannel::write(std::string_view line) {
-    std::lock_guard<std::mutex> lk(mu_);
+    std::lock_guard lk(mu_);
     if (!opened_) {
         GFL_LOG_ERROR("Write failed: Channel '", name_, "' is not opened");
         return false;
@@ -274,8 +274,13 @@ bool FileLogSink::FileChannel::write(std::string_view line) {
     // wall-time jumps can neither fire nor starve it. This write-path
     // check gives immediacy on busy channels; quiet channels are covered
     // by the collector beat calling rotateIfDue().
+    // Time-triggered channels need `now` on every write to test the
+    // deadline. Other channels avoid that hot-path clock read after their
+    // first write; they still capture one timestamp per non-empty window so
+    // the immutable transport metadata is complete even when rotation is
+    // size-only or disabled.
     const std::int64_t now =
-        opt_.rotate_after_ms > 0 ? nowMs() : 0;
+        opt_.rotate_after_ms > 0 ? nowMs() : -1;
     const bool time_due = timeDueLocked(now);
     const bool size_due =
         opt_.rotate_bytes > 0 &&
@@ -311,15 +316,19 @@ bool FileLogSink::FileChannel::write(std::string_view line) {
     if (opt_.flush_always) {
         stream_.flush();
     }
-    if (opt_.rotate_after_ms > 0 && window_first_write_ms_ < 0) {
-        window_first_write_ms_ = now;
+    if (window_first_write_ms_ < 0) {
+        // A size-triggered cutover may have reset the timestamp after `now`
+        // was conditionally sampled above. In the non-time-triggered case,
+        // read the monotonic clock here so the new window records its own
+        // first write rather than 0 or its predecessor's timestamp.
+        window_first_write_ms_ = now >= 0 ? now : nowMs();
     }
     current_bytes_ += bytesToWrite;
     return true;
 }
 
 FileLogSink::RotationStats FileLogSink::FileChannel::rotationStats() const {
-    std::lock_guard<std::mutex> lk(mu_);
+    std::lock_guard lk(mu_);
     return rotation_stats_;
 }
 
@@ -389,7 +398,7 @@ FileLogSink::RotationStats FileLogSink::rotationStats() const {
             std::max(total.max_export_ms, s.max_export_ms);
     }
     {
-        std::lock_guard<std::mutex> lk(retire_mu_);
+        std::lock_guard lk(retire_mu_);
         total.pending_exports = pending_exports_;
         total.max_pending_exports = max_pending_exports_;
         total.pending_export_bytes = pending_export_bytes_;
@@ -477,7 +486,7 @@ void FileLogSink::checkSpoolBudget(
         (max_spool_bytes_ == 0 && min_free_bytes_ == 0)) {
         return;
     }
-    std::lock_guard<std::mutex> lk(spool_budget_mu_);
+    std::lock_guard lk(spool_budget_mu_);
     if (spool_saturated_.load(std::memory_order_relaxed)) return;
     const std::int64_t now = spoolNowMs();
     // Directory scans are intentionally not on the 250 ms collector cadence.
@@ -532,7 +541,7 @@ void FileLogSink::enqueueRetired(FileChannel* channel,
                                  const std::uint64_t bytes,
                                  const WindowTiming timing) {
     if (!channel) return;
-    std::lock_guard<std::mutex> lk(retire_mu_);
+    std::lock_guard lk(retire_mu_);
     if (retire_stop_) {
         // Never export inline here: enqueueRetired() is called while the
         // channel mutex is held, and exportRetired() takes that same mutex to
@@ -562,7 +571,7 @@ void FileLogSink::enqueueRetired(FileChannel* channel,
             for (;;) {
                 RetiredWindow item{};
                 {
-                    std::unique_lock<std::mutex> lk(retire_mu_);
+                    std::unique_lock lk(retire_mu_);
                     retire_cv_.wait(lk, [this] {
                         return retire_stop_ || !retire_queue_.empty();
                     });
@@ -574,7 +583,7 @@ void FileLogSink::enqueueRetired(FileChannel* channel,
                 // Outside every lock: gzip + publish retries live here.
                 item.channel->exportRetired(item.index, item.timing);
                 {
-                    std::lock_guard<std::mutex> lk(retire_mu_);
+                    std::lock_guard lk(retire_mu_);
                     --exports_in_flight_;
                     if (pending_exports_ > 0) --pending_exports_;
                     if (pending_export_bytes_ >= item.bytes) {
@@ -591,7 +600,7 @@ void FileLogSink::enqueueRetired(FileChannel* channel,
 }
 
 void FileLogSink::waitForPendingExports() {
-    std::unique_lock<std::mutex> lk(retire_mu_);
+    std::unique_lock lk(retire_mu_);
     retire_cv_.wait(lk, [this] {
         return retire_queue_.empty() && exports_in_flight_ == 0;
     });
@@ -599,7 +608,7 @@ void FileLogSink::waitForPendingExports() {
 
 void FileLogSink::stopRetirementWorker() {
     {
-        std::lock_guard<std::mutex> lk(retire_mu_);
+        std::lock_guard lk(retire_mu_);
         retire_stop_ = true;
     }
     retire_cv_.notify_all();
@@ -630,7 +639,7 @@ void FileLogSink::close() {
             // see it AND keep it in the stats, because everything downstream
             // (an emptied `.tmp`, a finished upload) now looks like a clean
             // session. Reporting this onward is the open follow-up.
-            std::lock_guard<std::mutex> lk(retire_mu_);
+            std::lock_guard lk(retire_mu_);
             lost_windows_ += static_cast<std::size_t>(salvage.lost_windows);
             GFL_LOG_ERROR("[Logger] session '", session_dir.string(), "': ",
                           salvage.lost_windows,
@@ -675,7 +684,7 @@ void FileLogSink::write(Channel ch, std::string_view json) {
     if (spool_saturated_.load(std::memory_order_acquire)) {
         dropped_events_.fetch_add(1, std::memory_order_relaxed);
         dropped_bytes_.fetch_add(
-            static_cast<std::uint64_t>(json.size() + 1),
+            json.size() + 1,
             std::memory_order_relaxed);
         return;
     }
@@ -686,8 +695,7 @@ void FileLogSink::write(Channel ch, std::string_view json) {
                   (chanSystem_ ? 1 : 0) + (chanSass_ ? 1 : 0))
             : (resolveChannel(ch) ? 1u : 0u);
     if (planned_copies == 0) return;
-    const std::uint64_t event_bytes =
-        static_cast<std::uint64_t>(json.size() + 1);
+    const std::uint64_t event_bytes = json.size() + 1;
     const std::uint64_t incoming_bytes =
         event_bytes >
                 std::numeric_limits<std::uint64_t>::max() / planned_copies
@@ -734,11 +742,8 @@ void FileLogSink::write(Channel ch, std::string_view json) {
     }
     if (copies_written > 0) {
         const std::uint64_t bytes =
-            copies_written * static_cast<std::uint64_t>(json.size() + 1);
-        const std::uint64_t estimated =
-            spool_estimated_bytes_.fetch_add(
-                bytes, std::memory_order_relaxed) +
-            bytes;
+            copies_written * (json.size() + 1);
+        spool_estimated_bytes_.fetch_add(bytes, std::memory_order_relaxed);
         auto available =
             available_bytes_estimate_.load(std::memory_order_relaxed);
         while (available != std::numeric_limits<std::uint64_t>::max()) {
