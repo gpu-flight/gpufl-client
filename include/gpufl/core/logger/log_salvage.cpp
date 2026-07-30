@@ -103,6 +103,14 @@ bool endsWith(const std::string& value, const std::string& suffix) {
 
 }  // namespace
 
+bool parsePublishedWindowName(const std::string& filename,
+                              std::string& channel,
+                              std::size_t& sequence) {
+    bool compressed = false;
+    return parseWindowName(filename, channel, sequence, compressed) &&
+           sequence > 0;
+}
+
 MoveFileNoReplaceResult moveFileNoReplace(const fs::path& from,
                                           const fs::path& to,
                                           std::error_code& ec) {
@@ -621,9 +629,13 @@ LogSalvageResult salvageOwnedSessionTempDir(const fs::path& session_dir) {
                 ++result.deferred;
                 continue;
             }
+            // Fingerprint the staged file that exists now, but record the
+            // name it gets when published below - the agent only ever sees
+            // `target`, and a sidecar naming the staging file is rejected as
+            // a contract violation.
             if (!ensureWindowMetadata(
                     session_dir, session_dir.filename().string(), channel,
-                    idx, path)) {
+                    idx, path, target.filename().string())) {
                 ++result.deferred;
                 continue;
             }
@@ -712,9 +724,11 @@ LogSalvageResult salvageOwnedSessionTempDir(const fs::path& session_dir) {
             ++result.deferred;
             continue;
         }
+        // Same split as above: `staging` holds the bytes right now, `target`
+        // is the name the published window will carry.
         if (!ensureWindowMetadata(
                 session_dir, session_dir.filename().string(), channel, idx,
-                staging)) {
+                staging, target.filename().string())) {
             ++result.deferred;
             continue;
         }

@@ -27,17 +27,22 @@ void Sampler::configure(std::string appName, std::string sessionId,
         [fixed_runtime]() {
             return fixed_runtime->acquireSegmentContext();
         },
+        [fixed_runtime]() {
+            return fixed_runtime->peekSegmentContext();
+        },
         std::move(collector), sampleIntervalMs, hostCollector);
 }
 
 void Sampler::configure(
     std::string appName, SegmentProvider segmentProvider,
+    SegmentPeekProvider segmentPeekProvider,
     std::shared_ptr<ISystemCollector<DeviceSample>> collector,
     const int sampleIntervalMs, HostCollector* hostCollector,
     RowObserver rowObserver) {
     std::lock_guard lk(mu_);
     appName_        = std::move(appName);
     segment_provider_ = std::move(segmentProvider);
+    segment_peek_provider_ = std::move(segmentPeekProvider);
     collector_      = std::move(collector);
     host_collector_ = hostCollector;
     row_observer_ = std::move(rowObserver);
@@ -88,8 +93,25 @@ void Sampler::deactivate() {
 void Sampler::shutdown() {
     std::lock_guard lk(mu_);
     activations_.store(0, std::memory_order_release);
+    const SegmentContext* const retained_context = batch_context_.get();
+    if (retained_context) {
+        GFL_LOG_DEBUG(
+            "[Sampler] shutdown before worker join/reset: owners={",
+            retained_context->activeWriterSummary(), "}");
+    }
     if (running_.load()) {
         stopWorkerLocked_();
+    }
+    // stopWorkerLocked_() joins the producer, so no code can touch the
+    // retained batch lease after this point. Release it unconditionally:
+    // an empty/invalid final batch can return from flushBatches_ before its
+    // normal reset, and retaining that lease would prevent the final segment
+    // from draining and becoming uploadable.
+    batch_context_.reset();
+    if (retained_context) {
+        GFL_LOG_DEBUG(
+            "[Sampler] shutdown after worker join/reset: owners={",
+            retained_context->activeWriterSummary(), "}");
     }
 }
 
@@ -127,13 +149,14 @@ void Sampler::runLoop_() {
     while (running_.load()) {
         next_wake_time += interval;
         const int64_t ts = detail::GetTimestampNs();
-        auto context =
-            segment_provider_ ? segment_provider_() : nullptr;
-        if (!context || !context->logger) {
+        const auto active_context =
+            segment_peek_provider_ ? segment_peek_provider_() : nullptr;
+        if (!active_context || !active_context->logger) {
             std::this_thread::sleep_until(next_wake_time);
             continue;
         }
-        if (batch_context_ && batch_context_.get() != context.get()) {
+        if (batch_context_ &&
+            batch_context_.get() != active_context.get()) {
             if (!batch_.empty() || !host_batch_.empty()) {
                 flushBatches_(batch_context_);
                 samples_since_flush = 0;
@@ -141,7 +164,14 @@ void Sampler::runLoop_() {
                 batch_context_.reset();
             }
         }
-        if (!batch_context_) batch_context_ = std::move(context);
+        if (!batch_context_) {
+            batch_context_ =
+                segment_provider_ ? segment_provider_() : nullptr;
+        }
+        if (!batch_context_ || !batch_context_->logger) {
+            std::this_thread::sleep_until(next_wake_time);
+            continue;
+        }
 
         for (const DeviceSample& d : collector_->sampleAll()) {
             // A rule reads gauges from here, not by polling: the timestamp has

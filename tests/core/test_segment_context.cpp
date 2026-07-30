@@ -18,6 +18,7 @@
 #include "gpufl/core/logger/log_sink.hpp"
 #include "gpufl/core/logger/logger.hpp"
 #include "gpufl/core/logger/session_ownership.hpp"
+#include "gpufl/core/monitor_batch_manager.hpp"
 #include "gpufl/core/model/lifecycle_model.hpp"
 #include "gpufl/core/runtime.hpp"
 #include "gpufl/core/segment_runtime.hpp"
@@ -142,6 +143,43 @@ TEST(SegmentContextTest, DictionaryEmissionIsIndependentPerSegment) {
     ASSERT_EQ(lines->size(), 4u);
     EXPECT_NE((*lines)[2].find("\"2\":\"kernel_b\""), std::string::npos);
     EXPECT_NE((*lines)[3].find("\"2\":\"kernel_b\""), std::string::npos);
+}
+
+TEST(SegmentContextTest, PendingKernelDetailUsesTheFlushSegmentIdentity) {
+    gpufl::Runtime runtime;
+    runtime.session_id = "initial-process-session";
+    auto lines = std::make_shared<std::vector<std::string>>();
+    auto logger = std::make_shared<gpufl::Logger>();
+    logger->addSink(std::make_unique<RecordingSink>(lines));
+    ASSERT_TRUE(runtime.publishSegmentContext(
+        std::make_shared<gpufl::SegmentContext>(
+            "12345678-1234-4123-8123-123456789abc",
+            "current-segment-session", 1, 1000, logger)));
+
+    gpufl::detail::MonitorBatchManager batches;
+    batches.bindFlushRuntime(&runtime);
+    gpufl::KernelBatchRow kernel;
+    kernel.kernel_id = 1;
+    gpufl::KernelDetailRow detail;
+    detail.session_id = "stale-previous-segment";
+    detail.corr_id = 7;
+    ASSERT_FALSE(batches.pushKernel(kernel, &detail));
+    batches.flushAll(
+        gpufl::detail::MonitorBatchManager::FlushMode::Full);
+
+    const auto detail_line = std::find_if(
+        lines->begin(), lines->end(), [](const std::string& line) {
+            return line.find("\"type\":\"kernel_detail\"") !=
+                   std::string::npos;
+        });
+    ASSERT_NE(detail_line, lines->end());
+    EXPECT_NE(detail_line->find(
+                  "\"session_id\":\"current-segment-session\""),
+              std::string::npos);
+    EXPECT_EQ(detail_line->find("stale-previous-segment"),
+              std::string::npos);
+    EXPECT_EQ(detail_line->find("initial-process-session"),
+              std::string::npos);
 }
 
 TEST(SegmentContextTest, ProductionRuntimePublishesAndRetiresTwoSegments) {

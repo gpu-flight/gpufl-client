@@ -239,6 +239,7 @@ bool SegmentRuntime::awaitWriterDrain_(
         "; run=", context->run_id, " session=", context->session_id,
         " segment=", context->segment_index,
         " active_writers=", remaining,
+        " owners={", context->activeWriterSummary(), "}",
         ". The segment is intentionally left incomplete; its logger and "
         "ownership lock remain live until process exit.");
     quarantineUndrainedContext(context);

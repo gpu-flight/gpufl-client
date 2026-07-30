@@ -57,6 +57,20 @@ MoveFileNoReplaceResult moveFileNoReplace(
     std::error_code& ec);
 
 /**
+ * Split a published window filename (`<channel>.<N>.log` or `<channel>.<N>.log.gz`)
+ * into its channel and sequence. Returns false for anything that is not a
+ * published window, including the un-indexed active file `<channel>.log`
+ * (which yields sequence 0).
+ *
+ * Exposed so every publisher - rotator, salvage, launcher repair - derives the
+ * identity from ONE parser. A second copy of this convention is how the
+ * launcher previously allocated an index that ignored `.tmp`.
+ */
+bool parsePublishedWindowName(const std::string& filename,
+                              std::string& channel,
+                              std::size_t& sequence);
+
+/**
  * True when `path` is a non-empty file that decodes cleanly as gzip all the
  * way to EOF. Existence is NOT proof: a zero-length file decodes as a clean
  * empty stream, and a truncated one only fails partway through - so any code

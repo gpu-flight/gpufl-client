@@ -29,7 +29,10 @@ KernelDetailRow MakeKernelDetailRow(const ActivityRecord& rec,
                                     const Runtime& rt) {
     KernelDetailRow detail;
     detail.corr_id = rec.corr_id;
-    detail.session_id = rt.session_id;
+    // Segment identity is assigned when the pending detail is flushed. The
+    // Runtime's session_id is the initial process session and intentionally
+    // does not change at a segment cutover; copying it here would stamp later
+    // segments with the previous session's identity.
     detail.pid = GetPid();
     detail.app = rt.app_name;
     detail.grid_x = rec.grid_x; detail.grid_y = rec.grid_y; detail.grid_z = rec.grid_z;

@@ -6,15 +6,35 @@ namespace gpufl {
 // handlers can run after normal function-local/static teardown has begun.
 static auto* g_rt = new std::unique_ptr<Runtime>;
 
-bool SegmentContext::tryAcquireWriter() const noexcept {
+bool SegmentContext::tryAcquireWriter(const char* const owner) const noexcept {
     if (!accepting_writers_.load(std::memory_order_seq_cst)) return false;
     active_writers_.fetch_add(1, std::memory_order_seq_cst);
+    if (!run_id.empty()) {
+        // Diagnostics must never make a previously valid acquisition fail.
+        // Allocation can throw on the first sighting of an owner label.
+        try {
+            std::lock_guard<std::mutex> lock(writer_owner_mu_);
+            ++writer_owners_[owner ? owner : "general"];
+        } catch (...) {
+        }
+    }
     if (accepting_writers_.load(std::memory_order_seq_cst)) return true;
-    releaseWriter();
+    releaseWriter(owner);
     return false;
 }
 
-void SegmentContext::releaseWriter() const noexcept {
+void SegmentContext::releaseWriter(const char* const owner) const noexcept {
+    if (!run_id.empty()) {
+        std::lock_guard<std::mutex> lock(writer_owner_mu_);
+        const auto it = writer_owners_.find(owner ? owner : "general");
+        if (it != writer_owners_.end()) {
+            if (it->second <= 1) {
+                writer_owners_.erase(it);
+            } else {
+                --it->second;
+            }
+        }
+    }
     const uint64_t before =
         active_writers_.fetch_sub(1, std::memory_order_seq_cst);
     // The normal hot path is one atomic decrement. Once sealed, the last
@@ -25,6 +45,18 @@ void SegmentContext::releaseWriter() const noexcept {
         std::lock_guard<std::mutex> lock(writer_drain_mu_);
         writer_drain_cv_.notify_all();
     }
+}
+
+std::string SegmentContext::activeWriterSummary() const {
+    std::lock_guard<std::mutex> lock(writer_owner_mu_);
+    std::string summary;
+    for (const auto& [owner, count] : writer_owners_) {
+        if (!summary.empty()) summary += ", ";
+        summary += owner;
+        summary += "=";
+        summary += std::to_string(count);
+    }
+    return summary.empty() ? "none" : summary;
 }
 
 void SegmentContext::sealForRetirement() const noexcept {
@@ -46,13 +78,14 @@ bool SegmentContext::waitForWriters(const std::chrono::milliseconds timeout,
 SegmentWriteLease::~SegmentWriteLease() { reset(); }
 
 SegmentWriteLease::SegmentWriteLease(SegmentWriteLease&& other) noexcept
-    : context_(std::move(other.context_)) {}
+    : context_(std::move(other.context_)), owner_(other.owner_) {}
 
 SegmentWriteLease& SegmentWriteLease::operator=(
     SegmentWriteLease&& other) noexcept {
     if (this != &other) {
         reset();
         context_ = std::move(other.context_);
+        owner_ = other.owner_;
     }
     return *this;
 }
@@ -60,17 +93,17 @@ SegmentWriteLease& SegmentWriteLease::operator=(
 void SegmentWriteLease::reset() noexcept {
     if (!context_) return;
     const auto context = std::move(context_);
-    context->releaseWriter();
+    context->releaseWriter(owner_);
 }
 
 SegmentWriteLease
-Runtime::acquireSegmentContext() const noexcept {
+Runtime::acquireSegmentContext(const char* const owner) const noexcept {
     for (;;) {
         auto context = std::atomic_load_explicit(
             &active_segment_context, std::memory_order_acquire);
         if (!context) return {};
-        if (context->tryAcquireWriter()) {
-            return SegmentWriteLease(std::move(context));
+        if (context->tryAcquireWriter(owner)) {
+            return SegmentWriteLease(std::move(context), owner);
         }
         // Publication sealed this context after our atomic load. Retry against
         // the newly-published context instead of writing into retirement.

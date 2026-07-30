@@ -44,6 +44,8 @@ class ISystemCollector {
 class Sampler {
    public:
     using SegmentProvider = std::function<SegmentWriteLease()>;
+    using SegmentPeekProvider =
+        std::function<std::shared_ptr<const SegmentContext>()>;
     using RowObserver =
         std::function<void(uint32_t, uint64_t, int64_t, int64_t)>;
 
@@ -64,12 +66,14 @@ class Sampler {
                    HostCollector* hostCollector = nullptr);
 
     /**
-     * Segmentation-aware configuration. Each sampling iteration acquires one
-     * immutable context. If publication changes while rows are buffered, the
-     * old batch is committed through its original context before new rows are
-     * accepted.
+     * Segmentation-aware configuration. The sampler retains one writer lease
+     * for the batch and uses a read-only snapshot to detect publication. This
+     * is important during Windows injection teardown: ExitProcess can end the
+     * worker without running stack destructors, so a per-iteration writer
+     * lease could otherwise leak and block final-segment retirement.
      */
     void configure(std::string appName, SegmentProvider segmentProvider,
+                   SegmentPeekProvider segmentPeekProvider,
                    std::shared_ptr<ISystemCollector<DeviceSample>> collector,
                    int sampleIntervalMs,
                    HostCollector* hostCollector = nullptr,
@@ -123,6 +127,7 @@ class Sampler {
 
     std::string appName_;
     SegmentProvider segment_provider_;
+    SegmentPeekProvider segment_peek_provider_;
     RowObserver row_observer_;
     SegmentWriteLease batch_context_;
     std::shared_ptr<ISystemCollector<DeviceSample>> collector_;

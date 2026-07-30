@@ -31,6 +31,26 @@ struct WindowMetadata {
  * The payload may later be deleted, but this small file remains until the
  * session is retired. That keeps the sequence consumed and gives the agent a
  * stable idempotency key independent of filename timestamps.
+ *
+ * `fingerprint_source` is the file READ NOW to compute size and CRC.
+ * `published_name` is the basename the window will carry once it is visible
+ * to a consumer. They differ on every path that fingerprints a staged file
+ * before renaming it into place - the sidecar has to describe the published
+ * window, because that is the only name the agent can ever see. Recording the
+ * staging name made the agent reject the pair as a contract violation and
+ * refuse to upload it.
+ */
+bool ensureWindowMetadata(const std::filesystem::path& session_dir,
+                          const std::string& session_id,
+                          const std::string& channel,
+                          std::size_t sequence,
+                          const std::filesystem::path& fingerprint_source,
+                          const std::string& published_name,
+                          const WindowTiming& timing = {});
+
+/**
+ * Overload for callers whose payload is already at its published name.
+ * Equivalent to passing `payload.filename()` as `published_name`.
  */
 bool ensureWindowMetadata(const std::filesystem::path& session_dir,
                           const std::string& session_id,
