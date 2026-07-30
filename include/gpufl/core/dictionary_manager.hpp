@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <mutex>
+#include <unordered_set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -9,6 +10,31 @@
 namespace gpufl {
 
 class Logger;
+class DictionaryManager;
+
+/**
+ * Per-segment view of the process-wide dictionary registry.
+ *
+ * Numeric IDs remain stable for the full run, but every segment must emit its
+ * own copy of each mapping before a batch in that segment references it. This
+ * object records only the IDs already emitted into one SegmentContext; it
+ * never consumes another segment's dirty state.
+ */
+class SegmentDictionaryEmitter {
+   public:
+    void flush(DictionaryManager& registry, Logger& logger,
+               const std::string& session_id);
+
+   private:
+    friend class DictionaryManager;
+    std::mutex mu_;
+    std::unordered_set<uint32_t> kernels_;
+    std::unordered_set<uint32_t> scope_names_;
+    std::unordered_set<uint32_t> functions_;
+    std::unordered_set<uint32_t> function_symbols_;
+    std::unordered_set<uint32_t> metrics_;
+    std::unordered_set<uint32_t> source_files_;
+};
 
 class DictionaryManager {
    public:
@@ -75,6 +101,17 @@ class DictionaryManager {
     // Emits a dictionary_update JSON line to Channel::All for any new entries
     // accumulated since the last call.  No-op if nothing is dirty.
     void flushDictionary(Logger& logger, const std::string& session_id);
+
+    /**
+     * Emit every mapping not yet present in this segment.
+     *
+     * Unlike flushDictionary(), this does not consume the process-global dirty
+     * maps. Two retiring/live segments can therefore flush concurrently
+     * without stealing mappings from one another.
+     */
+    void flushDictionaryForSegment(SegmentDictionaryEmitter& emitter,
+                                   Logger& logger,
+                                   const std::string& session_id);
 
     // Emits one source_file_content JSON line per newly-seen source file.
     // No-op if no new source files since last call.

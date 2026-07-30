@@ -25,6 +25,7 @@ add_executable(gpufl_launcher
     info_command.cpp
     trace_command_common.cpp
     deep_window_env.cpp
+    segmentation_env.cpp
     ${GPUFL_LAUNCHER_TRACE_IMPL}
     monitor_command.cpp
     ../monitor/monitor_runner.cpp

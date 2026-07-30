@@ -162,11 +162,12 @@ std::string ScopeEventBatchModel::buildJson() const {
     const int64_t base = rows.front().ts_ns;
 
     std::ostringstream oss;
-    oss << "{\"version\":2,\"type\":\"scope_event_batch\""
+    oss << "{\"version\":3,\"type\":\"scope_event_batch\""
         << ",\"session_id\":\"" << jsonEscape(session_id_) << '"'
         << ",\"batch_id\":" << batch_id_ << ",\"base_time_ns\":" << base
         << ",\"columns\":[\"dt_ns\",\"scope_instance_id\",\"name_id\","
-           "\"event_type\",\"depth\",\"repeat\",\"warmup\"]"
+           "\"event_type\",\"depth\",\"repeat\",\"warmup\","
+           "\"original_start_ns\"]"
         << ",\"rows\":[";
 
     bool first = true;
@@ -180,7 +181,9 @@ std::string ScopeEventBatchModel::buildJson() const {
         // list / version bump changes the wire format.
         oss << '[' << (r.ts_ns - base) << ',' << r.scope_instance_id << ','
             << r.name_id << ',' << static_cast<int>(r.event_type) << ','
-            << r.depth << ',' << r.repeat << ',' << r.warmup << ']';
+            << r.depth << ',' << r.repeat << ',' << r.warmup << ','
+            << (r.original_start_ns == 0 ? r.ts_ns : r.original_start_ns)
+            << ']';
     }
     oss << "]}";
     return oss.str();

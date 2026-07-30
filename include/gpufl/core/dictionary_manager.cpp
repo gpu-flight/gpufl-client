@@ -869,4 +869,69 @@ void DictionaryManager::flushDictionary(Logger& logger,
     logger.write(DictLine{oss.str()});
 }
 
+void SegmentDictionaryEmitter::flush(DictionaryManager& registry,
+                                     Logger& logger,
+                                     const std::string& session_id) {
+    registry.flushDictionaryForSegment(*this, logger, session_id);
+}
+
+void DictionaryManager::flushDictionaryForSegment(
+    SegmentDictionaryEmitter& emitter, Logger& logger,
+    const std::string& session_id) {
+    std::unordered_map<std::string, uint32_t> dk, ds, df, dm, dsf;
+    std::unordered_map<uint32_t, std::string> dfsym;
+    {
+        // One order everywhere: segment emission state, then global registry.
+        // No dictionary path takes these locks in the reverse order.
+        std::scoped_lock lk(emitter.mu_, mu_);
+        for (const auto& [name, id] : kernel_dict_) {
+            if (emitter.kernels_.insert(id).second) dk.emplace(name, id);
+        }
+        for (const auto& [name, id] : scope_name_dict_) {
+            if (emitter.scope_names_.insert(id).second) ds.emplace(name, id);
+        }
+        for (const auto& [name, id] : function_dict_) {
+            if (emitter.functions_.insert(id).second) df.emplace(name, id);
+        }
+        for (const auto& [id, symbol] : function_symbol_dict_) {
+            if (emitter.function_symbols_.insert(id).second) {
+                dfsym.emplace(id, symbol);
+            }
+        }
+        for (const auto& [name, id] : metric_dict_) {
+            if (emitter.metrics_.insert(id).second) dm.emplace(name, id);
+        }
+        for (const auto& [name, id] : source_file_dict_) {
+            if (emitter.source_files_.insert(id).second) dsf.emplace(name, id);
+        }
+    }
+
+    if (dk.empty() && ds.empty() && df.empty() && dm.empty() && dsf.empty() &&
+        dfsym.empty()) {
+        return;
+    }
+
+    std::ostringstream oss;
+    oss << "{\"version\":1,\"type\":\"dictionary_update\",\"session_id\":\""
+        << model::jsonEscape(session_id) << '"';
+    bool firstField = false;
+    appendDict(oss, "kernel_dict", dk, firstField);
+    appendDict(oss, "scope_name_dict", ds, firstField);
+    appendDict(oss, "function_dict", df, firstField);
+    appendDict(oss, "metric_dict", dm, firstField);
+    appendDict(oss, "source_file_dict", dsf, firstField);
+    if (!dfsym.empty()) {
+        oss << ",\"func_symbol_dict\":{";
+        bool first = true;
+        for (const auto& [id, symbol] : dfsym) {
+            if (!first) oss << ',';
+            first = false;
+            oss << '"' << id << "\":\"" << model::jsonEscape(symbol) << '"';
+        }
+        oss << '}';
+    }
+    oss << '}';
+    logger.write(DictLine{oss.str()});
+}
+
 }  // namespace gpufl

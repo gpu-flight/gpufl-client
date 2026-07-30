@@ -6,6 +6,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "gpufl/core/batch_buffer.hpp"
@@ -15,6 +16,7 @@
 namespace gpufl {
 
 class Logger;
+struct Runtime;
 
 namespace detail {
 
@@ -26,10 +28,13 @@ public:
     enum class FlushMode { Fast, Full };
 
     void reset();
-    void bindFlushSink(Logger* logger, std::string session_id);
+    void bindFlushRuntime(Runtime* runtime);
     void clearFlushSink();
     void setSourceCollectionEnabled(bool enabled);
     void flushAll(FlushMode mode = FlushMode::Fast);
+    void flushDictionarySnapshot(SegmentDictionaryEmitter& emitter,
+                                 Logger& logger,
+                                 const std::string& session_id);
 
     uint32_t internKernel(const std::string& name);
     uint32_t internScopeName(const std::string& name);
@@ -90,6 +95,14 @@ public:
     bool pushMemcpy(const MemcpyBatchRow& row);
     void pushTraceScopeRows(const ScopeBatchRow& begin_row, const ScopeBatchRow& end_row);
     void pushTrackedScopeRow(const ScopeBatchRow& row);
+    /**
+     * Snapshot both sides of every currently-open logical scope at one
+     * boundary timestamp. Does not mutate the open-scope registry.
+     */
+    std::pair<std::vector<ScopeBatchRow>, std::vector<ScopeBatchRow>>
+    snapshotScopeContinuations(int64_t boundary_ns) const;
+    void writeScopeRows(Logger& logger, const std::string& session_id,
+                        const std::vector<ScopeBatchRow>& rows);
     bool pushProfileSample(const ProfileSampleBatchRow& row);
     void pushProfileSamples(const std::vector<ProfileSampleBatchRow>& rows);
     void pushPmSamplesResolvingScopes(const std::vector<PmSampleBatchRow>& rows);
@@ -98,10 +111,9 @@ public:
 
 private:
     struct FlushSink {
-        Logger* logger = nullptr;
-        std::string session_id;
+        Runtime* runtime = nullptr;
 
-        bool available() const { return logger != nullptr; }
+        bool available() const { return runtime != nullptr; }
     };
 
     struct ScopeWindow {
@@ -120,6 +132,8 @@ private:
         int64_t start_ns = 0;
         uint32_t name_id = 0;
         int depth = 0;
+        uint32_t repeat = 0;
+        uint32_t warmup = 0;
     };
 
     uint32_t resolveScopeIdLocked(int64_t ts_ns) const;

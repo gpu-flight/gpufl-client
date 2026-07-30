@@ -31,6 +31,7 @@ bool     g_installed = false;
 bool     g_finished  = false;
 std::string g_expression;
 std::string g_rule_id;
+uint64_t g_quality_resets_baseline = 0;
 
 /**
  * Process-lifetime feeds, never destroyed.
@@ -203,7 +204,8 @@ void RefuseLocked(const RuleOutcome outcome, const std::string& reason) {
  */
 void EmitSummary(const RuleSummary& summary, const std::string& expression) {
     const Runtime* rt = runtime();
-    if (!rt || !rt->logger) {
+    const auto segment = rt ? rt->acquireSegmentContext() : nullptr;
+    if (!segment || !segment->logger) {
         GFL_LOG_ERROR("[DeepWindowRule] no logger; summary lost: ",
                       toString(summary.outcome), " ", summary.reason);
         return;
@@ -212,7 +214,7 @@ void EmitSummary(const RuleSummary& summary, const std::string& expression) {
     DeepWindowRuleSummaryEvent ev;
     ev.pid            = detail::GetPid();
     ev.app            = rt->app_name;
-    ev.session_id     = rt->session_id;
+    ev.session_id     = segment->session_id;
     ev.rule_id        = summary.rule_id;
     ev.expression     = expression;
     ev.state          = toString(summary.state);
@@ -232,7 +234,7 @@ void EmitSummary(const RuleSummary& summary, const std::string& expression) {
     ev.state_sequence = summary.state_sequence;
     ev.emitted_ns     = summary.emitted_ns;
 
-    rt->logger->write(model::DeepWindowRuleSummaryModel(ev));
+    segment->logger->write(model::DeepWindowRuleSummaryModel(ev));
     GFL_LOG_DEBUG("[DeepWindowRule] summary id=", ev.rule_id,
                   " outcome=", ev.outcome, " windows=", ev.windows_opened,
                   " seq=", ev.state_sequence, " reason=", ev.reason);
@@ -255,6 +257,7 @@ void ReleaseSession() {
     g_refused_emitted = false;
     g_expression.clear();
     g_rule_id.clear();
+    g_quality_resets_baseline = 0;
 }
 
 }  // namespace
@@ -425,7 +428,13 @@ void DeepWindowRules::EmitCounterQuality() {
     uint64_t discarded = 0;
     {
         std::lock_guard lk(g_mu);
-        if (g_source) discarded = g_source->qualityResets();
+        if (g_source) {
+            const uint64_t current = g_source->qualityResets();
+            discarded = current >= g_quality_resets_baseline
+                            ? current - g_quality_resets_baseline
+                            : current;
+            g_quality_resets_baseline = current;
+        }
     }
 
     // Silent when this SESSION had nothing to say. Gating on trackedCount()
@@ -439,12 +448,13 @@ void DeepWindowRules::EmitCounterQuality() {
     }
 
     const Runtime* rt = runtime();
-    if (!rt || !rt->logger) return;
+    const auto segment = rt ? rt->acquireSegmentContext() : nullptr;
+    if (!segment || !segment->logger) return;
 
     CounterDataQualitySummaryEvent ev;
     ev.pid = detail::GetPid();
     ev.app = rt->app_name;
-    ev.session_id = rt->session_id;
+    ev.session_id = segment->session_id;
     ev.tracked_counters = NvtxCounterBridge::instance().trackedCount();
     ev.samples_observed = snap.samples_observed;
     ev.registration_rejected = snap.registration_rejected;
@@ -453,12 +463,33 @@ void DeepWindowRules::EmitCounterQuality() {
     ev.negative_delta_samples = snap.negative_delta_samples;
     ev.rate_windows_discarded = discarded;
     ev.emitted_ns = detail::GetTimestampNs();
-    rt->logger->write(model::CounterDataQualitySummaryModel(ev));
+    segment->logger->write(model::CounterDataQualitySummaryModel(ev));
     GFL_LOG_DEBUG("[NvtxCounters] quality summary rejected=",
                   ev.registration_rejected, " unknown=", ev.unknown_id_samples,
                   " unavailable=", ev.unavailable_samples,
                   " negative=", ev.negative_delta_samples,
                   " discarded=", ev.rate_windows_discarded);
+}
+
+void DeepWindowRules::SnapshotSegment() {
+    RuleSummary summary;
+    std::string expression;
+    bool have_summary = false;
+    {
+        std::lock_guard lk(g_mu);
+        if (g_installed && !g_finished) {
+            if (g_refused) {
+                summary = *g_refused;
+                have_summary = true;
+            } else if (g_eval) {
+                summary = g_eval->snapshot(detail::GetTimestampNs());
+                have_summary = true;
+            }
+            expression = g_expression;
+        }
+    }
+    if (have_summary) EmitSummary(summary, expression);
+    EmitCounterQuality();
 }
 
 void DeepWindowRules::Finish() {
@@ -497,6 +528,7 @@ void DeepWindowRules::ResetForTesting() {
     g_finished = false;
     g_expression.clear();
     g_rule_id.clear();
+    g_quality_resets_baseline = 0;
     g_eval.reset();
     g_source.reset();
     Feeds().resetForTesting();

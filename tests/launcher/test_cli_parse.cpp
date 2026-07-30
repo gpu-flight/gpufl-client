@@ -4,7 +4,9 @@
 
 #include <gtest/gtest.h>
 
+#include <regex>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "cli_parse.hpp"
@@ -27,6 +29,117 @@ TEST(CliParseTrace, BasicCommand) {
     EXPECT_EQ(r.args->command[1], "train.py");
     EXPECT_FALSE(r.args->verbose);
     EXPECT_FALSE(r.args->quiet);
+}
+
+// ── Long-running session segmentation ─────────────────────────────────────
+TEST(CliParseTrace, ParsesBothSegmentationTriggers) {
+    auto r = parseTraceArgs(argsFor(
+        {"--segment-every=5m", "--segment-max-rows", "2000000", "--", "./app"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    EXPECT_EQ(r.args->segment_every_ms, 300000);
+    EXPECT_EQ(r.args->segment_max_rows, 2'000'000u);
+    EXPECT_TRUE(segmentationRequested(*r.args));
+}
+
+TEST(CliParseTrace, ZeroSegmentationTriggersPreserveOrdinaryMode) {
+    auto r = parseTraceArgs(argsFor(
+        {"--segment-every=0", "--segment-max-rows=0", "--", "./app"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    EXPECT_FALSE(segmentationRequested(*r.args));
+}
+
+TEST(CliParseTrace, RejectsTooShortSegmentationCadence) {
+    auto r = parseTraceArgs(argsFor({"--segment-every=59s", "--", "./app"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("at least 60s"), std::string::npos) << r.error;
+}
+
+TEST(CliParseTrace, RejectsNonFiniteOverflowAndSubMillisecondDurations) {
+    for (const char* value : {
+             "nan", "inf", "1e100h", "9223372036854775808ms", "0.5ms"}) {
+        auto r = parseTraceArgs(
+            argsFor({"--segment-every", value, "--", "./app"}));
+        EXPECT_FALSE(r.args.has_value()) << value;
+        EXPECT_NE(r.error.find("--segment-every"), std::string::npos)
+            << value << ": " << r.error;
+    }
+}
+
+TEST(CliParseTrace, RejectsInvalidSegmentRowBudget) {
+    for (const char* value : {
+             "-1", "lots", "1.5", "999999999999999999999999999999"}) {
+        auto r = parseTraceArgs(
+            argsFor({"--segment-max-rows", value, "--", "./app"}));
+        EXPECT_FALSE(r.args.has_value()) << value;
+        EXPECT_NE(r.error.find("--segment-max-rows"), std::string::npos)
+            << value << ": " << r.error;
+    }
+}
+
+TEST(CliParseTrace, SegmentationAcceptsTheV1PassWhitelist) {
+    for (const char* pass : {"Trace", "PmSampling"}) {
+        auto r = parseTraceArgs(argsFor(
+            {"--segment-every=5m", "--passes", pass, "--", "./app"}));
+        EXPECT_TRUE(r.args.has_value()) << pass << ": " << r.error;
+    }
+}
+
+TEST(CliParseTrace, SegmentationAcceptsTheAdaptiveTracePmPlan) {
+    auto r = parseTraceArgs(argsFor(
+        {"--segment-every=5m", "--deep-when=kernel_launch_rate<10",
+         "--deep-for=2s", "--", "./app"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    EXPECT_EQ(resolveCaptureMode(*r.args), CaptureMode::AdaptiveDeepWindow);
+}
+
+TEST(CliParseTrace, SegmentationRejectsUnsupportedV1Passes) {
+    for (const char* pass : {
+             "PcSampling", "SassMetrics", "RangeProfiler",
+             "RangeProfilerKernelReplay", "Deep", "Trace+PcSampling"}) {
+        auto r = parseTraceArgs(argsFor(
+            {"--segment-every=5m", "--passes", pass, "--", "./app"}));
+        EXPECT_FALSE(r.args.has_value()) << pass;
+        EXPECT_NE(r.error.find("segmentation V1"), std::string::npos)
+            << pass << ": " << r.error;
+    }
+}
+
+TEST(CliParseTrace, SegmentationRejectsMultiPassAnalysis) {
+    auto r = parseTraceArgs(argsFor(
+        {"--passes=Trace,PmSampling", "--segment-every=5m", "--", "./app"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("multi-pass"), std::string::npos) << r.error;
+}
+
+TEST(CliParseTrace, ExecutionBoundaryRejectsInheritedAnalysisId) {
+    TraceArgs args;
+    args.segment_every_ms = 300000;
+    const std::string error =
+        validateTraceSegmentation(args, "analysis-from-parent");
+    EXPECT_NE(error.find("GPUFL_ANALYSIS_ID"), std::string::npos) << error;
+}
+
+TEST(CliParseTrace, DirectTraceArgsCannotBypassMinimumCadence) {
+    TraceArgs args;
+    args.segment_every_ms = 1;
+    EXPECT_NE(validateTraceExecutionMode(args).find("at least 60s"),
+              std::string::npos);
+}
+
+TEST(CliParseTrace, GeneratedRunIdIsUniqueUuidV4) {
+    const std::regex uuid_v4(
+        "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
+        "[89ab][0-9a-f]{3}-[0-9a-f]{12}$");
+    std::unordered_set<std::string> ids;
+    for (int i = 0; i < 100; ++i) {
+        const std::string id = generateRunId();
+        EXPECT_TRUE(std::regex_match(id, uuid_v4)) << id;
+        EXPECT_TRUE(ids.insert(id).second) << "duplicate UUID: " << id;
+    }
+}
+
+TEST(CliParseTrace, SegmentationExecutionStaysGatedUntilCoordinatorLands) {
+    EXPECT_TRUE(segmentationRuntimeReady());
 }
 
 TEST(CliParseTrace, MissingDashDash) {

@@ -94,11 +94,15 @@ Rules:
   today's wire format;
 - `GPUFL_ANALYSIS_ID` plus either segment option is rejected before target
   execution;
+- until `SegmentCoordinator` lands, one shared compile-time readiness gate is
+  enforced by both the launcher and `gpufl::init()`. Directly injecting the
+  internal environment variables must not bypass the launcher and emit a
+  misleading one-session segmented run;
 - a zero or absent time/row value disables that trigger;
 - both disabled means segmentation is off;
-- production CLI validation prevents cadences small enough to create a
-  session storm; unit tests use a fake coordinator clock instead of weakening
-  the production minimum.
+- production CLI requires a non-zero `--segment-every` cadence of at least 60
+  seconds to prevent an accidental session storm; unit tests use a fake
+  coordinator clock instead of weakening that minimum.
 
 The launcher owns configuration and validation. The target runtime owns
 individual `session_id` generation after the initial session.
@@ -300,7 +304,12 @@ Rules:
   code zero.” Target exit provenance remains separate.
 
 The backend marks a run complete only when `run_end.final_segment_index` is
-known and every segment `0..final_segment_index` is finalized.
+known and every segment `0..final_segment_index` is finalized. Delivery is
+order-independent: segment directories are uploaded by independent Agent
+drains, so `run_end` may become queryable before an earlier segment even
+though the client closes prior segments before writing the final `run_end`.
+Seeing `run_end` is therefore never sufficient by itself to mark the run
+complete.
 
 ---
 
@@ -374,16 +383,31 @@ struct SegmentContext {
 ```
 
 Publication uses C++17 `std::atomic_load`/`std::atomic_store` overloads for
-`shared_ptr`, or an equivalently reviewed generation/RCU mechanism.
+`shared_ptr`. A `use_count()` barrier would not close early merely because its
+load is relaxed: it can observe an older, larger count, not a decrement that
+has not happened. It is still the wrong expression of ownership here because
+producer leases and unrelated control-plane snapshots are indistinguishable;
+one cached snapshot would turn a safe over-count into an unbounded retirement
+wait. Each context therefore owns an explicit sealed writer-lease counter and
+drain condition. Check-only call sites use `hasSegmentContext()` and never
+manufacture a short-lived writer lease.
 
 ### 8.1 Writer contract
 
 A writer:
 
-1. acquires one `SegmentContext`;
+1. acquires one move-only `SegmentWriteLease`;
 2. uses that same context to build the event/batch JSON;
 3. writes through that context's logger;
-4. releases the context only after the complete record or batch is committed.
+4. releases the lease only after the complete record or batch is committed.
+
+Publication seals the old context before storing the new one. An acquire that
+races with sealing either increments the old context before the seal and is
+included in its drain, or observes the seal and retries against the new
+context. The retirement worker waits on the explicit counter with a bounded
+timeout. A timeout emits an ERROR and leaves that segment deliberately
+incomplete; it must not close a logger underneath a live writer or block
+process teardown forever.
 
 Batch-scoped acquisition is preferred. Per-kernel shared-pointer reference
 traffic is prohibited until benchmarked.
@@ -775,6 +799,8 @@ Existing areas requiring refactor:
 - new bootstrap is not visible before its ownership lock is acquired;
 - distinct old/new ownership locks overlap during handoff;
 - old sink closes only after old references drain;
+- a leaked writer reaches the bounded timeout, emits a diagnostic, publishes
+  no false `segment_end`/`run_end`, and does not hang shutdown;
 - old ownership lock releases only after sink/transport retirement completes;
 - a retiring context cannot request a second boundary from late rows;
 - last producer release does not execute filesystem close/compression;
@@ -848,6 +874,10 @@ On L4 and RTX 3090:
 2. Add wire structs/models and exact serialization tests without enabling
    runtime segmentation.
 3. Add launcher parsing, run ID generation, and invalid-combination tests.
+   This slice remains behind an explicit execution-boundary gate until the
+   coordinator lands. The launcher and injected runtime consult the same gate;
+   neither the CLI nor direct environment injection may silently accept
+   segmentation while still producing only one session.
 4. Implement `SegmentContext` and refactor producers to acquire it while still
    running one segment.
 5. Implement global dictionary registry plus segment-local emission.

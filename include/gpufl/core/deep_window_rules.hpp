@@ -64,6 +64,12 @@ public:
      */
     static void EmitCounterQuality();
 
+    /**
+     * Emit a non-terminal rule checkpoint plus segment-local counter quality.
+     * The evaluator, cooldown, rate baseline, and window budget continue.
+     */
+    static void SnapshotSegment();
+
     /** @brief True when a rule is installed - valid or refused. */
     static bool Installed();
 

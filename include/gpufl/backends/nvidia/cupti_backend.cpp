@@ -253,7 +253,22 @@ void CuptiBackend::start() {
     function_record_seen_.store(0, std::memory_order_relaxed);
     kernel_launch_callback_count_.store(0, std::memory_order_relaxed);
     last_sync_flush_launch_count_.store(0, std::memory_order_relaxed);
-    capture_capabilities_emitted_.store(false, std::memory_order_relaxed);
+    {
+        std::lock_guard lock(capture_capabilities_mu_);
+        capture_capabilities_segment_index_ = UINT32_MAX;
+        capability_kernel_rows_baseline_ = 0;
+        capability_memory_rows_baseline_ = 0;
+        capability_mem_transfer_rows_baseline_ = 0;
+        capability_sync_rows_baseline_ = 0;
+        capability_nvtx_rows_baseline_ = 0;
+        capability_graph_rows_baseline_ = 0;
+        capability_external_rows_baseline_ = 0;
+        capability_source_rows_baseline_ = 0;
+        capability_function_rows_baseline_ = 0;
+        capability_launch_count_baseline_ = 0;
+        capability_scope_truncated_baseline_ = 0;
+        capability_pm_rows_baseline_ = 0;
+    }
 
     // Reset the BufferCompleted companion maps for a clean per-session slate
     // (Step 5). These persist across BufferCompleted calls *within* a session
@@ -849,12 +864,13 @@ void CuptiBackend::StopActivityFlushThread_() {
 void CuptiBackend::WriteKernelPerfEventsToLog_() const {
     if (!engine_) return;
     const Runtime* rt = runtime();
-    if (!rt || !rt->logger) return;
+    const auto segment = rt ? rt->acquireSegmentContext() : nullptr;
+    if (!segment || !segment->logger) return;
     for (auto& ev : engine_->takeKernelPerfEvents()) {
         ev.pid = detail::GetPid();
         ev.app = rt->app_name;
-        ev.session_id = rt->session_id;
-        rt->logger->write(model::KernelPerfMetricModel(ev));
+        ev.session_id = segment->session_id;
+        segment->logger->write(model::KernelPerfMetricModel(ev));
     }
 }
 

@@ -127,6 +127,15 @@ constexpr const char* kAnalysisId = "GPUFL_ANALYSIS_ID";
 constexpr const char* kPassIndex  = "GPUFL_PASS_INDEX";
 constexpr const char* kPassCount  = "GPUFL_PASS_COUNT";
 
+// ── Long-running run segmentation (launcher-owned internal contract) ───────
+// kRunId is one UUIDv4 for the target process; each rotated session gets its
+// own session_id and a monotonically increasing segment_index. Zero/absent
+// trigger values disable that trigger. The launcher owns and scrubs all three
+// variables so stale parent-shell state cannot accidentally segment a run.
+constexpr const char* kRunId          = "GPUFL_RUN_ID";
+constexpr const char* kSegmentEveryMs = "GPUFL_SEGMENT_EVERY_MS";
+constexpr const char* kSegmentMaxRows = "GPUFL_SEGMENT_MAX_ROWS";
+
 // PC sampling knobs ───────────────────────────────────────────────────────
 // Kernel-timeline collection strategy for the standalone PcSampling pass:
 //   "none" - PC samples only; PC/SASS kernel rows come from launch callbacks

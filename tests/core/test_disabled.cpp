@@ -18,11 +18,13 @@
 #include <gtest/gtest.h>
 
 #include <cstdlib>
+#include <filesystem>
 
 #include "gpufl/core/env_vars.hpp"
 #include <optional>
 #include <string>
 
+#include "gpufl/core/common.hpp"
 #include "gpufl/core/runtime.hpp"
 #include "gpufl/gpufl.hpp"
 
@@ -67,6 +69,43 @@ protected:
         }
     }
     std::optional<std::string> saved_env_;
+};
+
+class SegmentationStartupTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        save_(gpufl::env::kDisabled, saved_disabled_);
+        save_(gpufl::env::kRunId, saved_run_id_);
+        save_(gpufl::env::kSegmentEveryMs, saved_every_);
+        save_(gpufl::env::kSegmentMaxRows, saved_rows_);
+        unsetEnv_(gpufl::env::kDisabled);
+        unsetEnv_(gpufl::env::kRunId);
+        unsetEnv_(gpufl::env::kSegmentEveryMs);
+        unsetEnv_(gpufl::env::kSegmentMaxRows);
+    }
+
+    void TearDown() override {
+        gpufl::shutdown();
+        restore_(gpufl::env::kDisabled, saved_disabled_);
+        restore_(gpufl::env::kRunId, saved_run_id_);
+        restore_(gpufl::env::kSegmentEveryMs, saved_every_);
+        restore_(gpufl::env::kSegmentMaxRows, saved_rows_);
+    }
+
+private:
+    static void save_(const char* key, std::optional<std::string>& slot) {
+        if (const char* value = std::getenv(key)) slot = value;
+    }
+    static void restore_(const char* key,
+                         const std::optional<std::string>& value) {
+        if (value) setEnv_(key, value->c_str());
+        else unsetEnv_(key);
+    }
+
+    std::optional<std::string> saved_disabled_;
+    std::optional<std::string> saved_run_id_;
+    std::optional<std::string> saved_every_;
+    std::optional<std::string> saved_rows_;
 };
 
 }  // namespace
@@ -140,6 +179,50 @@ TEST_F(DisabledFlagTest, EnvVarOverridesEnabledTrueKwarg) {
     opts.enabled = true;
     EXPECT_FALSE(gpufl::init(opts));
     EXPECT_EQ(gpufl::runtime(), nullptr);
+}
+
+TEST_F(SegmentationStartupTest, TriggerWithoutRunIdFailsBeforeAllocatingRuntime) {
+    setEnv_(gpufl::env::kSegmentEveryMs, "60000");
+
+    EXPECT_FALSE(gpufl::init(gpufl::InitOptions{}));
+    EXPECT_EQ(gpufl::runtime(), nullptr);
+}
+
+TEST_F(SegmentationStartupTest, InvalidTriggerFailsBeforeAllocatingRuntime) {
+    setEnv_(gpufl::env::kRunId, "12345678-1234-4123-8123-123456789abc");
+    setEnv_(gpufl::env::kSegmentMaxRows, "not-a-number");
+
+    EXPECT_FALSE(gpufl::init(gpufl::InitOptions{}));
+    EXPECT_EQ(gpufl::runtime(), nullptr);
+}
+
+TEST_F(SegmentationStartupTest, InvalidRunIdFailsBeforeAllocatingRuntime) {
+    setEnv_(gpufl::env::kRunId, "not-a-uuid");
+    setEnv_(gpufl::env::kSegmentEveryMs, "60000");
+
+    EXPECT_FALSE(gpufl::init(gpufl::InitOptions{}));
+    EXPECT_EQ(gpufl::runtime(), nullptr);
+}
+
+TEST_F(SegmentationStartupTest,
+       ValidConfigStartsTheSegmentRuntime) {
+    setEnv_(gpufl::env::kRunId,
+            "12345678-1234-4123-8123-123456789abc");
+    setEnv_(gpufl::env::kSegmentEveryMs, "60000");
+
+    const auto log_root =
+        std::filesystem::temp_directory_path() /
+        ("gpufl_segment_startup_" +
+         std::to_string(gpufl::detail::GetPid()));
+    std::error_code ec;
+    std::filesystem::remove_all(log_root, ec);
+    gpufl::InitOptions options;
+    options.log_path = log_root.string();
+    ASSERT_TRUE(gpufl::init(options));
+    ASSERT_NE(gpufl::runtime(), nullptr);
+    EXPECT_NE(gpufl::runtime()->segment_runtime, nullptr);
+    gpufl::shutdown();
+    std::filesystem::remove_all(log_root, ec);
 }
 
 // ── Cascade verification: downstream calls are safe when disabled ───────────

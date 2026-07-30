@@ -402,7 +402,23 @@ class CuptiBackend : public IMonitorBackend {
     // drives BufferCompleted on the calling thread, so this prevents a nested
     // context-destroy callback from recursing into another flush.
     std::atomic<bool> context_destroy_flushing_{false};
-    mutable std::atomic<bool> capture_capabilities_emitted_{false};
+    // Capture outcome is emitted once PER segment. Counters above remain
+    // process-cumulative, so these baselines turn them into segment-local
+    // deltas without resetting backend state at a sink cutover.
+    mutable std::mutex capture_capabilities_mu_;
+    mutable uint32_t capture_capabilities_segment_index_ = UINT32_MAX;
+    mutable uint64_t capability_kernel_rows_baseline_ = 0;
+    mutable uint64_t capability_memory_rows_baseline_ = 0;
+    mutable uint64_t capability_mem_transfer_rows_baseline_ = 0;
+    mutable uint64_t capability_sync_rows_baseline_ = 0;
+    mutable uint64_t capability_nvtx_rows_baseline_ = 0;
+    mutable uint64_t capability_graph_rows_baseline_ = 0;
+    mutable uint64_t capability_external_rows_baseline_ = 0;
+    mutable uint64_t capability_source_rows_baseline_ = 0;
+    mutable uint64_t capability_function_rows_baseline_ = 0;
+    mutable uint64_t capability_launch_count_baseline_ = 0;
+    mutable uint64_t capability_scope_truncated_baseline_ = 0;
+    mutable uint64_t capability_pm_rows_baseline_ = 0;
     uint32_t device_id_ = 0;
     std::string chip_name_;
 

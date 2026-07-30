@@ -1,6 +1,7 @@
 #pragma once
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -10,6 +11,7 @@
 #include "gpufl/backends/host_collector.hpp"
 #include "gpufl/core/batch_buffer.hpp"
 #include "gpufl/core/events.hpp"
+#include "gpufl/core/segment_context.hpp"
 
 namespace gpufl {
 class Logger;
@@ -41,6 +43,10 @@ class ISystemCollector {
  */
 class Sampler {
    public:
+    using SegmentProvider = std::function<SegmentWriteLease()>;
+    using RowObserver =
+        std::function<void(uint32_t, uint64_t, int64_t, int64_t)>;
+
     Sampler();
     ~Sampler();
 
@@ -56,6 +62,18 @@ class Sampler {
                    std::shared_ptr<ISystemCollector<DeviceSample>> collector,
                    int sampleIntervalMs,
                    HostCollector* hostCollector = nullptr);
+
+    /**
+     * Segmentation-aware configuration. Each sampling iteration acquires one
+     * immutable context. If publication changes while rows are buffered, the
+     * old batch is committed through its original context before new rows are
+     * accepted.
+     */
+    void configure(std::string appName, SegmentProvider segmentProvider,
+                   std::shared_ptr<ISystemCollector<DeviceSample>> collector,
+                   int sampleIntervalMs,
+                   HostCollector* hostCollector = nullptr,
+                   RowObserver rowObserver = {});
 
     /**
      * Increment the activation counter. On 0→1, spawn the worker
@@ -88,6 +106,8 @@ class Sampler {
     static constexpr int kMetricBatchSize = 4;  // flush every N samples
 
     void runLoop_();
+    void flushBatches_(
+        const SegmentWriteLease& context);
 
     // Spawns the worker. Caller must hold mu_ and ensure no worker is
     // currently running.
@@ -102,8 +122,9 @@ class Sampler {
     std::thread th_;
 
     std::string appName_;
-    std::string sessionId_;
-    std::shared_ptr<Logger> logger_;
+    SegmentProvider segment_provider_;
+    RowObserver row_observer_;
+    SegmentWriteLease batch_context_;
     std::shared_ptr<ISystemCollector<DeviceSample>> collector_;
     HostCollector* host_collector_{nullptr};  // non-owning
     int intervalMs_{0};
