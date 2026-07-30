@@ -553,8 +553,12 @@ struct ScopeBatchRow {
     int64_t  ts_ns             = 0;  // absolute timestamp
     uint64_t scope_instance_id = 0;  // monotonic ID shared by begin/end pair
     uint32_t name_id           = 0;  // scope name dictionary ID
-    uint8_t  event_type        = 0;  // 0 = begin, 1 = end
+    uint8_t  event_type        = 0;  // 0 begin, 1 end, 2 continuation-open,
+                                     // 3 continuation-close
     int      depth             = 0;
+    // Logical first-open timestamp. Equal to ts_ns for an ordinary begin/end
+    // pair; preserved across every continuation row in a segmented run.
+    int64_t  original_start_ns = 0;
 
     // Optional benchmark metadata set on the BEGIN row only (0 on END).
     // Populated when the scope was opened with iteration metadata -

@@ -548,8 +548,7 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
     if (segmented && !segmentationRuntimeReady()) {
         std::fprintf(
             stderr,
-            "gpufl: session segmentation is staged but not executable yet; "
-            "the SegmentCoordinator cutover slice has not landed\n");
+            "gpufl: this build does not include executable session segmentation\n");
         return 2;
     }
 

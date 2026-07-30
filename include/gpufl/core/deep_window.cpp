@@ -174,7 +174,8 @@ void EndPerfScopeIfEnabled(const char* name, const int pid,
     }
 
     const Runtime* rt = runtime();
-    if (!rt || !rt->logger) return;
+    const auto segment = rt ? rt->acquireSegmentContext() : nullptr;
+    if (!segment || !segment->logger) return;
     IMonitorBackend* backend = Monitor::GetBackend();
     if (!backend) return;
     auto event_opt = backend->TakeLastPerfEvent();
@@ -183,11 +184,11 @@ void EndPerfScopeIfEnabled(const char* name, const int pid,
     PerfMetricEvent& pe = *event_opt;
     pe.pid        = pid;
     pe.app        = rt->app_name;
-    pe.session_id = rt->session_id;
+    pe.session_id = segment->session_id;
     pe.name       = name ? name : "";
     pe.start_ns   = start_ns;
     pe.end_ns     = end_ns;
-    rt->logger->write(model::PerfMetricModel(pe));
+    segment->logger->write(model::PerfMetricModel(pe));
 }
 
 }  // namespace detail
@@ -197,7 +198,8 @@ bool DeepWindow::Active() {
 }
 
 bool DeepWindow::Open(const DeepWindowSpec& spec) {
-    if (const Runtime* rt = runtime(); !rt || !rt->logger) return false;
+    const Runtime* rt = runtime();
+    if (!rt || !rt->acquireSegmentContext()) return false;
     // Scheduled and manual requests do not pass through RequestOpenTagged.
     // Apply the same real-readiness gate here so they cannot publish a window
     // that was active in name only and armed no engine.
@@ -355,10 +357,13 @@ void DeepWindow::Close(const DeepWindowClose reason) {
         }
     }
 
-    if (const Runtime* rt = runtime(); rt && rt->logger) {
-        ev.app = rt->app_name;
-        ev.session_id = rt->session_id;
-        rt->logger->write(model::DeepWindowModel(ev));
+    if (const Runtime* rt = runtime(); rt) {
+        const auto segment = rt->acquireSegmentContext();
+        if (segment && segment->logger) {
+            ev.app = rt->app_name;
+            ev.session_id = segment->session_id;
+            segment->logger->write(model::DeepWindowModel(ev));
+        }
     }
 
     GFL_LOG_DEBUG("[DeepWindow] closed name=", name,

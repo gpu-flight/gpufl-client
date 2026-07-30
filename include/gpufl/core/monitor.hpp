@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -12,6 +13,9 @@
 #include "gpufl/core/trace_type.hpp"
 
 namespace gpufl {
+
+class Logger;
+class SegmentDictionaryEmitter;
 
 /// Size of the global monitor ring buffer.
 ///
@@ -440,6 +444,36 @@ class Monitor {
     static uint64_t ScopeAttributionTruncated();
     /** @brief PM metric rows that passed through scope attribution. */
     static uint64_t PmSampleRowsSeen();
+
+    /**
+     * Flush all currently available records and batches before publishing a
+     * new SegmentContext. This does not synchronize the CUDA device.
+     */
+    static void FlushForSegmentBoundary();
+
+    /** Emit a full process dictionary snapshot into a not-yet-published segment. */
+    static void FlushSegmentDictionarySnapshot(
+        SegmentDictionaryEmitter& emitter, Logger& logger,
+        const std::string& session_id);
+
+    /**
+     * Emit the backend's capture outcome into the currently active segment
+     * without stopping the backend. The NVIDIA implementation snapshots
+     * per-segment counter deltas; repeated calls in one segment are idempotent.
+     */
+    static void EmitSegmentCaptureCapabilities();
+
+    /**
+     * Serialize application scope mutation with a segment cutover. The
+     * callback sees continuation-close/open rows for the same boundary and
+     * must publish the new SegmentContext before returning true.
+     */
+    static bool CommitSegmentBoundary(
+        const std::function<bool(int64_t,
+                                 const std::vector<ScopeBatchRow>&,
+                                 const std::vector<ScopeBatchRow>&)>& commit);
+    static void WriteScopeRows(Logger& logger, const std::string& session_id,
+                               const std::vector<ScopeBatchRow>& rows);
 
     /**
      * @brief Emit PM sampling configuration metadata for readers/UI.

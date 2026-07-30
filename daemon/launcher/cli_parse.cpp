@@ -4,11 +4,15 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <iomanip>
+#include <limits>
 #include <random>
 #include <sstream>
+
+#include "gpufl/core/segmentation_config.hpp"
 
 namespace gpufl::launcher {
 
@@ -54,8 +58,11 @@ std::string trim(const std::string& s) {
 bool parseDurationMs(const std::string& s, int64_t& out_ms) {
     if (s.empty()) return false;
     char* end = nullptr;
+    errno = 0;
     const double v = std::strtod(s.c_str(), &end);
-    if (end == s.c_str() || v < 0) return false;
+    if (end == s.c_str() || errno == ERANGE || !std::isfinite(v) || v < 0) {
+        return false;
+    }
     std::string unit = trim(end);
     double mult_ms;  // value * mult_ms = milliseconds
     if (unit.empty() || unit == "s") mult_ms = 1000.0;
@@ -63,7 +70,14 @@ bool parseDurationMs(const std::string& s, int64_t& out_ms) {
     else if (unit == "m") mult_ms = 60.0 * 1000.0;
     else if (unit == "h") mult_ms = 60.0 * 60.0 * 1000.0;
     else return false;
-    out_ms = static_cast<int64_t>(v * mult_ms);
+    const double milliseconds = v * mult_ms;
+    if (!std::isfinite(milliseconds) ||
+        milliseconds >= static_cast<double>(
+            (std::numeric_limits<int64_t>::max)()) ||
+        (v > 0 && milliseconds < 1.0)) {
+        return false;
+    }
+    out_ms = static_cast<int64_t>(milliseconds);
     return true;
 }
 
@@ -171,8 +185,8 @@ const char* traceHelp() {
         "        --segment-max-rows=<N>\n"
         "                            Also split after this many logical telemetry rows.\n"
         "                            The batch crossing N stays in the old segment.\n"
-        "                            Default: off. Both segment flags are staged and\n"
-        "                            rejected until SegmentCoordinator lands.\n"
+        "                            Default: off. V1 supports one Trace or PM pass;\n"
+        "                            multi-pass analyses cannot be segmented.\n"
         "        --warmup=<DUR>      Skip cold start: defer capture by this long\n"
         "                            (e.g. 30s, 500ms, 5m; bare number = seconds)\n"
         "        --window=<DUR>      Bounded window: capture this long after warmup,\n"
@@ -948,9 +962,7 @@ std::string generateRunId() {
 }
 
 bool segmentationRuntimeReady() {
-    // Flipped only by the SegmentCoordinator slice, together with its
-    // cutover/ownership/dictionary tests.
-    return false;
+    return gpufl::segmentation::kRuntimeReady;
 }
 
 CaptureMode resolveCaptureMode(const TraceArgs& args) {

@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -7,9 +8,11 @@
 #include "gpufl/backends/host_collector.hpp"
 #include "gpufl/core/backend_interfaces.hpp"
 #include "gpufl/core/sampler.hpp"
+#include "gpufl/core/segment_context.hpp"
 
 namespace gpufl {
 class Logger;
+class SegmentRuntime;
 
 struct Runtime {
     std::string app_name;
@@ -22,6 +25,22 @@ struct Runtime {
     int64_t segment_every_ms = 0;
     uint64_t segment_max_rows = 0;
     std::shared_ptr<Logger> logger;
+    // Transition bridge: producers move from the aliases above to this
+    // immutable context one complete write path at a time. C++17 provides
+    // atomic_load/store overloads for shared_ptr; do not access this member
+    // directly outside Runtime's methods.
+    std::shared_ptr<const SegmentContext> active_segment_context;
+    std::shared_ptr<SegmentRuntime> segment_runtime;
+
+    SegmentWriteLease acquireSegmentContext() const noexcept;
+    /** Coordinator-only read. This does not protect a write operation. */
+    std::shared_ptr<const SegmentContext> peekSegmentContext() const noexcept;
+    bool publishSegmentContext(
+        std::shared_ptr<const SegmentContext> context) noexcept;
+    /** Stop new writers without publishing a replacement. Shutdown only. */
+    std::shared_ptr<const SegmentContext>
+    sealActiveSegmentContext() noexcept;
+
     std::shared_ptr<IUnifiedGpuCollector> unified_gpu_collector;
     std::shared_ptr<ISystemCollector<DeviceSample>> collector;
     std::unique_ptr<HostCollector> host_collector;

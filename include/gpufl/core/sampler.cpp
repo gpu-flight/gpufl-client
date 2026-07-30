@@ -6,6 +6,8 @@
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/logger/logger.hpp"
 #include "gpufl/core/model/batch_models.hpp"
+#include "gpufl/core/runtime.hpp"
+#include "gpufl/core/segment_runtime.hpp"
 
 namespace gpufl {
 Sampler::Sampler() = default;
@@ -16,12 +18,29 @@ void Sampler::configure(std::string appName, std::string sessionId,
                         std::shared_ptr<ISystemCollector<DeviceSample>> collector,
                         const int sampleIntervalMs,
                         HostCollector* hostCollector) {
+    auto fixed_context = std::make_shared<SegmentContext>(
+        std::string(), std::move(sessionId), 0, 0, std::move(logger));
+    auto fixed_runtime = std::make_shared<Runtime>();
+    fixed_runtime->publishSegmentContext(fixed_context);
+    configure(
+        std::move(appName),
+        [fixed_runtime]() {
+            return fixed_runtime->acquireSegmentContext();
+        },
+        std::move(collector), sampleIntervalMs, hostCollector);
+}
+
+void Sampler::configure(
+    std::string appName, SegmentProvider segmentProvider,
+    std::shared_ptr<ISystemCollector<DeviceSample>> collector,
+    const int sampleIntervalMs, HostCollector* hostCollector,
+    RowObserver rowObserver) {
     std::lock_guard lk(mu_);
     appName_        = std::move(appName);
-    sessionId_      = std::move(sessionId);
-    logger_         = std::move(logger);
+    segment_provider_ = std::move(segmentProvider);
     collector_      = std::move(collector);
     host_collector_ = hostCollector;
+    row_observer_ = std::move(rowObserver);
     intervalMs_     = sampleIntervalMs;
 }
 
@@ -33,7 +52,8 @@ void Sampler::activate() {
         // enough to do useful work. If we're not configured, the counter
         // still increments - the next deactivate balances it. This keeps
         // the API safe to call before configure().
-        if (logger_ && collector_ && intervalMs_ > 0 && !running_.load()) {
+        if (segment_provider_ && collector_ && intervalMs_ > 0 &&
+            !running_.load()) {
             startWorkerLocked_();
         }
     }
@@ -75,6 +95,7 @@ void Sampler::shutdown() {
 
 void Sampler::startWorkerLocked_() {
     batch_.clear();
+    batch_context_.reset();
     batch_id_ = 0;
     host_batch_.clear();
     host_batch_id_ = 0;
@@ -106,6 +127,21 @@ void Sampler::runLoop_() {
     while (running_.load()) {
         next_wake_time += interval;
         const int64_t ts = detail::GetTimestampNs();
+        auto context =
+            segment_provider_ ? segment_provider_() : nullptr;
+        if (!context || !context->logger) {
+            std::this_thread::sleep_until(next_wake_time);
+            continue;
+        }
+        if (batch_context_ && batch_context_.get() != context.get()) {
+            if (!batch_.empty() || !host_batch_.empty()) {
+                flushBatches_(batch_context_);
+                samples_since_flush = 0;
+            } else {
+                batch_context_.reset();
+            }
+        }
+        if (!batch_context_) batch_context_ = std::move(context);
 
         for (const DeviceSample& d : collector_->sampleAll()) {
             // A rule reads gauges from here, not by polling: the timestamp has
@@ -148,14 +184,7 @@ void Sampler::runLoop_() {
         ++samples_since_flush;
 
         if (samples_since_flush >= kMetricBatchSize || batch_.needsFlush()) {
-            logger_->write(model::DeviceMetricBatchModel(
-                batch_, sessionId_, ++batch_id_));
-            batch_.clear();
-            if (!host_batch_.empty()) {
-                logger_->write(model::HostMetricBatchModel(
-                    host_batch_, sessionId_, ++host_batch_id_));
-                host_batch_.clear();
-            }
+            flushBatches_(batch_context_);
             samples_since_flush = 0;
         }
 
@@ -163,16 +192,34 @@ void Sampler::runLoop_() {
     }
 
     // Flush any remaining samples accumulated before deactivation.
+    flushBatches_(batch_context_);
+}
+
+void Sampler::flushBatches_(
+    const SegmentWriteLease& context) {
+    if (!context || !context->logger) return;
+    uint64_t logical_rows = 0;
     if (!batch_.empty()) {
-        logger_->write(
-            model::DeviceMetricBatchModel(batch_, sessionId_, ++batch_id_));
+        logical_rows += batch_.rows().size();
+        context->logger->write(model::DeviceMetricBatchModel(
+            batch_, context->session_id, ++batch_id_));
         batch_.clear();
     }
     if (!host_batch_.empty()) {
-        logger_->write(
-            model::HostMetricBatchModel(host_batch_, sessionId_, ++host_batch_id_));
+        logical_rows += host_batch_.rows().size();
+        context->logger->write(model::HostMetricBatchModel(
+            host_batch_, context->session_id, ++host_batch_id_));
         host_batch_.clear();
     }
+    if (logical_rows > 0 && row_observer_) {
+        const int64_t steady_ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count();
+        row_observer_(context->segment_index, logical_rows, steady_ns,
+                      detail::GetTimestampNs());
+    }
+    batch_context_.reset();
 }
 
 }  // namespace gpufl

@@ -550,15 +550,17 @@ void SassMetricsEngine::ConfigureSassMetrics_() {
 
     // Emit sass_config event so the backend can distinguish "metric not
     // supported on this GPU" from "metric produced no data for this kernel".
-    if (Runtime* rt = runtime(); rt && rt->logger) {
+    if (Runtime* rt = runtime(); rt) {
+        const auto segment = rt->acquireSegmentContext();
+        if (!segment || !segment->logger) return;
         SassConfigEvent evt;
-        evt.session_id = rt->session_id;
+        evt.session_id = segment->session_id;
         evt.ts_ns = static_cast<int64_t>(detail::GetTimestampNs());
         evt.device_id = ctx_.device_id;
         for (const auto& [id, name] : metric_id_to_name_)
             evt.configured_metrics.push_back(name);
         evt.skipped_metrics = skipped_metrics_;
-        rt->logger->write(model::SassConfigModel(evt));
+        segment->logger->write(model::SassConfigModel(evt));
     }
 }
 

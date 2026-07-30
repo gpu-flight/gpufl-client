@@ -1,6 +1,7 @@
 #include "gpufl/core/monitor_batch_manager.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include <queue>
 #include <set>
@@ -10,6 +11,8 @@
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/logger/logger.hpp"
 #include "gpufl/core/model/batch_models.hpp"
+#include "gpufl/core/runtime.hpp"
+#include "gpufl/core/segment_runtime.hpp"
 
 namespace gpufl::detail {
 
@@ -52,9 +55,8 @@ void MonitorBatchManager::reset() {
     activeScopeNameId_.store(0);
 }
 
-void MonitorBatchManager::bindFlushSink(Logger* logger, std::string session_id) {
-    flushSink_.logger = logger;
-    flushSink_.session_id = std::move(session_id);
+void MonitorBatchManager::bindFlushRuntime(Runtime* runtime) {
+    flushSink_.runtime = runtime;
 }
 
 void MonitorBatchManager::clearFlushSink() {
@@ -79,18 +81,33 @@ void MonitorBatchManager::flushAll(FlushMode mode) {
         return;
     }
 
-    Logger& logger = *flushSink_.logger;
-    const std::string& session_id = flushSink_.session_id;
+    const auto context = flushSink_.runtime->acquireSegmentContext();
+    if (!context || !context->logger) {
+        GFL_LOG_ERROR(
+            "MonitorBatchManager::flushAll: active segment context is missing");
+        return;
+    }
+    Logger& logger = *context->logger;
+    const std::string& session_id = context->session_id;
+    uint64_t logical_rows = 0;
+    const auto flushDictionary = [&] {
+        if (context->dictionary) {
+            context->dictionary->flush(dictManager_, logger, session_id);
+        } else {
+            dictManager_.flushDictionary(logger, session_id);
+        }
+    };
 
     // Dictionary MUST be written before any batch that references its IDs.
-    dictManager_.flushDictionary(logger, session_id);
+    flushDictionary();
     if (mode == FlushMode::Full) {
         dictManager_.flushSourceContent(logger, session_id);
         dictManager_.flushDisassembly(logger, session_id);
     }
 
     if (!kernelBatch_.empty()) {
-        dictManager_.flushDictionary(logger, session_id);
+        logical_rows += kernelBatch_.rows().size();
+        flushDictionary();
         logger.write(model::KernelEventBatchModel(kernelBatch_, session_id, ++kernelBatchId_));
         kernelBatch_.clear();
         for (const auto& d : pendingDetails_) {
@@ -100,18 +117,21 @@ void MonitorBatchManager::flushAll(FlushMode mode) {
     }
 
     if (!memcpyBatch_.empty()) {
-        dictManager_.flushDictionary(logger, session_id);
+        logical_rows += memcpyBatch_.rows().size();
+        flushDictionary();
         logger.write(model::MemcpyEventBatchModel(memcpyBatch_, session_id, ++memcpyBatchId_));
         memcpyBatch_.clear();
     }
 
     if (!syncBatch_.empty()) {
-        dictManager_.flushDictionary(logger, session_id);
+        logical_rows += syncBatch_.rows().size();
+        flushDictionary();
         logger.write(model::SynchronizationEventBatchModel(syncBatch_, session_id, ++syncBatchId_));
         syncBatch_.clear();
     }
 
     if (!memAllocBatch_.empty()) {
+        logical_rows += memAllocBatch_.rows().size();
         logger.write(model::MemoryAllocEventBatchModel(memAllocBatch_, session_id, ++memAllocBatchId_));
         memAllocBatch_.clear();
     }
@@ -119,21 +139,39 @@ void MonitorBatchManager::flushAll(FlushMode mode) {
     {
         std::lock_guard lk(scopeBatchMu_);
         if (!scopeBatch_.empty() || !profileBatch_.empty() || !pmSampleBatch_.empty()) {
-            dictManager_.flushDictionary(logger, session_id);
+            flushDictionary();
         }
         if (!scopeBatch_.empty()) {
+            logical_rows += scopeBatch_.rows().size();
             logger.write(model::ScopeEventBatchModel(scopeBatch_, session_id, ++scopeBatchId_));
             scopeBatch_.clear();
         }
         if (!profileBatch_.empty()) {
+            logical_rows += profileBatch_.rows().size();
             logger.write(model::ProfileSampleBatchModel(profileBatch_, session_id, ++profileBatchId_));
             profileBatch_.clear();
         }
         if (!pmSampleBatch_.empty()) {
+            logical_rows += pmSampleBatch_.rows().size();
             logger.write(model::PmSampleBatchModel(pmSampleBatch_, session_id, ++pmSampleBatchId_));
             pmSampleBatch_.clear();
         }
     }
+    if (logical_rows > 0 && flushSink_.runtime->segment_runtime) {
+        const int64_t steady_ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count();
+        flushSink_.runtime->segment_runtime->noteRows(
+            context->segment_index, logical_rows, steady_ns,
+            GetTimestampNs());
+    }
+}
+
+void MonitorBatchManager::flushDictionarySnapshot(
+    SegmentDictionaryEmitter& emitter, Logger& logger,
+    const std::string& session_id) {
+    emitter.flush(dictManager_, logger, session_id);
 }
 
 uint32_t MonitorBatchManager::internKernel(const std::string& name) {
@@ -163,7 +201,9 @@ void MonitorBatchManager::enqueueDisassembly(uint64_t crc, const uint8_t* data, 
 
 void MonitorBatchManager::flushDisassembly() {
     if (!flushSink_.available()) return;
-    dictManager_.flushDisassembly(*flushSink_.logger, flushSink_.session_id);
+    const auto context = flushSink_.runtime->acquireSegmentContext();
+    if (!context || !context->logger) return;
+    dictManager_.flushDisassembly(*context->logger, context->session_id);
 }
 
 uint64_t MonitorBatchManager::allocateScopeInstanceId() {
@@ -228,7 +268,9 @@ void MonitorBatchManager::pushTrackedScopeRow(const ScopeBatchRow& row) {
     if (row.event_type == 0) {
         scopeNameStack_.emplace_back(row.scope_instance_id, row.name_id);
         activeScopeNameId_.store(row.name_id, std::memory_order_relaxed);
-        openScopeWindows_[row.scope_instance_id] = {row.ts_ns, row.name_id, row.depth};
+        openScopeWindows_[row.scope_instance_id] = {
+            row.original_start_ns == 0 ? row.ts_ns : row.original_start_ns,
+            row.name_id, row.depth, row.repeat, row.warmup};
     } else {
         // Search from the back: the common case is closing the innermost
         // scope, and an unmatched id leaves the stack alone rather than
@@ -256,6 +298,54 @@ void MonitorBatchManager::pushTrackedScopeRow(const ScopeBatchRow& row) {
         clearPendingScopeCloseLocked(row.scope_instance_id);
     }
     scopeBatch_.push(row);
+}
+
+std::pair<std::vector<ScopeBatchRow>, std::vector<ScopeBatchRow>>
+MonitorBatchManager::snapshotScopeContinuations(
+    const int64_t boundary_ns) const {
+    std::lock_guard lk(scopeBatchMu_);
+    std::vector<ScopeBatchRow> closes;
+    std::vector<ScopeBatchRow> opens;
+    closes.reserve(openScopeWindows_.size());
+    opens.reserve(openScopeWindows_.size());
+    for (const auto& [instance_id, open] : openScopeWindows_) {
+        ScopeBatchRow close;
+        close.ts_ns = boundary_ns;
+        close.scope_instance_id = instance_id;
+        close.name_id = open.name_id;
+        close.event_type = 3;
+        close.depth = open.depth;
+        close.original_start_ns = open.start_ns;
+        closes.push_back(close);
+
+        ScopeBatchRow next = close;
+        next.event_type = 2;
+        next.repeat = open.repeat;
+        next.warmup = open.warmup;
+        opens.push_back(next);
+    }
+    const auto by_depth_then_id = [](const ScopeBatchRow& lhs,
+                                     const ScopeBatchRow& rhs) {
+        if (lhs.depth != rhs.depth) return lhs.depth < rhs.depth;
+        return lhs.scope_instance_id < rhs.scope_instance_id;
+    };
+    std::sort(closes.begin(), closes.end(), by_depth_then_id);
+    std::sort(opens.begin(), opens.end(), by_depth_then_id);
+    return {std::move(closes), std::move(opens)};
+}
+
+void MonitorBatchManager::writeScopeRows(
+    Logger& logger, const std::string& session_id,
+    const std::vector<ScopeBatchRow>& rows) {
+    if (rows.empty()) return;
+    BatchBuffer<ScopeBatchRow> batch;
+    for (const auto& row : rows) batch.push(row);
+    uint64_t batch_id = 0;
+    {
+        std::lock_guard lk(scopeBatchMu_);
+        batch_id = ++scopeBatchId_;
+    }
+    logger.write(model::ScopeEventBatchModel(batch, session_id, batch_id));
 }
 
 bool MonitorBatchManager::pushProfileSample(const ProfileSampleBatchRow& row) {
@@ -418,8 +508,10 @@ MonitorBatchManager::snapshotScopeCandidatesLocked(
     // every sample in this batch without inventing a close that has not
     // happened.
     //
-    int64_t provisional_end = std::numeric_limits<int64_t>::min();
-    for (const auto& row : rows) provisional_end = std::max(provisional_end, row.ts_ns);
+    int64_t provisional_end = (std::numeric_limits<int64_t>::min)();
+    for (const auto& row : rows) {
+        provisional_end = (std::max)(provisional_end, row.ts_ns);
+    }
 
     std::vector<ScopeWindow> candidates;
     candidates.reserve(completedScopeWindows_.size() + openScopeWindows_.size());
@@ -432,7 +524,7 @@ MonitorBatchManager::snapshotScopeCandidatesLocked(
             int64_t effective_end = provisional_end;
             if (const auto close = pendingScopeCloseNs_.find(instance_id);
                 close != pendingScopeCloseNs_.end()) {
-                effective_end = std::min(effective_end, close->second);
+                effective_end = (std::min)(effective_end, close->second);
             }
             if (open.start_ns > effective_end) continue;
             candidates.push_back(ScopeWindow{open.start_ns, effective_end, instance_id,

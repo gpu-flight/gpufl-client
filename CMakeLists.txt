@@ -177,6 +177,8 @@ target_sources(gpufl PRIVATE
     include/gpufl/core/deep_window.cpp
     include/gpufl/core/sampler.cpp
     include/gpufl/core/runtime.cpp
+    include/gpufl/core/segment_coordinator.cpp
+    include/gpufl/core/segment_runtime.cpp
     include/gpufl/core/backend_factory.cpp
     include/gpufl/core/monitor_adapter.cpp
     include/gpufl/core/nvtx_counters.cpp

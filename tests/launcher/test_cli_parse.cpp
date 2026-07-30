@@ -54,6 +54,17 @@ TEST(CliParseTrace, RejectsTooShortSegmentationCadence) {
     EXPECT_NE(r.error.find("at least 60s"), std::string::npos) << r.error;
 }
 
+TEST(CliParseTrace, RejectsNonFiniteOverflowAndSubMillisecondDurations) {
+    for (const char* value : {
+             "nan", "inf", "1e100h", "9223372036854775808ms", "0.5ms"}) {
+        auto r = parseTraceArgs(
+            argsFor({"--segment-every", value, "--", "./app"}));
+        EXPECT_FALSE(r.args.has_value()) << value;
+        EXPECT_NE(r.error.find("--segment-every"), std::string::npos)
+            << value << ": " << r.error;
+    }
+}
+
 TEST(CliParseTrace, RejectsInvalidSegmentRowBudget) {
     for (const char* value : {
              "-1", "lots", "1.5", "999999999999999999999999999999"}) {
@@ -128,7 +139,7 @@ TEST(CliParseTrace, GeneratedRunIdIsUniqueUuidV4) {
 }
 
 TEST(CliParseTrace, SegmentationExecutionStaysGatedUntilCoordinatorLands) {
-    EXPECT_FALSE(segmentationRuntimeReady());
+    EXPECT_TRUE(segmentationRuntimeReady());
 }
 
 TEST(CliParseTrace, MissingDashDash) {

@@ -26,6 +26,7 @@
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/deep_window.hpp"
 #include "gpufl/core/deep_window_rules.hpp"
+#include "gpufl/core/dictionary_manager.hpp"
 #include "gpufl/core/events.hpp"
 #include "gpufl/core/logger/logger.hpp"
 #include "gpufl/core/remote_config.hpp"
@@ -42,6 +43,8 @@
 #include "gpufl/core/monitor.hpp"
 #include "gpufl/core/monitor_backend.hpp"
 #include "gpufl/core/runtime.hpp"
+#include "gpufl/core/segment_runtime.hpp"
+#include "gpufl/core/segmentation_config.hpp"
 #include "gpufl/core/scope_registry.hpp"
 #include "gpufl/report/text_report.hpp"
 #if GPUFL_HAS_CUDA || defined(__CUDACC__)
@@ -362,6 +365,11 @@ bool init(const InitOptions& opts) {
                       "' is invalid (expected a UUIDv4)");
         return false;
     }
+    if (segmented && !segmentation::kRuntimeReady) {
+        GFL_LOG_ERROR(
+            "This build does not include executable session segmentation.");
+        return false;
+    }
 
     if (runtime()) {
         GFL_LOG_DEBUG("Runtime already exists, shutting down first...");
@@ -429,6 +437,15 @@ bool init(const InitOptions& opts) {
     GFL_LOG_DEBUG("Opening log file: ", logPath);
     if (!rt->logger->open(logOpts)) {
         GFL_LOG_ERROR("Failed to open logger at: ", logPath);
+        return false;
+    }
+    auto initial_dictionary =
+        segmented ? std::make_shared<SegmentDictionaryEmitter>() : nullptr;
+    if (!rt->publishSegmentContext(std::make_shared<SegmentContext>(
+            rt->run_id, rt->session_id, rt->segment_index,
+            detail::GetTimestampNs(), rt->logger, initial_dictionary))) {
+        GFL_LOG_ERROR("Failed to publish the initial segment context");
+        rt->logger->close();
         return false;
     }
 
@@ -602,6 +619,11 @@ bool init(const InitOptions& opts) {
     GFL_LOG_DEBUG("Monitor started");
 
     Runtime* rt_ptr = runtime();
+    const auto segment = rt_ptr ? rt_ptr->acquireSegmentContext() : nullptr;
+    if (!segment) {
+        GFL_LOG_ERROR("Missing active segment context before job_start");
+        return false;
+    }
 
     // Runtime backend selection
     std::string backendReason;
@@ -619,7 +641,7 @@ bool init(const InitOptions& opts) {
     // init event with inventory (optional)
     InitEvent ie;
     ie.pid = detail::GetPid();
-    ie.session_id = rt_ptr->session_id;
+    ie.session_id = segment->session_id;
     ie.app = rt_ptr->app_name;
     ie.log_path = logPath;
     ie.ts_ns = detail::GetTimestampNs();
@@ -638,8 +660,8 @@ bool init(const InitOptions& opts) {
 
     ie.session_kind = ProfilingEngineSessionKind(mOpts.profiling_engine);
     ie.profiling_engine = ProfilingEngineWireName(mOpts.profiling_engine);
-    ie.run_id = rt_ptr->run_id;
-    ie.segment_index = rt_ptr->segment_index;
+    ie.run_id = segment->run_id;
+    ie.segment_index = segment->segment_index;
 
     // Multi-pass grouping (P1): the launcher's multi-pass driver tags each
     // child with GPUFL_ANALYSIS_ID + its 0-based GPUFL_PASS_INDEX and the
@@ -659,31 +681,55 @@ bool init(const InitOptions& opts) {
                       " pass ", ie.pass_index, "/", ie.pass_count);
     }
 
-    rt_ptr->logger->write(model::InitEventModel(ie));
+    segment->logger->write(model::InitEventModel(ie));
+
+    if (segmented) {
+        SegmentRuntime::Options segment_options;
+        segment_options.runtime = rt_ptr;
+        segment_options.logger_options = logOpts;
+        segment_options.init_template = ie;
+        segment_options.segment_every_ms = rt_ptr->segment_every_ms;
+        segment_options.segment_max_rows = rt_ptr->segment_max_rows;
+        rt_ptr->segment_runtime =
+            std::make_shared<SegmentRuntime>(std::move(segment_options));
+        if (!rt_ptr->segment_runtime->start()) {
+            GFL_LOG_ERROR("Failed to start SegmentRuntime");
+            shutdown();
+            return false;
+        }
+    }
 
     // Configure the sampler with collectors / interval. This does NOT
     // start the worker - that happens via activate(), driven either by
     // the continuous-mode baseline activation below or by GFL_SCOPE
     // entry / systemStart() at runtime.
     if (g_opts.system_sample_rate_ms > 0 && rt_ptr->collector) {
-        rt_ptr->sampler.configure(rt_ptr->app_name, rt_ptr->session_id,
-                                  rt_ptr->logger, rt_ptr->collector,
-                                  g_opts.system_sample_rate_ms,
-                                  rt_ptr->host_collector.get());
+        rt_ptr->sampler.configure(
+            rt_ptr->app_name,
+            [rt_ptr] { return rt_ptr->acquireSegmentContext(); },
+            rt_ptr->collector, g_opts.system_sample_rate_ms,
+            rt_ptr->host_collector.get(),
+            [rt_ptr](const uint32_t index, const uint64_t rows,
+                     const int64_t steady_ns, const int64_t event_ns) {
+                if (rt_ptr->segment_runtime) {
+                    rt_ptr->segment_runtime->noteRows(
+                        index, rows, steady_ns, event_ns);
+                }
+            });
     }
 
     // Continuous mode: emit the SystemStart event and take the baseline
     // activation that keeps the sampler running until shutdown().
-    if (g_opts.continuous_system_sampling && rt_ptr->logger) {
+    if (g_opts.continuous_system_sampling && segment->logger) {
         SystemStartEvent e;
         e.pid = gpufl::detail::GetPid();
         e.app = rt_ptr->app_name;
         e.name = "sampling_start";
-        e.session_id = rt_ptr->session_id;
+        e.session_id = segment->session_id;
         e.ts_ns = gpufl::detail::GetTimestampNs();
         if (rt_ptr->collector) e.devices = rt_ptr->collector->sampleAll();
         if (rt_ptr->host_collector) e.host = rt_ptr->host_collector->sample();
-        rt_ptr->logger->write(model::SystemStartModel(e));
+        segment->logger->write(model::SystemStartModel(e));
     }
     if (g_opts.continuous_system_sampling && g_opts.system_sample_rate_ms > 0 &&
         rt_ptr->collector) {
@@ -716,17 +762,18 @@ bool init(const InitOptions& opts) {
 
 void systemStart(std::string name) {
     Runtime* rt = runtime();
-    if (!rt || !rt->logger) return;
+    const auto segment = rt ? rt->acquireSegmentContext() : nullptr;
+    if (!segment || !segment->logger) return;
     {
         SystemStartEvent e;
         e.pid = detail::GetPid();
         e.app = rt->app_name;
         e.name = std::move(name);
-        e.session_id = rt->session_id;
+        e.session_id = segment->session_id;
         e.ts_ns = detail::GetTimestampNs();
         if (rt->collector) e.devices = rt->collector->sampleAll();
         if (rt->host_collector) e.host = rt->host_collector->sample();
-        rt->logger->write(model::SystemStartModel(e));
+        segment->logger->write(model::SystemStartModel(e));
     }
     // Activate the sampler under the ref-counted model. If continuous
     // mode already took a baseline activation at init(), this stacks on
@@ -739,7 +786,8 @@ void systemStart(std::string name) {
 
 void systemStop(std::string name) {
     Runtime* rt = runtime();
-    if (!rt || !rt->logger) return;
+    const auto segment = rt ? rt->acquireSegmentContext() : nullptr;
+    if (!segment || !segment->logger) return;
 
     // Symmetric with systemStart: drop one activation. The sampler
     // worker only stops when the activation count hits zero, so
@@ -751,12 +799,12 @@ void systemStop(std::string name) {
     SystemStopEvent e;
     e.pid = detail::GetPid();
     e.app = rt->app_name;
-    e.session_id = rt->session_id;
+    e.session_id = segment->session_id;
     e.name = std::move(name);
     e.ts_ns = detail::GetTimestampNs();
     if (rt->collector) e.devices = rt->collector->sampleAll();
     if (rt->host_collector) e.host = rt->host_collector->sample();
-    rt->logger->write(model::SystemStopModel(e));
+    segment->logger->write(model::SystemStopModel(e));
 }
 
 void shutdown() {
@@ -799,6 +847,12 @@ void shutdown() {
         Monitor::Shutdown();
     }
     GFL_LOG_DEBUG("Shutdown: monitor drained -> finalize logs");
+    auto final_segment = rt->acquireSegmentContext();
+    if (!final_segment || !final_segment->logger) {
+        GFL_LOG_ERROR("Shutdown: active segment context disappeared");
+        set_runtime(nullptr);
+        return;
+    }
 
     // The optional "sampling_end" sample is skipped on Windows-injection exit:
     // collector->sampleAll() does slow NVML/NVAPI work against the context cudart
@@ -810,24 +864,33 @@ void shutdown() {
         SystemStopEvent e;
         e.pid = detail::GetPid();
         e.app = rt->app_name;
-        e.session_id = rt->session_id;
+        e.session_id = final_segment->session_id;
         e.name = "sampling_end";
         e.ts_ns = detail::GetTimestampNs();
         if (rt->collector) e.devices = rt->collector->sampleAll();
         if (rt->host_collector) e.host = rt->host_collector->sample();
-        rt->logger->write(model::SystemStopModel(e));
+        final_segment->logger->write(model::SystemStopModel(e));
     }
 
-    ShutdownEvent se;
-    se.pid = detail::GetPid();
-    se.app = rt->app_name;
-    se.session_id = rt->session_id;
-    se.ts_ns = detail::GetTimestampNs();
-    rt->logger->write(model::ShutdownEventModel(se));
+    const int64_t ended_ns = detail::GetTimestampNs();
+    if (rt->segment_runtime) {
+        // finish() seals the active context and waits for every writer lease.
+        // This shutdown path is itself the final writer, so release its lease
+        // before entering that barrier.
+        final_segment.reset();
+        rt->segment_runtime->finish(ended_ns);
+    } else {
+        ShutdownEvent se;
+        se.pid = detail::GetPid();
+        se.app = rt->app_name;
+        se.session_id = final_segment->session_id;
+        se.ts_ns = ended_ns;
+        final_segment->logger->write(model::ShutdownEventModel(se));
 
-    GFL_LOG_DEBUG("Shutdown: writing events done -> logger->close()");
-    rt->logger->close();
-    GFL_LOG_DEBUG("Shutdown: logger->close() returned");
+        GFL_LOG_DEBUG("Shutdown: writing events done -> logger->close()");
+        final_segment->logger->close();
+        GFL_LOG_DEBUG("Shutdown: logger->close() returned");
+    }
 
     // Logs are durable now. Release the CUPTI backend LAST so that if
     // cuptiPCSamplingStop/Disable hangs or crashes against the dying context,
@@ -879,7 +942,7 @@ ScopedMonitor::ScopedMonitor(std::string name, ScopeMeta meta)
 
 void ScopedMonitor::init_(const ScopeMeta& meta) {
     Runtime* rt = runtime();
-    if (!rt || !rt->logger) return;
+    if (!rt || !rt->acquireSegmentContext()) return;
 
     auto& stack = getThreadScopeStack();
     const int depth = static_cast<int>(stack.size());
@@ -906,6 +969,7 @@ void ScopedMonitor::init_(const ScopeMeta& meta) {
     row.name_id = name_id;
     row.event_type = 0;  // begin
     row.depth = depth;
+    row.original_start_ns = start_ns_;
     // Benchmark metadata - 0/0 for the legacy ctors, populated for the
     // ScopeMeta overload. End row (in dtor) keeps these at 0; backend
     // joins by scope_instance_id to read the begin-row values.
@@ -923,7 +987,7 @@ void ScopedMonitor::init_(const ScopeMeta& meta) {
 
 ScopedMonitor::~ScopedMonitor() {
     Runtime* rt = runtime();
-    if (!rt || !rt->logger) {
+    if (!rt || !rt->acquireSegmentContext()) {
         // Best-effort: if the runtime is already gone but we'd taken a
         // sampler activation, we can't deactivate (no Sampler instance
         // to talk to). Sampler::shutdown() in gpufl::shutdown() will
@@ -953,6 +1017,7 @@ ScopedMonitor::~ScopedMonitor() {
     row.depth = depth;
     const int64_t end_ns = Monitor::CaptureScopeCloseTimestamp(scope_id_);
     row.ts_ns = end_ns;
+    row.original_start_ns = start_ns_;
     Monitor::PushScopeRow(row);
 
     // Scopes are recorded via scope_event only - we no longer echo each

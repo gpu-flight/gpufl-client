@@ -28,6 +28,8 @@ set(GPUFL_TEST_SOURCES
     core/test_monitor.cpp
     core/test_itanium_demangle.cpp
     core/test_sampler.cpp
+    core/test_segment_context.cpp
+    core/test_segment_coordinator.cpp
     upload/test_upload_logs.cpp
     # Launcher CLI parser test - portable (no CUDA / no POSIX).
     # cli_parse.cpp is compiled directly into the test binary so we don't

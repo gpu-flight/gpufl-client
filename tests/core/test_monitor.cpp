@@ -447,6 +447,45 @@ TEST(ScopeAttributionTest, CapCountsEvictionWhilePmSamplingIsActive) {
         << "eviction while PM can have buffered samples is an attribution risk";
 }
 
+TEST(ScopeAttributionTest, BoundarySnapshotsBothSidesOfEveryOpenScope) {
+    gpufl::detail::MonitorBatchManager manager;
+    manager.reset();
+
+    gpufl::ScopeBatchRow outer = ScopeEdge(11, 101, 1000, 0, 0);
+    outer.repeat = 8;
+    outer.warmup = 2;
+    outer.original_start_ns = 1000;
+    manager.pushTrackedScopeRow(outer);
+    gpufl::ScopeBatchRow inner = ScopeEdge(12, 102, 2000, 0, 1);
+    inner.original_start_ns = 2000;
+    manager.pushTrackedScopeRow(inner);
+
+    const auto [closes, opens] =
+        manager.snapshotScopeContinuations(5000);
+    ASSERT_EQ(closes.size(), 2u);
+    ASSERT_EQ(opens.size(), 2u);
+    EXPECT_EQ(closes[0].event_type, 3);
+    EXPECT_EQ(opens[0].event_type, 2);
+    EXPECT_EQ(closes[0].ts_ns, 5000);
+    EXPECT_EQ(opens[0].ts_ns, 5000);
+    EXPECT_EQ(closes[0].scope_instance_id, 11u);
+    EXPECT_EQ(opens[0].scope_instance_id, 11u);
+    EXPECT_EQ(opens[0].original_start_ns, 1000);
+    EXPECT_EQ(opens[0].repeat, 8u);
+    EXPECT_EQ(opens[0].warmup, 2u);
+    EXPECT_EQ(closes[1].scope_instance_id, 12u);
+
+    // Snapshotting is non-destructive: the real end still closes the same
+    // logical scope after any number of segment boundaries.
+    manager.pushTrackedScopeRow(ScopeEdge(12, 102, 6000, 1, 1));
+    const auto [later_closes, later_opens] =
+        manager.snapshotScopeContinuations(7000);
+    ASSERT_EQ(later_closes.size(), 1u);
+    ASSERT_EQ(later_opens.size(), 1u);
+    EXPECT_EQ(later_opens[0].scope_instance_id, 11u);
+    EXPECT_EQ(later_opens[0].original_start_ns, 1000);
+}
+
 TEST(ScopeAttributionTest, OldTraceHistoryEvictedDuringPmIsNotPartialAttribution) {
     gpufl::detail::MonitorBatchManager m;
     const uint32_t name = m.internScopeName("trace_step");
