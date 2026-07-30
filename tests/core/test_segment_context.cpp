@@ -52,6 +52,7 @@ std::shared_ptr<const gpufl::SegmentContext> makeContext(
 
 TEST(SegmentContextTest, RefusesAnUnusablePublication) {
     gpufl::Runtime runtime;
+    EXPECT_FALSE(runtime.hasSegmentContext());
     EXPECT_FALSE(runtime.publishSegmentContext(nullptr));
     EXPECT_EQ(runtime.acquireSegmentContext(), nullptr);
 
@@ -59,6 +60,8 @@ TEST(SegmentContextTest, RefusesAnUnusablePublication) {
         "run", "session", 0, 1, nullptr);
     EXPECT_FALSE(runtime.publishSegmentContext(missing_logger));
     EXPECT_EQ(runtime.acquireSegmentContext(), nullptr);
+    ASSERT_TRUE(runtime.publishSegmentContext(makeContext(0)));
+    EXPECT_TRUE(runtime.hasSegmentContext());
 }
 
 TEST(SegmentContextTest, OldLeaseRemainsImmutableAcrossPublication) {

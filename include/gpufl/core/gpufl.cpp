@@ -942,7 +942,7 @@ ScopedMonitor::ScopedMonitor(std::string name, ScopeMeta meta)
 
 void ScopedMonitor::init_(const ScopeMeta& meta) {
     Runtime* rt = runtime();
-    if (!rt || !rt->acquireSegmentContext()) return;
+    if (!rt || !rt->hasSegmentContext()) return;
 
     auto& stack = getThreadScopeStack();
     const int depth = static_cast<int>(stack.size());
@@ -987,7 +987,7 @@ void ScopedMonitor::init_(const ScopeMeta& meta) {
 
 ScopedMonitor::~ScopedMonitor() {
     Runtime* rt = runtime();
-    if (!rt || !rt->acquireSegmentContext()) {
+    if (!rt || !rt->hasSegmentContext()) {
         // Best-effort: if the runtime is already gone but we'd taken a
         // sampler activation, we can't deactivate (no Sampler instance
         // to talk to). Sampler::shutdown() in gpufl::shutdown() will

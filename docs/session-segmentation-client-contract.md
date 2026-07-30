@@ -383,11 +383,14 @@ struct SegmentContext {
 ```
 
 Publication uses C++17 `std::atomic_load`/`std::atomic_store` overloads for
-`shared_ptr`. Writer drainage does **not** infer liveness from
-`shared_ptr::use_count()`: reference count observation is not a synchronization
-primitive and unrelated owner copies would make its target value ambiguous.
-Each context instead owns an explicit sealed writer-lease counter and drain
-condition.
+`shared_ptr`. A `use_count()` barrier would not close early merely because its
+load is relaxed: it can observe an older, larger count, not a decrement that
+has not happened. It is still the wrong expression of ownership here because
+producer leases and unrelated control-plane snapshots are indistinguishable;
+one cached snapshot would turn a safe over-count into an unbounded retirement
+wait. Each context therefore owns an explicit sealed writer-lease counter and
+drain condition. Check-only call sites use `hasSegmentContext()` and never
+manufacture a short-lived writer lease.
 
 ### 8.1 Writer contract
 

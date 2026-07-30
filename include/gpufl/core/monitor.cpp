@@ -207,7 +207,7 @@ void drainSyntheticKernels(Runtime* rt, int64_t maxApiStartNs = INT64_MAX) {
         if (maxApiStartNs == INT64_MAX) metaMap.clear();
         return;
     }
-    if (!(rt && rt->acquireSegmentContext())) return;
+    if (!(rt && rt->hasSegmentContext())) return;
     
     const int64_t flushNs = detail::GetTimestampNs();
     std::vector<uint64_t> orderedCorr;
@@ -272,7 +272,7 @@ struct RecordProcessor {
         }
 
         Runtime* rt = runtime();
-        if (!(rt && rt->acquireSegmentContext())) return true;
+        if (!(rt && rt->hasSegmentContext())) return true;
 
         switch (rec.type) {
             case TraceType::KERNEL:
@@ -466,7 +466,7 @@ void CollectorLoop() {
         if (const uint64_t req = g_state.drainRequest.load(std::memory_order_acquire);
             req != g_state.drainAck.load(std::memory_order_relaxed)) {
             while (RecordProcessor::processNext()) {}
-            if (Runtime* rt = runtime(); rt && rt->acquireSegmentContext()) {
+            if (Runtime* rt = runtime(); rt && rt->hasSegmentContext()) {
                 drainSyntheticKernels(rt);
                 g_state.metadata.emitSignatures(rt);
                 g_state.batches.flushAll(detail::MonitorBatchManager::FlushMode::Full);
@@ -487,7 +487,7 @@ void CollectorLoop() {
         }
 
         if (std::chrono::steady_clock::now() - lastFlush > std::chrono::milliseconds(250)) {
-            if (Runtime* rt = runtime(); rt && rt->acquireSegmentContext()) {
+            if (Runtime* rt = runtime(); rt && rt->hasSegmentContext()) {
                 if (g_state.drainSyntheticMidRun) {
                     constexpr int64_t kMidRunSyntheticGraceNs = 100'000'000;
                     drainSyntheticKernels(rt, detail::GetTimestampNs() - kMidRunSyntheticGraceNs);
@@ -515,7 +515,7 @@ void CollectorLoop() {
 
     while (RecordProcessor::processNext()) {}
 
-    if (Runtime* rt = runtime(); rt && rt->acquireSegmentContext()) {
+    if (Runtime* rt = runtime(); rt && rt->hasSegmentContext()) {
         drainSyntheticKernels(rt);
         g_state.metadata.emitSignatures(rt);
         g_state.batches.flushAll(detail::MonitorBatchManager::FlushMode::Full);
@@ -549,7 +549,7 @@ void Monitor::Initialize(const MonitorOptions& opts) {
     g_state.batches.reset();
     g_state.metadata.reset();
     g_state.batches.setSourceCollectionEnabled(opts.enable_source_collection);
-    if (Runtime* rt = runtime(); rt && rt->acquireSegmentContext()) {
+    if (Runtime* rt = runtime(); rt && rt->hasSegmentContext()) {
         g_state.batches.bindFlushRuntime(rt);
     }
 
@@ -599,7 +599,7 @@ void Monitor::Shutdown() {
     detail::DeepWindowRules::Finish();
 
     while (RecordProcessor::processNext()) {}
-    if (Runtime* rt = runtime(); rt && rt->acquireSegmentContext()) {
+    if (Runtime* rt = runtime(); rt && rt->hasSegmentContext()) {
         drainSyntheticKernels(rt);
         g_state.metadata.emitSignatures(rt);
         g_state.batches.flushAll(detail::MonitorBatchManager::FlushMode::Full);
@@ -641,7 +641,7 @@ void Monitor::DrainAndFinalizeForExit() {
     detail::DeepWindowRules::Finish();
 
     while (RecordProcessor::processNext()) {}
-    if (Runtime* rt = runtime(); rt && rt->acquireSegmentContext()) {
+    if (Runtime* rt = runtime(); rt && rt->hasSegmentContext()) {
         drainSyntheticKernels(rt);
         g_state.metadata.emitSignatures(rt);
         g_state.batches.flushAll(detail::MonitorBatchManager::FlushMode::Full);
@@ -847,7 +847,7 @@ void Monitor::EmitPmSamplingConfig(uint32_t device_id, uint32_t interval_us, uin
 
 void Monitor::FlushForSegmentBoundary() {
     while (RecordProcessor::processNext()) {}
-    if (Runtime* rt = runtime(); rt && rt->acquireSegmentContext()) {
+    if (Runtime* rt = runtime(); rt && rt->hasSegmentContext()) {
         if (g_state.drainSyntheticMidRun) {
             constexpr int64_t kMidRunSyntheticGraceNs = 100'000'000;
             drainSyntheticKernels(
@@ -859,7 +859,7 @@ void Monitor::FlushForSegmentBoundary() {
     }
     if (g_state.adapter) g_state.adapter->drainProfilingData();
     while (RecordProcessor::processNext()) {}
-    if (Runtime* rt = runtime(); rt && rt->acquireSegmentContext()) {
+    if (Runtime* rt = runtime(); rt && rt->hasSegmentContext()) {
         g_state.batches.flushAll(
             detail::MonitorBatchManager::FlushMode::Full);
     }

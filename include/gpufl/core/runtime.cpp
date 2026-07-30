@@ -78,6 +78,11 @@ Runtime::acquireSegmentContext() const noexcept {
     }
 }
 
+bool Runtime::hasSegmentContext() const noexcept {
+    return static_cast<bool>(std::atomic_load_explicit(
+        &active_segment_context, std::memory_order_acquire));
+}
+
 std::shared_ptr<const SegmentContext>
 Runtime::peekSegmentContext() const noexcept {
     return std::atomic_load_explicit(&active_segment_context,

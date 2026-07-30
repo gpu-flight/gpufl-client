@@ -199,7 +199,7 @@ bool DeepWindow::Active() {
 
 bool DeepWindow::Open(const DeepWindowSpec& spec) {
     const Runtime* rt = runtime();
-    if (!rt || !rt->acquireSegmentContext()) return false;
+    if (!rt || !rt->hasSegmentContext()) return false;
     // Scheduled and manual requests do not pass through RequestOpenTagged.
     // Apply the same real-readiness gate here so they cannot publish a window
     // that was active in name only and armed no engine.
