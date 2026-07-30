@@ -96,9 +96,9 @@ Rules:
   execution;
 - a zero or absent time/row value disables that trigger;
 - both disabled means segmentation is off;
-- production CLI validation prevents cadences small enough to create a
-  session storm; unit tests use a fake coordinator clock instead of weakening
-  the production minimum.
+- production CLI requires a non-zero `--segment-every` cadence of at least 60
+  seconds to prevent an accidental session storm; unit tests use a fake
+  coordinator clock instead of weakening that minimum.
 
 The launcher owns configuration and validation. The target runtime owns
 individual `session_id` generation after the initial session.
@@ -848,6 +848,9 @@ On L4 and RTX 3090:
 2. Add wire structs/models and exact serialization tests without enabling
    runtime segmentation.
 3. Add launcher parsing, run ID generation, and invalid-combination tests.
+   This slice remains behind an explicit execution-boundary gate until the
+   coordinator lands; the CLI must never silently accept a segmentation flag
+   while still producing only one session.
 4. Implement `SegmentContext` and refactor producers to acquire it while still
    running one segment.
 5. Implement global dictionary registry plus segment-local emission.

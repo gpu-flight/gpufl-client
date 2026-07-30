@@ -537,6 +537,22 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
         return 2;
     }
 
+    const bool segmented = segmentationRequested(args);
+    const char* inherited_analysis = std::getenv(env::kAnalysisId);
+    if (const std::string segmentation_error = validateTraceSegmentation(
+            args, inherited_analysis ? inherited_analysis : "");
+        !segmentation_error.empty()) {
+        std::fprintf(stderr, "gpufl: %s\n", segmentation_error.c_str());
+        return 2;
+    }
+    if (segmented && !segmentationRuntimeReady()) {
+        std::fprintf(
+            stderr,
+            "gpufl: session segmentation is staged but not executable yet; "
+            "the SegmentCoordinator cutover slice has not landed\n");
+        return 2;
+    }
+
     const fs::path exe = platform.selfExe();
     if (exe.empty()) {
         std::fprintf(stderr, "gpufl: cannot resolve launcher path (%s)\n",
@@ -560,7 +576,9 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
     const bool multipass = plan.size() > 1;
 
     const std::string analysis_id = multipass ? makeAnalysisId() : std::string();
-    const std::string dir_tag = multipass ? analysis_id : makeSessionId();
+    const std::string run_id = segmented ? generateRunId() : std::string();
+    const std::string dir_tag =
+        multipass ? analysis_id : (segmented ? run_id : makeSessionId());
 
     const std::string app_name = args.name.empty()
                                ? platform.defaultAppName(args.command.front())
@@ -632,6 +650,7 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
     }
 
     if (!applyDeepWindowEnv(args, platform)) return 2;
+    if (!applySegmentationEnv(args, run_id, platform)) return 2;
 
     // A bounded window stops the target after warmup+window wall-clock;
     // run_ms == 0 keeps the historical "run until the target exits" behavior.
@@ -704,6 +723,19 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
             std::fprintf(stderr, "[gpufl] multi-pass analysis %s - %zu passes:",
                          analysis_id.c_str(), plan.size());
             for (const auto& e : plan) std::fprintf(stderr, " %s", e.c_str());
+            std::fputc('\n', stderr);
+        }
+        if (segmented) {
+            std::fprintf(stderr, "[gpufl] segmented run %s:", run_id.c_str());
+            if (args.segment_every_ms > 0) {
+                std::fprintf(stderr, " every=%lldms",
+                             static_cast<long long>(args.segment_every_ms));
+            }
+            if (args.segment_max_rows > 0) {
+                std::fprintf(stderr, " max_rows=%llu",
+                             static_cast<unsigned long long>(
+                                 args.segment_max_rows));
+            }
             std::fputc('\n', stderr);
         }
         if (args.verbose) {

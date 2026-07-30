@@ -82,6 +82,15 @@ bool unsetEnvOrPrint(const TracePlatform& platform, const char* key);
  */
 bool applyDeepWindowEnv(const TraceArgs& args, const TracePlatform& platform);
 
+/**
+ * @brief Publish or scrub the launcher-owned segmentation environment.
+ *
+ * A non-segmented invocation removes all three internal variables so stale
+ * parent-shell state cannot turn an ordinary trace into a segmented run.
+ */
+bool applySegmentationEnv(const TraceArgs& args, const std::string& run_id,
+                          const TracePlatform& platform);
+
 int runTraceCommon(const TraceArgs& args, const TracePlatform& platform);
 
 }  // namespace gpufl::launcher

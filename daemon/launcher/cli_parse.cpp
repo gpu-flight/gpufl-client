@@ -1,8 +1,14 @@
 #include "cli_parse.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cerrno>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <iomanip>
+#include <random>
+#include <sstream>
 
 namespace gpufl::launcher {
 
@@ -159,6 +165,14 @@ const char* traceHelp() {
         "        --agent-drain-ms=<MS>\n"
         "                            Max wait for the agent to finish uploading before\n"
         "                            stopping it (it exits on its own when done). Default: 60000\n"
+        "        --segment-every=<DUR>\n"
+        "                            Split a long run on this cadence (minimum: 60s).\n"
+        "                            Example: --segment-every=5m. Default: off\n"
+        "        --segment-max-rows=<N>\n"
+        "                            Also split after this many logical telemetry rows.\n"
+        "                            The batch crossing N stays in the old segment.\n"
+        "                            Default: off. Both segment flags are staged and\n"
+        "                            rejected until SegmentCoordinator lands.\n"
         "        --warmup=<DUR>      Skip cold start: defer capture by this long\n"
         "                            (e.g. 30s, 500ms, 5m; bare number = seconds)\n"
         "        --window=<DUR>      Bounded window: capture this long after warmup,\n"
@@ -351,6 +365,40 @@ TraceParseResult parseTraceArgs(const std::vector<std::string>& argv) {
                         "invalid --agent-drain-ms value: " + v +
                         " (expected a non-negative integer, milliseconds)"};
             }
+        } else if (key == "--segment-every") {
+            std::string v;
+            auto err = take_value(v);
+            if (!err.empty()) return {std::nullopt, err};
+            if (!parseDurationMs(v, out.segment_every_ms)) {
+                return {std::nullopt,
+                        "invalid --segment-every value: " + v +
+                        " (expected a duration like 60s, 5m, 1h, or a bare "
+                        "number of seconds)"};
+            }
+            if (out.segment_every_ms > 0 &&
+                out.segment_every_ms < kMinSegmentEveryMs) {
+                return {std::nullopt,
+                        "--segment-every must be at least 60s; shorter cadences "
+                        "can create a session storm"};
+            }
+        } else if (key == "--segment-max-rows") {
+            std::string v;
+            auto err = take_value(v);
+            if (!err.empty()) return {std::nullopt, err};
+            if (v.empty() || v.front() == '-') {
+                return {std::nullopt,
+                        "invalid --segment-max-rows value: " + v +
+                        " (expected a non-negative integer; 0 disables it)"};
+            }
+            char* end = nullptr;
+            errno = 0;
+            const unsigned long long n = std::strtoull(v.c_str(), &end, 10);
+            if (end == v.c_str() || (end && *end != '\0') || errno == ERANGE) {
+                return {std::nullopt,
+                        "invalid --segment-max-rows value: " + v +
+                        " (expected a non-negative integer; 0 disables it)"};
+            }
+            out.segment_max_rows = static_cast<uint64_t>(n);
         } else if (key == "--pc-sample-period") {
             std::string v;
             auto err = take_value(v);
@@ -815,16 +863,94 @@ InfoParseResult parseInfoArgs(const std::vector<std::string>& argv) {
 }
 
 std::string validateTraceExecutionMode(const TraceArgs& args) {
-    if (!args.deep_requested || args.passes.empty()) return {};
-    return "--passes cannot be combined with --deep-* flags.\n"
-           "\n"
-           "  --passes runs the engines you name, relaunching the target "
-           "once per pass.\n"
-           "  --deep-* runs ONE adaptive pass: gpufl selects a compatible "
-           "deep engine\n"
-           "  and arms it only inside the window.\n"
-           "\n"
-           "Drop --passes to use a deep window.";
+    if (args.deep_requested && !args.passes.empty()) {
+        return "--passes cannot be combined with --deep-* flags.\n"
+               "\n"
+               "  --passes runs the engines you name, relaunching the target "
+               "once per pass.\n"
+               "  --deep-* runs ONE adaptive pass: gpufl selects a compatible "
+               "deep engine\n"
+               "  and arms it only inside the window.\n"
+               "\n"
+               "Drop --passes to use a deep window.";
+    }
+    return validateTraceSegmentation(args);
+}
+
+bool segmentationRequested(const TraceArgs& args) {
+    return args.segment_every_ms > 0 || args.segment_max_rows > 0;
+}
+
+std::string validateTraceSegmentation(
+    const TraceArgs& args,
+    const std::string& inherited_analysis_id) {
+    if (args.segment_every_ms < 0) {
+        return "--segment-every cannot be negative";
+    }
+    if (args.segment_every_ms > 0 &&
+        args.segment_every_ms < kMinSegmentEveryMs) {
+        return "--segment-every must be at least 60s; shorter cadences can "
+               "create a session storm";
+    }
+    if (!segmentationRequested(args)) return {};
+
+    if (!inherited_analysis_id.empty()) {
+        return "session segmentation cannot be combined with an inherited "
+               "GPUFL_ANALYSIS_ID; unset GPUFL_ANALYSIS_ID before launching "
+               "the target";
+    }
+    if (args.passes.size() > 1) {
+        return "session segmentation cannot be combined with a multi-pass "
+               "--passes list; segmented runs concatenate time while analysis "
+               "passes overlay the same interval";
+    }
+    if (!args.passes.empty()) {
+        const std::string& pass = args.passes.front();
+        if (pass != "Trace" && pass != "PmSampling") {
+            return "session segmentation V1 supports only a single Trace or "
+                   "PmSampling pass. Unsupported pass: " + pass;
+        }
+    }
+
+    // No explicit pass plus --deep-* is the one supported composite: the
+    // launcher pins native Trace as the base and prepares window-only PM.
+    // No explicit pass and no deep flags is the ordinary single Trace pass.
+    return {};
+}
+
+std::string generateRunId() {
+    std::array<uint8_t, 16> bytes{};
+    static thread_local std::mt19937_64 rng([] {
+        std::random_device rd;
+        std::seed_seq seed{
+            rd(), rd(), rd(), rd(),
+            static_cast<unsigned>(
+                std::chrono::steady_clock::now().time_since_epoch().count())};
+        return std::mt19937_64(seed);
+    }());
+    for (size_t i = 0; i < bytes.size(); i += sizeof(uint64_t)) {
+        const uint64_t word = rng();
+        for (size_t j = 0; j < sizeof(uint64_t); ++j) {
+            bytes[i + j] = static_cast<uint8_t>(word >> (j * 8));
+        }
+    }
+
+    bytes[6] = static_cast<uint8_t>((bytes[6] & 0x0f) | 0x40);
+    bytes[8] = static_cast<uint8_t>((bytes[8] & 0x3f) | 0x80);
+
+    std::ostringstream out;
+    out << std::hex << std::setfill('0');
+    for (size_t i = 0; i < bytes.size(); ++i) {
+        if (i == 4 || i == 6 || i == 8 || i == 10) out << '-';
+        out << std::setw(2) << static_cast<unsigned>(bytes[i]);
+    }
+    return out.str();
+}
+
+bool segmentationRuntimeReady() {
+    // Flipped only by the SegmentCoordinator slice, together with its
+    // cutover/ownership/dictionary tests.
+    return false;
 }
 
 CaptureMode resolveCaptureMode(const TraceArgs& args) {

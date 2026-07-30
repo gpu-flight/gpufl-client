@@ -52,6 +52,10 @@ struct TraceArgs {
     std::string deep_when;
     int64_t  deep_cooldown_ms = 0;   // --deep-cooldown; quiet time between windows
     bool     deep_requested = false; // any --deep-* flag was given
+    // Long-running run segmentation. Zero disables the corresponding trigger;
+    // both zero preserves the ordinary single-session path.
+    int64_t segment_every_ms = 0;    // --segment-every
+    uint64_t segment_max_rows = 0;   // --segment-max-rows
     // PC sampling period as a log2 exponent (2^N GPU cycles/sample, valid 5..31;
     // lower = more frequent → catches shorter kernels). 0 = leave the engine
     // default. Plumbed to the injected target via GPUFL_PC_SAMPLING_PERIOD.
@@ -137,6 +141,33 @@ TraceParseResult parseTraceArgs(const std::vector<std::string>& argv);
  * Returns an empty string when valid, otherwise a user-facing error.
  */
 std::string validateTraceExecutionMode(const TraceArgs& args);
+
+// The shortest user-configurable time cadence. This protects the backend from
+// an accidental session storm; unit tests of the future coordinator use a fake
+// clock instead of weakening this production CLI bound.
+constexpr int64_t kMinSegmentEveryMs = 60'000;
+
+/** True when at least one segmentation trigger is enabled. */
+bool segmentationRequested(const TraceArgs& args);
+
+/**
+ * Validate segmentation-specific mode restrictions. inherited_analysis_id is
+ * supplied by the execution boundary so an exported GPUFL_ANALYSIS_ID cannot
+ * silently turn a segmented single-pass run into an invalid two-axis run.
+ */
+std::string validateTraceSegmentation(
+    const TraceArgs& args,
+    const std::string& inherited_analysis_id = std::string());
+
+/** Generate the launcher-owned UUIDv4 shared by every segment in one run. */
+std::string generateRunId();
+
+/**
+ * False until SegmentCoordinator cutover is implemented. Keeping this as an
+ * explicit execution-boundary gate lets the parser/wire contract land without
+ * exposing a flag that claims to split sessions but silently produces one.
+ */
+bool segmentationRuntimeReady();
 
 /**
  * How a run decides which engines to select - two modes, never mixed.

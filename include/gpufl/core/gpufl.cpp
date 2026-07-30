@@ -4,12 +4,15 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <thread>
@@ -245,6 +248,43 @@ bool windowsInjectedProcess_() {
 #endif
 }
 
+bool parseNonNegativeEnv_(const char* key, uint64_t& value,
+                          std::string& error) {
+    value = 0;
+    const char* raw = std::getenv(key);
+    if (!raw || !*raw) return true;
+    if (*raw == '-') {
+        error = std::string(key) + " must be a non-negative integer";
+        return false;
+    }
+    errno = 0;
+    char* end = nullptr;
+    const unsigned long long parsed = std::strtoull(raw, &end, 10);
+    if (end == raw || *end != '\0' || errno == ERANGE) {
+        error = std::string(key) + "='" + raw +
+                "' is invalid (expected a non-negative integer)";
+        return false;
+    }
+    value = static_cast<uint64_t>(parsed);
+    return true;
+}
+
+bool isUuidV4_(const char* value) {
+    if (!value || std::strlen(value) != 36) return false;
+    for (size_t i = 0; i < 36; ++i) {
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (value[i] != '-') return false;
+        } else if (!std::isxdigit(static_cast<unsigned char>(value[i]))) {
+            return false;
+        }
+    }
+    if (value[14] != '4') return false;
+    const char variant =
+        static_cast<char>(std::tolower(static_cast<unsigned char>(value[19])));
+    return variant == '8' || variant == '9' || variant == 'a' ||
+           variant == 'b';
+}
+
 }  // namespace
 
 bool init(const InitOptions& opts) {
@@ -292,6 +332,37 @@ bool init(const InitOptions& opts) {
 
     DebugLogger::setEnabled(g_opts.enable_debug_output);
     GFL_LOG_DEBUG("Initializing...");
+
+    uint64_t segment_every_ms = 0;
+    uint64_t segment_max_rows = 0;
+    std::string segmentation_error;
+    if (!parseNonNegativeEnv_(env::kSegmentEveryMs, segment_every_ms,
+                              segmentation_error) ||
+        !parseNonNegativeEnv_(env::kSegmentMaxRows, segment_max_rows,
+                              segmentation_error)) {
+        GFL_LOG_ERROR(segmentation_error);
+        return false;
+    }
+    const bool segmented = segment_every_ms > 0 || segment_max_rows > 0;
+    if (segment_every_ms >
+        static_cast<uint64_t>((std::numeric_limits<int64_t>::max)())) {
+        GFL_LOG_ERROR(env::kSegmentEveryMs,
+                      " exceeds the supported signed 64-bit millisecond range");
+        return false;
+    }
+    const char* env_run_id = std::getenv(env::kRunId);
+    if (segmented && (!env_run_id || !*env_run_id)) {
+        GFL_LOG_ERROR("Session segmentation requires GPUFL_RUN_ID. The "
+                      "launcher must generate one run ID before starting the "
+                      "target.");
+        return false;
+    }
+    if (segmented && !isUuidV4_(env_run_id)) {
+        GFL_LOG_ERROR(env::kRunId, "='", env_run_id,
+                      "' is invalid (expected a UUIDv4)");
+        return false;
+    }
+
     if (runtime()) {
         GFL_LOG_DEBUG("Runtime already exists, shutting down first...");
         shutdown();
@@ -300,6 +371,12 @@ bool init(const InitOptions& opts) {
     auto rt = std::make_unique<Runtime>();
     rt->app_name = g_opts.app_name.empty() ? "gpufl" : g_opts.app_name;
     rt->session_id = detail::GenerateSessionId();
+    if (segmented) {
+        rt->run_id = env_run_id;
+        rt->segment_index = 0;
+        rt->segment_every_ms = static_cast<int64_t>(segment_every_ms);
+        rt->segment_max_rows = segment_max_rows;
+    }
     rt->logger = std::make_shared<Logger>();
     rt->host_collector = std::make_unique<HostCollector>();
 
@@ -561,6 +638,8 @@ bool init(const InitOptions& opts) {
 
     ie.session_kind = ProfilingEngineSessionKind(mOpts.profiling_engine);
     ie.profiling_engine = ProfilingEngineWireName(mOpts.profiling_engine);
+    ie.run_id = rt_ptr->run_id;
+    ie.segment_index = rt_ptr->segment_index;
 
     // Multi-pass grouping (P1): the launcher's multi-pass driver tags each
     // child with GPUFL_ANALYSIS_ID + its 0-based GPUFL_PASS_INDEX and the
