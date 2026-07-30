@@ -21,6 +21,30 @@ private:
     const ShutdownEvent& e_;
 };
 
+struct SegmentStartEventModel final : IJsonSerializable {
+    explicit SegmentStartEventModel(const SegmentStartEvent& e) : e_(e) {}
+    std::string buildJson() const override;
+    Channel channel() const override { return Channel::All; }
+private:
+    const SegmentStartEvent& e_;
+};
+
+struct SegmentEndEventModel final : IJsonSerializable {
+    explicit SegmentEndEventModel(const SegmentEndEvent& e) : e_(e) {}
+    std::string buildJson() const override;
+    Channel channel() const override { return Channel::All; }
+private:
+    const SegmentEndEvent& e_;
+};
+
+struct RunEndEventModel final : IJsonSerializable {
+    explicit RunEndEventModel(const RunEndEvent& e) : e_(e) {}
+    std::string buildJson() const override;
+    Channel channel() const override { return Channel::All; }
+private:
+    const RunEndEvent& e_;
+};
+
 struct SassConfigModel final : IJsonSerializable {
     explicit SassConfigModel(const SassConfigEvent& e) : e_(e) {}
     std::string buildJson() const override;

@@ -177,6 +177,40 @@ TEST(WireContract, JobStartOmitsMultiPassGroupingWhenUnset) {
         << "pass_count must be omitted when analysis_id is unset: " << json;
 }
 
+// Session segmentation is an independent grouping axis. The two fields are
+// emitted together only when run_id is set, including segment_index zero.
+TEST(WireContract, JobStartEmitsSegmentationGroupingWhenSet) {
+    gpufl::InitEvent e;
+    e.pid = 7;
+    e.app = "segmented_app";
+    e.session_id = "segment-0";
+    e.ts_ns = 1;
+    e.session_kind = "trace";
+    e.profiling_engine = "nvidia.trace";
+    e.run_id = "run-123";
+    e.segment_index = 0;
+
+    const std::string json = gpufl::model::InitEventModel(e).buildJson();
+
+    EXPECT_TRUE(JsonContains(json, "\"run_id\":\"run-123\""));
+    EXPECT_TRUE(JsonContains(json, "\"segment_index\":0"));
+}
+
+TEST(WireContract, JobStartOmitsSegmentationGroupingWhenUnset) {
+    gpufl::InitEvent e;
+    e.pid = 7;
+    e.app = "ordinary_app";
+    e.session_id = "ordinary-session";
+    e.ts_ns = 1;
+    e.session_kind = "trace";
+    e.profiling_engine = "nvidia.trace";
+
+    const std::string json = gpufl::model::InitEventModel(e).buildJson();
+
+    EXPECT_EQ(json.find("\"run_id\""), std::string::npos);
+    EXPECT_EQ(json.find("\"segment_index\""), std::string::npos);
+}
+
 // ── shutdown ──────────────────────────────────────────────────────────────
 TEST(WireContract, ShutdownShape) {
     gpufl::ShutdownEvent e;
@@ -192,6 +226,115 @@ TEST(WireContract, ShutdownShape) {
     EXPECT_TRUE(JsonContains(json, "\"app\":\"wire_contract_app\""));
     EXPECT_TRUE(JsonContains(json, "\"session_id\":\"sess-1\""));
     EXPECT_TRUE(JsonContains(json, "\"ts_ns\":1700000000000000500"));
+    EXPECT_EQ(json.find("\"shutdown_reason\""), std::string::npos);
+    EXPECT_EQ(json.find("\"process_continues\""), std::string::npos);
+}
+
+// ── segmented-run lifecycle ───────────────────────────────────────────────
+TEST(WireContract, SegmentStartShape) {
+    gpufl::SegmentStartEvent e;
+    e.session_id = "S1";
+    e.run_id = "R";
+    e.segment_index = 1;
+    e.ts_ns = 300000000001LL;
+    e.actual_start_ns = 300000000000LL;
+    e.previous_session_id = "S0";
+    e.has_requested_boundary = true;
+    e.requested_boundary_ns = 300000000000LL;
+    e.boundary_delay_ns = 12500000;
+    e.deferred_by = "deep_window";
+
+    const gpufl::model::SegmentStartEventModel model(e);
+    EXPECT_EQ(
+        model.buildJson(),
+        "{\"version\":1,\"type\":\"segment_start\",\"session_id\":\"S1\","
+        "\"run_id\":\"R\",\"segment_index\":1,\"ts_ns\":300000000001,"
+        "\"actual_start_ns\":300000000000,\"previous_session_id\":\"S0\","
+        "\"requested_boundary_ns\":300000000000,"
+        "\"boundary_delay_ns\":12500000,\"deferred_by\":\"deep_window\"}");
+    EXPECT_EQ(model.channel(), gpufl::Channel::All);
+}
+
+TEST(WireContract, FirstSegmentStartUsesExplicitNulls) {
+    gpufl::SegmentStartEvent e;
+    e.session_id = "S0";
+    e.run_id = "R";
+    e.segment_index = 0;
+    e.ts_ns = 1;
+    e.actual_start_ns = 1;
+
+    const std::string json =
+        gpufl::model::SegmentStartEventModel(e).buildJson();
+
+    EXPECT_EQ(
+        json,
+        "{\"version\":1,\"type\":\"segment_start\",\"session_id\":\"S0\","
+        "\"run_id\":\"R\",\"segment_index\":0,\"ts_ns\":1,"
+        "\"actual_start_ns\":1,\"previous_session_id\":null,"
+        "\"requested_boundary_ns\":null,\"boundary_delay_ns\":0,"
+        "\"deferred_by\":null}");
+    EXPECT_EQ(json.find("\"start_reason\""), std::string::npos);
+}
+
+TEST(WireContract, SegmentEndShape) {
+    gpufl::SegmentEndEvent e;
+    e.session_id = "S0";
+    e.run_id = "R";
+    e.segment_index = 0;
+    e.ts_ns = 300000000020LL;
+    e.actual_end_ns = 300000000000LL;
+    e.has_requested_boundary = true;
+    e.requested_boundary_ns = 300000000000LL;
+    e.boundary_delay_ns = 12500000;
+    e.end_reason = "time";
+    e.deferred_by = "deep_window";
+    e.records_outside_segment_window = 3;
+
+    const gpufl::model::SegmentEndEventModel model(e);
+    EXPECT_EQ(
+        model.buildJson(),
+        "{\"version\":1,\"type\":\"segment_end\",\"session_id\":\"S0\","
+        "\"run_id\":\"R\",\"segment_index\":0,\"ts_ns\":300000000020,"
+        "\"actual_end_ns\":300000000000,"
+        "\"requested_boundary_ns\":300000000000,"
+        "\"boundary_delay_ns\":12500000,\"end_reason\":\"time\","
+        "\"deferred_by\":\"deep_window\","
+        "\"records_outside_segment_window\":3}");
+    EXPECT_EQ(model.channel(), gpufl::Channel::All);
+}
+
+TEST(WireContract, FinalSegmentEndHasNoRequestedBoundary) {
+    gpufl::SegmentEndEvent e;
+    e.session_id = "S1";
+    e.run_id = "R";
+    e.segment_index = 1;
+    e.ts_ns = 600;
+    e.actual_end_ns = 600;
+    e.end_reason = "process_shutdown";
+
+    const std::string json =
+        gpufl::model::SegmentEndEventModel(e).buildJson();
+
+    EXPECT_TRUE(JsonContains(json, "\"requested_boundary_ns\":null"));
+    EXPECT_TRUE(JsonContains(json, "\"boundary_delay_ns\":0"));
+    EXPECT_TRUE(JsonContains(json, "\"deferred_by\":null"));
+}
+
+TEST(WireContract, RunEndShape) {
+    gpufl::RunEndEvent e;
+    e.session_id = "S1";
+    e.run_id = "R";
+    e.final_segment_index = 1;
+    e.ts_ns = 600000000000LL;
+    e.ended_ns = 600000000000LL;
+
+    const gpufl::model::RunEndEventModel model(e);
+    EXPECT_EQ(
+        model.buildJson(),
+        "{\"version\":1,\"type\":\"run_end\",\"session_id\":\"S1\","
+        "\"run_id\":\"R\",\"final_segment_index\":1,"
+        "\"ts_ns\":600000000000,\"ended_ns\":600000000000}");
+    EXPECT_EQ(model.channel(), gpufl::Channel::All);
 }
 
 // ── sass_config ───────────────────────────────────────────────────────────
