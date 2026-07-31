@@ -5,11 +5,13 @@
 #include <gtest/gtest.h>
 
 #include <regex>
+#include <set>
 #include <string>
 #include <unordered_set>
 #include <vector>
 
 #include "cli_parse.hpp"
+#include "cli_trace_options.hpp"
 
 using namespace gpufl::launcher;
 
@@ -29,6 +31,40 @@ TEST(CliParseTrace, BasicCommand) {
     EXPECT_EQ(r.args->command[1], "train.py");
     EXPECT_FALSE(r.args->verbose);
     EXPECT_FALSE(r.args->quiet);
+}
+
+TEST(CliParseNumbers, RejectsOutOfRangeIntegerOptions) {
+    constexpr const char* kIntOverflow = "2147483648";
+    constexpr const char* kUint64Overflow = "18446744073709551616";
+
+    auto trace_drain = parseTraceArgs(
+        argsFor({"--agent-drain-ms", kIntOverflow, "--", "./app"}));
+    EXPECT_FALSE(trace_drain.args.has_value());
+
+    auto trace_rows = parseTraceArgs(
+        argsFor({"--segment-max-rows", kUint64Overflow, "--", "./app"}));
+    EXPECT_FALSE(trace_rows.args.has_value());
+
+    auto trace_launches = parseTraceArgs(
+        argsFor({"--deep-launches", kUint64Overflow, "--", "./app"}));
+    EXPECT_FALSE(trace_launches.args.has_value());
+
+    auto upload = parseUploadArgs(
+        argsFor({"--timeout", kIntOverflow, "./logs"}));
+    EXPECT_FALSE(upload.args.has_value());
+
+    auto monitor = parseMonitorArgs(argsFor({"--interval", kIntOverflow}));
+    EXPECT_FALSE(monitor.args.has_value());
+
+    auto info = parseInfoArgs(argsFor({"--device", kIntOverflow}));
+    EXPECT_FALSE(info.args.has_value());
+}
+
+TEST(CliParseNumbers, RetainsStrtolCompatibleLeadingSpaceAndPlusSign) {
+    auto trace = parseTraceArgs(
+        argsFor({"--agent-drain-ms", " +500", "--", "./app"}));
+    ASSERT_TRUE(trace.args.has_value()) << trace.error;
+    EXPECT_EQ(trace.args->agent_drain_ms, 500);
 }
 
 // ── Long-running session segmentation ─────────────────────────────────────
@@ -177,6 +213,65 @@ TEST(CliParseTrace, VerboseAndQuiet) {
     ASSERT_TRUE(r.args.has_value()) << r.error;
     EXPECT_TRUE(r.args->verbose);
     EXPECT_TRUE(r.args->quiet);
+}
+
+TEST(CliParseTrace, BooleanFlagsRejectInlineValues) {
+    const auto r = parseTraceArgs(
+        argsFor({"--verbose=true", "--", "./bin"}));
+    ASSERT_FALSE(r.args.has_value());
+    EXPECT_EQ(r.error, "unknown flag: --verbose");
+}
+
+TEST(CliParseHelp, TraceSimpleOptionsComeFromTheRegistry) {
+    const std::string help = traceHelp();
+    EXPECT_NE(help.find("-n, --name=<NAME>"), std::string::npos);
+    EXPECT_NE(help.find("--backend-url=<URL>"), std::string::npos);
+    EXPECT_NE(help.find("GPUFL_BACKEND_URL"), std::string::npos);
+}
+
+// The registry is the only source of trace help, so every flag a user can pass
+// must appear in the rendered output. Without this, adding an option to the
+// table and forgetting its help section produces a flag that works but that
+// nothing documents - the exact drift the registry exists to prevent.
+TEST(CliParseHelp, EveryTraceOptionIsDocumentedOrDeliberatelyRemoved) {
+    // Flags kept only to print a migration hint; they must NOT be advertised.
+    const std::set<std::string> removed = {"--profile", "--engine"};
+    const std::string help = traceHelp();
+
+    for (const std::string& alias : traceOptionAliases()) {
+        const bool documented = help.find(alias) != std::string::npos;
+        if (removed.count(alias) > 0) {
+            EXPECT_FALSE(documented)
+                << alias << " is a removed flag and must stay out of help";
+        } else {
+            EXPECT_TRUE(documented)
+                << alias << " is accepted by the parser but missing from help; "
+                   "give it a help section and description in the registry";
+        }
+    }
+}
+
+// Help is assembled section by section, so a section that exists in the enum but
+// is never rendered would silently swallow its options.
+TEST(CliParseHelp, EveryTraceHelpSectionRendersSomething) {
+    const TraceHelpSection sections[] = {
+        TraceHelpSection::Capture,   TraceHelpSection::Runtime,
+        TraceHelpSection::Segmentation, TraceHelpSection::Window,
+        TraceHelpSection::Deep,      TraceHelpSection::Sampling,
+    };
+    const std::string help = traceHelp();
+    for (const TraceHelpSection section : sections) {
+        const std::string rendered = formatTraceSimpleOptions(section);
+        EXPECT_FALSE(rendered.empty())
+            << "help section " << static_cast<int>(section) << " is empty";
+        // And it actually reached the assembled help, not just the formatter.
+        const std::size_t first_newline = rendered.find('\n');
+        ASSERT_NE(first_newline, std::string::npos);
+        EXPECT_NE(help.find(rendered.substr(0, first_newline)),
+                  std::string::npos)
+            << "section " << static_cast<int>(section)
+            << " renders but is not included in traceHelp()";
+    }
 }
 
 TEST(CliParseTrace, ProfileFlagRejectedWithMigrationHint) {

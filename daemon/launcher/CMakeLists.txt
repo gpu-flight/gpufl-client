@@ -21,7 +21,11 @@ endif()
 add_executable(gpufl_launcher
     main.cpp
     agent_launcher.cpp
+    cli_help.cpp
     cli_parse.cpp
+    cli_parse_internal.cpp
+    cli_subcommand_options.cpp
+    cli_trace_options.cpp
     info_command.cpp
     trace_command_common.cpp
     deep_window_env.cpp
