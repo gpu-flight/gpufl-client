@@ -70,6 +70,15 @@ public:
      */
     static void SnapshotSegment();
 
+    /**
+     * Reset the rule's window budget and per-part summary for a new run part,
+     * re-arming a rule that had spent its budget. Called on a rollover cut,
+     * after SnapshotSegment has emitted the retiring part's summary. The
+     * evaluator's live condition tracking is preserved; a permanently dead rule
+     * (invalid / unsupported) stays disabled.
+     */
+    static void BeginRunPart();
+
     /** @brief True when a rule is installed - valid or refused. */
     static bool Installed();
 

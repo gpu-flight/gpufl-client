@@ -383,6 +383,85 @@ TEST_F(RuleEvaluatorTest, ExhaustionIsMarkedAtTheOpenThatReachesTheLimit) {
     EXPECT_EQ(ev.windowsOpened(), 1u);
 }
 
+TEST_F(RuleEvaluatorTest, BeginRunPartRefreshesASpentBudget) {
+    DeepWindowRule rule = makeRule("kernel_launch_rate<100 for 500ms");
+    rule.max_windows = 1;
+    MetricSource src(rule.metric, rule.timing, &feeds, ActiveCounterProvider());
+    RuleEvaluator ev(rule, "r1", RuleCapabilities{}, &src, coord.hooks());
+    feeds.seedStartup(0);
+
+    // Part 1: spend the single-window budget, ending Inactive/Exhausted.
+    run(ev, src, 0, 1500 * kMs, 10);
+    run(ev, src, 1510 * kMs, 4000 * kMs, 0);
+    coord.serviceOpen();
+    ev.poll(4010 * kMs);
+    ASSERT_EQ(ev.windowsOpened(), 1u);
+    coord.close();
+    ev.poll(4030 * kMs);
+    ASSERT_EQ(ev.state(), RuleState::Inactive);
+
+    // The roll: a fresh part gets its own budget and re-arms.
+    ev.beginRunPart();
+    EXPECT_EQ(ev.windowsOpened(), 0u) << "budget carried across the roll";
+    EXPECT_EQ(ev.state(), RuleState::Armed);
+    EXPECT_EQ(ev.snapshot(4040 * kMs).outcome, RuleOutcome::None)
+        << "the new part starts with no terminal outcome";
+
+    // Part 2: recover to healthy, then degrade again. The window opens, which
+    // it could not do if the spent budget had carried over.
+    run(ev, src, 5000 * kMs, 7000 * kMs, 10);
+    run(ev, src, 7010 * kMs, 10000 * kMs, 0);
+    coord.serviceOpen();
+    ev.poll(10010 * kMs);
+    EXPECT_EQ(ev.windowsOpened(), 1u)
+        << "the new part could not open a window with its reset budget";
+}
+
+TEST_F(RuleEvaluatorTest, BeginRunPartLeavesAnUnsupportedRuleDead) {
+    DeepWindowRule rule = makeRule("kernel_launch_rate<100 for 500ms");
+    MetricSource src(rule.metric, rule.timing, &feeds, ActiveCounterProvider());
+    RuleCapabilities caps;
+    caps.deep_engine_prepared = false;
+    RuleEvaluator ev(rule, "r1", caps, &src, coord.hooks());
+    feeds.seedStartup(0);
+
+    run(ev, src, 0, 4000 * kMs, 0);
+    ASSERT_EQ(ev.state(), RuleState::Inactive);
+
+    // A roll cannot revive a rule that can never be supported.
+    ev.beginRunPart();
+    EXPECT_EQ(ev.state(), RuleState::Inactive)
+        << "an unsupported rule was wrongly re-armed on a roll";
+    EXPECT_EQ(ev.snapshot(4010 * kMs).outcome, RuleOutcome::Unsupported);
+}
+
+TEST_F(RuleEvaluatorTest, BeginRunPartResetsBudgetWithoutDisturbingALiveRule) {
+    DeepWindowRule rule = makeRule("kernel_launch_rate<100 for 500ms");
+    rule.max_windows = 3;  // plenty of budget; the rule never exhausts
+    MetricSource src(rule.metric, rule.timing, &feeds, ActiveCounterProvider());
+    RuleEvaluator ev(rule, "r1", RuleCapabilities{}, &src, coord.hooks());
+    feeds.seedStartup(0);
+
+    // Open one window, then let it close: the rule is live in Recovery, not
+    // exhausted.
+    run(ev, src, 0, 1500 * kMs, 10);
+    run(ev, src, 1510 * kMs, 4000 * kMs, 0);
+    coord.serviceOpen();
+    ev.poll(4010 * kMs);
+    ASSERT_EQ(ev.windowsOpened(), 1u);
+    coord.close();
+    ev.poll(4020 * kMs);
+    const RuleState live_state = ev.state();
+    ASSERT_NE(live_state, RuleState::Inactive);
+
+    // The roll resets the budget but must not re-arm or otherwise disturb a
+    // rule that had not spent it.
+    ev.beginRunPart();
+    EXPECT_EQ(ev.windowsOpened(), 0u);
+    EXPECT_EQ(ev.state(), live_state) << "a live rule's state was disturbed";
+    EXPECT_EQ(ev.snapshot(4030 * kMs).outcome, RuleOutcome::None);
+}
+
 TEST_F(RuleEvaluatorTest, HysteresisNeedsARealRecoveryNotABrushPastTheThreshold) {
     DeepWindowRule rule = makeRule("kernel_launch_rate<500 for 500ms");
     rule.rearm_threshold = 900;   // must climb back above 900 to rearm

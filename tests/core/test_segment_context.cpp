@@ -413,7 +413,7 @@ TEST(SegmentContextTest, ProductionRuntimeRollsToANewRunPart) {
     ASSERT_NE(p1_run_end, std::string::npos) << part1_log;
     EXPECT_LT(p1_seg_end, p1_run_end);
     EXPECT_NE(part1_log.find("\"end_reason\":\"rolled\""), std::string::npos);
-    EXPECT_NE(part1_log.find("\"rollover_reason\":\"run_roll_bytes\""),
+    EXPECT_NE(part1_log.find("\"rollover_reason\":\"serialized_bytes\""),
               std::string::npos);
 
     // Part 2 opened the chain's next link at wire segment 0.

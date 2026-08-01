@@ -255,6 +255,18 @@ public:
     RuleSummary snapshot(int64_t now_ns) const;
 
     /**
+     * @brief Start a new run part after a rollover.
+     *
+     * Resets the window budget, terminal outcome, and per-part summary counters,
+     * re-arming a rule that had spent its budget so the next part gets its own.
+     * The live condition tracking - the rate baseline (in the source), the
+     * cooldown (owned by the coordinator), and the in-flight sustained-condition
+     * span - is preserved, because the workload continues across a roll. A
+     * permanently dead rule (invalid / unsupported) is left disabled.
+     */
+    void beginRunPart();
+
+    /**
      * @brief True once, when a terminal outcome is first reached.
      *
      * `exhausted` and `unsupported` are conclusions the run can reach long

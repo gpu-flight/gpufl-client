@@ -362,6 +362,39 @@ void RuleEvaluator::enterBlackout(const int64_t) {
     ++state_sequence_;
 }
 
+void RuleEvaluator::beginRunPart() {
+    // A permanently dead rule stays dead: a fresh part cannot make an invalid
+    // or unsupported rule valid, so leave it Inactive and untouched.
+    if (terminal_ == RuleOutcome::InvalidConfig ||
+        terminal_ == RuleOutcome::Unsupported) {
+        return;
+    }
+
+    // Each run part is its own job: reset the window budget and the per-part
+    // summary counters. The rate baseline (source_), the cooldown (owned by the
+    // coordinator), and the current metric reading are deliberately preserved,
+    // because the workload is continuous across a roll.
+    const bool was_exhausted = (terminal_ == RuleOutcome::Exhausted);
+    windows_opened_ = 0;
+    samples_seen_ = 0;
+    truncated_samples_ = 0;
+    open_was_attempted_ = false;
+    terminal_ = RuleOutcome::None;
+    terminal_emitted_ = false;
+    reason_.clear();
+
+    if (was_exhausted) {
+        // It was parked in Inactive after spending its budget; re-arm so the
+        // new part's budget can be used. toArmed clears the sustained span and
+        // advances the sequence.
+        toArmed();
+    } else {
+        // The live state machine and its in-flight sustained span carry across
+        // the roll untouched; advance the sequence so the next summary orders.
+        ++state_sequence_;
+    }
+}
+
 void RuleEvaluator::poll(const int64_t now_ns) {
     if (state_ == RuleState::Inactive) return;
 

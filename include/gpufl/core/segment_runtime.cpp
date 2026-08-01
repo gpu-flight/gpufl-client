@@ -219,6 +219,12 @@ bool SegmentRuntime::cutover_(SegmentBoundaryRequest& boundary) {
             // Snapshot without finishing: the rule state machine, cooldown,
             // rate baseline, and max-window budget remain run-global.
             detail::DeepWindowRules::SnapshotSegment();
+            if (boundary.ends_run) {
+                // A roll ends the run part. The summary above is this part's;
+                // reset the rule's window budget so the next part starts fresh
+                // (the live evaluator state is preserved).
+                detail::DeepWindowRules::BeginRunPart();
+            }
             const auto next = std::make_shared<SegmentContext>(
                 next_run_id, next_session_id, next_index,
                 actual_event_ns, next_logger, next_dictionary, next_run_part);
@@ -311,8 +317,13 @@ bool SegmentRuntime::retire_(RetiredSegment retired) {
         run_end.ts_ns = retired.boundary.actual_event_ns;
         run_end.ended_ns = retired.boundary.actual_event_ns;
         run_end.end_reason = "rolled";
+        // Backend contract values, not the internal enum names: the run_end
+        // wire carries "time" | "serialized_bytes".
         run_end.rollover_reason =
-            segmentBoundaryReasonName(retired.boundary.rollover_reason);
+            retired.boundary.rollover_reason ==
+                    SegmentBoundaryReason::RunRollBytes
+                ? "serialized_bytes"
+                : "time";
         run_end.requested_rollover_ns =
             retired.boundary.requested_rollover_event_ns;
         run_end.actual_rollover_ns =

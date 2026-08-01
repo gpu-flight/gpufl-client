@@ -271,14 +271,14 @@ TEST(WireContract, RunEndEmitsRolloverBlockWhenRolled) {
     e.ts_ns = 120000000000LL;
     e.ended_ns = 120000000000LL;
     e.end_reason = "rolled";
-    e.rollover_reason = "run_roll_time";
+    e.rollover_reason = "time";
     e.requested_rollover_ns = 90000000000LL;
     e.actual_rollover_ns = 120000000000LL;
 
     const std::string json = gpufl::model::RunEndEventModel(e).buildJson();
 
     EXPECT_TRUE(JsonContains(json, "\"end_reason\":\"rolled\""));
-    EXPECT_TRUE(JsonContains(json, "\"rollover_reason\":\"run_roll_time\""));
+    EXPECT_TRUE(JsonContains(json, "\"rollover_reason\":\"time\""));
     EXPECT_TRUE(JsonContains(json, "\"requested_rollover_ns\":90000000000"));
     EXPECT_TRUE(JsonContains(json, "\"actual_rollover_ns\":120000000000"));
     EXPECT_EQ(json.find("rollover_delay"), std::string::npos)
