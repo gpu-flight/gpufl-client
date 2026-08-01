@@ -255,7 +255,7 @@ void CuptiBackend::start() {
     last_sync_flush_launch_count_.store(0, std::memory_order_relaxed);
     {
         std::lock_guard lock(capture_capabilities_mu_);
-        capture_capabilities_segment_index_ = UINT32_MAX;
+        capture_capabilities_session_id_.clear();
         capability_kernel_rows_baseline_ = 0;
         capability_memory_rows_baseline_ = 0;
         capability_mem_transfer_rows_baseline_ = 0;

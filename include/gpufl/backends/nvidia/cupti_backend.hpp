@@ -406,7 +406,7 @@ class CuptiBackend : public IMonitorBackend {
     // process-cumulative, so these baselines turn them into segment-local
     // deltas without resetting backend state at a sink cutover.
     mutable std::mutex capture_capabilities_mu_;
-    mutable uint32_t capture_capabilities_segment_index_ = UINT32_MAX;
+    mutable std::string capture_capabilities_session_id_;
     mutable uint64_t capability_kernel_rows_baseline_ = 0;
     mutable uint64_t capability_memory_rows_baseline_ = 0;
     mutable uint64_t capability_mem_transfer_rows_baseline_ = 0;

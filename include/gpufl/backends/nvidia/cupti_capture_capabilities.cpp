@@ -17,7 +17,7 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
     const auto segment = rt ? rt->acquireSegmentContext() : nullptr;
     if (!segment || !segment->logger) return;
     std::lock_guard capability_lock(capture_capabilities_mu_);
-    if (capture_capabilities_segment_index_ == segment->segment_index) return;
+    if  (capture_capabilities_session_id_ == segment->session_id) return;
 
     const auto delta = [](const uint64_t value, const uint64_t baseline) {
         return value >= baseline ? value - baseline : value;
@@ -148,7 +148,7 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
     capability_launch_count_baseline_ = launch_count;
     capability_scope_truncated_baseline_ = truncated_total;
     capability_pm_rows_baseline_ = pm_rows_total;
-    capture_capabilities_segment_index_ = segment->segment_index;
+    capture_capabilities_session_id_ = segment->session_id;
 }
 
 }  // namespace gpufl
