@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -353,6 +354,23 @@ bool init(const InitOptions& opts) {
                       " exceeds the supported signed 64-bit millisecond range");
         return false;
     }
+
+    uint64_t run_roll_every_ms = 0;
+    uint64_t run_roll_max_bytes = 0;
+    if (!parseNonNegativeEnv_(env::kRunRollEveryMs, run_roll_every_ms,
+                              segmentation_error) ||
+        !parseNonNegativeEnv_(env::kRunRollMaxBytes, run_roll_max_bytes,
+                              segmentation_error)) {
+        GFL_LOG_ERROR(segmentation_error);
+        return false;
+    }
+    if (run_roll_every_ms >
+        static_cast<uint64_t>((std::numeric_limits<int64_t>::max)())) {
+        GFL_LOG_ERROR(env::kRunRollEveryMs,
+                      " exceeds the supported signed 64-bit millisecond range");
+        return false;
+    }
+
     const char* env_run_id = std::getenv(env::kRunId);
     if (segmented && (!env_run_id || !*env_run_id)) {
         GFL_LOG_ERROR("Session segmentation requires GPUFL_RUN_ID. The "
@@ -384,6 +402,8 @@ bool init(const InitOptions& opts) {
         rt->segment_index = 0;
         rt->segment_every_ms = static_cast<int64_t>(segment_every_ms);
         rt->segment_max_rows = segment_max_rows;
+        rt->run_roll_every_ms = static_cast<int64_t>(run_roll_every_ms);
+        rt->run_roll_max_bytes = run_roll_max_bytes;
     }
     rt->logger = std::make_shared<Logger>();
     rt->host_collector = std::make_unique<HostCollector>();
@@ -441,9 +461,24 @@ bool init(const InitOptions& opts) {
     }
     auto initial_dictionary =
         segmented ? std::make_shared<SegmentDictionaryEmitter>() : nullptr;
+    // A rolled run carries part-1 identity from the start, so its job_start
+    // announces the chain. A segmented-but-not-rolled run keeps run_part null
+    // and stays byte-identical on the wire.
+    std::shared_ptr<const RunPartContext> initial_run_part;
+    if (segmented &&
+        (rt->run_roll_every_ms > 0 || rt->run_roll_max_bytes > 0)) {
+        initial_run_part = std::make_shared<const RunPartContext>(
+            rt->run_id, rt->run_id, std::string(), 1u,
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count(),
+            0u);
+    }
+
     if (!rt->publishSegmentContext(std::make_shared<SegmentContext>(
             rt->run_id, rt->session_id, rt->segment_index,
-            detail::GetTimestampNs(), rt->logger, initial_dictionary))) {
+            detail::GetTimestampNs(), rt->logger, initial_dictionary,
+            initial_run_part))) {
         GFL_LOG_ERROR("Failed to publish the initial segment context");
         rt->logger->close();
         return false;
@@ -690,6 +725,8 @@ bool init(const InitOptions& opts) {
         segment_options.init_template = ie;
         segment_options.segment_every_ms = rt_ptr->segment_every_ms;
         segment_options.segment_max_rows = rt_ptr->segment_max_rows;
+        segment_options.run_roll_every_ms = rt_ptr->run_roll_every_ms;
+        segment_options.run_roll_max_bytes = rt_ptr->run_roll_max_bytes;
         rt_ptr->segment_runtime =
             std::make_shared<SegmentRuntime>(std::move(segment_options));
         if (!rt_ptr->segment_runtime->start()) {

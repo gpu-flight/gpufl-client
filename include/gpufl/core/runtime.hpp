@@ -24,6 +24,9 @@ struct Runtime {
     uint32_t segment_index = 0;
     int64_t segment_every_ms = 0;
     uint64_t segment_max_rows = 0;
+    int64_t run_roll_every_ms = 0;
+    uint64_t run_roll_max_bytes = 0;
+
     std::shared_ptr<Logger> logger;
     // Transition bridge: producers move from the aliases above to this
     // immutable context one complete write path at a time. C++17 provides
