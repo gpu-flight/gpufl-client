@@ -7,7 +7,7 @@
 
 namespace gpufl {
 
-enum class SegmentBoundaryReason { Time, RowBudget };
+enum class SegmentBoundaryReason { Time, RowBudget, RunRollTime, RunRollBytes };
 
 struct SegmentBoundaryRequest {
     SegmentBoundaryReason reason = SegmentBoundaryReason::Time;
@@ -18,6 +18,10 @@ struct SegmentBoundaryRequest {
     int64_t actual_event_ns = 0;
     int64_t boundary_delay_ns = 0;
     std::string deferred_by;
+    bool ends_run = false;
+    SegmentBoundaryReason rollover_reason = SegmentBoundaryReason::RunRollTime;
+    int64_t requested_rollover_event_ns = 0;
+    int64_t actual_rollover_event_ns = 0;
 };
 
 /**
@@ -34,6 +38,8 @@ class SegmentCoordinator {
     struct Options {
         int64_t segment_every_ms = 0;
         uint64_t segment_max_rows = 0;
+        int64_t run_roll_every_ms = 0;
+        uint64_t run_roll_max_bytes = 0;
         std::function<int64_t()> steady_now_ns;
         std::function<int64_t()> event_now_ns;
         std::function<bool()> deep_window_active;
@@ -56,6 +62,15 @@ class SegmentCoordinator {
                   int64_t committed_steady_ns,
                   int64_t committed_event_ns);
 
+    /**
+     * Account serialized output against the run-part byte budget. Unlike
+     * noteRows this accumulates ACROSS ordinary segment boundaries: the budget
+     * belongs to the run part, so only a roll reset it.
+     */
+    void noteBytes(uint32_t segment_index, uint64_t bytes,
+                   int64_t committed_steady_ns,
+                   int64_t committed_event_ns);
+
     /** Evaluate due triggers and perform at most one cutover. */
     bool service();
 
@@ -65,6 +80,9 @@ class SegmentCoordinator {
     uint32_t currentSegmentIndex() const;
     uint64_t currentRows() const;
     bool boundaryPending() const;
+    uint64_t currentRunPartBytes() const;
+
+    bool runRollPending() const;
 
    private:
     struct Pending {
@@ -77,6 +95,9 @@ class SegmentCoordinator {
     void considerTimeLocked_(int64_t steady_now_ns);
     Pending winnerLocked_() const;
 
+    void considerRollLocked_(int64_t steady_now_ns);
+    Pending rollWinnerLocked_() const;
+
     Options options_;
     mutable std::mutex mu_;
     bool started_ = false;
@@ -88,6 +109,11 @@ class SegmentCoordinator {
     int64_t segment_start_event_ns_ = 0;
     Pending time_;
     Pending rows_;
+    Pending roll_time_;
+    Pending roll_bytes_;
+    uint64_t run_part_bytes_ = 0;
+    int64_t run_part_start_steady_ns_ = 0;
+    int64_t run_part_start_event_ns_ = 0;
     bool deferred_by_deep_window_ = false;
 };
 

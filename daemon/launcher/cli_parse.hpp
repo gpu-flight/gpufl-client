@@ -56,6 +56,9 @@ struct TraceArgs {
     // both zero preserves the ordinary single-session path.
     int64_t segment_every_ms = 0;    // --segment-every
     uint64_t segment_max_rows = 0;   // --segment-max-rows
+
+    int64_t run_roll_every_ms = 0;
+    uint64_t run_roll_max_bytes = 0;
     // PC sampling period as a log2 exponent (2^N GPU cycles/sample, valid 5..31;
     // lower = more frequent → catches shorter kernels). 0 = leave the engine
     // default. Plumbed to the injected target via GPUFL_PC_SAMPLING_PERIOD.
@@ -149,6 +152,13 @@ constexpr int64_t kMinSegmentEveryMs = 60'000;
 
 /** True when at least one segmentation trigger is enabled. */
 bool segmentationRequested(const TraceArgs& args);
+
+/**
+ * Non-fatal configuration advice, empty when there is none. Separate from
+ * validation because validation runs twice (prase, then the execution
+ * boundary) and a warning must print exactly one.
+ */
+std::string segmentationWarning(const TraceArgs& args);
 
 /**
  * Validate segmentation-specific mode restrictions. inherited_analysis_id is

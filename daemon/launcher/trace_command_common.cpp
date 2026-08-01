@@ -726,6 +726,12 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
         std::fprintf(stderr, "gpufl: %s\n", segmentation_error.c_str());
         return 2;
     }
+
+    if (const std::string warning = segmentationWarning(args);
+        !warning.empty()) {
+        std::fprintf(stderr, "[gpufl] warning: %s\n", warning.c_str());
+    }
+
     if (segmented && !segmentationRuntimeReady()) {
         std::fprintf(
             stderr,

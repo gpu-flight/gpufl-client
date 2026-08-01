@@ -65,6 +65,39 @@ bool parseDurationMs(const std::string& value, std::int64_t& out_ms) {
     return true;
 }
 
+bool parseByteSize(const std::string& value, std::uint64_t& out) {
+    const std::string text = trim(value);
+    std::size_t digits = 0;
+    while (digits < text.size() &&
+        std::isdigit(static_cast<unsigned char>(text[digits]))) {
+        ++digits;
+    }
+    if (digits == 0) return false;
+
+    std::uint64_t number = 0;
+    if (!parseUint64(text.substr(0, digits), number)) return false;
+
+    std::string unit = trim(text.substr(digits));
+    for (char& c : unit) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+
+    std::uint64_t multiplier = 1;
+    if (unit.empty() || unit == "b") multiplier = 1;
+    else if (unit == "k" || unit == "kb" || unit == "kib") multiplier = 1024ULL;
+    else if (unit == "m" || unit == "mb" || unit == "mib")
+        multiplier = 1024ULL * 1024;
+    else if (unit == "g" || unit == "gb" || unit == "gib")
+        multiplier = 1024ULL * 1024 * 1024;
+    else return false;
+
+    if (number > (std::numeric_limits<std::uint64_t>::max)() / multiplier) {
+        return false;
+    }
+    out = number * multiplier;
+    return true;
+}
+
 bool parseUint64(const std::string& value, std::uint64_t& out) {
     const char* begin = value.data();
     const char* end = begin + value.size();
