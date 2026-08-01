@@ -17,6 +17,38 @@ class SegmentRuntime;
 struct Runtime;
 
 /**
+ * Immutable identity shared by every SegmentContext of one run part.
+ *
+ * A run is a chain of parts joined by roll_chain_id. Each part owns a distinct
+ * run_id and its own segment numbering; a rollover mints a new RunPartContext
+ * with a fresh run_id, an incremented part_index, and previous_run_id pointing
+ * at the part it succeeded. An ordinary segment cut keeps the same one.
+ *
+ * job_start and run_end read run identity from here rather than from a mutable
+ * process global, so a part still carries the correct identity after a roll.
+ */
+struct RunPartContext {
+    RunPartContext(std::string roll_chain_id_value, std::string run_id_value,
+                   std::string previous_run_id_value,
+                   uint32_t part_index_value,
+                   int64_t run_started_mono_ns_value,
+                   uint32_t first_segment_index_value = 0)
+        : roll_chain_id(std::move(roll_chain_id_value)),
+          run_id(std::move(run_id_value)),
+          previous_run_id(std::move(previous_run_id_value)),
+          part_index(part_index_value),
+          run_started_mono_ns(run_started_mono_ns_value),
+          first_segment_index(first_segment_index_value) {}
+
+    const std::string roll_chain_id;
+    const std::string run_id;
+    const std::string previous_run_id;
+    const uint32_t part_index;
+    const int64_t run_started_mono_ns;
+    const uint32_t first_segment_index;
+};
+
+/**
  * Immutable identity and output ownership for one segment.
  *
  * Writers acquire one SegmentWriteLease and retain it for the complete
@@ -29,13 +61,15 @@ struct SegmentContext {
         std::string run_id_value, std::string session_id_value,
         uint32_t segment_index_value, int64_t actual_start_ns_value,
         std::shared_ptr<Logger> logger_value,
-        std::shared_ptr<SegmentDictionaryEmitter> dictionary_value = {})
+        std::shared_ptr<SegmentDictionaryEmitter> dictionary_value = {},
+        std::shared_ptr<const RunPartContext> run_part_value = {})
         : run_id(std::move(run_id_value)),
           session_id(std::move(session_id_value)),
           segment_index(segment_index_value),
           actual_start_ns(actual_start_ns_value),
           logger(std::move(logger_value)),
-          dictionary(std::move(dictionary_value)) {}
+          dictionary(std::move(dictionary_value)),
+          run_part(std::move(run_part_value)) {}
 
     const std::string run_id;
     const std::string session_id;
@@ -43,6 +77,7 @@ struct SegmentContext {
     const int64_t actual_start_ns;
     const std::shared_ptr<Logger> logger;
     const std::shared_ptr<SegmentDictionaryEmitter> dictionary;
+    const std::shared_ptr<const RunPartContext> run_part;
 
    private:
     friend class SegmentWriteLease;
@@ -109,5 +144,10 @@ class SegmentWriteLease {
     std::shared_ptr<const SegmentContext> context_;
     const char* owner_ = "general";
 };
+
+inline uint32_t wireSegmentIndex(const SegmentContext& context) {
+    if (!context.run_part) return context.segment_index;
+    return context.segment_index - context.run_part->first_segment_index;
+}
 
 }  // namespace gpufl

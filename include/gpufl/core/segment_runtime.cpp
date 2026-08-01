@@ -39,7 +39,7 @@ void quarantineUndrainedContext(
 
 SegmentRuntime::SegmentRuntime(Options options)
     : options_(std::move(options)),
-      coordinator_([this, &options] {
+      coordinator_([this] {
           SegmentCoordinator::Options coordinator_options;
           // Integers survive the move into options_; naming the constructor
           // argument explicitly also keeps older MSVC frontends from treating
@@ -48,6 +48,10 @@ SegmentRuntime::SegmentRuntime(Options options)
               options_.segment_every_ms;
           coordinator_options.segment_max_rows =
               options_.segment_max_rows;
+          coordinator_options.run_roll_every_ms =
+              options_.run_roll_every_ms;
+          coordinator_options.run_roll_max_bytes =
+              options_.run_roll_max_bytes;
           coordinator_options.cutover =
               [this](SegmentBoundaryRequest& boundary) {
               return cutover_(boundary);
@@ -101,6 +105,14 @@ void SegmentRuntime::noteRows(const uint32_t segment_index,
                           committed_event_ns);
 }
 
+void SegmentRuntime::noteBytes(const uint32_t segment_index,
+                               const uint64_t bytes,
+                               const int64_t committed_steady_ns,
+                               const int64_t committed_event_ns) {
+    coordinator_.noteBytes(segment_index, bytes, committed_steady_ns,
+                           committed_event_ns);
+}
+
 bool SegmentRuntime::cutover_(SegmentBoundaryRequest& boundary) {
     Runtime* const rt = options_.runtime;
     if (!rt) return false;
@@ -137,17 +149,42 @@ bool SegmentRuntime::cutover_(SegmentBoundaryRequest& boundary) {
                 int64_t{0},
                 boundary.actual_steady_ns - boundary.requested_steady_ns);
 
+            std::shared_ptr<const RunPartContext> next_run_part;
+            if (boundary.ends_run) {
+                const auto& prev = retiring->run_part;
+                next_run_part = std::make_shared<const RunPartContext>(
+                    prev ? prev->roll_chain_id : retiring->run_id,
+                    detail::GenerateSessionId(),
+                    prev ? prev->run_id : retiring->run_id,
+                    (prev ? prev->part_index : 1u) + 1u,
+                    boundary.actual_steady_ns, next_index);
+            } else {
+                next_run_part = retiring->run_part;
+            }
+            const std::string next_run_id =
+                next_run_part ? next_run_part->run_id : retiring->run_id;
+            const uint32_t wire_index =
+                next_run_part
+                    ? next_index - next_run_part->first_segment_index
+                    : next_index;
+
+
             InitEvent job_start = options_.init_template;
             job_start.session_id = next_session_id;
             job_start.ts_ns = actual_event_ns;
-            job_start.run_id = retiring->run_id;
-            job_start.segment_index = next_index;
+            job_start.run_id = next_run_id;
+            job_start.segment_index = wire_index;
+            if (next_run_part) {
+                job_start.roll_chain_id = next_run_part->roll_chain_id;
+                job_start.previous_run_id = next_run_part->previous_run_id;
+                job_start.part_index = next_run_part->part_index;
+            }
             next_logger->write(model::InitEventModel(job_start));
 
             SegmentStartEvent segment_start;
             segment_start.session_id = next_session_id;
-            segment_start.run_id = retiring->run_id;
-            segment_start.segment_index = next_index;
+            segment_start.run_id = next_run_id;
+            segment_start.segment_index = wire_index;
             segment_start.ts_ns = actual_event_ns;
             segment_start.actual_start_ns = actual_event_ns;
             segment_start.previous_session_id = retiring->session_id;
@@ -182,9 +219,9 @@ bool SegmentRuntime::cutover_(SegmentBoundaryRequest& boundary) {
             // Snapshot without finishing: the rule state machine, cooldown,
             // rate baseline, and max-window budget remain run-global.
             detail::DeepWindowRules::SnapshotSegment();
-            auto next = std::make_shared<SegmentContext>(
-                retiring->run_id, next_session_id, next_index,
-                actual_event_ns, next_logger, next_dictionary);
+            const auto next = std::make_shared<SegmentContext>(
+                next_run_id, next_session_id, next_index,
+                actual_event_ns, next_logger, next_dictionary, next_run_part);
             return rt->publishSegmentContext(next);
         });
     if (!published) {
@@ -254,15 +291,35 @@ bool SegmentRuntime::retire_(RetiredSegment retired) {
     SegmentEndEvent end;
     end.session_id = context->session_id;
     end.run_id = context->run_id;
-    end.segment_index = context->segment_index;
+    end.segment_index = wireSegmentIndex(*context);
     end.ts_ns = retired.boundary.actual_event_ns;
     end.actual_end_ns = retired.boundary.actual_event_ns;
     end.has_requested_boundary = true;
     end.requested_boundary_ns = retired.boundary.requested_event_ns;
     end.boundary_delay_ns = retired.boundary.boundary_delay_ns;
-    end.end_reason = segmentBoundaryReasonName(retired.boundary.reason);
+    end.end_reason = retired.boundary.ends_run
+                        ? "rolled"
+                        : segmentBoundaryReasonName(retired.boundary.reason);
     end.deferred_by = retired.boundary.deferred_by;
     context->logger->write(model::SegmentEndEventModel(end));
+
+    if (retired.boundary.ends_run) {
+        RunEndEvent run_end;
+        run_end.session_id = context->session_id;
+        run_end.run_id = context->run_id;
+        run_end.final_segment_index = wireSegmentIndex(*context);
+        run_end.ts_ns = retired.boundary.actual_event_ns;
+        run_end.ended_ns = retired.boundary.actual_event_ns;
+        run_end.end_reason = "rolled";
+        run_end.rollover_reason =
+            segmentBoundaryReasonName(retired.boundary.rollover_reason);
+        run_end.requested_rollover_ns =
+            retired.boundary.requested_rollover_event_ns;
+        run_end.actual_rollover_ns =
+            retired.boundary.actual_rollover_event_ns;
+        context->logger->write(model::RunEndEventModel(run_end));
+    }
+
     writeShutdown_(context, retired.boundary.actual_event_ns);
     context->logger->close();
     return true;
@@ -270,7 +327,7 @@ bool SegmentRuntime::retire_(RetiredSegment retired) {
 
 void SegmentRuntime::writeShutdown_(
     const std::shared_ptr<const SegmentContext>& context,
-    const int64_t ts_ns) {
+    const int64_t ts_ns) const {
     ShutdownEvent shutdown;
     shutdown.pid = options_.init_template.pid;
     shutdown.app = options_.init_template.app;
@@ -300,7 +357,7 @@ void SegmentRuntime::finish(const int64_t ended_ns) {
         SegmentEndEvent end;
         end.session_id = context->session_id;
         end.run_id = context->run_id;
-        end.segment_index = context->segment_index;
+        end.segment_index = wireSegmentIndex(*context);
         end.ts_ns = ended_ns;
         end.actual_end_ns = ended_ns;
         end.end_reason = "final";
@@ -309,7 +366,7 @@ void SegmentRuntime::finish(const int64_t ended_ns) {
         RunEndEvent run_end;
         run_end.session_id = context->session_id;
         run_end.run_id = context->run_id;
-        run_end.final_segment_index = context->segment_index;
+        run_end.final_segment_index = wireSegmentIndex(*context);
         run_end.ts_ns = ended_ns;
         run_end.ended_ns = ended_ns;
         context->logger->write(model::RunEndEventModel(run_end));
