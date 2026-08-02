@@ -34,6 +34,17 @@ bool Logger::open(const Options& opt) {
     return opened;
 }
 
+void Logger::setSerializedBytesCallbackBeforeFirstWrite(
+    std::function<void(std::uint64_t)> callback) {
+    std::lock_guard lock(sinks_mu_);
+    opt_.on_serialized_bytes = callback;
+    for (auto& sink : sinks_) {
+        if (sink) {
+            sink->setSerializedBytesCallbackBeforeFirstWrite(callback);
+        }
+    }
+}
+
 void Logger::close() {
     std::lock_guard<std::mutex> lk(sinks_mu_);
     for (auto& sink : sinks_) {

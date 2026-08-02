@@ -311,6 +311,146 @@ TEST(SegmentContextTest, ProductionRuntimePublishesAndRetiresTwoSegments) {
     fs::remove_all(root, ec);
 }
 
+TEST(SegmentContextTest, ProductionRuntimeCarriesBytesAcrossCutsThenRolls) {
+    const fs::path root =
+        fs::temp_directory_path() /
+        ("gpufl_segment_roll_" + std::to_string(gpufl::detail::GetPid()));
+    std::error_code ec;
+    fs::remove_all(root, ec);
+
+    gpufl::Runtime runtime;
+    runtime.app_name = "roll-test";
+    runtime.run_id = "12345678-1234-4123-8123-123456789abc";
+    runtime.session_id = "part1-seg0";
+    runtime.logger = std::make_shared<gpufl::Logger>();
+
+    gpufl::Logger::Options logger_options;
+    logger_options.base_path = root.string();
+    logger_options.session_id = runtime.session_id;
+    logger_options.compress_rotated = false;
+    logger_options.max_spool_bytes = 0;
+    logger_options.min_free_bytes = 0;
+    ASSERT_TRUE(runtime.logger->open(logger_options));
+
+    // Part 1 identity. gpufl.cpp mints this in production (2c-ii-C); the test
+    // constructs it so the runtime has a chain to extend.
+    auto part1 = std::make_shared<const gpufl::RunPartContext>(
+        runtime.run_id, runtime.run_id, std::string(), 1u,
+        gpufl::detail::GetTimestampNs(), 0u);
+    auto dictionary = std::make_shared<gpufl::SegmentDictionaryEmitter>();
+    ASSERT_TRUE(runtime.publishSegmentContext(
+        std::make_shared<gpufl::SegmentContext>(
+            runtime.run_id, runtime.session_id, 0,
+            gpufl::detail::GetTimestampNs(), runtime.logger, dictionary,
+            part1)));
+
+    gpufl::InitEvent init;
+    init.pid = gpufl::detail::GetPid();
+    init.app = runtime.app_name;
+    init.session_id = runtime.session_id;
+    init.ts_ns = gpufl::detail::GetTimestampNs();
+    init.run_id = runtime.run_id;
+    init.segment_index = 0;
+    runtime.logger->write(gpufl::model::InitEventModel(init));
+
+    gpufl::SegmentRuntime::Options options;
+    options.runtime = &runtime;
+    options.logger_options = logger_options;
+    options.init_template = init;
+    options.segment_max_rows = 1;     // arms the segment boundary
+    options.run_roll_max_bytes = 2;   // first cut stays in Part 1; next cut rolls
+    auto segmented =
+        std::make_shared<gpufl::SegmentRuntime>(std::move(options));
+    runtime.segment_runtime = segmented;
+    ASSERT_TRUE(segmented->start());
+
+    const int64_t steady_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    segmented->noteRows(0, 1, steady_ns, gpufl::detail::GetTimestampNs());
+    part1->addSerializedBytes(1);
+    ASSERT_TRUE(segmented->service());
+
+    // One serialized byte is below the part budget, so this row-triggered
+    // boundary is an ordinary segment cut. Bootstrap writes from the replacement
+    // logger must still charge bytes to this same Part 1.
+    const auto after_ordinary_cut = runtime.peekSegmentContext();
+    ASSERT_TRUE(after_ordinary_cut);
+    ASSERT_TRUE(after_ordinary_cut->run_part);
+    EXPECT_EQ(after_ordinary_cut->run_part.get(), part1.get());
+    EXPECT_EQ(after_ordinary_cut->run_part->part_index, 1u);
+    EXPECT_EQ(gpufl::wireSegmentIndex(*after_ordinary_cut), 1u);
+    ASSERT_GT(part1->serializedBytes(), 1u);
+
+    const std::string part1_final_session = after_ordinary_cut->session_id;
+
+    // On the next safe boundary, SegmentRuntime observes those replacement-logger
+    // bytes and rolls into Part 2.
+    const int64_t second_steady_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    segmented->noteRows(
+        after_ordinary_cut->segment_index, 1, second_steady_ns,
+        gpufl::detail::GetTimestampNs());
+    ASSERT_TRUE(segmented->service());
+
+    // The new part reset its wire index to 0 but advanced the chain to part 2.
+    // peek, not acquire: a write lease here would pin part 2, so finish() would
+    // time out draining it and never write its log.
+    const auto current = runtime.peekSegmentContext();
+    ASSERT_TRUE(current->run_part);
+    EXPECT_EQ(current->run_part->part_index, 2u);
+    EXPECT_EQ(current->run_part->previous_run_id, runtime.run_id);
+    EXPECT_EQ(gpufl::wireSegmentIndex(*current), 0u);
+    EXPECT_EQ(current->segment_index, 2u)
+        << "the internal sequence stays monotonic";
+    const std::string part2_session = current->session_id;
+    EXPECT_NE(current->run_part->run_id, runtime.run_id)
+        << "a roll mints a new run_id";
+
+
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!fs::exists(root / part1_final_session / "device.1.log") &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    segmented->finish(gpufl::detail::GetTimestampNs());
+    runtime.segment_runtime.reset();
+    segmented.reset();
+
+    const auto read = [](const fs::path& path) {
+        std::ifstream input(path);
+        return std::string(std::istreambuf_iterator(input),
+                           std::istreambuf_iterator<char>());
+    };
+    const std::string part1_log =
+        read(root / part1_final_session / "device.1.log");
+    const std::string part2_log = read(root / part2_session / "device.1.log");
+
+    // Part 1 retired as a roll: segment_end(rolled) then run_end(rolled).
+    const auto p1_seg_end = part1_log.find("\"type\":\"segment_end\"");
+    const auto p1_run_end = part1_log.find("\"type\":\"run_end\"");
+    ASSERT_NE(p1_seg_end, std::string::npos);
+    ASSERT_NE(p1_run_end, std::string::npos) << part1_log;
+    EXPECT_LT(p1_seg_end, p1_run_end);
+    EXPECT_NE(part1_log.find("\"end_reason\":\"rolled\""), std::string::npos);
+    EXPECT_NE(part1_log.find("\"rollover_reason\":\"serialized_bytes\""),
+              std::string::npos);
+
+    // Part 2 opened the chain's next link at wire segment 0.
+    EXPECT_NE(part2_log.find("\"part_index\":2"), std::string::npos) << part2_log;
+    EXPECT_NE(part2_log.find("\"roll_chain_id\":\"" + runtime.run_id + "\""),
+              std::string::npos);
+    EXPECT_NE(part2_log.find("\"previous_run_id\":\"" + runtime.run_id + "\""),
+              std::string::npos);
+    EXPECT_NE(part2_log.find("\"segment_index\":0"), std::string::npos);
+
+    fs::remove_all(root, ec);
+}
+
 TEST(SegmentContextTest, LeakedWriterTimesOutWithoutPublishingFalseFinality) {
     gpufl::Runtime runtime;
     runtime.run_id = "12345678-1234-4123-8123-123456789abc";
@@ -362,6 +502,69 @@ TEST(SegmentContextTest, LeakedWriterTimesOutWithoutPublishingFalseFinality) {
     leaked_writer.reset();
     logger->close();
     segmented.reset();
+}
+
+TEST(RunPartContextTest, CarriesImmutableChainIdentity) {
+    const auto part = std::make_shared<const gpufl::RunPartContext>(
+        "chain-abc", "run-1", /*previous=*/std::string(), /*part_index=*/1u,
+        /*run_started_mono_ns=*/5000);
+    EXPECT_EQ(part->roll_chain_id, "chain-abc");
+    EXPECT_EQ(part->run_id, "run-1");
+    EXPECT_TRUE(part->previous_run_id.empty()) << "first part has no predecessor";
+    EXPECT_EQ(part->part_index, 1u) << "part numbering is 1-based";
+    EXPECT_EQ(part->run_started_mono_ns, 5000);
+}
+
+TEST(RunPartContextTest, SerializedBytesArePartLocalAndSaturating) {
+    const auto part1 = std::make_shared<const gpufl::RunPartContext>(
+        "chain-abc", "run-1", std::string(), 1u, 5000);
+    const auto part2 = std::make_shared<const gpufl::RunPartContext>(
+        "chain-abc", "run-2", "run-1", 2u, 9000);
+
+    part1->addSerializedBytes(7);
+    part1->addSerializedBytes(11);
+    EXPECT_EQ(part1->serializedBytes(), 18u);
+    EXPECT_EQ(part2->serializedBytes(), 0u);
+
+    part1->addSerializedBytes((std::numeric_limits<uint64_t>::max)());
+    EXPECT_EQ(part1->serializedBytes(), (std::numeric_limits<uint64_t>::max)());
+    part1->addSerializedBytes(1);
+    EXPECT_EQ(part1->serializedBytes(), (std::numeric_limits<uint64_t>::max)());
+}
+
+TEST(RunPartContextTest, TheOrdinaryPathHasNoRunPart) {
+    // Everything built through the existing 5/6-arg constructor stays on the
+    // non-rolled path: run_part is null and nothing reads chain identity.
+    const auto context = makeContext(0);
+    EXPECT_EQ(context->run_part, nullptr);
+}
+
+TEST(RunPartContextTest, AnOrdinaryCutSharesThePartWhileARollReplacesIt) {
+    const auto logger = std::make_shared<gpufl::Logger>();
+    const auto part1 = std::make_shared<const gpufl::RunPartContext>(
+        "chain-abc", "run-1", std::string(), 1u, 5000);
+
+    // Two segments of the SAME part share one RunPartContext instance - the
+    // structure the runtime will rely on when an ordinary cut keeps identity.
+    const auto seg0 = std::make_shared<gpufl::SegmentContext>(
+        "run-1", "session-a", 0u, 1000, logger, nullptr, part1);
+    const auto seg1 = std::make_shared<gpufl::SegmentContext>(
+        "run-1", "session-b", 1u, 2000, logger, nullptr, part1);
+    EXPECT_EQ(seg0->run_part.get(), seg1->run_part.get())
+        << "an ordinary cut retains the same run part";
+
+    // A roll mints a new part: fresh run_id, previous_run_id set, part_index++.
+    const auto part2 = std::make_shared<const gpufl::RunPartContext>(
+        "chain-abc", "run-2", "run-1", 2u, 9000);
+    const auto rolled = std::make_shared<gpufl::SegmentContext>(
+        "run-2", "session-c", 0u, 9000, logger, nullptr, part2);
+
+    EXPECT_NE(rolled->run_part.get(), seg1->run_part.get());
+    EXPECT_EQ(rolled->run_part->roll_chain_id, part1->roll_chain_id)
+        << "same chain across the roll";
+    EXPECT_EQ(rolled->run_part->previous_run_id, "run-1");
+    EXPECT_EQ(rolled->run_part->part_index, 2u);
+    EXPECT_EQ(rolled->segment_index, 0u) << "segment numbering restarts";
 }
 
 }  // namespace

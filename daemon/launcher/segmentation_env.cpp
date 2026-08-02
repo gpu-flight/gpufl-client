@@ -16,7 +16,9 @@ bool applySegmentationEnv(const TraceArgs& args, const std::string& run_id,
     if (!segmentationRequested(args)) {
         return unsetEnvOrPrint(platform, env::kRunId) &&
                unsetEnvOrPrint(platform, env::kSegmentEveryMs) &&
-               unsetEnvOrPrint(platform, env::kSegmentMaxRows);
+               unsetEnvOrPrint(platform, env::kSegmentMaxRows) &&
+               unsetEnvOrPrint(platform, env::kRunRollEveryMs) &&
+               unsetEnvOrPrint(platform, env::kRunRollMaxBytes);
     }
 
     if (run_id.empty()) {
@@ -41,6 +43,24 @@ bool applySegmentationEnv(const TraceArgs& args, const std::string& run_id,
             return false;
         }
     } else if (!unsetEnvOrPrint(platform, env::kSegmentMaxRows)) {
+        return false;
+    }
+
+    if (args.run_roll_every_ms > 0) {
+        if (!setEnvOrPrint(platform, env::kRunRollEveryMs,
+                           std::to_string(args.run_roll_every_ms))) {
+            return false;
+        }
+    } else if (!unsetEnvOrPrint(platform, env::kRunRollEveryMs)) {
+        return false;
+    }
+
+    if (args.run_roll_max_bytes > 0) {
+        if (!setEnvOrPrint(platform, env::kRunRollMaxBytes,
+                           std::to_string(args.run_roll_max_bytes))) {
+            return false;
+        }
+    } else if (!unsetEnvOrPrint(platform, env::kRunRollMaxBytes)) {
         return false;
     }
 

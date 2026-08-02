@@ -123,6 +123,26 @@ std::string parseUint64Option(const FlagBreak& flag,
     return {};
 }
 
+/** Byte budget into a slot; 0 disables the trigger. */
+template <std::uint64_t TraceArgs::*Slot>
+std::string parseByteSizeOption(const FlagBreak& flag,
+                                const std::vector<std::string>& argv,
+                                std::size_t& index,
+                                TraceArgs& args) {
+    std::string value;
+    if (const std::string error =
+            detail::takeFlagValue(flag, argv, index, value);
+        !error.empty()) {
+        return error;
+        }
+    if (!detail::parseByteSize(value, args.*Slot)) {
+        return "invalid " + flag.key + " value: " + value +
+               " (expected a byte count with an optional k/m/g suffix, "
+               "e.g. 50g; 0 disables it)";
+    }
+    return {};
+}
+
 // A flag that no longer exists: consume its value so the next token is not
 // mistaken for a command, then explain where it went. Two named handlers rather
 // than a template over the message: taking the address of an internal-linkage
@@ -476,7 +496,18 @@ const CliOptionManager<TraceArgs>& traceOptions() {
                  "segmented.",
                  kSection(TraceHelpSection::Segmentation),
                  &parseUint64Option<&TraceArgs::segment_max_rows, 0>)
-
+            .add({"--roll-every"}, "<DUR>",
+                 "End the run and start a new part after this long, restarting "
+                 "at segment 0. Requires --segment-every: the part ends at the "
+                 "next segment boundary. Default: off",
+                 kSection(TraceHelpSection::Segmentation),
+                 &parseDurationOption<&TraceArgs::run_roll_every_ms>)
+            .add({"--roll-max-bytes"}, "<SIZE>",
+                 "Also end the run part after this much serialized telemetry, "
+                 "e.g. 50g. Counts every channel across the whole part, not "
+                 "per segment. Default: off",
+                 kSection(TraceHelpSection::Segmentation),
+                 &parseByteSizeOption<&TraceArgs::run_roll_max_bytes>)
             // Window
             .add({"--warmup"}, "<DUR>",
                  "Skip cold start: defer capture by this long (e.g. 30s, "

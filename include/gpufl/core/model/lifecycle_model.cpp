@@ -55,6 +55,19 @@ std::string InitEventModel::buildJson() const {
             << ",\"segment_index\":" << e_.segment_index;
     }
 
+    // Roll-chain identity is gated on its own key, not run_id: a segmented run
+    // that never rolled has run_id set but no chain, and must not grow the wire.
+    // part_index rides with roll_chain_id (1-based, so it is never a false 0);
+    // previous_run_id is omitted for the first part rather than sent as null.
+    if (!e_.roll_chain_id.empty()) {
+        oss << ",\"roll_chain_id\":\"" << jsonEscape(e_.roll_chain_id) << "\""
+            << ",\"part_index\":" << e_.part_index;
+        if (!e_.previous_run_id.empty()) {
+            oss << ",\"previous_run_id\":\""
+                << jsonEscape(e_.previous_run_id) << "\"";
+        }
+    }
+
     oss << "}";
     return oss.str();
 }
@@ -135,8 +148,17 @@ std::string RunEndEventModel::buildJson() const {
         << ",\"run_id\":\"" << jsonEscape(e_.run_id) << "\""
         << ",\"final_segment_index\":" << e_.final_segment_index
         << ",\"ts_ns\":" << e_.ts_ns
-        << ",\"ended_ns\":" << e_.ended_ns
-        << "}";
+        << ",\"ended_ns\":" << e_.ended_ns;
+    // Only a rolled run carries rollover provenance; a shutdown run_end is
+    // byte-identical to the pre-rollover wire.
+    if (e_.end_reason == "rolled") {
+        oss << ",\"end_reason\":\"" << jsonEscape(e_.end_reason) << "\""
+            << ",\"rollover_reason\":\""
+            << jsonEscape(e_.rollover_reason) << "\""
+            << ",\"requested_rollover_ns\":" << e_.requested_rollover_ns
+            << ",\"actual_rollover_ns\":" << e_.actual_rollover_ns;
+    }
+    oss << "}";
     return oss.str();
 }
 

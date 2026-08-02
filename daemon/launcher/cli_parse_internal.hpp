@@ -28,5 +28,6 @@ bool parseDurationMs(const std::string& value, std::int64_t& out_ms);
 bool parseUint64(const std::string& value, std::uint64_t& out);
 bool parseNonNegativeInt(const std::string& value, int& out);
 bool parsePositiveInt(const std::string& value, int& out);
+bool parseByteSize(const std::string& value, std::uint64_t& out);
 
 }  // namespace gpufl::launcher::detail

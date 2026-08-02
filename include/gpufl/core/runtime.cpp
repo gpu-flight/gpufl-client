@@ -13,7 +13,7 @@ bool SegmentContext::tryAcquireWriter(const char* const owner) const noexcept {
         // Diagnostics must never make a previously valid acquisition fail.
         // Allocation can throw on the first sighting of an owner label.
         try {
-            std::lock_guard<std::mutex> lock(writer_owner_mu_);
+            std::lock_guard lock(writer_owner_mu_);
             ++writer_owners_[owner ? owner : "general"];
         } catch (...) {
         }
@@ -25,7 +25,7 @@ bool SegmentContext::tryAcquireWriter(const char* const owner) const noexcept {
 
 void SegmentContext::releaseWriter(const char* const owner) const noexcept {
     if (!run_id.empty()) {
-        std::lock_guard<std::mutex> lock(writer_owner_mu_);
+        std::lock_guard lock(writer_owner_mu_);
         const auto it = writer_owners_.find(owner ? owner : "general");
         if (it != writer_owners_.end()) {
             if (it->second <= 1) {

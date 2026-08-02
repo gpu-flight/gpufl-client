@@ -52,6 +52,8 @@ class FileLogSink final : public ILogSink {
     FileLogSink& operator=(const FileLogSink&) = delete;
 
     void write(Channel ch, std::string_view json) override;
+    void setSerializedBytesCallbackBeforeFirstWrite(
+        std::function<void(std::uint64_t)> callback) override;
     void close() override;
 
     /**
@@ -218,6 +220,7 @@ class FileLogSink final : public ILogSink {
     std::uint64_t max_spool_bytes_ = 0;
     std::uint64_t min_free_bytes_ = 0;
     std::function<std::int64_t()> spool_now_ms_;
+    std::function<void(std::uint64_t bytes)> on_serialized_bytes_;
     mutable std::mutex spool_budget_mu_;
     std::int64_t last_spool_check_ms_ = -1;
     std::atomic<std::uint64_t> spool_estimated_bytes_{0};

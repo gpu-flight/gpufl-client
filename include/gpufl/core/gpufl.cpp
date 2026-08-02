@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -314,7 +315,7 @@ bool init(const InitOptions& opts) {
     {
         std::string configPath = g_opts.config_file;
         if (configPath.empty()) {
-            if (const char* env = std::getenv(gpufl::env::kConfigFile)) configPath = env;
+            if (const char* env = std::getenv(env::kConfigFile)) configPath = env;
         }
         if (!configPath.empty()) {
             ConfigFileLoader::apply(g_opts, configPath);
@@ -328,7 +329,7 @@ bool init(const InitOptions& opts) {
         // GPUFL_BACKEND_URL straight from the environment.
         std::string apiPath = g_opts.api_path;
         if (apiPath.empty()) {
-            if (const char* e = std::getenv(gpufl::env::kApiPath)) apiPath = e;
+            if (const char* e = std::getenv(env::kApiPath)) apiPath = e;
         }
         g_opts.api_path = normalizeApiPath(apiPath);
     }
@@ -353,6 +354,23 @@ bool init(const InitOptions& opts) {
                       " exceeds the supported signed 64-bit millisecond range");
         return false;
     }
+
+    uint64_t run_roll_every_ms = 0;
+    uint64_t run_roll_max_bytes = 0;
+    if (!parseNonNegativeEnv_(env::kRunRollEveryMs, run_roll_every_ms,
+                              segmentation_error) ||
+        !parseNonNegativeEnv_(env::kRunRollMaxBytes, run_roll_max_bytes,
+                              segmentation_error)) {
+        GFL_LOG_ERROR(segmentation_error);
+        return false;
+    }
+    if (run_roll_every_ms >
+        static_cast<uint64_t>((std::numeric_limits<int64_t>::max)())) {
+        GFL_LOG_ERROR(env::kRunRollEveryMs,
+                      " exceeds the supported signed 64-bit millisecond range");
+        return false;
+    }
+
     const char* env_run_id = std::getenv(env::kRunId);
     if (segmented && (!env_run_id || !*env_run_id)) {
         GFL_LOG_ERROR("Session segmentation requires GPUFL_RUN_ID. The "
@@ -384,6 +402,8 @@ bool init(const InitOptions& opts) {
         rt->segment_index = 0;
         rt->segment_every_ms = static_cast<int64_t>(segment_every_ms);
         rt->segment_max_rows = segment_max_rows;
+        rt->run_roll_every_ms = static_cast<int64_t>(run_roll_every_ms);
+        rt->run_roll_max_bytes = run_roll_max_bytes;
     }
     rt->logger = std::make_shared<Logger>();
     rt->host_collector = std::make_unique<HostCollector>();
@@ -423,16 +443,34 @@ bool init(const InitOptions& opts) {
     }
     if (const char* v = std::getenv(env::kLogMaxSpoolBytes)) {
         logOpts.max_spool_bytes =
-            static_cast<std::uint64_t>(std::strtoull(v, nullptr, 10));
+            std::strtoull(v, nullptr, 10);
     }
     if (const char* v = std::getenv(env::kLogMinFreeBytes)) {
         logOpts.min_free_bytes =
-            static_cast<std::uint64_t>(std::strtoull(v, nullptr, 10));
+            std::strtoull(v, nullptr, 10);
     }
 
     g_lastLogPath = logPath;
     g_lastSessionId = rt->session_id;
     g_lastAppName = rt->app_name;
+
+
+    std::shared_ptr<const RunPartContext> initial_run_part;
+    if (segmented &&
+        (rt->run_roll_every_ms > 0 || rt->run_roll_max_bytes > 0)) {
+        initial_run_part = std::make_shared<const RunPartContext>(
+            rt->run_id, rt->run_id, std::string(), 1u,
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count(),
+            0u);
+        }
+    if (initial_run_part && rt->run_roll_max_bytes > 0) {
+        logOpts.on_serialized_bytes =
+            [part = initial_run_part](const uint64_t bytes) noexcept {
+                part->addSerializedBytes(bytes);
+        };
+    }
 
     GFL_LOG_DEBUG("Opening log file: ", logPath);
     if (!rt->logger->open(logOpts)) {
@@ -441,9 +479,11 @@ bool init(const InitOptions& opts) {
     }
     auto initial_dictionary =
         segmented ? std::make_shared<SegmentDictionaryEmitter>() : nullptr;
+
     if (!rt->publishSegmentContext(std::make_shared<SegmentContext>(
             rt->run_id, rt->session_id, rt->segment_index,
-            detail::GetTimestampNs(), rt->logger, initial_dictionary))) {
+            detail::GetTimestampNs(), rt->logger, initial_dictionary,
+            initial_run_part))) {
         GFL_LOG_ERROR("Failed to publish the initial segment context");
         rt->logger->close();
         return false;
@@ -456,8 +496,8 @@ bool init(const InitOptions& opts) {
     // Reads GPUFL_BACKEND_URL from the environment (creds live on
     // UploadOptions now); skipped when unset (offline / file-only mode).
     std::string probeUrl;
-    if (const char* e = std::getenv(gpufl::env::kBackendUrl)) probeUrl = e;
-    else if (const char* e2 = std::getenv(gpufl::env::kRemoteConfig)) probeUrl = e2;
+    if (const char* e = std::getenv(env::kBackendUrl)) probeUrl = e;
+    else if (const char* e2 = std::getenv(env::kRemoteConfig)) probeUrl = e2;
     if (!probeUrl.empty()) {
         std::thread([url = probeUrl, ap = g_opts.api_path] {
             probeBackendVersion(url, ap);
@@ -571,13 +611,13 @@ bool init(const InitOptions& opts) {
     // gpufl.init(); this covers the pure-C++ path.
     if (mOpts.profiling_engine == ProfilingEngine::SassMetrics ||
         mOpts.profiling_engine == ProfilingEngine::Deep) {
-        const char* knobEnv = std::getenv(gpufl::env::kEagerModuleLoading);
+        const char* knobEnv = std::getenv(env::kEagerModuleLoading);
         const std::string knob = knobEnv ? knobEnv : "";
         const bool optedIn = (knob == "1" || knob == "true" ||
                               knob == "yes" || knob == "on");
-        if (optedIn && std::getenv(gpufl::env::kCudaModuleLoading) == nullptr) {
+        if (optedIn && std::getenv(env::kCudaModuleLoading) == nullptr) {
 #if defined(_WIN32)
-            _putenv_s(gpufl::env::kCudaModuleLoading, "EAGER");
+            _putenv_s(env::kCudaModuleLoading, "EAGER");
 #else
             setenv(gpufl::env::kCudaModuleLoading, "EAGER", /*overwrite=*/0);
 #endif
@@ -663,6 +703,12 @@ bool init(const InitOptions& opts) {
     ie.run_id = segment->run_id;
     ie.segment_index = segment->segment_index;
 
+    if (segment->run_part) {
+        ie.roll_chain_id = segment->run_part->roll_chain_id;
+        ie.previous_run_id = segment->run_part->previous_run_id;
+        ie.part_index = segment->run_part->part_index;
+    }
+
     // Multi-pass grouping (P1): the launcher's multi-pass driver tags each
     // child with GPUFL_ANALYSIS_ID + its 0-based GPUFL_PASS_INDEX and the
     // GPUFL_PASS_COUNT total so the backend can stitch the isolated passes
@@ -687,9 +733,12 @@ bool init(const InitOptions& opts) {
         SegmentRuntime::Options segment_options;
         segment_options.runtime = rt_ptr;
         segment_options.logger_options = logOpts;
+        segment_options.logger_options.on_serialized_bytes = {};
         segment_options.init_template = ie;
         segment_options.segment_every_ms = rt_ptr->segment_every_ms;
         segment_options.segment_max_rows = rt_ptr->segment_max_rows;
+        segment_options.run_roll_every_ms = rt_ptr->run_roll_every_ms;
+        segment_options.run_roll_max_bytes = rt_ptr->run_roll_max_bytes;
         rt_ptr->segment_runtime =
             std::make_shared<SegmentRuntime>(std::move(segment_options));
         if (!rt_ptr->segment_runtime->start()) {

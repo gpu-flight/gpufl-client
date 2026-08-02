@@ -492,6 +492,13 @@ void DeepWindowRules::SnapshotSegment() {
     EmitCounterQuality();
 }
 
+void DeepWindowRules::BeginRunPart() {
+    std::lock_guard lk(g_mu);
+    if (g_installed && !g_finished && g_eval) {
+        g_eval->beginRunPart();
+    }
+}
+
 void DeepWindowRules::Finish() {
     RuleSummary summary;
     std::string expression;

@@ -211,6 +211,98 @@ TEST(WireContract, JobStartOmitsSegmentationGroupingWhenUnset) {
     EXPECT_EQ(json.find("\"segment_index\""), std::string::npos);
 }
 
+TEST(WireContract, JobStartEmitsRollChainWhenSet) {
+    gpufl::InitEvent e;
+    e.pid = 7;
+    e.app = "rolled_app";
+    e.session_id = "run-2-seg-0";
+    e.ts_ns = 1;
+    e.session_kind = "trace";
+    e.profiling_engine = "nvidia.trace";
+    e.run_id = "run-2";
+    e.segment_index = 0;
+    e.roll_chain_id = "chain-abc";
+    e.previous_run_id = "run-1";
+    e.part_index = 2;
+
+    const std::string json = gpufl::model::InitEventModel(e).buildJson();
+
+    EXPECT_TRUE(JsonContains(json, "\"roll_chain_id\":\"chain-abc\""));
+    EXPECT_TRUE(JsonContains(json, "\"part_index\":2"));
+    EXPECT_TRUE(JsonContains(json, "\"previous_run_id\":\"run-1\""));
+}
+
+TEST(WireContract, JobStartFirstPartOmitsPreviousRunId) {
+    gpufl::InitEvent e;
+    e.session_kind = "trace";
+    e.run_id = "run-1";
+    e.roll_chain_id = "chain-abc";
+    e.part_index = 1;  // first part, no predecessor
+
+    const std::string json = gpufl::model::InitEventModel(e).buildJson();
+
+    EXPECT_TRUE(JsonContains(json, "\"roll_chain_id\":\"chain-abc\""));
+    EXPECT_TRUE(JsonContains(json, "\"part_index\":1"));
+    EXPECT_EQ(json.find("\"previous_run_id\""), std::string::npos)
+        << "the first part has no predecessor to name";
+}
+
+// A segmented run that never rolled keeps run_id/segment_index but must not
+// grow the wire with chain fields - this is the byte-compat guard.
+TEST(WireContract, JobStartOmitsRollChainWhenUnset) {
+    gpufl::InitEvent e;
+    e.session_kind = "trace";
+    e.run_id = "run-1";
+    e.segment_index = 0;
+
+    const std::string json = gpufl::model::InitEventModel(e).buildJson();
+
+    EXPECT_TRUE(JsonContains(json, "\"run_id\":\"run-1\""));
+    EXPECT_EQ(json.find("\"roll_chain_id\""), std::string::npos);
+    EXPECT_EQ(json.find("\"part_index\""), std::string::npos);
+    EXPECT_EQ(json.find("\"previous_run_id\""), std::string::npos);
+}
+
+TEST(WireContract, RunEndEmitsRolloverBlockWhenRolled) {
+    gpufl::RunEndEvent e;
+    e.session_id = "run-1-seg-2";
+    e.run_id = "run-1";
+    e.final_segment_index = 2;
+    e.ts_ns = 120000000000LL;
+    e.ended_ns = 120000000000LL;
+    e.end_reason = "rolled";
+    e.rollover_reason = "time";
+    e.requested_rollover_ns = 90000000000LL;
+    e.actual_rollover_ns = 120000000000LL;
+
+    const std::string json = gpufl::model::RunEndEventModel(e).buildJson();
+
+    EXPECT_TRUE(JsonContains(json, "\"end_reason\":\"rolled\""));
+    EXPECT_TRUE(JsonContains(json, "\"rollover_reason\":\"time\""));
+    EXPECT_TRUE(JsonContains(json, "\"requested_rollover_ns\":90000000000"));
+    EXPECT_TRUE(JsonContains(json, "\"actual_rollover_ns\":120000000000"));
+    EXPECT_EQ(json.find("rollover_delay"), std::string::npos)
+        << "overshoot is derived backend-side, never sent";
+}
+
+// The non-rolled run_end must stay byte-identical; RunEndShape pins the exact
+// string, this pins that a shutdown reason does not leak the rollover block.
+TEST(WireContract, RunEndOmitsRolloverBlockWhenNotRolled) {
+    gpufl::RunEndEvent e;
+    e.session_id = "S1";
+    e.run_id = "R";
+    e.final_segment_index = 1;
+    e.ts_ns = 1;
+    e.ended_ns = 1;
+    e.end_reason = "process_shutdown";  // anything but "rolled"
+
+    const std::string json = gpufl::model::RunEndEventModel(e).buildJson();
+
+    EXPECT_EQ(json.find("\"end_reason\""), std::string::npos);
+    EXPECT_EQ(json.find("\"rollover_reason\""), std::string::npos);
+    EXPECT_EQ(json.find("\"requested_rollover_ns\""), std::string::npos);
+}
+
 // ── shutdown ──────────────────────────────────────────────────────────────
 TEST(WireContract, ShutdownShape) {
     gpufl::ShutdownEvent e;

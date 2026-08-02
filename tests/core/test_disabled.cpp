@@ -17,15 +17,16 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
-
-#include "gpufl/core/env_vars.hpp"
 #include <optional>
 #include <string>
 
 #include "gpufl/core/common.hpp"
+#include "gpufl/core/env_vars.hpp"
 #include "gpufl/core/runtime.hpp"
+#include "gpufl/core/segment_runtime.hpp"
 #include "gpufl/gpufl.hpp"
 
 namespace {
@@ -71,17 +72,21 @@ protected:
     std::optional<std::string> saved_env_;
 };
 
-class SegmentationStartupTest : public ::testing::Test {
+class SegmentationStartupTest : public testing::Test {
 protected:
     void SetUp() override {
         save_(gpufl::env::kDisabled, saved_disabled_);
         save_(gpufl::env::kRunId, saved_run_id_);
         save_(gpufl::env::kSegmentEveryMs, saved_every_);
         save_(gpufl::env::kSegmentMaxRows, saved_rows_);
+        save_(gpufl::env::kRunRollEveryMs, saved_roll_every_);
+        save_(gpufl::env::kRunRollMaxBytes, saved_roll_bytes_);
         unsetEnv_(gpufl::env::kDisabled);
         unsetEnv_(gpufl::env::kRunId);
         unsetEnv_(gpufl::env::kSegmentEveryMs);
         unsetEnv_(gpufl::env::kSegmentMaxRows);
+        unsetEnv_(gpufl::env::kRunRollEveryMs);
+        unsetEnv_(gpufl::env::kRunRollMaxBytes);
     }
 
     void TearDown() override {
@@ -90,6 +95,8 @@ protected:
         restore_(gpufl::env::kRunId, saved_run_id_);
         restore_(gpufl::env::kSegmentEveryMs, saved_every_);
         restore_(gpufl::env::kSegmentMaxRows, saved_rows_);
+        restore_(gpufl::env::kRunRollEveryMs, saved_roll_every_);
+        restore_(gpufl::env::kRunRollMaxBytes, saved_roll_bytes_);
     }
 
 private:
@@ -106,6 +113,8 @@ private:
     std::optional<std::string> saved_run_id_;
     std::optional<std::string> saved_every_;
     std::optional<std::string> saved_rows_;
+    std::optional<std::string> saved_roll_every_;
+    std::optional<std::string> saved_roll_bytes_;
 };
 
 }  // namespace
@@ -221,6 +230,59 @@ TEST_F(SegmentationStartupTest,
     ASSERT_TRUE(gpufl::init(options));
     ASSERT_NE(gpufl::runtime(), nullptr);
     EXPECT_NE(gpufl::runtime()->segment_runtime, nullptr);
+    gpufl::shutdown();
+    std::filesystem::remove_all(log_root, ec);
+}
+
+TEST_F(SegmentationStartupTest,
+       InitialLoggerSerializedBytesArmRollover) {
+    setEnv_(gpufl::env::kRunId,
+            "12345678-1234-4123-8123-123456789abc");
+    setEnv_(gpufl::env::kSegmentMaxRows, "1");
+    setEnv_(gpufl::env::kRunRollMaxBytes, "1");
+
+    const auto log_root =
+        std::filesystem::temp_directory_path() /
+        ("gpufl_initial_byte_roll_" +
+         std::to_string(gpufl::detail::GetPid()));
+    std::error_code ec;
+    std::filesystem::remove_all(log_root, ec);
+
+    gpufl::InitOptions options;
+    options.log_path = log_root.string();
+    ASSERT_TRUE(gpufl::init(options));
+
+    auto* const rt = gpufl::runtime();
+    ASSERT_NE(rt, nullptr);
+    ASSERT_NE(rt->segment_runtime, nullptr);
+
+    const int64_t steady_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    rt->segment_runtime->noteRows(
+        0, 1, steady_ns, gpufl::detail::GetTimestampNs());
+    ASSERT_TRUE(rt->segment_runtime->service());
+
+    const auto current = rt->peekSegmentContext();
+    ASSERT_TRUE(current);
+    ASSERT_TRUE(current->run_part);
+    EXPECT_EQ(current->run_part->part_index, 2u);
+
+    const int64_t second_steady_ns =
+    std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+    rt->segment_runtime->noteRows(
+        current->segment_index, 1, second_steady_ns,
+        gpufl::detail::GetTimestampNs());
+    ASSERT_TRUE(rt->segment_runtime->service());
+
+    const auto third = rt->peekSegmentContext();
+    ASSERT_TRUE(third);
+    ASSERT_TRUE(third->run_part);
+    EXPECT_EQ(third->run_part->part_index, 3u);
+
     gpufl::shutdown();
     std::filesystem::remove_all(log_root, ec);
 }

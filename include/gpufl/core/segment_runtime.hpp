@@ -15,6 +15,7 @@ namespace gpufl {
 
 struct Runtime;
 struct SegmentContext;
+struct RunPartContext;
 
 /**
  * Production transaction around SegmentCoordinator.
@@ -33,6 +34,8 @@ class SegmentRuntime {
         InitEvent init_template;
         int64_t segment_every_ms = 0;
         uint64_t segment_max_rows = 0;
+        int64_t run_roll_every_ms = 0;
+        uint64_t run_roll_max_bytes = 0;
         // A leaked writer must not make shutdown unkillable. On timeout the
         // segment is deliberately left incomplete and its context is retained
         // for process lifetime rather than closing a sink under a live writer.
@@ -49,6 +52,8 @@ class SegmentRuntime {
     bool service();
     void noteRows(uint32_t segment_index, uint64_t rows,
                   int64_t committed_steady_ns, int64_t committed_event_ns);
+    void noteBytes(uint32_t segment_index, uint64_t bytes,
+               int64_t committed_steady_ns, int64_t committed_event_ns);
 
     /** Finalize the current segment and the run after all producers stop. */
     void finish(int64_t ended_ns);
@@ -60,6 +65,7 @@ class SegmentRuntime {
     };
 
     bool cutover_(SegmentBoundaryRequest& boundary);
+    void accountSerializedBytes_();
     void enqueueRetirement_(RetiredSegment retired);
     void retirementLoop_();
     bool retire_(RetiredSegment retired);
@@ -68,7 +74,7 @@ class SegmentRuntime {
         const char* phase);
     void stopRetirementWorker_();
     void writeShutdown_(const std::shared_ptr<const SegmentContext>& context,
-                        int64_t ts_ns);
+                        int64_t ts_ns) const;
 
     Options options_;
     SegmentCoordinator coordinator_;
@@ -81,6 +87,9 @@ class SegmentRuntime {
     std::deque<RetiredSegment> retirement_queue_;
     bool retirement_stopping_ = false;
     std::thread retirement_thread_;
+    std::mutex serialized_bytes_mu_;
+    std::shared_ptr<const RunPartContext> observed_run_part_;
+    uint64_t observed_run_part_bytes_ = 0;
 };
 
 }  // namespace gpufl

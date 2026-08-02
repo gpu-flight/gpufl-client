@@ -107,6 +107,16 @@ class Logger {
          */
         std::function<void()> before_retired_export;
         /**
+         * Called synchronously after FileLogSink accepts serialized NDJSON
+         * bytes. The value includes the trailing newline and every channel
+         * copy actually written (Channel::All therefore reports four copies
+         * when all default channels are open). Dropped or failed writes do not
+         * invoke it. The callback must be non-blocking, must not throw, and
+         * must not re-enter Logger.
+         */
+        std::function<void(std::uint64_t bytes)> on_serialized_bytes;
+
+        /**
          * Stop accepting new profiling events once this session's on-disk
          * spool reaches the limit. 0 disables the per-session byte limit.
          * Saturation is terminal for the session and is recorded durably so
@@ -132,6 +142,14 @@ class Logger {
      * open without a path).
      */
     bool open(const Options& opt);
+
+    /**
+     * Replace FileLogSink byte accounting before this logger's first write.
+     * The callback must remina non-blocking, non-throwing, and must not
+     * re-enter Logger.
+     */
+    void setSerializedBytesCallbackBeforeFirstWrite(
+        std::function<void(std::uint64_t)> callback);
 
     /**
      * Close and release all attached sinks. Safe to call multiple

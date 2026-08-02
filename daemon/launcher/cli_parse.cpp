@@ -154,17 +154,17 @@ UploadParseResult parseUploadArgs(const std::vector<std::string>& argv) {
             return {std::nullopt,
                     "--session-id is no longer supported; point <LOG_PATH> at a "
                     "directory containing only that session"};
-        } else if (!tok.empty() && tok[0] == '-') {
-            return {std::nullopt, "unknown flag: " + key};
-        } else {
-            // Bare token → the positional <LOG_PATH>. Only one allowed.
-            if (have_log_path) {
-                return {std::nullopt, "unexpected extra argument: " + tok +
-                                      " (only one <LOG_PATH> is accepted)"};
-            }
-            out.log_path = tok;
-            have_log_path = true;
         }
+        if (!tok.empty() && tok[0] == '-') {
+            return {std::nullopt, "unknown flag: " + key};
+        }
+        // Bare token → the positional <LOG_PATH>. Only one allowed.
+        if (have_log_path) {
+            return {std::nullopt, "unexpected extra argument: " + tok +
+                                      " (only one <LOG_PATH> is accepted)"};
+        }
+        out.log_path = tok;
+        have_log_path = true;
     }
 
     if (!have_log_path) {
@@ -244,7 +244,18 @@ std::string validateTraceExecutionMode(const TraceArgs& args) {
 }
 
 bool segmentationRequested(const TraceArgs& args) {
-    return args.segment_every_ms > 0 || args.segment_max_rows > 0;
+    return args.segment_every_ms > 0 || args.segment_max_rows > 0 ||
+           args.run_roll_every_ms > 0 || args.run_roll_max_bytes > 0;
+}
+
+std::string segmentationWarning(const TraceArgs& args) {
+    if (args.run_roll_every_ms > 0 && args.segment_every_ms > 0 &&
+        args.segment_every_ms > args.run_roll_every_ms / 10) {
+        return "--segment-every is more than a tenth of --roll-every, so a run "
+               "part can overshoot its budget visibly; a run part ends only at "
+               "a segment boundary";
+        }
+    return {};
 }
 
 std::string validateTraceSegmentation(
@@ -258,6 +269,29 @@ std::string validateTraceSegmentation(
         return "--segment-every must be at least 60s; shorter cadences can "
                "create a session storm";
     }
+
+    if (args.run_roll_every_ms < 0) {
+        return "--roll-every cannot be negative";
+    }
+
+    if (args.run_roll_every_ms > 0 && args.segment_every_ms <= 0) {
+        return "--roll-every requires --segment-every. A run part ends at the "
+               "next segment boundary, and with no segment time trigger a "
+               "quiet period produces no boundary, so the part would grow "
+               "without bound";
+    }
+    if (args.run_roll_every_ms > 0 &&
+        args.run_roll_every_ms < args.segment_every_ms) {
+        return "--roll-every must be at least --segment-every; a run part "
+               "cannot be shorter than the segment carrying its boundary";
+        }
+    if (args.run_roll_max_bytes > 0 && args.segment_every_ms <= 0 &&
+        args.segment_max_rows == 0) {
+        return "--roll-max-bytes requires --segment-every or "
+               "--segment-max-rows; at least one segment trigger must be armed "
+               "for a run part to have a boundary to end on";
+    }
+
     if (!segmentationRequested(args)) return {};
 
     if (!inherited_analysis_id.empty()) {

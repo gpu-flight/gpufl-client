@@ -155,6 +155,77 @@ TEST(CliParseTrace, ExecutionBoundaryRejectsInheritedAnalysisId) {
     EXPECT_NE(error.find("GPUFL_ANALYSIS_ID"), std::string::npos) << error;
 }
 
+TEST(CliParseTrace, RollEveryParsesWithSegmentEvery) {
+    auto r = parseTraceArgs(argsFor(
+        {"--roll-every=3m", "--segment-every=60s", "--", "./app"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    EXPECT_EQ(r.args->run_roll_every_ms, 180'000);
+    EXPECT_EQ(r.args->segment_every_ms, 60'000);
+}
+
+TEST(CliParseTrace, RollEveryRejectsShorterThanSegmentEvery) {
+    auto r = parseTraceArgs(argsFor(
+        {"--roll-every=90s", "--segment-every=120s", "--", "./app"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("at least --segment-every"), std::string::npos)
+        << r.error;
+}
+
+TEST(CliParseTrace, RollEveryRequiresASegmentTimeTrigger) {
+    auto r = parseTraceArgs(argsFor({"--roll-every=3m", "--", "./app"}));
+    EXPECT_FALSE(r.args.has_value());
+    EXPECT_NE(r.error.find("requires --segment-every"), std::string::npos)
+        << r.error;
+
+    // A row trigger alone is not enough: with no rows arriving, no boundary is
+    // ever due and the part would grow without bound.
+    auto rows = parseTraceArgs(argsFor(
+        {"--roll-every=3m", "--segment-max-rows=1000", "--", "./app"}));
+    EXPECT_FALSE(rows.args.has_value());
+    EXPECT_NE(rows.error.find("requires --segment-every"), std::string::npos)
+        << rows.error;
+}
+
+TEST(CliParseTrace, RollMaxBytesAcceptsSuffixesAndNeedsAnySegmentTrigger) {
+    auto r = parseTraceArgs(argsFor(
+        {"--roll-max-bytes=50g", "--segment-max-rows=1000", "--", "./app"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    EXPECT_EQ(r.args->run_roll_max_bytes, 50ULL * 1024 * 1024 * 1024);
+
+    auto bare = parseTraceArgs(argsFor(
+        {"--roll-max-bytes=50g", "--", "./app"}));
+    EXPECT_FALSE(bare.args.has_value());
+    EXPECT_NE(bare.error.find("--segment-max-rows"), std::string::npos)
+        << bare.error;
+}
+
+TEST(CliParseTrace, RollMaxBytesRejectsGarbageAndOverflow) {
+    for (const char* value : {"50gg", "g", "-1", "1e9", "50g50",
+                              "99999999999999999999g"}) {
+        auto r = parseTraceArgs(argsFor(
+            {((std::string("--roll-max-bytes=") + value).c_str()),
+             "--segment-every=60s", "--", "./app"}));
+        EXPECT_FALSE(r.args.has_value()) << value;
+    }
+}
+
+TEST(CliParseTrace, OvershootWarningFiresOnlyWhenSegmentIsCoarse) {
+    TraceArgs coarse;
+    coarse.segment_every_ms = 60'000;
+    coarse.run_roll_every_ms = 180'000;  // segment is a third of the part
+    EXPECT_NE(segmentationWarning(coarse).find("overshoot"),
+              std::string::npos);
+
+    TraceArgs fine;
+    fine.segment_every_ms = 60'000;
+    fine.run_roll_every_ms = 3'600'000;
+    EXPECT_TRUE(segmentationWarning(fine).empty());
+
+    TraceArgs no_roll;
+    no_roll.segment_every_ms = 60'000;
+    EXPECT_TRUE(segmentationWarning(no_roll).empty());
+}
+
 TEST(CliParseTrace, DirectTraceArgsCannotBypassMinimumCadence) {
     TraceArgs args;
     args.segment_every_ms = 1;

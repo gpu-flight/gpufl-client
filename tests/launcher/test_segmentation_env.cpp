@@ -89,13 +89,34 @@ TEST(SegmentationEnvTest, OrdinaryRunScrubsAllInheritedSegmentationState) {
     platform.env[env::kRunId] = "stale-run";
     platform.env[env::kSegmentEveryMs] = "300000";
     platform.env[env::kSegmentMaxRows] = "1000";
+    platform.env[env::kRunRollEveryMs] = "180000";
+    platform.env[env::kRunRollMaxBytes] = "1000000";
 
     ASSERT_TRUE(applySegmentationEnv(TraceArgs{}, "", platform));
 
     EXPECT_FALSE(platform.has(env::kRunId));
     EXPECT_FALSE(platform.has(env::kSegmentEveryMs));
     EXPECT_FALSE(platform.has(env::kSegmentMaxRows));
-    EXPECT_EQ(platform.removed.size(), 3u);
+    EXPECT_FALSE(platform.has(env::kRunRollEveryMs));
+    EXPECT_FALSE(platform.has(env::kRunRollMaxBytes));
+    EXPECT_EQ(platform.removed.size(), 5u);
+}
+
+TEST(SegmentationEnvTest, RollBudgetsTravelWithTheSegmentationContract) {
+    RecordingSegmentationPlatform platform;
+    platform.env[env::kRunRollMaxBytes] = "999";  // stale: must not survive
+
+    TraceArgs args;
+    args.segment_every_ms = 60'000;
+    args.run_roll_every_ms = 180'000;
+
+    ASSERT_TRUE(applySegmentationEnv(
+        args, "12345678-1234-4123-8123-123456789abc", platform));
+
+    EXPECT_EQ(platform.get(env::kRunRollEveryMs), "180000");
+    // A disabled budget is removed, never published as 0: the runtime reads 0
+    // as off, but an inherited value would be a live budget nobody asked for.
+    EXPECT_FALSE(platform.has(env::kRunRollMaxBytes));
 }
 
 TEST(SegmentationEnvTest, SegmentedRunWithoutRunIdFailsBeforeTargetLaunch) {

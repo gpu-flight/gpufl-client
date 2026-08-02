@@ -136,6 +136,12 @@ constexpr const char* kRunId          = "GPUFL_RUN_ID";
 constexpr const char* kSegmentEveryMs = "GPUFL_SEGMENT_EVERY_MS";
 constexpr const char* kSegmentMaxRows = "GPUFL_SEGMENT_MAX_ROWS";
 
+// Run rollover: when a run part exceeds either budget, the run ends at the next
+// segment boundary and a fresh run part starts over at segment_index 0.
+// Both budgets are per run PART, not per segment.
+constexpr auto kRunRollEveryMs = "GPUFL_RUN_ROLL_EVERY_MS";
+constexpr auto kRunRollMaxBytes = "GPUFL_RUN_ROLL_MAX_BYTES";
+
 // PC sampling knobs ───────────────────────────────────────────────────────
 // Kernel-timeline collection strategy for the standalone PcSampling pass:
 //   "none" - PC samples only; PC/SASS kernel rows come from launch callbacks
