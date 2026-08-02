@@ -26,10 +26,13 @@ set(GPUFL_TEST_SOURCES
     core/test_deep_window_rule.cpp
     core/test_deep_window_rules_install.cpp
     core/test_monitor.cpp
+    core/test_monitor_configuration.cpp
     core/test_itanium_demangle.cpp
     core/test_sampler.cpp
     core/test_segment_context.cpp
     core/test_segment_coordinator.cpp
+    core/test_session_bootstrap.cpp
+    core/test_startup_configuration.cpp
     upload/test_upload_logs.cpp
     # Launcher CLI parser test - portable (no CUDA / no POSIX).
     # The portable CLI parser sources are compiled directly into the test
@@ -38,6 +41,7 @@ set(GPUFL_TEST_SOURCES
     launcher/test_info_command.cpp
     launcher/test_deep_window_env.cpp
     launcher/test_segmentation_env.cpp
+    launcher/test_trace_run_plan.cpp
     launcher/test_agent_launcher.cpp
     ${CMAKE_SOURCE_DIR}/daemon/launcher/cli_parse.cpp
     ${CMAKE_SOURCE_DIR}/daemon/launcher/cli_help.cpp
@@ -45,8 +49,10 @@ set(GPUFL_TEST_SOURCES
     ${CMAKE_SOURCE_DIR}/daemon/launcher/cli_subcommand_options.cpp
     ${CMAKE_SOURCE_DIR}/daemon/launcher/cli_trace_options.cpp
     ${CMAKE_SOURCE_DIR}/daemon/launcher/info_command.cpp
+    ${CMAKE_SOURCE_DIR}/daemon/launcher/trace_command_common.cpp
     ${CMAKE_SOURCE_DIR}/daemon/launcher/deep_window_env.cpp
     ${CMAKE_SOURCE_DIR}/daemon/launcher/segmentation_env.cpp
+    ${CMAKE_SOURCE_DIR}/daemon/launcher/trace_run_plan.cpp
     ${CMAKE_SOURCE_DIR}/daemon/launcher/agent_launcher.cpp
 )
 
