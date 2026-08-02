@@ -18,7 +18,7 @@ class SegmentRuntime;
 struct Runtime;
 
 /**
- * Immutable identity shared by every SegmentContext of one run part.
+ * Identity shared by every SegmentContext of one run part.
  *
  * A run is a chain of parts joined by roll_chain_id. Each part owns a distinct
  * run_id and its own segment numbering; a rollover mints a new RunPartContext
@@ -27,6 +27,9 @@ struct Runtime;
  *
  * job_start and run_end read run identity from here rather than from a mutable
  * process global, so a part still carries the correct identity after a roll.
+ *
+ * Identity is const; the byte counter is not. It lives here because the budget
+ * is scoped to this object, so a roll resets it by construction.
  */
 struct RunPartContext {
     RunPartContext(std::string roll_chain_id_value, std::string run_id_value,
@@ -48,6 +51,8 @@ struct RunPartContext {
     const int64_t run_started_mono_ns;
     const uint32_t first_segment_index;
 
+    /** Lock-free (logger write path). Saturates: a wrap would read as a tiny
+     *  budget and roll continuously. */
     void addSerializedBytes(const uint64_t bytes) const noexcept {
         auto current = serialized_bytes_.load(std::memory_order_relaxed);
         for (;;) {
@@ -67,9 +72,8 @@ struct RunPartContext {
         return serialized_bytes_.load(std::memory_order_relaxed);
     }
 
-private:
+   private:
     mutable std::atomic<uint64_t> serialized_bytes_{0};
-
 };
 
 /**

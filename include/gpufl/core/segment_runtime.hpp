@@ -87,6 +87,7 @@ class SegmentRuntime {
     std::deque<RetiredSegment> retirement_queue_;
     bool retirement_stopping_ = false;
     std::thread retirement_thread_;
+    // How much of the current part's byte counter is already accounted.
     std::mutex serialized_bytes_mu_;
     std::shared_ptr<const RunPartContext> observed_run_part_;
     uint64_t observed_run_part_bytes_ = 0;
