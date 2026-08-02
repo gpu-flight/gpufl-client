@@ -189,7 +189,11 @@ target_sources(gpufl PRIVATE
     include/gpufl/core/monitor_batch_manager.cpp
     include/gpufl/core/monitor_record_builders.cpp
     include/gpufl/core/monitor.cpp
+    include/gpufl/core/client_startup.cpp
+    include/gpufl/core/monitor_configuration.cpp
     include/gpufl/core/gpufl.cpp
+    include/gpufl/core/session_bootstrap.cpp
+    include/gpufl/core/startup_configuration.cpp
     include/gpufl/core/common.cpp
     include/gpufl/core/stack_trace.cpp
     include/gpufl/core/itanium_demangle.cpp

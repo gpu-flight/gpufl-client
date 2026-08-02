@@ -145,7 +145,7 @@ class Logger {
 
     /**
      * Replace FileLogSink byte accounting before this logger's first write.
-     * The callback must remina non-blocking, non-throwing, and must not
+     * The callback must remain non-blocking, non-throwing, and must not
      * re-enter Logger.
      */
     void setSerializedBytesCallbackBeforeFirstWrite(

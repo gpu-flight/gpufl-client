@@ -4,33 +4,27 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cerrno>
 #include <chrono>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <limits>
 #include <memory>
 #include <string>
 #include <thread>
 #include <utility>
 
 #include "gpufl/backends/host_collector.hpp"
-#include "gpufl/core/backend_factory.hpp"
+#include "gpufl/core/client_startup.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/teardown_flag.hpp"  // detail::isProcessExitTeardown
-#include "gpufl/core/config_file_loader.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/deep_window.hpp"
 #include "gpufl/core/deep_window_rules.hpp"
-#include "gpufl/core/dictionary_manager.hpp"
 #include "gpufl/core/events.hpp"
 #include "gpufl/core/logger/logger.hpp"
-#include "gpufl/core/remote_config.hpp"
 #include "gpufl/core/version.hpp"
 #include "gpufl/upload/upload_logs.hpp"
 // NOTE: we intentionally do NOT include <httplib.h> in this TU.
@@ -45,12 +39,9 @@
 #include "gpufl/core/monitor_backend.hpp"
 #include "gpufl/core/runtime.hpp"
 #include "gpufl/core/segment_runtime.hpp"
-#include "gpufl/core/segmentation_config.hpp"
+#include "gpufl/core/session_bootstrap.hpp"
 #include "gpufl/core/scope_registry.hpp"
 #include "gpufl/report/text_report.hpp"
-#if GPUFL_HAS_CUDA || defined(__CUDACC__)
-#include <cuda_runtime.h>
-#endif
 
 // NVTX (NVIDIA Tools Extension) - zero-overhead annotation library.
 // When GPUFL_HAS_NVTX is defined (see CMakeLists NVTX block), GFL_SCOPE
@@ -185,39 +176,6 @@ namespace gpufl {
 std::atomic<int> g_systemSampleRateMs{0};
 InitOptions g_opts;
 
-namespace {
-
-MonitorBackendKind ToMonitorBackendKind(const BackendKind backend) {
-    switch (backend) {
-        case BackendKind::Nvidia:
-            return MonitorBackendKind::Nvidia;
-        case BackendKind::Amd:
-            return MonitorBackendKind::Amd;
-        case BackendKind::None:
-            return MonitorBackendKind::None;
-        case BackendKind::Auto:
-        default:
-            return MonitorBackendKind::Auto;
-    }
-}
-
-}  // namespace
-
-static std::string defaultLogPath_(const std::string& app) {
-    // v1.2: log_path is a directory (sessions nest inside it as
-    // `<log_path>/<session_id>/<channel>.log`). The legacy convention
-    // returned "<app>.log" which the rotator stripped down to "<app>"
-    // anyway; explicitly return just "<app>" so debug output and
-    // `clean_logs(log_path=...)` show the same value as what's on
-    // disk.
-    return app;
-}
-
-// Remembered after init() for use by generateReport() after shutdown()
-static std::string g_lastLogPath;
-static std::string g_lastSessionId;
-static std::string g_lastAppName;
-
 static std::atomic<uint64_t> g_nextScopeId{1};
 
 static uint64_t nextScopeId_() {
@@ -243,52 +201,6 @@ bool envDisabled_() {
     return s == "1" || s == "true" || s == "yes" || s == "on";
 }
 
-bool windowsInjectedProcess_() {
-#if defined(_WIN32)
-    const char* injected = std::getenv(gpufl::env::kInject);
-    return injected && std::string(injected) == "1";
-#else
-    return false;
-#endif
-}
-
-bool parseNonNegativeEnv_(const char* key, uint64_t& value,
-                          std::string& error) {
-    value = 0;
-    const char* raw = std::getenv(key);
-    if (!raw || !*raw) return true;
-    if (*raw == '-') {
-        error = std::string(key) + " must be a non-negative integer";
-        return false;
-    }
-    errno = 0;
-    char* end = nullptr;
-    const unsigned long long parsed = std::strtoull(raw, &end, 10);
-    if (end == raw || *end != '\0' || errno == ERANGE) {
-        error = std::string(key) + "='" + raw +
-                "' is invalid (expected a non-negative integer)";
-        return false;
-    }
-    value = static_cast<uint64_t>(parsed);
-    return true;
-}
-
-bool isUuidV4_(const char* value) {
-    if (!value || std::strlen(value) != 36) return false;
-    for (size_t i = 0; i < 36; ++i) {
-        if (i == 8 || i == 13 || i == 18 || i == 23) {
-            if (value[i] != '-') return false;
-        } else if (!std::isxdigit(static_cast<unsigned char>(value[i]))) {
-            return false;
-        }
-    }
-    if (value[14] != '4') return false;
-    const char variant =
-        static_cast<char>(std::tolower(static_cast<unsigned char>(value[19])));
-    return variant == '8' || variant == '9' || variant == 'a' ||
-           variant == 'b';
-}
-
 }  // namespace
 
 bool init(const InitOptions& opts) {
@@ -310,488 +222,8 @@ bool init(const InitOptions& opts) {
     }
 
     g_opts = opts;
-
-    // Read config file early - before anything uses the options
-    {
-        std::string configPath = g_opts.config_file;
-        if (configPath.empty()) {
-            if (const char* env = std::getenv(env::kConfigFile)) configPath = env;
-        }
-        if (!configPath.empty()) {
-            ConfigFileLoader::apply(g_opts, configPath);
-        }
-    }
-
-    {
-        // Resolve api_path (InitOptions value or GPUFL_API_PATH) and normalize
-        // once - the version-discovery probe below appends to it. Backend
-        // creds live on UploadOptions now, not InitOptions; the probe reads
-        // GPUFL_BACKEND_URL straight from the environment.
-        std::string apiPath = g_opts.api_path;
-        if (apiPath.empty()) {
-            if (const char* e = std::getenv(env::kApiPath)) apiPath = e;
-        }
-        g_opts.api_path = normalizeApiPath(apiPath);
-    }
-
-    DebugLogger::setEnabled(g_opts.enable_debug_output);
-    GFL_LOG_DEBUG("Initializing...");
-
-    uint64_t segment_every_ms = 0;
-    uint64_t segment_max_rows = 0;
-    std::string segmentation_error;
-    if (!parseNonNegativeEnv_(env::kSegmentEveryMs, segment_every_ms,
-                              segmentation_error) ||
-        !parseNonNegativeEnv_(env::kSegmentMaxRows, segment_max_rows,
-                              segmentation_error)) {
-        GFL_LOG_ERROR(segmentation_error);
-        return false;
-    }
-    const bool segmented = segment_every_ms > 0 || segment_max_rows > 0;
-    if (segment_every_ms >
-        static_cast<uint64_t>((std::numeric_limits<int64_t>::max)())) {
-        GFL_LOG_ERROR(env::kSegmentEveryMs,
-                      " exceeds the supported signed 64-bit millisecond range");
-        return false;
-    }
-
-    uint64_t run_roll_every_ms = 0;
-    uint64_t run_roll_max_bytes = 0;
-    if (!parseNonNegativeEnv_(env::kRunRollEveryMs, run_roll_every_ms,
-                              segmentation_error) ||
-        !parseNonNegativeEnv_(env::kRunRollMaxBytes, run_roll_max_bytes,
-                              segmentation_error)) {
-        GFL_LOG_ERROR(segmentation_error);
-        return false;
-    }
-    if (run_roll_every_ms >
-        static_cast<uint64_t>((std::numeric_limits<int64_t>::max)())) {
-        GFL_LOG_ERROR(env::kRunRollEveryMs,
-                      " exceeds the supported signed 64-bit millisecond range");
-        return false;
-    }
-
-    const char* env_run_id = std::getenv(env::kRunId);
-    if (segmented && (!env_run_id || !*env_run_id)) {
-        GFL_LOG_ERROR("Session segmentation requires GPUFL_RUN_ID. The "
-                      "launcher must generate one run ID before starting the "
-                      "target.");
-        return false;
-    }
-    if (segmented && !isUuidV4_(env_run_id)) {
-        GFL_LOG_ERROR(env::kRunId, "='", env_run_id,
-                      "' is invalid (expected a UUIDv4)");
-        return false;
-    }
-    if (segmented && !segmentation::kRuntimeReady) {
-        GFL_LOG_ERROR(
-            "This build does not include executable session segmentation.");
-        return false;
-    }
-
-    if (runtime()) {
-        GFL_LOG_DEBUG("Runtime already exists, shutting down first...");
-        shutdown();
-    }
-
-    auto rt = std::make_unique<Runtime>();
-    rt->app_name = g_opts.app_name.empty() ? "gpufl" : g_opts.app_name;
-    rt->session_id = detail::GenerateSessionId();
-    if (segmented) {
-        rt->run_id = env_run_id;
-        rt->segment_index = 0;
-        rt->segment_every_ms = static_cast<int64_t>(segment_every_ms);
-        rt->segment_max_rows = segment_max_rows;
-        rt->run_roll_every_ms = static_cast<int64_t>(run_roll_every_ms);
-        rt->run_roll_max_bytes = run_roll_max_bytes;
-    }
-    rt->logger = std::make_shared<Logger>();
-    rt->host_collector = std::make_unique<HostCollector>();
-
-    const std::string logPath =
-        g_opts.log_path.empty() ? defaultLogPath_(rt->app_name) : g_opts.log_path;
-
-    Logger::Options logOpts;
-    logOpts.base_path = logPath;
-    // Threaded through so the rotator can write under
-    // `<base_path>/<session_id>/<channel>.log` - v1.2 disk layout. The
-    // uploader uses the directory name to discover sessions instead of
-    // parsing job_start events out of flat log files.
-    logOpts.session_id = rt->session_id;
-    logOpts.system_sample_rate_ms = g_opts.system_sample_rate_ms;
-    logOpts.flush_always = g_opts.flush_logs_always;
-    if (const char* v = std::getenv(env::kFlushLogsAlways)) {
-        std::string flag(v);
-        std::transform(flag.begin(), flag.end(), flag.begin(),
-                       [](unsigned char c) {
-                           return static_cast<char>(std::tolower(c));
-                       });
-        if (flag == "1" || flag == "true" || flag == "yes" ||
-            flag == "on") {
-            logOpts.flush_always = true;
-        }
-    }
-    if (const char* v = std::getenv(env::kLogRotateBytes)) {
-        if (const auto bytes = std::strtoull(v, nullptr, 10); bytes > 0) {
-            logOpts.rotate_bytes = static_cast<std::size_t>(bytes);
-        }
-    }
-    if (const char* v = std::getenv(env::kLogRotateAfterMs)) {
-        if (const auto ms = std::strtoll(v, nullptr, 10); ms > 0) {
-            logOpts.rotate_after_ms = static_cast<std::int64_t>(ms);
-        }
-    }
-    if (const char* v = std::getenv(env::kLogMaxSpoolBytes)) {
-        logOpts.max_spool_bytes =
-            std::strtoull(v, nullptr, 10);
-    }
-    if (const char* v = std::getenv(env::kLogMinFreeBytes)) {
-        logOpts.min_free_bytes =
-            std::strtoull(v, nullptr, 10);
-    }
-
-    g_lastLogPath = logPath;
-    g_lastSessionId = rt->session_id;
-    g_lastAppName = rt->app_name;
-
-
-    std::shared_ptr<const RunPartContext> initial_run_part;
-    if (segmented &&
-        (rt->run_roll_every_ms > 0 || rt->run_roll_max_bytes > 0)) {
-        initial_run_part = std::make_shared<const RunPartContext>(
-            rt->run_id, rt->run_id, std::string(), 1u,
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now().time_since_epoch())
-                .count(),
-            0u);
-        }
-    if (initial_run_part && rt->run_roll_max_bytes > 0) {
-        logOpts.on_serialized_bytes =
-            [part = initial_run_part](const uint64_t bytes) noexcept {
-                part->addSerializedBytes(bytes);
-        };
-    }
-
-    GFL_LOG_DEBUG("Opening log file: ", logPath);
-    if (!rt->logger->open(logOpts)) {
-        GFL_LOG_ERROR("Failed to open logger at: ", logPath);
-        return false;
-    }
-    auto initial_dictionary =
-        segmented ? std::make_shared<SegmentDictionaryEmitter>() : nullptr;
-
-    if (!rt->publishSegmentContext(std::make_shared<SegmentContext>(
-            rt->run_id, rt->session_id, rt->segment_index,
-            detail::GetTimestampNs(), rt->logger, initial_dictionary,
-            initial_run_part))) {
-        GFL_LOG_ERROR("Failed to publish the initial segment context");
-        rt->logger->close();
-        return false;
-    }
-
-    // Fire-and-forget version-discovery probe. Hits
-    // <backend_url><api_path>/info/version with 2s timeouts to detect
-    // client/backend version drift early and emit a clear warning.
-    // Must NEVER block init - detached, bounded by httplib timeouts.
-    // Reads GPUFL_BACKEND_URL from the environment (creds live on
-    // UploadOptions now); skipped when unset (offline / file-only mode).
-    std::string probeUrl;
-    if (const char* e = std::getenv(env::kBackendUrl)) probeUrl = e;
-    else if (const char* e2 = std::getenv(env::kRemoteConfig)) probeUrl = e2;
-    if (!probeUrl.empty()) {
-        std::thread([url = probeUrl, ap = g_opts.api_path] {
-            probeBackendVersion(url, ap);
-        }).detach();
-    }
-
-    set_runtime(std::move(rt));
-    rt = nullptr;  // rt is now moved
-
-    GFL_LOG_DEBUG("Initializing Monitor (CUPTI)...");
-    MonitorOptions mOpts;
-    mOpts.enable_debug_output = g_opts.enable_debug_output;
-    mOpts.profiling_engine = g_opts.profiling_engine;
-
-    // Allow environment variable override: GPUFL_PROFILING_ENGINE.
-    // Accepts exactly the six canonical engine names. Unrecognized
-    // values are logged and ignored (the engine stays at whatever
-    // g_opts set above) rather than silently doing nothing.
-    if (const char* envEngine = std::getenv(gpufl::env::kProfilingEngine)) {
-        const std::string val(envEngine);
-        bool matched = true;
-        if (val == "Monitor")                  mOpts.profiling_engine = ProfilingEngine::Monitor;
-        else if (val == "Trace")               mOpts.profiling_engine = ProfilingEngine::Trace;
-        else if (val == "PcSampling")          mOpts.profiling_engine = ProfilingEngine::PcSampling;
-        else if (val == "SassMetrics")         mOpts.profiling_engine = ProfilingEngine::SassMetrics;
-        else if (val == "PmSampling")          mOpts.profiling_engine = ProfilingEngine::PmSampling;
-        else if (val == "RangeProfiler")       mOpts.profiling_engine = ProfilingEngine::RangeProfiler;
-        else if (val == "RangeProfilerKernelReplay")
-            mOpts.profiling_engine = ProfilingEngine::RangeProfilerKernelReplay;
-        else if (val == "Deep")                mOpts.profiling_engine = ProfilingEngine::Deep;
-        else matched = false;
-        if (matched) {
-            GFL_LOG_DEBUG("GPUFL_PROFILING_ENGINE override: ", val);
-        } else {
-            GFL_LOG_ERROR(
-                "GPUFL_PROFILING_ENGINE='", val, "' is not a recognized "
-                "engine name. Valid values: Monitor, Trace, PcSampling, "
-                "SassMetrics, PmSampling, RangeProfiler, Deep. Keeping current engine "
-                "selection.");
-        }
-    }
-
-    // Allow environment override of the PC sampling period (log2 cycles/sample),
-    // e.g. `gpufl trace --pc-sample-period`. The injection path has no other way
-    // to reach pc_sampling_period. CUPTI accepts 5..31; out-of-range/garbage is
-    // logged and ignored so a typo can't silently disable sampling.
-    if (const char* v = std::getenv(gpufl::env::kPcSamplingPeriod)) {
-        char* end = nullptr;
-        const unsigned long n = std::strtoul(v, &end, 10);
-        if (end != v && *end == '\0' && n >= 5 && n <= 31) {
-            mOpts.pc_sampling_period = static_cast<uint32_t>(n);
-            GFL_LOG_DEBUG("GPUFL_PC_SAMPLING_PERIOD override: 2^", n, " = ",
-                          (1ul << n), " cycles/sample");
-        } else {
-            GFL_LOG_ERROR("GPUFL_PC_SAMPLING_PERIOD='", v, "' is invalid "
-                          "(expected an integer 5..31). Keeping ",
-                          mOpts.pc_sampling_period, ".");
-        }
-    }
-
-    mOpts.kernel_sample_rate_ms = g_opts.kernel_sample_rate_ms;
-    mOpts.enable_stack_trace = g_opts.enable_stack_trace;
-    mOpts.enable_source_collection = g_opts.enable_source_collection;
-    // Propagate the framework-correlation flag to the backend so
-    // CuptiBackend::start can decide whether to enable
-    // CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION.
-    mOpts.enable_external_correlation = g_opts.enable_external_correlation;
-    mOpts.enable_synchronization      = g_opts.enable_synchronization;
-    mOpts.enable_memory_tracking      = g_opts.enable_memory_tracking;
-    mOpts.enable_cuda_graphs_tracking = g_opts.enable_cuda_graphs_tracking;
-    mOpts.pm_sampling_interval_us = g_opts.pm_sampling_interval_us;
-    mOpts.pm_sampling_max_samples = g_opts.pm_sampling_max_samples;
-    mOpts.pm_sampling_preset = g_opts.pm_sampling_preset;
-    mOpts.pm_sampling_metrics = g_opts.pm_sampling_metrics;
-    mOpts.pm_sampling_scope_only = g_opts.pm_sampling_scope_only;
-    mOpts.deep_arm_mode = g_opts.deep_window_only ? DeepArmMode::WindowOnly
-                                                  : DeepArmMode::Always;
-    // GPUFL_DEEP_ARM reaches the injection path, which can't set InitOptions.
-    if (const char* v = std::getenv(gpufl::env::kDeepArm)) {
-        const std::string val(v);
-        if (val == "window") {
-            mOpts.deep_arm_mode = DeepArmMode::WindowOnly;
-        } else if (val == "always") {
-            mOpts.deep_arm_mode = DeepArmMode::Always;
-        } else {
-            GFL_LOG_ERROR("GPUFL_DEEP_ARM='", val,
-                          "' is not recognized. Valid values: always, window. "
-                          "Keeping current deep arm mode.");
-        }
-    }
-    // WindowOnly subsumes the PM-specific gate: PM sampling already arms on
-    // scope start, which is exactly what a window is.
-    if (mOpts.deep_arm_mode == DeepArmMode::WindowOnly) {
-        mOpts.pm_sampling_scope_only = true;
-    }
-    mOpts.backend_kind = ToMonitorBackendKind(g_opts.backend);
-
-    // EAGER module loading is OPT-IN. By default we leave CUDA on its normal
-    // LAZY loading; the per-architecture SASS exclusion gate
-    // (GPUFL_SASS_EXCLUDE_ARCHS, in SassMetricsEngine) is the default guard
-    // for the CUPTI lazy-patching deadlock - it disables SASS only on
-    // architectures confirmed to hang, rather than paying EAGER's
-    // whole-process startup/memory cost everywhere. EAGER remains available
-    // as a per-run alternative: GPUFL_EAGER_MODULE_LOADING=1 forces it (it
-    // finalizes every module up front, while the process is quiescent, so the
-    // concurrent-launch finalize that triggers the deadlock never happens).
-    //
-    // This MUST run before the first CUDA call below (cudaGetDevice creates
-    // the context, which reads CUDA_MODULE_LOADING). Honor a value the user
-    // already set. Python callers apply the same opt-in earlier in
-    // gpufl.init(); this covers the pure-C++ path.
-    if (mOpts.profiling_engine == ProfilingEngine::SassMetrics ||
-        mOpts.profiling_engine == ProfilingEngine::Deep) {
-        const char* knobEnv = std::getenv(env::kEagerModuleLoading);
-        const std::string knob = knobEnv ? knobEnv : "";
-        const bool optedIn = (knob == "1" || knob == "true" ||
-                              knob == "yes" || knob == "on");
-        if (optedIn && std::getenv(env::kCudaModuleLoading) == nullptr) {
-#if defined(_WIN32)
-            _putenv_s(env::kCudaModuleLoading, "EAGER");
-#else
-            setenv(gpufl::env::kCudaModuleLoading, "EAGER", /*overwrite=*/0);
-#endif
-            GFL_LOG_DEBUG("[gpufl] CUDA_MODULE_LOADING=EAGER set "
-                          "(GPUFL_EAGER_MODULE_LOADING opt-in) for SASS/Deep.");
-        }
-    }
-
-    // Auto-tune kernel_sample_rate_ms on older NVIDIA GPUs where SASS metric
-    // overhead per kernel launch is much higher. A default 50ms on sm_86 can
-    // lead to hundreds of captured kernels per second each carrying
-    // instrumentation replay cost; bump to 200ms so users get a workable
-    // profile without wild slowdowns. Users can still explicitly set a lower
-    // value in InitOptions or via config file.
-#if GPUFL_HAS_CUDA || defined(__CUDACC__)
-    if (mOpts.kernel_sample_rate_ms > 0 && mOpts.kernel_sample_rate_ms < 200 &&
-        (mOpts.profiling_engine == ProfilingEngine::SassMetrics ||
-         mOpts.profiling_engine == ProfilingEngine::Deep)) {
-        cudaDeviceProp prop{};
-        int devId = 0;
-        if (cudaGetDevice(&devId) == cudaSuccess &&
-            cudaGetDeviceProperties(&prop, devId) == cudaSuccess) {
-            const bool preSm120 = prop.major < 12;
-            if (preSm120 && mOpts.kernel_sample_rate_ms == g_opts.kernel_sample_rate_ms) {
-                GFL_LOG_DEBUG("[gpufl] Auto-tuning kernel_sample_rate_ms 50 -> 200 "
-                              "on sm_", prop.major, prop.minor,
-                              " (SASS metrics have significant per-launch overhead "
-                              "on pre-sm_120 GPUs). Set the value explicitly to override.");
-                mOpts.kernel_sample_rate_ms = 200;
-            }
-        }
-    }
-#endif
-
-    Monitor::Initialize(mOpts);
-
-    GFL_LOG_DEBUG("Starting Monitor...");
-    Monitor::Start();
-    GFL_LOG_DEBUG("Monitor started");
-
-    Runtime* rt_ptr = runtime();
-    const auto segment = rt_ptr ? rt_ptr->acquireSegmentContext() : nullptr;
-    if (!segment) {
-        GFL_LOG_ERROR("Missing active segment context before job_start");
-        return false;
-    }
-
-    // Runtime backend selection
-    std::string backendReason;
-    auto backendCollectors =
-        CreateBackendCollectors(g_opts.backend, &backendReason);
-    rt_ptr->unified_gpu_collector = std::move(backendCollectors.unified_collector);
-    rt_ptr->collector = std::move(backendCollectors.telemetry_collector);
-    rt_ptr->static_info_collector =
-        std::move(backendCollectors.static_info_collector);
-
-    if (!rt_ptr->collector) {
-        GFL_LOG_ERROR("Failed to initialize GPU backend: ", backendReason);
-    }
-
-    // init event with inventory (optional)
-    InitEvent ie;
-    ie.pid = detail::GetPid();
-    ie.session_id = segment->session_id;
-    ie.app = rt_ptr->app_name;
-    ie.log_path = logPath;
-    ie.ts_ns = detail::GetTimestampNs();
-    // Collector may be unavailable on systems without NVML/ROCm. Guard usage.
-    if (rt_ptr->collector) {
-        ie.devices = rt_ptr->collector->sampleAll();
-    }
-    const bool skipStaticInfoDuringInject = windowsInjectedProcess_();
-    if (rt_ptr->static_info_collector && !skipStaticInfoDuringInject) {
-        ie.gpu_static_device_infos =
-            rt_ptr->static_info_collector->sampleStaticInfo();
-    } else if (skipStaticInfoDuringInject) {
-        GFL_LOG_DEBUG("Skipping CUDA static GPU inventory during Windows injection init.");
-    }
-    ie.host = rt_ptr->host_collector->sample();
-
-    ie.session_kind = ProfilingEngineSessionKind(mOpts.profiling_engine);
-    ie.profiling_engine = ProfilingEngineWireName(mOpts.profiling_engine);
-    ie.run_id = segment->run_id;
-    ie.segment_index = segment->segment_index;
-
-    if (segment->run_part) {
-        ie.roll_chain_id = segment->run_part->roll_chain_id;
-        ie.previous_run_id = segment->run_part->previous_run_id;
-        ie.part_index = segment->run_part->part_index;
-    }
-
-    // Multi-pass grouping (P1): the launcher's multi-pass driver tags each
-    // child with GPUFL_ANALYSIS_ID + its 0-based GPUFL_PASS_INDEX and the
-    // GPUFL_PASS_COUNT total so the backend can stitch the isolated passes
-    // into one analysis. Read straight from the env here (same pattern as the
-    // GPUFL_PROFILING_ENGINE override above). Absent → an ordinary single-pass
-    // run: analysis_id stays empty and the three fields are omitted from
-    // job_start (see InitEventModel), keeping single runs wire-identical.
-    if (const char* envAnalysis = std::getenv(gpufl::env::kAnalysisId);
-        envAnalysis && *envAnalysis) {
-        ie.analysis_id = envAnalysis;
-        if (const char* envIdx = std::getenv(gpufl::env::kPassIndex))
-            ie.pass_index = std::atoi(envIdx);
-        if (const char* envCnt = std::getenv(gpufl::env::kPassCount))
-            ie.pass_count = std::atoi(envCnt);
-        GFL_LOG_DEBUG("Multi-pass: analysis_id=", ie.analysis_id,
-                      " pass ", ie.pass_index, "/", ie.pass_count);
-    }
-
-    segment->logger->write(model::InitEventModel(ie));
-
-    if (segmented) {
-        SegmentRuntime::Options segment_options;
-        segment_options.runtime = rt_ptr;
-        segment_options.logger_options = logOpts;
-        segment_options.logger_options.on_serialized_bytes = {};
-        segment_options.init_template = ie;
-        segment_options.segment_every_ms = rt_ptr->segment_every_ms;
-        segment_options.segment_max_rows = rt_ptr->segment_max_rows;
-        segment_options.run_roll_every_ms = rt_ptr->run_roll_every_ms;
-        segment_options.run_roll_max_bytes = rt_ptr->run_roll_max_bytes;
-        rt_ptr->segment_runtime =
-            std::make_shared<SegmentRuntime>(std::move(segment_options));
-        if (!rt_ptr->segment_runtime->start()) {
-            GFL_LOG_ERROR("Failed to start SegmentRuntime");
-            shutdown();
-            return false;
-        }
-    }
-
-    // Configure the sampler with collectors / interval. This does NOT
-    // start the worker - that happens via activate(), driven either by
-    // the continuous-mode baseline activation below or by GFL_SCOPE
-    // entry / systemStart() at runtime.
-    if (g_opts.system_sample_rate_ms > 0 && rt_ptr->collector) {
-        rt_ptr->sampler.configure(
-            rt_ptr->app_name,
-            [rt_ptr] {
-                return rt_ptr->acquireSegmentContext("sampler");
-            },
-            [rt_ptr] {
-                return rt_ptr->peekSegmentContext();
-            },
-            rt_ptr->collector, g_opts.system_sample_rate_ms,
-            rt_ptr->host_collector.get(),
-            [rt_ptr](const uint32_t index, const uint64_t rows,
-                     const int64_t steady_ns, const int64_t event_ns) {
-                if (rt_ptr->segment_runtime) {
-                    rt_ptr->segment_runtime->noteRows(
-                        index, rows, steady_ns, event_ns);
-                }
-            });
-    }
-
-    // Continuous mode: emit the SystemStart event and take the baseline
-    // activation that keeps the sampler running until shutdown().
-    if (g_opts.continuous_system_sampling && segment->logger) {
-        SystemStartEvent e;
-        e.pid = gpufl::detail::GetPid();
-        e.app = rt_ptr->app_name;
-        e.name = "sampling_start";
-        e.session_id = segment->session_id;
-        e.ts_ns = gpufl::detail::GetTimestampNs();
-        if (rt_ptr->collector) e.devices = rt_ptr->collector->sampleAll();
-        if (rt_ptr->host_collector) e.host = rt_ptr->host_collector->sample();
-        segment->logger->write(model::SystemStartModel(e));
-    }
-    if (g_opts.continuous_system_sampling && g_opts.system_sample_rate_ms > 0 &&
-        rt_ptr->collector) {
-        rt_ptr->sampler.activate();
-    }
-
-    // Intentionally disabled - shutdown order must be explicit to avoid CUPTI
-    // teardown races std::atexit(shutdown);
+    detail::ClientStartup startup(g_opts);
+    if (!startup.start()) return false;
 
 #if GPUFL_HAS_NVTX
     // Enable NVTX push/pop now that CUPTI has wired up its injection.
@@ -1084,14 +516,15 @@ ScopedMonitor::~ScopedMonitor() {
 void generateReport(const std::string& output_path) {
     namespace fs = std::filesystem;
 
-    fs::path p(g_lastLogPath);
+    const auto report_source = detail::lastSessionReportSource();
+    fs::path p(report_source.log_path);
     if (p.extension() == ".log") {
         p.replace_extension();
     }
 
     report::TextReport::Options opts;
-    const fs::path sessionDir = p / g_lastSessionId;
-    if (!g_lastSessionId.empty() && fs::exists(sessionDir)) {
+    const fs::path sessionDir = p / report_source.session_id;
+    if (!report_source.session_id.empty() && fs::exists(sessionDir)) {
         opts.log_dir = sessionDir.string();
         opts.log_prefix.clear();
     } else {

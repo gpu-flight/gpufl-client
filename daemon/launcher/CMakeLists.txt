@@ -28,6 +28,7 @@ add_executable(gpufl_launcher
     cli_trace_options.cpp
     info_command.cpp
     trace_command_common.cpp
+    trace_run_plan.cpp
     deep_window_env.cpp
     segmentation_env.cpp
     ${GPUFL_LAUNCHER_TRACE_IMPL}

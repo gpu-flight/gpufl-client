@@ -1,4 +1,5 @@
 #include "trace_command_common.hpp"
+#include "trace_run_plan.hpp"
 
 #include <zlib.h>
 
@@ -11,8 +12,6 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
-#include <iomanip>
-#include <random>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -54,48 +53,6 @@ std::string comboForToken(const std::string& token) {
 std::string firstEngineOfToken(const std::string& token) {
     const size_t plus = token.find('+');
     return plus == std::string::npos ? token : token.substr(0, plus);
-}
-
-std::string makeSessionId() {
-    static std::mt19937_64 rng{
-        static_cast<uint64_t>(
-            std::chrono::steady_clock::now().time_since_epoch().count())};
-    uint64_t v = rng();
-    std::ostringstream os;
-    os << std::hex << std::setw(8) << std::setfill('0') << (v & 0xffffffffu);
-    return os.str();
-}
-
-std::string makeAnalysisId() {
-    static std::mt19937_64 rng{
-        static_cast<uint64_t>(
-            std::chrono::steady_clock::now().time_since_epoch().count()) ^
-        0x9e3779b97f4a7c15ULL};
-    const uint64_t a = rng();
-    const uint64_t b = rng();
-    char buf[40];
-    std::snprintf(buf, sizeof(buf), "%08x-%04x-%04x-%04x-%012llx",
-                  static_cast<unsigned>(a >> 32),
-                  static_cast<unsigned>((a >> 16) & 0xffff),
-                  static_cast<unsigned>(a & 0xffff),
-                  static_cast<unsigned>((b >> 48) & 0xffff),
-                  static_cast<unsigned long long>(b & 0xffffffffffffULL));
-    return buf;
-}
-
-// Filesystem-safe slug for a run-folder name: keep [A-Za-z0-9-_.], turn anything else into '-',
-// trim leading/trailing dashes, cap length. Empty input falls back to "session".
-std::string slugForPath(const std::string& in) {
-    auto safe = [](const char c) {
-        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-               (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.';
-    };
-    std::string out;
-    for (const char c : in) out.push_back(safe(c) ? c : '-');
-    while (!out.empty() && out.front() == '-') out.erase(out.begin());
-    while (!out.empty() && out.back() == '-') out.pop_back();
-    if (out.size() > 48) out.resize(48);
-    return out.empty() ? std::string("session") : out;
 }
 
 int64_t nowNs() {
@@ -758,37 +715,13 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
         return 3;
     }
 
-    const std::vector<std::string> plan = resolvePassPlan(args);
-    const bool multipass = plan.size() > 1;
-
-    const std::string analysis_id = multipass ? makeAnalysisId() : std::string();
-    const std::string run_id = segmented ? generateRunId() : std::string();
-    const std::string dir_tag =
-        multipass ? analysis_id : (segmented ? run_id : makeSessionId());
-
-    const std::string app_name = args.name.empty()
-                               ? platform.defaultAppName(args.command.front())
-                               : args.name;
-
-    // Where this run's session folder(s) land. The default output dir is already
-    // per-run (defaultOutputDir(dir_tag)), so sessions sit flat inside it. An
-    // explicit --output is a dir the user reuses across runs:
-    //   - multi-pass nests its passes under a readable "run-<name>-<analysis_id>"
-    //     folder so the passes of one analysis stay grouped (a flat dir would lose
-    //     which sessions belong to the same run);
-    //   - single-pass is one session, so it lands flat as <output>/<session_id>/ -
-    //     matching embedded gpufl and the upload agent's <parent>/<session_id>
-    //     discovery, with no redundant per-session wrapper.
-    fs::path output_dir;
-    if (args.output_dir.empty()) {
-        output_dir = platform.defaultOutputDir(dir_tag);
-    } else if (multipass) {
-        const std::string run_folder =
-            "run-" + slugForPath(app_name) + "-" + dir_tag.substr(0, 8);
-        output_dir = fs::path(args.output_dir) / run_folder;
-    } else {
-        output_dir = fs::path(args.output_dir);
-    }
+    const TraceRunPlan trace_plan = createTraceRunPlan(args, platform);
+    const std::vector<std::string>& plan = trace_plan.passes;
+    const bool multipass = trace_plan.multipass;
+    const std::string& analysis_id = trace_plan.analysis_id;
+    const std::string& run_id = trace_plan.run_id;
+    const std::string& app_name = trace_plan.app_name;
+    const fs::path& output_dir = trace_plan.output_dir;
 
     std::error_code ec;
     fs::create_directories(output_dir, ec);
@@ -838,17 +771,7 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
     if (!applyDeepWindowEnv(args, platform)) return 2;
     if (!applySegmentationEnv(args, run_id, platform)) return 2;
 
-    // A bounded window stops the target after warmup+window wall-clock;
-    // run_ms == 0 keeps the historical "run until the target exits" behavior.
-    RunOptions run_opts;
-    if (args.window_ms > 0) {
-        run_opts.run_ms = args.warmup_ms + args.window_ms;
-    }
-    if (args.window_timeout_ms > 0) {
-        run_opts.run_ms = run_opts.run_ms > 0
-                        ? std::min(run_opts.run_ms, args.window_timeout_ms)
-                        : args.window_timeout_ms;
-    }
+    const RunOptions& run_opts = trace_plan.run_options;
 
     AgentProcess agent;
     if (args.upload) {
