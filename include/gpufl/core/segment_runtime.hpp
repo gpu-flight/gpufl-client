@@ -15,6 +15,7 @@ namespace gpufl {
 
 struct Runtime;
 struct SegmentContext;
+struct RunPartContext;
 
 /**
  * Production transaction around SegmentCoordinator.
@@ -64,6 +65,7 @@ class SegmentRuntime {
     };
 
     bool cutover_(SegmentBoundaryRequest& boundary);
+    void accountSerializedBytes_();
     void enqueueRetirement_(RetiredSegment retired);
     void retirementLoop_();
     bool retire_(RetiredSegment retired);
@@ -85,6 +87,9 @@ class SegmentRuntime {
     std::deque<RetiredSegment> retirement_queue_;
     bool retirement_stopping_ = false;
     std::thread retirement_thread_;
+    std::mutex serialized_bytes_mu_;
+    std::shared_ptr<const RunPartContext> observed_run_part_;
+    uint64_t observed_run_part_bytes_ = 0;
 };
 
 }  // namespace gpufl

@@ -327,6 +327,11 @@ bool FileLogSink::FileChannel::write(std::string_view line) {
     return true;
 }
 
+void FileLogSink::setSerializedBytesCallbackBeforeFirstWrite(
+    std::function<void(std::uint64_t)> callback) {
+    on_serialized_bytes_ = std::move(callback);
+}
+
 FileLogSink::RotationStats FileLogSink::FileChannel::rotationStats() const {
     std::lock_guard lk(mu_);
     return rotation_stats_;
@@ -334,7 +339,7 @@ FileLogSink::RotationStats FileLogSink::FileChannel::rotationStats() const {
 
 // --- FileLogSink ---
 
-FileLogSink::FileLogSink(const Logger::Options& opt) {
+FileLogSink::FileLogSink(const Logger::Options& opt): on_serialized_bytes_(opt.on_serialized_bytes) {
     if (opt.base_path.empty()) return;
     if (opt.session_id.empty()) {
         GFL_LOG_ERROR("FileLogSink: session_id is required for session "
@@ -753,6 +758,10 @@ void FileLogSink::write(Channel ch, std::string_view json) {
                     available, reduced, std::memory_order_relaxed)) {
                 break;
             }
+        }
+
+        if (on_serialized_bytes_) {
+            on_serialized_bytes_(bytes);
         }
     }
 }

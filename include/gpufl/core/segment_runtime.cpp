@@ -94,6 +94,7 @@ bool SegmentRuntime::start() {
 }
 
 bool SegmentRuntime::service() {
+    accountSerializedBytes_();
     return coordinator_.service();
 }
 
@@ -111,6 +112,31 @@ void SegmentRuntime::noteBytes(const uint32_t segment_index,
                                const int64_t committed_event_ns) {
     coordinator_.noteBytes(segment_index, bytes, committed_steady_ns,
                            committed_event_ns);
+}
+
+void SegmentRuntime::accountSerializedBytes_() {
+    if (options_.run_roll_max_bytes == 0 || !options_.runtime) return;
+
+    const auto context = options_.runtime->peekSegmentContext();
+    if (!context || !context->run_part) return;
+
+    const auto part = context->run_part;
+    const uint64_t observed = part->serializedBytes();
+    uint64_t delta = 0;
+    {
+        std::lock_guard lock(serialized_bytes_mu_);
+        if (observed_run_part_ != part) {
+            observed_run_part_ = part;
+            observed_run_part_bytes_ = 0;
+        }
+        if (observed <= observed_run_part_bytes_) return;
+
+        delta = observed - observed_run_part_bytes_;
+        observed_run_part_bytes_ = observed;
+    }
+
+    coordinator_.noteBytes(context->segment_index, delta, steadyNowNs(),
+        detail::GetTimestampNs());
 }
 
 bool SegmentRuntime::cutover_(SegmentBoundaryRequest& boundary) {
@@ -161,6 +187,15 @@ bool SegmentRuntime::cutover_(SegmentBoundaryRequest& boundary) {
             } else {
                 next_run_part = retiring->run_part;
             }
+
+            if (next_run_part && options_.run_roll_max_bytes > 0) {
+                next_logger->setSerializedBytesCallbackBeforeFirstWrite(
+                  [part = next_run_part](const uint64_t bytes) noexcept {
+                      part->addSerializedBytes(bytes);
+                  }
+                );
+            }
+
             const std::string next_run_id =
                 next_run_part ? next_run_part->run_id : retiring->run_id;
             const uint32_t wire_index =

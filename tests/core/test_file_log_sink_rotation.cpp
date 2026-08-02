@@ -163,6 +163,19 @@ class FileLogSinkRotationTest : public ::testing::Test {
     std::int64_t fake_now_ms_ = 0;
 };
 
+class RawJsonEvent final : public gpufl::IJsonSerializable {
+public:
+    RawJsonEvent(const gpufl::Channel channel, std::string json)
+        : channel_(channel), json_(std::move(json)) {}
+
+    std::string buildJson() const override { return json_; }
+    gpufl::Channel channel() const override { return channel_; }
+
+private:
+    gpufl::Channel channel_;
+    std::string json_;
+};
+
 TEST_F(FileLogSinkRotationTest, TimeTriggerPublishesOnceWindowSpanExceeded) {
     gpufl::FileLogSink sink(options(/*rotate_after_ms=*/5000));
 
@@ -218,6 +231,61 @@ TEST_F(FileLogSinkRotationTest, SizeTriggerStillRotatesAndRecordsSize) {
     EXPECT_EQ(publishedWindows("device"), 1u);
     EXPECT_EQ(sink.rotationStats().by_size, 1u);
     EXPECT_EQ(sink.rotationStats().by_time, 0u);
+}
+
+TEST_F(FileLogSinkRotationTest,
+       ReportsAcceptedSerializedBytesForExactChannelFanout) {
+    std::vector<std::uint64_t> reported;
+    auto opt = options(/*rotate_after_ms=*/0);
+    opt.on_serialized_bytes = [&reported](const std::uint64_t bytes) {
+        reported.push_back(bytes);
+    };
+
+    gpufl::FileLogSink sink(opt);
+    const std::string device_line = R"({"device":1})";
+    const std::string shared_line = R"({"shared":true})";
+
+    sink.write(gpufl::Channel::Device, device_line);
+    sink.write(gpufl::Channel::All, shared_line);
+
+    ASSERT_EQ(reported.size(), 2u);
+    EXPECT_EQ(reported[0], device_line.size() + 1u);
+    EXPECT_EQ(reported[1], 4u * (shared_line.size() + 1u));
+}
+
+TEST_F(FileLogSinkRotationTest,
+       DoesNotReportSerializedBytesForSpoolRejectedWrites) {
+    std::vector<std::uint64_t> reported;
+    auto opt = options(/*rotate_after_ms=*/0);
+    opt.max_spool_bytes = 1;
+    opt.min_free_bytes = 0;
+    opt.on_serialized_bytes = [&reported](const std::uint64_t bytes) {
+        reported.push_back(bytes);
+    };
+
+    gpufl::FileLogSink sink(opt);
+    sink.write(gpufl::Channel::Device, R"({"event":1})");
+
+    EXPECT_TRUE(sink.rotationStats().spool_saturated);
+    EXPECT_TRUE(reported.empty());
+}
+
+TEST_F(FileLogSinkRotationTest,
+       LoggerBindsSerializedBytesCallbackBeforeFirstWrite) {
+    gpufl::Logger logger;
+    ASSERT_TRUE(logger.open(options(/*rotate_after_ms=*/0)));
+
+    std::vector<std::uint64_t> reported;
+    logger.setSerializedBytesCallbackBeforeFirstWrite(
+        [&reported](const std::uint64_t bytes) {
+            reported.push_back(bytes);
+        });
+
+    const std::string json = R"({"event":"bound"})";
+    logger.write(RawJsonEvent(gpufl::Channel::Device, json));
+
+    ASSERT_EQ(reported.size(), 1u);
+    EXPECT_EQ(reported[0], json.size() + 1u);
 }
 
 TEST_F(FileLogSinkRotationTest,

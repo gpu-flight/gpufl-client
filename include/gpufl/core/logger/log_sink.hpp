@@ -1,6 +1,8 @@
 #pragma once
 
 #include <string_view>
+#include <cstdint>
+#include <functional>
 
 #include "gpufl/core/model/serializable.hpp"
 
@@ -40,6 +42,14 @@ class ILogSink {
      *              bytes directly into a POST body).
      */
     virtual void write(Channel ch, std::string_view json) = 0;
+
+    /**
+     * Replace file-output byte accounting before the sink's first write.
+     * Custom sinks may ignore this hook. Callers must not invoke it after
+     * events have begun flowing if they need complete accounting.
+     */
+    virtual void setSerializedBytesCallbackBeforeFirstWrite(
+        std::function<void(uint64_t)> callback) {}
 
     /**
      * Called from Logger::close() before destruction. Implementations

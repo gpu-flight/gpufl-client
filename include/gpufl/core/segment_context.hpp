@@ -8,6 +8,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <string>
+#include <limits>
 
 namespace gpufl {
 
@@ -46,6 +47,29 @@ struct RunPartContext {
     const uint32_t part_index;
     const int64_t run_started_mono_ns;
     const uint32_t first_segment_index;
+
+    void addSerializedBytes(const uint64_t bytes) const noexcept {
+        auto current = serialized_bytes_.load(std::memory_order_relaxed);
+        for (;;) {
+            const uint64_t next =
+                bytes > (std::numeric_limits<uint64_t>::max)() - current
+                    ? (std::numeric_limits<uint64_t>::max)()
+                    : current + bytes;
+            if (serialized_bytes_.compare_exchange_weak(
+                    current, next, std::memory_order_relaxed,
+                    std::memory_order_relaxed)) {
+                return;
+            }
+        }
+    }
+
+    uint64_t serializedBytes() const noexcept {
+        return serialized_bytes_.load(std::memory_order_relaxed);
+    }
+
+private:
+    mutable std::atomic<uint64_t> serialized_bytes_{0};
+
 };
 
 /**
