@@ -25,6 +25,7 @@
 #include "gpufl/core/model/synchronization_event_model.hpp"
 #include "gpufl/core/model/memory_alloc_event_model.hpp"
 #include "gpufl/core/model/graph_launch_event_model.hpp"
+#include "gpufl/core/model/graph_node_definition_model.hpp"
 #include "gpufl/core/model/lifecycle_model.hpp"
 #include "gpufl/core/monitor_adapter.hpp"
 #include "gpufl/core/monitor_batch_manager.hpp"
@@ -58,6 +59,7 @@ public:
         launchMetaByCorr.clear();
         emittedKernelCorrIds.clear();
         syncStackByCorr.clear();
+        graphExecByCorr.clear();
         execSignatureByScope.clear();
     }
 
@@ -143,6 +145,7 @@ public:
     std::unordered_map<uint64_t, ActivityRecord> launchMetaByCorr;
     std::unordered_set<uint64_t> emittedKernelCorrIds;
     std::unordered_map<uint64_t, size_t> syncStackByCorr;
+    std::unordered_map<uint64_t, uint64_t> graphExecByCorr;
     std::map<std::string, std::map<std::string, uint64_t>> execSignatureByScope;
 };
 
@@ -267,6 +270,10 @@ struct RecordProcessor {
                 // pass is ~2k such drops in one go).
                 g_state.metadata.launchMetaByCorr.erase(rec.corr_id);
                 return true;
+            case TraceType::GRAPH_EXEC_LAUNCH:
+                g_state.metadata.graphExecByCorr[rec.corr_id] =
+                    rec.graph_exec_key;
+                return true;
             default:
                 break;
         }
@@ -291,6 +298,9 @@ struct RecordProcessor {
                 break;
             case TraceType::GRAPH_LAUNCH:
                 handleGraphLaunch(rec, rt);
+                break;
+            case TraceType::GRAPH_NODE_DEFINITION:
+                handleGraphNodeDefinition(rec, rt);
                 break;
             case TraceType::MEMORY_ALLOC:
                 handleMemoryAlloc(rec, rt);
@@ -422,7 +432,25 @@ private:
         ev.device_id = rec.device_id;
         ev.stream_id = static_cast<uint32_t>(rec.stream);
         ev.corr_id = rec.corr_id;
+        if (const auto it = g_state.metadata.graphExecByCorr.find(rec.corr_id);
+            it != g_state.metadata.graphExecByCorr.end()) {
+            ev.graph_exec_key = it->second;
+            g_state.metadata.graphExecByCorr.erase(it);
+        }
         segment->logger->write(model::GraphLaunchEventModel(ev));
+    }
+
+    static void handleGraphNodeDefinition(const ActivityRecord& rec,
+                                          Runtime* rt) {
+        const auto segment = rt ? rt->acquireSegmentContext() : nullptr;
+        if (!segment || !segment->logger || rec.graph_exec_key == 0) return;
+        GraphNodeDefinitionEvent event;
+        event.session_id = segment->session_id;
+        event.graph_exec_key = rec.graph_exec_key;
+        event.node_index = rec.graph_node_index;
+        event.node_type = rec.graph_node_type;
+        event.dependency_count = rec.graph_node_dependency_count;
+        segment->logger->write(model::GraphNodeDefinitionModel(event));
     }
 
     static void handleMemoryAlloc(const ActivityRecord& rec, Runtime* rt) {
@@ -749,7 +777,9 @@ void Monitor::EnqueueCubinForDisassembly(uint64_t crc, const uint8_t* data, size
 void Monitor::FlushDisassemblyNow() {
     g_state.batches.flushDisassembly();
 }
-void Monitor::PushActivityRecord(const ActivityRecord& rec) { g_monitorBuffer.Push(rec); }
+bool Monitor::PushActivityRecord(const ActivityRecord& rec) {
+    return g_monitorBuffer.Push(rec);
+}
 
 void Monitor::PushScopeRow(const ScopeBatchRow& row) {
     std::lock_guard boundary_lock(g_segmentScopeBoundaryMu);
@@ -877,6 +907,18 @@ void Monitor::EmitSegmentCaptureCapabilities() {
             backend->emitCapabilities();
         }
     }
+}
+
+void Monitor::EmitSegmentMetadata() {
+    if (g_state.adapter) {
+        if (IMonitorBackend* backend = g_state.adapter->backend()) {
+            backend->emitSegmentMetadata();
+        }
+    }
+    // Definitions enter the normal activity ring and are consumed by the
+    // collector's next beat. Do not drain here: RecordProcessor has exactly
+    // one consumer (CollectorLoop), and this helper is also called by startup
+    // and SegmentRuntime threads.
 }
 
 bool Monitor::CommitSegmentBoundary(

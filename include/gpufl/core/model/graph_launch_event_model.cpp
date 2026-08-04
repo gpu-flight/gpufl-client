@@ -18,6 +18,8 @@ std::string GraphLaunchEventModel::buildJson() const {
     //   device_id, stream_id   - context fields
     //   corr_id                - joins to the driver-API record that
     //                            triggered the launch (cuGraphLaunch)
+    //   graph_exec_key         - opaque CUDA graph-execution handle, encoded
+    //                            as hex to preserve all pointer bits in JSON
     std::ostringstream oss;
     oss << "{\"type\":\"graph_launch_event\""
         << ",\"pid\":"          << e_.pid
@@ -29,8 +31,12 @@ std::string GraphLaunchEventModel::buildJson() const {
         << ",\"graph_id\":"     << e_.graph_id
         << ",\"device_id\":"    << e_.device_id
         << ",\"stream_id\":"    << e_.stream_id
-        << ",\"corr_id\":"      << e_.corr_id
-        << "}";
+        << ",\"corr_id\":"      << e_.corr_id;
+    if (e_.graph_exec_key != 0) {
+        oss << ",\"graph_exec_key\":\"0x" << std::hex
+            << e_.graph_exec_key << std::dec << "\"";
+    }
+    oss << "}";
     return oss.str();
 }
 

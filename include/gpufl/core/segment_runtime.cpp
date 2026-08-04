@@ -270,6 +270,11 @@ bool SegmentRuntime::cutover_(SegmentBoundaryRequest& boundary) {
         return false;
     }
 
+    // A CUDA graph may have been instantiated before this segment opened.
+    // Replay its small static definition now so each segment is independently
+    // inspectable, even after an earlier rollover part has finalized.
+    Monitor::EmitSegmentMetadata();
+
     enqueueRetirement_({retiring, boundary});
     return true;
 }

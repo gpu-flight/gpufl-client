@@ -402,7 +402,7 @@ class Monitor {
      * Used by low-level injection callbacks that already have a complete
      * ActivityRecord and should use the normal collector serialization path.
      */
-    static void PushActivityRecord(const ActivityRecord& rec);
+    static bool PushActivityRecord(const ActivityRecord& rec);
 
     /**
      * @brief Bulk-push profile samples (SASS metric rows, etc.) directly
@@ -462,6 +462,9 @@ class Monitor {
      * per-segment counter deltas; repeated calls in one segment are idempotent.
      */
     static void EmitSegmentCaptureCapabilities();
+
+    /** Re-emit process-lived static metadata into the active segment. */
+    static void EmitSegmentMetadata();
 
     /**
      * Serialize application scope mutation with a segment cutover. The

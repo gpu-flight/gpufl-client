@@ -193,6 +193,7 @@ bool ClientStartup::activateRuntime() {
 
     configureCollectors(*active_runtime);
     emitInitialEvent(*active_runtime, *segment);
+    Monitor::EmitSegmentMetadata();
     if (!startSegmentRuntime(*active_runtime)) {
         GFL_LOG_ERROR("Failed to start SegmentRuntime");
         shutdown();

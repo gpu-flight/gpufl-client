@@ -114,6 +114,12 @@ class ICuptiHandler {
                                       int64_t baseCpuNs, uint64_t baseCuptiTs) {
         return false;
     }
+
+    // Re-emit stable, low-volume metadata into the current SegmentContext.
+    // CUDA graphs are often instantiated only once but replayed across many
+    // segments, so a later segment must not lose the definition merely because
+    // it did not create the graph itself.
+    virtual void emitCurrentSegmentMetadata() {}
 };
 
 }  // namespace gpufl

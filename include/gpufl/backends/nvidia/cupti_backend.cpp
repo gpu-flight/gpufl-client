@@ -17,6 +17,7 @@
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
 #include "gpufl/backends/nvidia/engine/pc_sampling_with_sass_engine.hpp"
 #include "gpufl/backends/nvidia/kernel_launch_handler.hpp"
+#include "gpufl/backends/nvidia/graph_structure_handler.hpp"
 #include "gpufl/backends/nvidia/mem_transfer_handler.hpp"
 #include "gpufl/backends/nvidia/resource_handler.hpp"
 #include "gpufl/backends/nvidia/synchronization_handler.hpp"
@@ -130,6 +131,7 @@ void CuptiBackend::initialize(const MonitorOptions& opts) {
     RegisterHandler(std::make_shared<ResourceHandler>(this));
     RegisterHandler(std::make_shared<CudaCleanupHandler>(this));
     RegisterHandler(std::make_shared<KernelLaunchHandler>(this));
+    RegisterHandler(std::make_shared<GraphStructureHandler>(this));
     RegisterHandler(std::make_shared<MemTransferHandler>(this));
     RegisterHandler(std::make_shared<SynchronizationHandler>(this));
 
@@ -991,6 +993,15 @@ void CuptiBackend::RegisterHandler(
     // No lock: called only from initialize() before CUPTI callbacks are enabled
     // (single-threaded setup). handlers_ is immutable once callbacks can fire.
     handlers_.push_back(handler);
+}
+
+void CuptiBackend::emitSegmentMetadata() {
+    // The handler list is immutable after initialize(), so this snapshot is
+    // safe without a registry lock. Individual handlers own synchronization
+    // for any metadata they retain from the callback path.
+    for (const auto& handler : handlers_) {
+        handler->emitCurrentSegmentMetadata();
+    }
 }
 
 void CuptiBackend::FlushOnContextDestroy() {
