@@ -18,6 +18,7 @@ set(GPUFL_TEST_SOURCES
     core/test_deep_window.cpp
     core/test_disabled.cpp
     core/test_file_log_sink_rotation.cpp
+    core/test_lifecycle_control_journal.cpp
     core/test_wire_contract.cpp
     core/test_counter_registry.cpp
     core/test_nvtx_counters.cpp
@@ -26,6 +27,7 @@ set(GPUFL_TEST_SOURCES
     core/test_deep_window_rule.cpp
     core/test_deep_window_rules_install.cpp
     core/test_monitor.cpp
+    core/test_ring_buffer.cpp
     core/test_monitor_configuration.cpp
     core/test_itanium_demangle.cpp
     core/test_sampler.cpp

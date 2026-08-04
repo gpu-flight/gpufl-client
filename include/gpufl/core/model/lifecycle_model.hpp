@@ -9,6 +9,9 @@ struct InitEventModel final : IJsonSerializable {
     explicit InitEventModel(const InitEvent& e) : e_(e) {}
     std::string buildJson() const override;
     Channel channel() const override { return Channel::All; }
+    std::string_view lifecycleControlEventType() const noexcept override {
+        return "job_start";
+    }
 private:
     const InitEvent& e_;
 };
@@ -17,6 +20,9 @@ struct ShutdownEventModel final : IJsonSerializable {
     explicit ShutdownEventModel(const ShutdownEvent& e) : e_(e) {}
     std::string buildJson() const override;
     Channel channel() const override { return Channel::All; }
+    std::string_view lifecycleControlEventType() const noexcept override {
+        return "shutdown";
+    }
 private:
     const ShutdownEvent& e_;
 };
@@ -25,6 +31,9 @@ struct SegmentStartEventModel final : IJsonSerializable {
     explicit SegmentStartEventModel(const SegmentStartEvent& e) : e_(e) {}
     std::string buildJson() const override;
     Channel channel() const override { return Channel::All; }
+    std::string_view lifecycleControlEventType() const noexcept override {
+        return "segment_start";
+    }
 private:
     const SegmentStartEvent& e_;
 };
@@ -33,6 +42,9 @@ struct SegmentEndEventModel final : IJsonSerializable {
     explicit SegmentEndEventModel(const SegmentEndEvent& e) : e_(e) {}
     std::string buildJson() const override;
     Channel channel() const override { return Channel::All; }
+    std::string_view lifecycleControlEventType() const noexcept override {
+        return "segment_end";
+    }
 private:
     const SegmentEndEvent& e_;
 };
@@ -41,6 +53,9 @@ struct RunEndEventModel final : IJsonSerializable {
     explicit RunEndEventModel(const RunEndEvent& e) : e_(e) {}
     std::string buildJson() const override;
     Channel channel() const override { return Channel::All; }
+    std::string_view lifecycleControlEventType() const noexcept override {
+        return "run_end";
+    }
 private:
     const RunEndEvent& e_;
 };
