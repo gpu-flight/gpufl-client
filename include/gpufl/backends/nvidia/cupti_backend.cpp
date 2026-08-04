@@ -248,6 +248,7 @@ void CuptiBackend::start() {
     sync_activity_emitted_.store(0, std::memory_order_relaxed);
     nvtx_marker_emitted_.store(0, std::memory_order_relaxed);
     graph_activity_emitted_.store(0, std::memory_order_relaxed);
+    graph_activity_dropped_.store(0, std::memory_order_relaxed);
     external_correlation_seen_.store(0, std::memory_order_relaxed);
     source_locator_seen_.store(0, std::memory_order_relaxed);
     function_record_seen_.store(0, std::memory_order_relaxed);
@@ -262,6 +263,7 @@ void CuptiBackend::start() {
         capability_sync_rows_baseline_ = 0;
         capability_nvtx_rows_baseline_ = 0;
         capability_graph_rows_baseline_ = 0;
+        capability_graph_rows_dropped_baseline_ = 0;
         capability_external_rows_baseline_ = 0;
         capability_source_rows_baseline_ = 0;
         capability_function_rows_baseline_ = 0;

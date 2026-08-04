@@ -266,6 +266,8 @@ void CUPTIAPI CuptiBackend::BufferCompleted(CUcontext context,
                                 "record with invalid timestamps corr=",
                                 g->correlationId, " start=", g->start,
                                 " end=", g->end);
+                            backend->graph_activity_dropped_.fetch_add(
+                                1, std::memory_order_relaxed);
                         } else {
                             const int64_t end_wall =
                                 static_cast<int64_t>(g->end) -

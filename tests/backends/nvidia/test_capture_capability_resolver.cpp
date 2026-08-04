@@ -68,6 +68,40 @@ TEST(CaptureCapabilityResolver, TraceWithRowsReportsCollectedTimeline) {
     EXPECT_EQ(memory->status, "collected");
 }
 
+TEST(CaptureCapabilityResolver,
+     GraphTimingReportsPartialWhenInvalidRecordsWereDropped) {
+    auto input = BaseInput(gpufl::ProfilingEngine::Trace);
+    input.kernel_activity = true;
+    input.options.enable_cuda_graphs_tracking = true;
+    input.counters.graph_rows = 3;
+    input.counters.graph_rows_dropped = 2;
+
+    const auto evt = gpufl::BuildCaptureCapabilitiesEvent(input);
+
+    const auto* graph = FindCapability(evt, "graph_activity");
+    ASSERT_NE(graph, nullptr);
+    EXPECT_TRUE(graph->requested);
+    EXPECT_EQ(graph->status, "partial");
+    EXPECT_EQ(graph->reason_code, "invalid_timestamps_dropped");
+    EXPECT_NE(graph->message.find("2 invalid-timestamp record(s)"),
+              std::string::npos);
+}
+
+TEST(CaptureCapabilityResolver,
+     GraphTimingWithOnlyDroppedRecordsIsNotReportedAsNoActivity) {
+    auto input = BaseInput(gpufl::ProfilingEngine::Trace);
+    input.kernel_activity = true;
+    input.options.enable_cuda_graphs_tracking = true;
+    input.counters.graph_rows_dropped = 4;
+
+    const auto evt = gpufl::BuildCaptureCapabilitiesEvent(input);
+
+    const auto* graph = FindCapability(evt, "graph_activity");
+    ASSERT_NE(graph, nullptr);
+    EXPECT_EQ(graph->status, "partial");
+    EXPECT_EQ(graph->reason_code, "invalid_timestamps_dropped");
+}
+
 TEST(CaptureCapabilityResolver, PcSamplingSyntheticMajorityReportsFallback) {
     auto input = BaseInput(gpufl::ProfilingEngine::PcSampling);
     input.counters.kernel_rows = 2;

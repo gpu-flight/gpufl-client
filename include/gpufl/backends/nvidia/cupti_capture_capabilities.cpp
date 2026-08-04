@@ -34,6 +34,8 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
         nvtx_marker_emitted_.load(std::memory_order_relaxed);
     const uint64_t graph_rows =
         graph_activity_emitted_.load(std::memory_order_relaxed);
+    const uint64_t graph_rows_dropped =
+        graph_activity_dropped_.load(std::memory_order_relaxed);
     const uint64_t external_rows =
         external_correlation_seen_.load(std::memory_order_relaxed);
     const uint64_t source_rows =
@@ -86,6 +88,8 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
         delta(nvtx_rows, capability_nvtx_rows_baseline_);
     input.counters.graph_rows =
         delta(graph_rows, capability_graph_rows_baseline_);
+    input.counters.graph_rows_dropped =
+        delta(graph_rows_dropped, capability_graph_rows_dropped_baseline_);
     input.counters.external_rows =
         delta(external_rows, capability_external_rows_baseline_);
     input.counters.source_rows =
@@ -142,6 +146,7 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
     capability_sync_rows_baseline_ = sync_rows;
     capability_nvtx_rows_baseline_ = nvtx_rows;
     capability_graph_rows_baseline_ = graph_rows;
+    capability_graph_rows_dropped_baseline_ = graph_rows_dropped;
     capability_external_rows_baseline_ = external_rows;
     capability_source_rows_baseline_ = source_rows;
     capability_function_rows_baseline_ = function_rows;
