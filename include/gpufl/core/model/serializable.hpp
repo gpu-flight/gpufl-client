@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 
 namespace gpufl {
 
@@ -12,6 +13,12 @@ enum class Channel { Device, Scope, System, Sass, All };
 struct IJsonSerializable {
     virtual std::string buildJson() const = 0;
     virtual Channel channel() const = 0;
+    // Empty means normal telemetry. The five lifecycle models override this
+    // so Logger can copy their already-serialized payload into the optional
+    // priority control journal without parsing or serializing a second time.
+    virtual std::string_view lifecycleControlEventType() const noexcept {
+        return {};
+    }
     virtual ~IJsonSerializable() = default;
 };
 

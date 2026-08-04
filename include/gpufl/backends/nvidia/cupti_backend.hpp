@@ -383,6 +383,7 @@ class CuptiBackend : public IMonitorBackend {
     std::atomic<uint64_t> sync_activity_emitted_{0};
     std::atomic<uint64_t> nvtx_marker_emitted_{0};
     std::atomic<uint64_t> graph_activity_emitted_{0};
+    std::atomic<uint64_t> graph_activity_dropped_{0};
     std::atomic<uint64_t> memory_activity_emitted_{0};
     std::atomic<uint64_t> external_correlation_seen_{0};
     std::atomic<uint64_t> source_locator_seen_{0};
@@ -413,6 +414,7 @@ class CuptiBackend : public IMonitorBackend {
     mutable uint64_t capability_sync_rows_baseline_ = 0;
     mutable uint64_t capability_nvtx_rows_baseline_ = 0;
     mutable uint64_t capability_graph_rows_baseline_ = 0;
+    mutable uint64_t capability_graph_rows_dropped_baseline_ = 0;
     mutable uint64_t capability_external_rows_baseline_ = 0;
     mutable uint64_t capability_source_rows_baseline_ = 0;
     mutable uint64_t capability_function_rows_baseline_ = 0;

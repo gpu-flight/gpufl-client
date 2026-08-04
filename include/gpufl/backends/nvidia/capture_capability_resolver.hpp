@@ -17,6 +17,8 @@ struct CaptureCapabilityCounters {
     uint64_t sync_rows = 0;
     uint64_t nvtx_rows = 0;
     uint64_t graph_rows = 0;
+    /** GRAPH_TRACE records discarded because their timing was unusable. */
+    uint64_t graph_rows_dropped = 0;
     uint64_t external_rows = 0;
     uint64_t source_rows = 0;
     uint64_t function_rows = 0;

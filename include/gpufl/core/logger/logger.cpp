@@ -1,6 +1,7 @@
 #include "gpufl/core/logger/logger.hpp"
 
 #include "gpufl/core/logger/file_log_sink.hpp"
+#include "gpufl/core/logger/lifecycle_control_journal.hpp"
 #include "gpufl/core/logger/log_sink.hpp"
 
 namespace gpufl {
@@ -31,6 +32,11 @@ bool Logger::open(const Options& opt) {
     // the caller, with the underlying fs error already on stderr.
     const bool opened = sink->anyChannelOpen();
     addSink(std::move(sink));
+    if (opened && opt_.lifecycle_control_journal_enabled) {
+        lifecycle_control_journal_ = std::make_unique<LifecycleControlJournal>(
+            std::filesystem::path(opt_.base_path) / opt_.session_id,
+            opt_.session_id);
+    }
     return opened;
 }
 
@@ -51,6 +57,7 @@ void Logger::close() {
         if (sink) sink->close();
     }
     sinks_.clear();
+    lifecycle_control_journal_.reset();
 }
 
 void Logger::addSink(std::unique_ptr<ILogSink> sink) {
@@ -72,6 +79,15 @@ void Logger::write(const IJsonSerializable& model) {
     std::lock_guard<std::mutex> lk(sinks_mu_);
     for (auto& sink : sinks_) {
         if (sink) sink->write(ch, json);
+    }
+    if (lifecycle_control_journal_) {
+        const std::string_view event_type = model.lifecycleControlEventType();
+        if (!event_type.empty()) {
+            // The data-plane line is written first. A journal failure is
+            // deliberately non-fatal: the ordinary lifecycle line remains
+            // the compatible eventual-consistency path for older agents.
+            (void)lifecycle_control_journal_->append(event_type, json);
+        }
     }
 }
 

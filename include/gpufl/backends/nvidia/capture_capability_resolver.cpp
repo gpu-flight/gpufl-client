@@ -74,6 +74,7 @@ CaptureCapabilitiesEvent BuildCaptureCapabilitiesEvent(
     const bool syncHasData = input.counters.sync_rows > 0;
     const bool nvtxHasData = input.counters.nvtx_rows > 0;
     const bool graphHasData = input.counters.graph_rows > 0;
+    const bool graphTimingPartial = input.counters.graph_rows_dropped > 0;
     const bool externalHasData = input.counters.external_rows > 0;
     const bool sourceHasData =
         input.counters.source_rows > 0 || input.counters.function_rows > 0;
@@ -240,16 +241,24 @@ CaptureCapabilitiesEvent BuildCaptureCapabilitiesEvent(
     AddCapability(
         evt, "graph_activity", graphRequested,
         graphRequested
-            ? (graphHasData ? "collected" : "enabled_no_data")
+            ? (graphTimingPartial ? "partial"
+                                  : (graphHasData ? "collected" : "enabled_no_data"))
             : (input.options.enable_cuda_graphs_tracking ? "skipped" : "not_requested"),
         graphRequested ? "cupti_graph_trace" : "disabled",
         graphRequested
-            ? (graphHasData ? "" : "enabled_but_no_records")
+            ? (graphTimingPartial ? "invalid_timestamps_dropped"
+                                  : (graphHasData ? "" : "enabled_but_no_records"))
             : (input.kernel_activity ? "disabled_by_option" : "not_selected"),
         graphRequested
-            ? (graphHasData
-                   ? "CUDA graph launch activity records were collected."
-                   : "CUDA graph launch activity was enabled but emitted no rows this session.")
+            ? (graphTimingPartial
+                   ? ("CUDA graph launch activity dropped " +
+                      std::to_string(input.counters.graph_rows_dropped) +
+                      " invalid-timestamp record(s); " +
+                      std::to_string(input.counters.graph_rows) +
+                      " usable timing record(s) remain.")
+                   : (graphHasData
+                          ? "CUDA graph launch activity records were collected."
+                          : "CUDA graph launch activity was enabled but emitted no rows this session."))
             : "CUDA graph launch timeline activity was not collected.");
     AddCapability(
         evt, "cubin_disassembly", input.cubin_requested,

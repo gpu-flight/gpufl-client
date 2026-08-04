@@ -153,6 +153,7 @@ target_sources(gpufl PRIVATE
     include/gpufl/core/dictionary_manager.cpp
     include/gpufl/core/sass_compressor.cpp
     include/gpufl/core/logger/logger.cpp
+    include/gpufl/core/logger/lifecycle_control_journal.cpp
     include/gpufl/core/logger/log_rotator.cpp
     include/gpufl/core/logger/log_salvage.cpp
     include/gpufl/core/logger/session_ownership.cpp

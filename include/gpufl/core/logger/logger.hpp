@@ -13,6 +13,7 @@
 namespace gpufl {
 
 class ILogSink;
+class LifecycleControlJournal;
 
 /**
  * Central log dispatcher - every event emitted via the runtime goes
@@ -117,6 +118,14 @@ class Logger {
         std::function<void(std::uint64_t bytes)> on_serialized_bytes;
 
         /**
+         * Write immutable lifecycle control records beside the normal NDJSON
+         * windows. This remains OFF until the launcher has confirmed an agent
+         * that understands the control endpoint; old agents continue to use
+         * the ordinary data-plane lifecycle records as their fallback.
+         */
+        bool lifecycle_control_journal_enabled = false;
+
+        /**
          * Stop accepting new profiling events once this session's on-disk
          * spool reaches the limit. 0 disables the per-session byte limit.
          * Saturation is terminal for the session and is recorded durably so
@@ -179,6 +188,7 @@ class Logger {
    private:
     Options opt_;
     std::vector<std::unique_ptr<ILogSink>> sinks_;
+    std::unique_ptr<LifecycleControlJournal> lifecycle_control_journal_;
     mutable std::mutex sinks_mu_;
 };
 

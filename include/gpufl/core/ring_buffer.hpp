@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <thread>
 #include <type_traits>
 
@@ -28,7 +29,12 @@ class RingBuffer {
     std::array<Slot, Size> buffer_;
     static constexpr size_t MASK = Size - 1;
 
-    alignas(CACHE_LINE_SIZE) std::atomic<size_t> head_{0};
+    // All producers serialize only the tiny reserve/copy/publish critical
+    // section.  Do not reserve a sequence with fetch_add before a slot is
+    // known free: a timed-out producer would leave an unfillable hole and the
+    // single consumer could never advance beyond it.
+    alignas(CACHE_LINE_SIZE) size_t head_{0};
+    std::mutex producer_mu_;
 
     alignas(CACHE_LINE_SIZE) size_t tail_{0};
 
@@ -36,10 +42,26 @@ class RingBuffer {
 
    public:
     bool Push(const T& item) {
-        const size_t headIdx = head_.fetch_add(1, std::memory_order_acq_rel);
-        size_t index = headIdx & MASK;
+        // CUPTI can invoke producers concurrently.  Bound lock acquisition
+        // just like the old slot wait: a delayed producer drops its own event
+        // without advancing head_, so it cannot poison the FIFO sequence.
+        constexpr int kSpinAttempts = 100;
+        constexpr int kYieldAttempts = 1000;
+        std::unique_lock<std::mutex> producerLock(producer_mu_,
+                                                  std::defer_lock);
+        for (int i = 0; i < kSpinAttempts && !producerLock.owns_lock(); ++i) {
+            if (producerLock.try_lock()) break;
+        }
+        for (int i = 0; i < kYieldAttempts && !producerLock.owns_lock(); ++i) {
+            if (producerLock.try_lock()) break;
+            if (!producerLock.owns_lock()) std::this_thread::yield();
+        }
+        if (!producerLock.owns_lock()) {
+            dropped_.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
 
-        Slot* slot = &buffer_[index];
+        Slot* slot = &buffer_[head_ & MASK];
 
         // Wait for the slot to become FREE. On wraparound the slot still
         // holds READY data the consumer hasn't drained yet - without this
@@ -53,8 +75,6 @@ class RingBuffer {
         // total) is comfortably long enough for the collector to drain
         // a few records and short enough that an actually-dead consumer
         // doesn't block CUPTI for noticeable time.
-        constexpr int kSpinAttempts = 100;
-        constexpr int kYieldAttempts = 1000;
         for (int i = 0; i < kSpinAttempts; ++i) {
             if (slot->state.load(std::memory_order_acquire) == SlotState::FREE)
                 break;
@@ -75,6 +95,7 @@ class RingBuffer {
 
         slot->data = item;
         slot->state.store(SlotState::READY, std::memory_order_release);
+        ++head_;
         return true;
     }
 
