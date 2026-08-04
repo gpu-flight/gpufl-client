@@ -66,6 +66,7 @@ class CuptiBackend : public IMonitorBackend {
     void shutdown() override;
     void emitCapabilities() override { EmitCaptureCapabilities_(); }
     void emitPendingPerfEvents() override;
+    void emitSegmentMetadata() override;
 
     static CUptiResult (*get_value())(CUpti_ActivityKind);
 
@@ -310,6 +311,7 @@ class CuptiBackend : public IMonitorBackend {
 
     friend class ResourceHandler;
     friend class KernelLaunchHandler;
+    friend class GraphStructureHandler;
     friend class MemTransferHandler;
     friend class SynchronizationHandler;
 

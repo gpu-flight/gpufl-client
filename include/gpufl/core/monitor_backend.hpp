@@ -54,6 +54,15 @@ class IMonitorBackend {
     virtual void emitPendingPerfEvents() {}
 
     /**
+     * @brief Emit static metadata into the currently active segment.
+     *
+     * CUDA graph definitions are process-lived while session directories roll
+     * over. Backends that retain such metadata replay it at each segment
+     * bootstrap so a standalone segment detail remains self-describing.
+     */
+    virtual void emitSegmentMetadata() {}
+
+    /**
      * @brief start active monitoring/tracing.
      */
     virtual void start() = 0;

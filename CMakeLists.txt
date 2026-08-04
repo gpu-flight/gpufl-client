@@ -173,6 +173,7 @@ target_sources(gpufl PRIVATE
     include/gpufl/core/model/synchronization_event_model.cpp
     include/gpufl/core/model/memory_alloc_event_model.cpp
     include/gpufl/core/model/graph_launch_event_model.cpp
+    include/gpufl/core/model/graph_node_definition_model.cpp
     include/gpufl/core/model/system_event_model.cpp
     include/gpufl/core/model/deep_window_model.cpp
     include/gpufl/core/deep_window.cpp
@@ -369,6 +370,7 @@ if(GPUFL_ENABLE_NVIDIA)
                 include/gpufl/backends/nvidia/cuda_cleanup_handler.cpp
                 include/gpufl/backends/nvidia/resource_handler.cpp
                 include/gpufl/backends/nvidia/kernel_launch_handler.cpp
+                include/gpufl/backends/nvidia/graph_structure_handler.cpp
                 include/gpufl/backends/nvidia/mem_transfer_handler.cpp
                 include/gpufl/backends/nvidia/synchronization_handler.cpp
                 include/gpufl/backends/nvidia/monitor_adapter_nvidia.cpp

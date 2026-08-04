@@ -19,11 +19,9 @@ namespace gpufl {
  * any other CUPTI stream we capture. Channel::Scope
  *
  * `corr_id` matches the driver-API call that issued the launch
- * (cuGraphLaunch). It does NOT match the per-node kernel records -
- * each kernel inside the graph keeps its own correlationId. To pair
- * "kernel K was part of graph G", the backend (or dashboard) needs
- * a temporal join on [start_ns, end_ns] + same stream - that's
- * deliberate v2 work, out of scope here.
+ * (cuGraphLaunch). `graph_exec_key` is the opaque driver graph-execution
+ * handle captured at that call; it links this timing record to the static
+ * GraphNodeDefinition rows. It does NOT imply per-node timing.
  */
 struct GraphLaunchEvent {
     int pid = 0;
@@ -36,6 +34,16 @@ struct GraphLaunchEvent {
     uint32_t device_id = 0;
     uint32_t stream_id = 0;
     uint32_t corr_id = 0;
+    uint64_t graph_exec_key = 0;
+};
+
+/** One static node in a CUDA graph execution. */
+struct GraphNodeDefinitionEvent {
+    std::string session_id;
+    uint64_t graph_exec_key = 0;
+    uint32_t node_index = 0;
+    uint32_t node_type = 0;
+    uint32_t dependency_count = 0;
 };
 
 }  // namespace gpufl

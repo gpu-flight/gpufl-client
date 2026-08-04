@@ -5,6 +5,7 @@
 #include "gpufl/core/model/synchronization_event_model.hpp"
 #include "gpufl/core/model/memory_alloc_event_model.hpp"
 #include "gpufl/core/model/graph_launch_event_model.hpp"
+#include "gpufl/core/model/graph_node_definition_model.hpp"
 
 TEST(BatchModels, DeviceMetricBatchIncludesClockSm) {
     gpufl::BatchBuffer<gpufl::DeviceMetricBatchRow> batch;
@@ -127,6 +128,7 @@ TEST(BatchModels, GraphLaunchEventModelEmitsExpectedShape) {
     ev.end_ns   = 7'500'000;
     ev.duration_ns = 2'500'000;
     ev.graph_id  = 42;
+    ev.graph_exec_key = 0x1234abcdULL;
     ev.device_id = 0;
     ev.stream_id = 7;
     ev.corr_id   = 999;
@@ -136,9 +138,27 @@ TEST(BatchModels, GraphLaunchEventModelEmitsExpectedShape) {
 
     EXPECT_NE(json.find("\"type\":\"graph_launch_event\""), std::string::npos);
     EXPECT_NE(json.find("\"graph_id\":42"), std::string::npos);
+    EXPECT_NE(json.find("\"graph_exec_key\":\"0x1234abcd\""), std::string::npos);
     EXPECT_NE(json.find("\"corr_id\":999"), std::string::npos);
     EXPECT_NE(json.find("\"duration_ns\":2500000"), std::string::npos);
     EXPECT_NE(json.find("\"stream_id\":7"), std::string::npos);
     EXPECT_NE(json.find("\"app\":\"Heavy_Stress_App\""), std::string::npos);
     EXPECT_NE(json.find("\"session_id\":\"abc-123\""), std::string::npos);
+}
+
+TEST(BatchModels, GraphNodeDefinitionModelPreservesOpaqueExecutionKey) {
+    gpufl::GraphNodeDefinitionEvent event;
+    event.session_id = "session-42";
+    event.graph_exec_key = 0xfeedbeefULL;
+    event.node_index = 7;
+    event.node_type = 0;
+    event.dependency_count = 3;
+
+    gpufl::model::GraphNodeDefinitionModel model(event);
+    const std::string json = model.buildJson();
+
+    EXPECT_NE(json.find("\"type\":\"graph_node_definition\""), std::string::npos);
+    EXPECT_NE(json.find("\"graph_exec_key\":\"0xfeedbeef\""), std::string::npos);
+    EXPECT_NE(json.find("\"node_index\":7"), std::string::npos);
+    EXPECT_NE(json.find("\"dependency_count\":3"), std::string::npos);
 }

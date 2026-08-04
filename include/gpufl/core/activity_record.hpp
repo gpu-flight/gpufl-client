@@ -96,6 +96,14 @@ struct ActivityRecord {
     // backend can aggregate by it to surface "this graph launched 50x,
     // total 4.2s" insights.
     uint32_t graph_id = 0;
+    // Process-local CUDA graph execution handle, captured from cuGraphLaunch.
+    // It is serialized as hexadecimal text so a JavaScript consumer never
+    // loses pointer bits to Number precision.
+    uint64_t graph_exec_key = 0;
+    // Static CUDA graph-node metadata. Used only by GRAPH_NODE_DEFINITION.
+    uint32_t graph_node_index = 0;
+    uint32_t graph_node_type = 0;
+    uint32_t graph_node_dependency_count = 0;
 
     // Memory-allocation specific.
     //

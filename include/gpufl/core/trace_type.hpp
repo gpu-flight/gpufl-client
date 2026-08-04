@@ -127,5 +127,13 @@ enum class TraceType : uint8_t {
     //   zeroed timestamps - and one capture pass would otherwise leave ~2k junk
     //   synthetic rows. Fields used on ActivityRecord: corr_id.
     KERNEL_META_DISCARD,
+    // GRAPH_EXEC_LAUNCH: internal corr_id -> CUDA graph-execution-handle join.
+    // Pushed at cuGraphLaunch ENTER; the later GRAPH_LAUNCH activity record
+    // uses the same correlation id to acquire the opaque execution key.
+    GRAPH_EXEC_LAUNCH,
+    // GRAPH_NODE_DEFINITION: one static node from a captured CUDA graph. This
+    // reaches the graph_node_definition wire model; it has structure only, not
+    // fabricated per-node timing.
+    GRAPH_NODE_DEFINITION,
 };
 }
