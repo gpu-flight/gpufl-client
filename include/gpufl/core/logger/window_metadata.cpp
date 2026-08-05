@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -168,10 +169,16 @@ bool ensureWindowMetadata(const fs::path& session_dir,
     metadata.payload_crc32 = payload_crc32;
 
     const fs::path partial =
-        target.string() + ".part." + metadata.window_id;
+        target.string() + ".part." + metadata.window_id.substr(0, 12);
     {
         std::ofstream out(partial, std::ios::binary | std::ios::trunc);
-        if (!out) return false;
+        if (!out) {
+            GFL_LOG_ERROR("[Logger] cannot open window-metadata staging "
+                          "file '", partial.string(), "' (errno=", errno,
+                          ": ", std::strerror(errno),
+                          "); metadata not published.");
+            return false;
+        }
         out << "{\"schema_version\":1,\"type\":\"transport_window\","
             << "\"window_id\":\"" << metadata.window_id << "\","
             << "\"session_id\":\"" << jsonEscape(metadata.session_id)
@@ -188,6 +195,10 @@ bool ensureWindowMetadata(const fs::path& session_dir,
         if (!out.good()) {
             out.close();
             fs::remove(partial, state_ec);
+            GFL_LOG_ERROR("[Logger] write to window-metadata staging file '",
+                          partial.string(), "' failed (errno=", errno, ": ",
+                          std::strerror(errno),
+                          "); metadata not published.");
             return false;
         }
     }

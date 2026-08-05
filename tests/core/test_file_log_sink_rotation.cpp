@@ -1256,6 +1256,105 @@ TEST_F(FileLogSinkRotationTest,
            "must keep the sequence consumed.";
 }
 
+// A SHORT session - one write per channel, no rotation, clean close - must
+// leave a FINISHED session: every channel's single window published in the
+// session root with its metadata sidecar, and `.tmp` gone. This is the
+// `gpufl trace` zero/short-kernel shape (a sub-second host-only target): on
+// Windows it regressed to salvaged=0/deferred=4 at close, with all four
+// windows stranded in `.tmp` and the lock left behind, so the session was
+// never uploadable.
+TEST_F(FileLogSinkRotationTest,
+       CleanCloseOfShortSessionPublishesEveryChannelWindow) {
+    gpufl::FileLogSink sink(options(/*rotate_after_ms=*/0));
+
+    sink.write(gpufl::Channel::Device, R"({"type":"job_start"})");
+    sink.write(gpufl::Channel::Scope, R"({"type":"nvtx_marker_event"})");
+    sink.write(gpufl::Channel::System, R"({"type":"system_start"})");
+    sink.write(gpufl::Channel::Sass, R"({"type":"dictionary_update"})");
+    sink.close();
+
+    EXPECT_EQ(publishedWindows("device"), 1u);
+    EXPECT_EQ(publishedWindows("scope"), 1u);
+    EXPECT_EQ(publishedWindows("system"), 1u);
+    EXPECT_EQ(publishedWindows("sass"), 1u);
+    // The sidecar is the immutable identity the agent uploads against.
+    EXPECT_TRUE(fs::exists(sessionDir() / ".gpufl-window.device.1.json"));
+    // A finished session leaves no staging directory behind.
+    EXPECT_FALSE(fs::exists(tmpDir()));
+}
+
+// The launcher's post-run sweep must finish a session another process left
+// stranded: valid staged gzips in `.tmp`, NO metadata sidecars yet, and a
+// stale `.gpufl-session.lock` file whose OS lock died with its process. This
+// is byte-for-byte the state a short `gpufl trace` run left behind on
+// Windows, where two consecutive sweeps salvaged nothing.
+TEST_F(FileLogSinkRotationTest, SweepSalvagesAStrandedSessionWithStaleLock) {
+    const fs::path session = sessionDir();
+    const fs::path tmp = tmpDir();
+    fs::create_directories(tmp);
+    writeText(session / ".gpufl-session.lock", "");
+
+    const std::vector<std::string> channels = {"device", "scope", "system",
+                                               "sass"};
+    for (const auto& channel : channels) {
+        const fs::path gz = tmp / (channel + ".1.log.gz");
+        gzFile file = gzopen(gz.string().c_str(), "wb");
+        ASSERT_NE(file, nullptr);
+        const std::string line = R"({"type":"job_start"})" "\n";
+        ASSERT_GT(gzwrite(file, line.data(),
+                          static_cast<unsigned>(line.size())), 0);
+        ASSERT_EQ(gzclose(file), Z_OK);
+    }
+
+    const auto result = gpufl::salvageSessionTempDir(session);
+
+    EXPECT_EQ(result.active_sessions_skipped, 0);
+    EXPECT_EQ(result.deferred, 0);
+    EXPECT_EQ(result.salvaged, 4);
+    for (const auto& channel : channels) {
+        EXPECT_TRUE(fs::exists(session / (channel + ".1.log.gz")))
+            << channel << " window was not published";
+        EXPECT_TRUE(fs::exists(gpufl::windowMetadataPath(session, channel, 1)))
+            << channel << " sidecar missing";
+    }
+    EXPECT_FALSE(fs::exists(tmp));
+}
+
+// Windows MAX_PATH regression: in a deep output directory every PUBLISHED
+// name fit under 260 chars but the metadata STAGING name - published name
+// plus ".part." plus a full 36-char UUID - did not. std::filesystem uses
+// extended-length paths transparently, the CRT behind std::ofstream does
+// not, so exactly that one file failed (errno=2) and every window of every
+// channel was stranded in `.tmp` with nothing loud in the log. The staging
+// suffix is now truncated; this test pins the boundary: a sidecar path
+// around 230 chars must publish even though the OLD staging name (+42)
+// would have crossed 260.
+TEST_F(FileLogSinkRotationTest, DeepSessionDirectoryStillPublishesMetadata) {
+    const std::string sidecar_name = ".gpufl-window.device.1.json";
+    const std::size_t target_sidecar_len = 230;
+    const std::size_t base_len = base_.string().size();
+    // Session path must reach target_sidecar_len minus separator and name.
+    if (base_len + 40 > target_sidecar_len - sidecar_name.size() - 1) {
+        GTEST_SKIP() << "temp base path too long to stage this layout";
+    }
+    const std::size_t pad =
+        target_sidecar_len - sidecar_name.size() - 1 - base_len - 1;
+    const fs::path session = base_ / std::string(pad, 'd');
+    const fs::path payload_dir = session / ".tmp";
+    fs::create_directories(payload_dir);
+    ASSERT_EQ(gpufl::windowMetadataPath(session, "device", 1)
+                  .string()
+                  .size(),
+              target_sidecar_len);
+
+    const fs::path payload = payload_dir / "device.1.log.gz";
+    writeText(payload, "fingerprint-me");
+
+    EXPECT_TRUE(gpufl::ensureWindowMetadata(session, "s1", "device", 1,
+                                            payload, "device.1.log.gz"));
+    EXPECT_TRUE(fs::exists(gpufl::windowMetadataPath(session, "device", 1)));
+}
+
 // Wiring: the collector beat calls Logger::rotateDueWindows(), which must
 // reach every sink exactly once. (Monitor's 250 ms beat → Logger is closed
 // by the 3090 sparse-channel run.)
