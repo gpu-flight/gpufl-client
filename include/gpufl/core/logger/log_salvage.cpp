@@ -591,6 +591,9 @@ LogSalvageResult salvageOwnedSessionTempDir(const fs::path& session_dir) {
         bool compressed = false;
         const std::string name = path.filename().string();
         if (!parseWindowName(name, channel, idx, compressed)) {
+            GFL_LOG_ERROR("[Logger] salvage found unrecognized file '",
+                          path.string(),
+                          "' in `.tmp`; leaving it deferred.");
             ++result.deferred;
             continue;
         }
@@ -648,6 +651,11 @@ LogSalvageResult salvageOwnedSessionTempDir(const fs::path& session_dir) {
                         target.string(),
                         "'; preserving the staged window instead of "
                         "overwriting it.");
+                } else {
+                    GFL_LOG_ERROR("[Logger] salvage could not publish '",
+                                  path.string(), "' to '", target.string(),
+                                  "' (", mv_ec.message(),
+                                  "); window stays deferred in `.tmp`.");
                 }
                 ++result.deferred;
                 staged_publish_blocked = true;
