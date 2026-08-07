@@ -5,9 +5,19 @@
 **/__pycache__/
 **/*.pyc
 
-# Build artifacts
+# Build artifacts.
+# `build-*/` matters as much as `build/`: the Windows build trees
+# (build-windows/, build-windows-tests/, build-windows-python/,
+# build-windows-coretests/) total ~1.8GB and were being shipped into the
+# Linux image build on EVERY run - 1.93GB of context transfer, ~137s, for
+# object files no Linux compile can use. `build/` alone matches only the
+# exact directory name, so they slipped through.
 cmake-build-*/
 build/
+build-*/
+out/
+# Local profiling output, not build input.
+runs/
 *.o
 *.a
 
