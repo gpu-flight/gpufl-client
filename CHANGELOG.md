@@ -5,7 +5,16 @@ inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows PEP 440 for the Python wheel and semver-style
 `MAJOR.MINOR.PATCH` for the C++ library.
 
-## [Unreleased]
+## [1.3.0] - 2026-08-07
+
+Headline: **profiling that arms itself.** A run can watch a metric only it
+knows about, open a bounded deep-profiling window when that metric goes wrong,
+and disarm before replay cost matters - instead of choosing between deep data
+and an affordable run. Long runs also stop accumulating into one unbounded
+session: they roll into parts with their own identity and lifecycle.
+
+The wire schema is unchanged (`kWireVersion` is still `"1"`); the six new event
+types are additive.
 
 ### Added
 
@@ -47,6 +56,123 @@ versioning follows PEP 440 for the Python wheel and semver-style
 
   Any `--deep-*` flag implies `GPUFL_DEEP_ARM=window`. A window with neither
   a duration nor a launch bound is rejected.
+- **`--deep-when`: a window a rule opens, not a timer.** `deepWindow()` needs a
+  call site and `--deep-after` needs you to know in advance when the problem
+  starts. `--deep-when` states a condition instead and lets the run decide:
+
+  ```bash
+  gpufl trace --deep-when 'kernel_launch_rate<100 for 2s' -- python serve.py
+  ```
+
+  Built-in metrics are `kernel_launch_rate` and `recent_kernel_ms`; a custom
+  counter named `token` contributes `token_rate`. Previously reachable only
+  through `GPUFL_DEEP_WHEN`.
+
+  The evaluator will not fire on its own profiling overhead. Samples taken
+  while any window is open are discarded (blackout), and the clean epoch is
+  refilled after it closes (recovery) rather than merged - merged, a
+  contaminated sample would prove the workload had recovered and re-fire the
+  rule on the cost of the last window. Blackout covers manual and scheduled
+  windows too, because contamination does not care who opened it.
+
+  `GPUFL_DEEP_MAX_WINDOWS` bounds the budget and `GPUFL_DEEP_REARM_AT` sets the
+  return-to-health predicate, whose direction is validated: a rearm on the
+  wrong side of the operator can never be reached, so the rule would fire once
+  and then wait forever while looking healthy. `GPUFL_DEEP_RATE_WINDOW_MS` and
+  `GPUFL_DEEP_STALE_AFTER_MS` govern how metrics are read.
+
+  Two gates refuse a rule with a recorded reason rather than letting it spend
+  its budget: one for when no deep engine would actually arm, one for custom
+  counter rules when the registry is not shared across modules and more than
+  one is in play - the target would tick one registry while the evaluator read
+  another. An invalid rule never fails `init()`.
+- **Named counters.** A rule needs to watch something only the application
+  knows - tokens, steps, requests - and neither existing primitive fits. A
+  scope costs two locked batch pushes and a wire row per iteration, which rules
+  it out of a decode loop, and being one-per it cannot say a step produced
+  eight tokens:
+
+  ```cpp
+  auto tokens = gpufl::counter("token");   // once, outside the loop
+  tokens.add(batchSize);                   // one relaxed atomic add
+  ```
+
+  `gpufl::tick(name, n)` is the one-shot form. The handle holds the slot's
+  address, taken once at registration, so `add()` never touches the registry
+  container - it could not do so safely in any case, since reading a deque's
+  size or indexing it races a concurrent registration even though existing
+  element addresses stay valid.
+
+  Slots live for the process and are never freed, so a handle kept in a static
+  or held by an embedded host across `shutdown()`/`init()` stays valid. What
+  separates sessions is a baseline taken at initialize: ticks from a previous
+  session, or from while gpufl was down, belong to neither and are excluded
+  rather than counted twice. `add()` validates before the atomic - non-positive
+  values and anything above a per-call bound are dropped, which catches a
+  caller passing something that is not a count rather than guarding overflow.
+
+  `GPUFL_COUNTER_RUNTIME_PATH` shares the registry across modules through a C
+  ABI runtime, so a counter ticked in one shared object is visible to a rule
+  evaluated in another.
+- **Session segmentation and long-run rollover.** A run that lasts days no
+  longer accumulates into one unbounded session. `--segment-every` /
+  `--segment-max-rows` (env `GPUFL_SEGMENT_EVERY_MS`, `GPUFL_SEGMENT_MAX_ROWS`)
+  cut a long session into segments, and `--roll-every` / `--roll-max-bytes`
+  (env `GPUFL_RUN_ROLL_EVERY_MS`, `GPUFL_RUN_ROLL_MAX_BYTES`) roll the run into
+  parts, each with its own identity and lifecycle chained back to part 1.
+  `GPUFL_RUN_ID` names the chain explicitly. Emits the `segment_start`,
+  `segment_end`, `job_start` and `run_end` events; finality is preserved across
+  process-exit teardown.
+- **CUDA Graph execution topology.** Graph launches are captured as
+  `graph_activity` events carrying the executed topology, so a graph shows up
+  as its structure rather than as one opaque launch.
+- **Per-kernel achieved occupancy.** Collected via the Range Profiler's
+  KernelReplay pass and reported alongside the existing per-kernel metrics.
+- **Shared-memory bank-conflict profiling.** `RangeProfilerKernelReplay` emits
+  per-kernel shared load/store/total conflict counts, shared wavefronts,
+  conflict overhead, and average N-way serialization. Reports and
+  `inspect_perf_metrics()` surface the derived values, and
+  `shared_bank_conflicts_demo` provides a 1-way/32-way comparison.
+- **`gpufl info`.** Reports GPU device information without running a target;
+  `--device` selects one and `--json` makes it machine-readable.
+- **`gpufl trace --pc-sample-period`** (env `GPUFL_PC_SAMPLING_PERIOD`) tunes
+  the PC sampling period, and a capture that collects zero samples now says so
+  instead of reporting an empty result as a successful one.
+- **Crash-safe transport window rotation.** Low-volume log windows publish from
+  the collector beat without blocking it on compression; retired windows export
+  asynchronously with monotonic per-channel sequence numbers, bounded backlog
+  telemetry, and deterministic shutdown draining. The spool transaction is
+  crash-safe through `.part` promotion, validated gzip recovery, atomic
+  no-replace moves, payload-aware collision handling, and durable
+  transport-loss markers - upload and launcher completion refuse sessions with
+  known loss while isolating unrelated old ones. `GPUFL_LOG_ROTATE_AFTER_MS`,
+  `GPUFL_LOG_MAX_SPOOL_BYTES` and `GPUFL_LOG_MIN_FREE_BYTES` bound it.
+- **`deepWindowClose()`, `deepWindowActive()`** for closing and inspecting a
+  window from the host program.
+
+### Changed
+
+- **`--passes` and `--deep-*` are separate execution modes and cannot be
+  combined.** The reason is a hardware constraint rather than a style choice:
+  `cuptiProfilerInitialize` has to run before any CUDA context exists, so the
+  deep engines are fixed at process start whatever the trigger later does. A
+  `--passes` list therefore either already holds what the window would arm,
+  making the flag redundant, or does not - which is what
+  `--passes=Trace --deep-after=30s` silently did, opening a window that armed
+  nothing and reporting `no_deep_engine`. It is now rejected before the target
+  launches, in either flag order, with the way out named.
+
+  This breaks no v1.2.1 command line: every `--deep-*` flag is new in this
+  release, so the rejected combination was never valid before it.
+- **`gpufl upload` routes through the agent.** `--agent-jar`,
+  `--agent-drain-ms`, `--agent-cursor` and `--all-sessions` control it, and the
+  launcher sends upload-complete only after a clean agent drain. `--upload` is
+  scoped to a per-run folder rather than the shared `--output` directory.
+
+### Deprecated
+
+- **`gpufl::uploadLogs()`.** Retained as the embedded no-Java upload path, but
+  `gpufl upload` through the agent is the supported route.
 
 ### Fixed
 
@@ -56,14 +182,12 @@ versioning follows PEP 440 for the Python wheel and semver-style
   CUPTI-to-wall-clock anchor. Engines that stamp their own samples emitted
   raw CUPTI timestamps, putting every PM sample days away from the kernel
   timeline it should line up with.
-- **Shared-memory bank-conflict profiling.**
-  `RangeProfilerKernelReplay` now emits per-kernel shared load/store/total
-  conflict counts, shared wavefronts, conflict overhead, and average N-way
-  serialization. Reports and `inspect_perf_metrics()` surface the derived
-  values, and `shared_bank_conflicts_demo` provides a 1-way/32-way comparison.
-
-### Fixed
-
+- **PC sampling and SASS under Windows DLL injection.** Samples are collected
+  with sampling stopped and configured before allocating; source/SASS is
+  correlated to the merged kernel; logs flush before the fragile CUPTI release
+  on injection exit. Kernels are captured reliably for Deep, synthetic kernel
+  rows are emitted mid-run, and a `kernel_events` fallback is reported when
+  synthetic durations dominate.
 - **Range metric registration recovery.** A rejected optional PerfWorks metric
   can poison subsequent metric registration on some toolkit/driver pairs.
   GPUFlight now rebuilds the accepted metric configuration and continues, so
@@ -71,6 +195,20 @@ versioning follows PEP 440 for the Python wheel and semver-style
 - **Clearer range-profiler reports.** Numeric CUPTI AutoRange labels are
   correlated with kernel activity names, out-of-range cache hit rates are
   reported as unavailable, and unsupported DRAM columns are omitted.
+- **Kernel timing is never inferred from host gaps.** Kernel rows are omitted
+  when real activity records never arrived, rather than reported as measured.
+- **Numba CUDA injection initialization race.**
+- **Graph-only CUDA activity is classified correctly.**
+- **NVML temperature** uses the classic `nvmlDeviceGetTemperature` for driver
+  portability.
+- **Invalid-timestamp activity records** are dropped without leaving synthetic
+  junk behind.
+- **Sessions in deep output directories finalize on Windows.**
+- **Transport spool limits are preflighted**, capture stops when the spool
+  saturates, and windows are retained until the backend acknowledges them.
+- **Kernel-replay perf events are emitted before logger close** on process
+  exit, so a range-profiler run does not lose its last events.
+- **httplib install export dependency** is enforced at build time.
 
 ## [1.2.1] - 2026-06-23
 
