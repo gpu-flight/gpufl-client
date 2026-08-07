@@ -28,7 +28,7 @@ on:
 
 jobs:
   build:
-    name: Build on ${{ matrix.os }}
+    name: Build on ${{ matrix.os }} py${{ matrix.python-version }} perfworks=${{ matrix.perfworks }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -36,12 +36,20 @@ jobs:
         # 2026), whose MSVC toolset CUDA 13.x nvcc doesn't support.
         os: [ubuntu-22.04, windows-2022]
         python-version: ["3.12", "3.13"]
+        perfworks: ["ON"]  # quoted: unquoted ON/OFF are YAML 1.1 booleans
+        include:
+          # Release wheels build without PerfWorks (manylinux ships no nvperf)
+          # and nothing else here does. One job is enough for a link error.
+          - os: ubuntu-22.04
+            python-version: "3.12"
+            perfworks: "OFF"
 
     env:
       CMAKE_ARGS: >-
         -DGPUFL_ENABLE_NVIDIA=ON
         -DGPUFL_ENABLE_AMD=OFF
-        -DBUILD_TESTING=OFF  
+        -DGPUFL_ENABLE_PERFWORKS=${{ matrix.perfworks }}
+        -DBUILD_TESTING=OFF
 
     steps:
       - uses: actions/checkout@v4

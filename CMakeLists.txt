@@ -29,6 +29,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(GPUFL_ENABLE_NVIDIA "Enable NVIDIA backends (CUDA + NVML when available)" ON)
 option(GPUFL_ENABLE_AMD    "Enable AMD backends (ROCm when available)" OFF)
 option(GPUFL_ENABLE_AMD_ROCPROFILER "Enable AMD rocprofiler-sdk tracing backend when available" ON)
+# OFF builds the configuration release wheels ship (manylinux has no nvperf),
+# so CI can catch #if GPUFL_HAS_PERFWORKS mistakes.
+option(GPUFL_ENABLE_PERFWORKS "Link PerfWorks (NVPERF) for hardware-counter scopes" ON)
 
 option(BUILD_GPUFL_EXAMPLE "Build gpufl example application" ON)
 option(BUILD_GPUFL_MONITOR "Build gpufl-monitor standalone daemon" ON)
@@ -455,26 +458,33 @@ if(GPUFL_ENABLE_NVIDIA)
             # --------------------------------------------------------
             # NVPERF Support (for GFL_PERF_SCOPE hardware counters)
             # --------------------------------------------------------
-            find_library(NVPERF_HOST_LIBRARY NAMES nvperf_host nvperf_host_static
-                HINTS "${CUDAToolkit_ROOT}/extras/CUPTI/lib64"
-                      "${CUDAToolkit_ROOT}/targets/x86_64-linux/lib"
-                      "$ENV{CUDA_PATH}/extras/CUPTI/lib64"
-                      "$ENV{CUDA_PATH}/targets/x86_64-linux/lib"
-            )
-            find_library(NVPERF_TARGET_LIBRARY NAMES nvperf_target
-                HINTS "${CUDAToolkit_ROOT}/extras/CUPTI/lib64"
-                      "${CUDAToolkit_ROOT}/targets/x86_64-linux/lib"
-                      "$ENV{CUDA_PATH}/extras/CUPTI/lib64"
-                      "$ENV{CUDA_PATH}/targets/x86_64-linux/lib"
-            )
-            if(NVPERF_HOST_LIBRARY AND NVPERF_TARGET_LIBRARY)
-                set(GPUFL_HAS_PERFWORKS 1)
-                target_link_libraries(gpufl PRIVATE
-                    ${NVPERF_HOST_LIBRARY} ${NVPERF_TARGET_LIBRARY})
-                message(STATUS "Found NVPERF: ${NVPERF_HOST_LIBRARY}")
+            # Gated on the option, not just detection: find_library caches, so
+            # there is no command-line way to force a miss.
+            if(GPUFL_ENABLE_PERFWORKS)
+                find_library(NVPERF_HOST_LIBRARY NAMES nvperf_host nvperf_host_static
+                    HINTS "${CUDAToolkit_ROOT}/extras/CUPTI/lib64"
+                          "${CUDAToolkit_ROOT}/targets/x86_64-linux/lib"
+                          "$ENV{CUDA_PATH}/extras/CUPTI/lib64"
+                          "$ENV{CUDA_PATH}/targets/x86_64-linux/lib"
+                )
+                find_library(NVPERF_TARGET_LIBRARY NAMES nvperf_target
+                    HINTS "${CUDAToolkit_ROOT}/extras/CUPTI/lib64"
+                          "${CUDAToolkit_ROOT}/targets/x86_64-linux/lib"
+                          "$ENV{CUDA_PATH}/extras/CUPTI/lib64"
+                          "$ENV{CUDA_PATH}/targets/x86_64-linux/lib"
+                )
+                if(NVPERF_HOST_LIBRARY AND NVPERF_TARGET_LIBRARY)
+                    set(GPUFL_HAS_PERFWORKS 1)
+                    target_link_libraries(gpufl PRIVATE
+                        ${NVPERF_HOST_LIBRARY} ${NVPERF_TARGET_LIBRARY})
+                    message(STATUS "Found NVPERF: ${NVPERF_HOST_LIBRARY}")
+                else()
+                    set(GPUFL_HAS_PERFWORKS 0)
+                    message(WARNING "NVPERF not found - GFL_PERF_SCOPE disabled at runtime")
+                endif()
             else()
                 set(GPUFL_HAS_PERFWORKS 0)
-                message(WARNING "NVPERF not found - GFL_PERF_SCOPE disabled at runtime")
+                message(STATUS "PerfWorks disabled by GPUFL_ENABLE_PERFWORKS=OFF")
             endif()
         endif()
     endif()
