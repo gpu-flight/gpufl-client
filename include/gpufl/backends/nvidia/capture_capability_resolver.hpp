@@ -44,6 +44,8 @@ struct CaptureCapabilityInput {
     CaptureCapabilityOptions options;
 
     bool kernel_activity = false;
+    /** This trace intentionally has no CUDA kernel launch (host-only lesson). */
+    bool expect_no_kernel_events = false;
     bool cubin_requested = false;
     bool cubin_capture = false;
     bool sass_metrics_only = false;

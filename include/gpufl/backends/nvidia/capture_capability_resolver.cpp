@@ -78,6 +78,13 @@ CaptureCapabilitiesEvent BuildCaptureCapabilitiesEvent(
     const bool externalHasData = input.counters.external_rows > 0;
     const bool sourceHasData =
         input.counters.source_rows > 0 || input.counters.function_rows > 0;
+    // A host-only trace still enables CUPTI activity to collect NVTX scopes,
+    // but its authored contract expects no CUDA launch. Preserve the fact that
+    // kernel collection was requested; a distinct terminal status lets the
+    // server distinguish this legitimate empty timeline from an unexpected
+    // missing kernel capture without weakening normal Trace validation.
+    const bool expectedEmptyKernelTimeline =
+        input.expect_no_kernel_events && !kernelHasData;
 
     std::string selected = ProfilingEngineWireName(input.requested_engine);
     if (input.combo_active) {
@@ -98,9 +105,11 @@ CaptureCapabilitiesEvent BuildCaptureCapabilitiesEvent(
         evt, "kernel_events", input.kernel_activity,
         kernelHasData
             ? (syntheticKernels ? "fallback" : "collected")
-            : (input.kernel_activity
+            : (expectedEmptyKernelTimeline
+                   ? "expected_no_data"
+                   : (input.kernel_activity
                    ? (input.sass_metrics_only ? "skipped" : "enabled_no_data")
-                   : "not_requested"),
+                   : "not_requested")),
         input.sass_metrics_only
             ? "sass_metrics_only"
             : (syntheticKernels
@@ -114,29 +123,35 @@ CaptureCapabilitiesEvent BuildCaptureCapabilitiesEvent(
                           ? "cupti_kernel_activity_conflicts_with_pc_sampling"
                           : "cupti_kernel_activity_deadlock_risk")
                    : "")
-            : (input.kernel_activity
+            : (expectedEmptyKernelTimeline
+                   ? "host_only_trace"
+                   : (input.kernel_activity
                    ? (input.sass_metrics_only
                           ? "disabled_to_preserve_sass_counters"
                           : "enabled_but_no_records")
-                   : "not_selected"),
+                   : "not_selected")),
         kernelHasData
             ? (syntheticKernels
                    ? (input.requests.pc
                           ? "Kernel rows were collected from launch callbacks; durations are estimated because CUPTI kernel activity is disabled while PC Sampling API is active."
                           : "Kernel rows were collected from launch callbacks; durations are estimated because CUPTI kernel activity is disabled in SASS safe mode.")
                    : "Kernel rows were collected from CUPTI kernel activity records.")
-            : (!input.kernel_activity
+            : (expectedEmptyKernelTimeline
+                   ? "This host-only trace intentionally ran no CUDA kernels; the CPU scope is the evidence for this lesson."
+                   : (!input.kernel_activity
                    ? "Kernel timeline activity was not requested by the selected engine domains."
                    : input.sass_metrics_only
                          ? "Kernel activity was intentionally disabled because CUPTI SASS Metrics requires metrics-only mode on this GPU/driver to produce non-zero counters."
-                         : "Kernel tracing was enabled but emitted no kernel rows this session."));
+                         : "Kernel tracing was enabled but emitted no kernel rows this session.")));
     AddCapability(
         evt, "kernel_names", input.kernel_activity,
         kernelHasData
             ? (syntheticKernels ? "partial" : "collected")
-            : (input.kernel_activity
+            : (expectedEmptyKernelTimeline
+                   ? "expected_no_data"
+                   : (input.kernel_activity
                    ? (input.sass_metrics_only ? "skipped" : "enabled_no_data")
-                   : "not_requested"),
+                   : "not_requested")),
         input.sass_metrics_only
             ? "sass_metrics_only"
             : (syntheticKernels
@@ -146,27 +161,33 @@ CaptureCapabilitiesEvent BuildCaptureCapabilitiesEvent(
                           : "disabled")),
         kernelHasData
             ? (syntheticKernels ? "symbol_name_may_be_unavailable" : "")
-            : (input.kernel_activity
+            : (expectedEmptyKernelTimeline
+                   ? "host_only_trace"
+                   : (input.kernel_activity
                    ? (input.sass_metrics_only
                           ? "disabled_to_preserve_sass_counters"
                           : "enabled_but_no_records")
-                   : "not_selected"),
+                   : "not_selected")),
         kernelHasData
             ? (syntheticKernels
                    ? "Kernel names use CUPTI callback symbolName when safely readable, otherwise the CUDA launch API name."
                    : "Kernel names came from CUPTI activity records.")
-            : (!input.kernel_activity
+            : (expectedEmptyKernelTimeline
+                   ? "This host-only trace intentionally has no CUDA kernel names."
+                   : (!input.kernel_activity
                    ? "Kernel name tracing was not requested by the selected engine domains."
                    : input.sass_metrics_only
                          ? "Kernel name tracing was intentionally disabled to keep SASS metric counters valid."
-                         : "Kernel name capture was enabled but no kernel rows were emitted."));
+                         : "Kernel name capture was enabled but no kernel rows were emitted.")));
     AddCapability(
         evt, "kernel_details", input.kernel_activity,
         kernelHasData
             ? (syntheticKernels ? "partial" : "collected")
-            : (input.kernel_activity
+            : (expectedEmptyKernelTimeline
+                   ? "expected_no_data"
+                   : (input.kernel_activity
                    ? (input.sass_metrics_only ? "skipped" : "enabled_no_data")
-                   : "not_requested"),
+                   : "not_requested")),
         input.sass_metrics_only
             ? "sass_metrics_only"
             : (syntheticKernels
@@ -176,20 +197,24 @@ CaptureCapabilitiesEvent BuildCaptureCapabilitiesEvent(
                           : "disabled")),
         kernelHasData
             ? (syntheticKernels ? "activity_details_unavailable" : "")
-            : (input.kernel_activity
+            : (expectedEmptyKernelTimeline
+                   ? "host_only_trace"
+                   : (input.kernel_activity
                    ? (input.sass_metrics_only
                           ? "disabled_to_preserve_sass_counters"
                           : "enabled_but_no_records")
-                   : "not_selected"),
+                   : "not_selected")),
         kernelHasData
             ? (syntheticKernels
                    ? "Grid/block parameters are captured from launch callbacks; register and occupancy details may be unavailable."
                    : "Kernel details came from CUPTI activity records and launch metadata.")
-            : (!input.kernel_activity
+            : (expectedEmptyKernelTimeline
+                   ? "This host-only trace intentionally has no CUDA kernel launch details."
+                   : (!input.kernel_activity
                    ? "Kernel detail tracing was not requested by the selected engine domains."
                    : input.sass_metrics_only
                          ? "Kernel detail tracing was intentionally disabled to keep SASS metric counters valid."
-                         : "Kernel detail capture was enabled but no kernel rows were emitted."));
+                         : "Kernel detail capture was enabled but no kernel rows were emitted.")));
     AddCapability(
         evt, "memcpy_activity", input.kernel_activity,
         input.kernel_activity
