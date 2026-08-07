@@ -108,6 +108,25 @@ void PmSamplingEngine::onScopeStop(const char*) {
 #endif
 }
 
+// Declared unconditionally in the header, so the vtable carries this slot in
+// every build: the definition stays outside the GPUFL_HAS_PERFWORKS block and
+// guards its body instead, or a PerfWorks-less link fails on the vtable.
+void PmSamplingEngine::drainData() {
+#if GPUFL_HAS_PERFWORKS
+    if (!running_) return;
+    // Half the buffer span: enough headroom that a late collector tick still
+    // lands before the hardware wraps.
+    const int64_t now = detail::GetTimestampNs();
+    const int64_t due = last_drain_ns_ + BufferSpanNs_() / 2;
+    if (last_drain_ns_ != 0 && now < due) return;
+
+    std::lock_guard<std::mutex> lk(pm_mu_);
+    if (!running_) return;
+    last_drain_ns_ = now;
+    DecodeAndEmit_();
+#endif
+}
+
 std::vector<std::string> PmSamplingEngine::ResolveMetrics_() const {
     if (!opts_.pm_sampling_metrics.empty()) return opts_.pm_sampling_metrics;
     return OverviewMetrics();
@@ -419,20 +438,6 @@ int64_t PmSamplingEngine::BufferSpanNs_() const {
                                     ? opts_.pm_sampling_interval_us
                                     : 100;
     return samples * interval_us * 1000;
-}
-
-void PmSamplingEngine::drainData() {
-    if (!running_) return;
-    // Half the buffer span: enough headroom that a late collector tick still
-    // lands before the hardware wraps.
-    const int64_t now = detail::GetTimestampNs();
-    const int64_t due = last_drain_ns_ + BufferSpanNs_() / 2;
-    if (last_drain_ns_ != 0 && now < due) return;
-
-    std::lock_guard<std::mutex> lk(pm_mu_);
-    if (!running_) return;
-    last_drain_ns_ = now;
-    DecodeAndEmit_();
 }
 
 void PmSamplingEngine::DecodeAndEmit_() {
