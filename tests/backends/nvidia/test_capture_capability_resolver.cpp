@@ -68,6 +68,26 @@ TEST(CaptureCapabilityResolver, TraceWithRowsReportsCollectedTimeline) {
     EXPECT_EQ(memory->status, "collected");
 }
 
+TEST(CaptureCapabilityResolver, HostOnlyTraceReportsExpectedEmptyKernelTimeline) {
+    auto input = BaseInput(gpufl::ProfilingEngine::Trace);
+    input.kernel_activity = true;
+    input.expect_no_kernel_events = true;
+    input.counters.nvtx_rows = 1;
+
+    const auto evt = gpufl::BuildCaptureCapabilitiesEvent(input);
+
+    const auto* kernel = FindCapability(evt, "kernel_events");
+    ASSERT_NE(kernel, nullptr);
+    EXPECT_TRUE(kernel->requested);
+    EXPECT_EQ(kernel->status, "expected_no_data");
+    EXPECT_EQ(kernel->reason_code, "host_only_trace");
+
+    const auto* markers = FindCapability(evt, "nvtx_markers");
+    ASSERT_NE(markers, nullptr);
+    EXPECT_TRUE(markers->requested);
+    EXPECT_EQ(markers->status, "collected");
+}
+
 TEST(CaptureCapabilityResolver,
      GraphTimingReportsPartialWhenInvalidRecordsWereDropped) {
     auto input = BaseInput(gpufl::ProfilingEngine::Trace);

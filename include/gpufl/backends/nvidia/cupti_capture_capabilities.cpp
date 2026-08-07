@@ -1,11 +1,14 @@
 #include "gpufl/backends/nvidia/cupti_backend.hpp"
 
 #include <atomic>
+#include <cstdlib>
+#include <cstring>
 #include <string>
 
 #include "gpufl/backends/nvidia/capture_capability_resolver.hpp"
 #include "gpufl/backends/nvidia/cupti_engine_selection.hpp"
 #include "gpufl/core/common.hpp"
+#include "gpufl/core/env_vars.hpp"
 #include "gpufl/core/logger/logger.hpp"
 #include "gpufl/core/model/lifecycle_model.hpp"
 #include "gpufl/core/runtime.hpp"
@@ -65,6 +68,9 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
     input.requests = requests;
     input.engine_state = engineState;
     input.kernel_activity = kernelActivity;
+    if (const char* value = std::getenv(env::kExpectNoKernelEvents)) {
+        input.expect_no_kernel_events = std::strcmp(value, "1") == 0;
+    }
     input.cubin_requested = cubinRequested;
     input.cubin_capture = cubinCapture;
     input.sass_metrics_only = SassMetricsOnlyMode();

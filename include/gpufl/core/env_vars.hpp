@@ -71,6 +71,12 @@ constexpr const char* kInjectUseConstructor = "GPUFL_INJECT_USE_CONSTRUCTOR";
 // must finish CUDA Driver initialization first (Numba is the motivating case)
 // calls the exported GpuFlightInitializeInjectionAfterCuda function afterward.
 constexpr const char* kInjectManualInit     = "GPUFL_INJECT_MANUAL_INIT";
+// Internal launcher contract for an intentionally host-only trace. CUDA
+// activity remains enabled so NVTX/host scopes can still be collected, but a
+// terminal zero-kernel result is reported as expected rather than a failed
+// kernel timeline. The experiment worker sets this only for the CPU baseline
+// lesson; it must never be inferred from an application name.
+constexpr const char* kExpectNoKernelEvents = "GPUFL_EXPECT_NO_KERNEL_EVENTS";
 
 // Opt-in ("1"): turn on gpufl's debug logging (GFL_LOG_DEBUG → stderr) in the
 // injected target - same switch InitOptions.enable_debug_output exposes to
