@@ -48,6 +48,12 @@ endif()
 option(BUILD_PYTHON "Build Python bindings" OFF)
 option(BUILD_TESTING "Build the testing tree." ON)
 
+# This example is intentionally independent from CUDA, HIP, and gpufl.  It is
+# useful as a small CPU-only rendering workload on machines without a GPU.
+if(BUILD_GPUFL_EXAMPLE AND CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+    add_subdirectory(example/cpu)
+endif()
+
 # -----------------------
 # Library target
 # -----------------------
