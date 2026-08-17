@@ -86,7 +86,7 @@ std::string MemcpyEventBatchModel::buildJson() const {
         << ",\"session_id\":\"" << jsonEscape(session_id_) << '"'
         << ",\"batch_id\":" << batch_id_ << ",\"base_time_ns\":" << base
         << ",\"columns\":[\"dt_ns\",\"stream_id\",\"duration_ns\","
-           "\"bytes\",\"copy_kind\",\"corr_id\"]"
+           "\"bytes\",\"copy_kind\",\"corr_id\",\"device_id\"]"
         << ",\"rows\":[";
 
     bool first = true;
@@ -95,7 +95,7 @@ std::string MemcpyEventBatchModel::buildJson() const {
         first = false;
         oss << '[' << (r.start_ns - base) << ',' << r.stream_id << ','
             << r.duration_ns << ',' << r.bytes << ',' << r.copy_kind << ','
-            << r.corr_id << ']';
+            << r.corr_id << ',' << r.device_id << ']';
     }
     oss << "]}";
     return oss.str();

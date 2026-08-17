@@ -129,6 +129,7 @@ TEST(AmdCaptureCapabilities, DispatchSamplesAndDroppedTraceAreVisible) {
     input.trace_configured = true;
     input.profiling_sample_rows = 4;
     input.dropped_trace_records = 3;
+    input.unattributed_trace_records = 2;
 
     const auto event = gpufl::amd::BuildAmdCaptureCapabilitiesEvent(input);
 
@@ -138,6 +139,11 @@ TEST(AmdCaptureCapabilities, DispatchSamplesAndDroppedTraceAreVisible) {
     ASSERT_NE(counters, nullptr);
     EXPECT_TRUE(counters->requested);
     EXPECT_EQ(counters->status, "collected");
+
+    const auto* attribution = FindCapability(event, "device_attribution");
+    ASSERT_NE(attribution, nullptr);
+    EXPECT_EQ(attribution->status, "partial");
+    EXPECT_EQ(attribution->reason_code, "rocprofiler_agent_unmapped");
 
     const auto* delivery = FindCapability(event, "trace_buffer_delivery");
     ASSERT_NE(delivery, nullptr);

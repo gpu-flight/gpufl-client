@@ -17,6 +17,7 @@
 
 #include "gpufl/backends/amd/engine/amd_profiling_engine.hpp"
 #include "gpufl/backends/amd/amd_profiling_policy.hpp"
+#include "gpufl/backends/amd/amd_trace_policy.hpp"
 #include "gpufl/core/activity_record.hpp"
 #include "gpufl/core/monitor_backend.hpp"
 
@@ -82,7 +83,8 @@ class RocprofilerBackend final : public IMonitorBackend {
     void handleCodeObjectLoad(const rocprofiler_callback_tracing_code_object_load_data_t& data);
 
     std::string resolveKernelName(uint64_t kernel_id) const;
-    int resolveDeviceId(rocprofiler_agent_id_t agent_id) const;
+    AmdTraceEndpoint resolveTraceEndpoint(
+        rocprofiler_agent_id_t agent_id) const;
     uint32_t classifyMemcpyKind(rocprofiler_agent_id_t src_agent,
                                 rocprofiler_agent_id_t dst_agent) const;
 
@@ -147,11 +149,13 @@ class RocprofilerBackend final : public IMonitorBackend {
     std::atomic<uint64_t> kernel_rows_emitted_{0};
     std::atomic<uint64_t> memcpy_rows_emitted_{0};
     std::atomic<uint64_t> trace_records_dropped_{0};
+    std::atomic<uint64_t> trace_records_unattributed_{0};
     mutable std::mutex capture_capabilities_mutex_;
     mutable std::string capture_capabilities_session_id_;
     mutable uint64_t capability_kernel_rows_baseline_ = 0;
     mutable uint64_t capability_memcpy_rows_baseline_ = 0;
     mutable uint64_t capability_dropped_records_baseline_ = 0;
+    mutable uint64_t capability_unattributed_records_baseline_ = 0;
 
     std::atomic<bool> initialized_{false};
     std::atomic<bool> active_{false};

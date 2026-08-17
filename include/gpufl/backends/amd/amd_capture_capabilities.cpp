@@ -144,6 +144,29 @@ CaptureCapabilitiesEvent BuildAmdCaptureCapabilitiesEvent(
               "implementation.");
 
     AddCapability(
+        event, "device_attribution", tracing_requested,
+        !tracing_requested
+            ? "not_requested"
+            : (!input.trace_configured
+                   ? "skipped"
+                   : (input.unattributed_trace_records > 0 ? "partial"
+                                                          : "complete")),
+        input.trace_configured ? "rocprofiler_agent_mapping" : "disabled",
+        !input.trace_configured
+            ? (tracing_requested ? "rocprofiler_buffer_tracing_unavailable"
+                                 : "not_selected")
+            : (input.unattributed_trace_records > 0
+                   ? "rocprofiler_agent_unmapped"
+                   : ""),
+        !input.trace_configured
+            ? "ROCprofiler device attribution was not active."
+            : (input.unattributed_trace_records > 0
+                   ? "Dropped " +
+                         std::to_string(input.unattributed_trace_records) +
+                         " trace record(s) whose GPU agent could not be mapped."
+                   : "Every GPU trace record was attributed to a device."));
+
+    AddCapability(
         event, "trace_buffer_delivery", tracing_requested,
         !tracing_requested
             ? "not_requested"

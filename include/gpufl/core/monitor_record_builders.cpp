@@ -65,6 +65,7 @@ MemcpyBatchRow MakeMemcpyBatchRow(const ActivityRecord& rec) {
     row.bytes = rec.bytes;
     row.copy_kind = rec.copy_kind;
     row.corr_id = rec.corr_id;
+    row.device_id = rec.device_id;
     return row;
 }
 

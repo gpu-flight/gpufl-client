@@ -119,12 +119,14 @@ void RocprofilerBackend::initialize(const MonitorOptions& opts) {
     kernel_rows_emitted_.store(0, std::memory_order_relaxed);
     memcpy_rows_emitted_.store(0, std::memory_order_relaxed);
     trace_records_dropped_.store(0, std::memory_order_relaxed);
+    trace_records_unattributed_.store(0, std::memory_order_relaxed);
     {
         std::lock_guard lock(capture_capabilities_mutex_);
         capture_capabilities_session_id_.clear();
         capability_kernel_rows_baseline_ = 0;
         capability_memcpy_rows_baseline_ = 0;
         capability_dropped_records_baseline_ = 0;
+        capability_unattributed_records_baseline_ = 0;
     }
 
     AmdProfilingSupport support;
@@ -166,6 +168,8 @@ void RocprofilerBackend::resetToolState() {
         std::lock_guard<std::mutex> lock(agent_mutex_);
         gpu_device_ids_.clear();
         agent_types_.clear();
+        gpu_arch_props_.clear();
+        primary_gpu_agent_ = {};
     }
 }
 
@@ -379,6 +383,8 @@ void RocprofilerBackend::emitCapabilities() {
         memcpy_rows_emitted_.load(std::memory_order_relaxed);
     const uint64_t dropped_records =
         trace_records_dropped_.load(std::memory_order_relaxed);
+    const uint64_t unattributed_records =
+        trace_records_unattributed_.load(std::memory_order_relaxed);
 
     AmdCaptureCapabilityInput input;
     input.session_id = segment->session_id;
@@ -394,6 +400,8 @@ void RocprofilerBackend::emitCapabilities() {
         engine_ && engine_->hasData() ? 1 : 0;
     input.dropped_trace_records =
         delta(dropped_records, capability_dropped_records_baseline_);
+    input.unattributed_trace_records = delta(
+        unattributed_records, capability_unattributed_records_baseline_);
 
     segment->logger->write(model::CaptureCapabilitiesModel(
         BuildAmdCaptureCapabilitiesEvent(input)));
@@ -401,6 +409,7 @@ void RocprofilerBackend::emitCapabilities() {
     capability_kernel_rows_baseline_ = kernel_rows;
     capability_memcpy_rows_baseline_ = memcpy_rows;
     capability_dropped_records_baseline_ = dropped_records;
+    capability_unattributed_records_baseline_ = unattributed_records;
     capture_capabilities_session_id_ = segment->session_id;
 }
 
@@ -587,41 +596,59 @@ rocprofiler_status_t RocprofilerBackend::queryAgentsShim(
     std::lock_guard<std::mutex> lock(backend->agent_mutex_);
     backend->gpu_device_ids_.clear();
     backend->agent_types_.clear();
+    backend->gpu_arch_props_.clear();
+    backend->primary_gpu_agent_ = {};
 
     for (size_t i = 0; i < num_agents; ++i) {
         const auto* agent = static_cast<const rocprofiler_agent_t*>(agents[i]);
         if (!agent) continue;
 
         backend->agent_types_[agent->id.handle] = agent->type;
-        if (agent->type == ROCPROFILER_AGENT_TYPE_GPU) {
-            int dev_id = std::max(agent->logical_node_type_id, 0);
-            backend->gpu_device_ids_[agent->id.handle] = dev_id;
+        if (agent->type == ROCPROFILER_AGENT_TYPE_GPU &&
+            agent->logical_node_type_id >= 0) {
+            const int device_id = agent->logical_node_type_id;
+            backend->gpu_device_ids_[agent->id.handle] = device_id;
 
-            // Track the first GPU agent for profiling engine initialization
+            // Track the first attributable GPU agent for profiling engine
+            // initialization. Dispatch counting remains single-agent today.
             if (backend->primary_gpu_agent_.handle == 0) {
                 backend->primary_gpu_agent_ = agent->id;
             }
 
             GpuArchProps props{};
-            props.wave_front_size = agent->wave_front_size > 0 ? agent->wave_front_size : 64;
+            props.wave_front_size =
+                agent->wave_front_size > 0 ? agent->wave_front_size : 64;
             props.max_waves_per_cu = agent->max_waves_per_cu;
             props.simd_per_cu = agent->simd_per_cu;
             props.lds_size_bytes = agent->lds_size_in_kb * 1024;
             props.cu_count = agent->cu_count;
             props.workgroup_max_size = agent->workgroup_max_size;
-            backend->gpu_arch_props_[dev_id] = props;
+            backend->gpu_arch_props_[device_id] = props;
         }
     }
 
     return ROCPROFILER_STATUS_SUCCESS;
 }
 
-int RocprofilerBackend::resolveDeviceId(const rocprofiler_agent_id_t agent_id) const {
+AmdTraceEndpoint RocprofilerBackend::resolveTraceEndpoint(
+    const rocprofiler_agent_id_t agent_id) const {
     std::lock_guard<std::mutex> lock(agent_mutex_);
-    if (auto itr = gpu_device_ids_.find(agent_id.handle); itr != gpu_device_ids_.end()) {
-        return itr->second;
+    AmdTraceEndpoint endpoint;
+
+    const auto type_it = agent_types_.find(agent_id.handle);
+    if (type_it == agent_types_.end()) return endpoint;
+    if (type_it->second == ROCPROFILER_AGENT_TYPE_CPU) {
+        endpoint.kind = AmdTraceAgentKind::Cpu;
+        return endpoint;
     }
-    return 0;
+    if (type_it->second != ROCPROFILER_AGENT_TYPE_GPU) return endpoint;
+
+    endpoint.kind = AmdTraceAgentKind::Gpu;
+    if (const auto device_it = gpu_device_ids_.find(agent_id.handle);
+        device_it != gpu_device_ids_.end()) {
+        endpoint.device_id = static_cast<uint32_t>(device_it->second);
+    }
+    return endpoint;
 }
 
 uint32_t RocprofilerBackend::classifyMemcpyKind(const rocprofiler_agent_id_t src_agent,
@@ -706,9 +733,16 @@ void RocprofilerBackend::handleKernelDispatch(
     const uint64_t start_timestamp,
     const uint64_t end_timestamp,
     const rocprofiler_async_correlation_id_t& correlation_id) {
+    const auto device_id =
+        ResolveAmdKernelDeviceId(resolveTraceEndpoint(info.agent_id));
+    if (!device_id.has_value()) {
+        trace_records_unattributed_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
     ActivityRecord out{};
     out.type = TraceType::KERNEL;
-    out.device_id = static_cast<uint32_t>(resolveDeviceId(info.agent_id));
+    out.device_id = *device_id;
     out.stream = static_cast<StreamHandle>(info.queue_id.handle);
     out.cpu_start_ns = static_cast<int64_t>(start_timestamp);
     out.duration_ns =
@@ -844,9 +878,20 @@ void RocprofilerBackend::handleKernelDispatch(
 
 void RocprofilerBackend::handleMemoryCopy(
     const rocprofiler_buffer_tracing_memory_copy_record_t& data) {
+    const auto source = resolveTraceEndpoint(data.src_agent_id);
+    const auto destination = resolveTraceEndpoint(data.dst_agent_id);
+    const auto device_id =
+        ResolveAmdMemoryCopyDeviceId(source, destination);
+    const bool host_only = source.kind == AmdTraceAgentKind::Cpu &&
+                           destination.kind == AmdTraceAgentKind::Cpu;
+    if (!device_id.has_value() && !host_only) {
+        trace_records_unattributed_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
     ActivityRecord out{};
     out.type = TraceType::MEMCPY;
-    out.device_id = static_cast<uint32_t>(resolveDeviceId(data.dst_agent_id));
+    out.device_id = device_id.value_or(0);
     out.cpu_start_ns = static_cast<int64_t>(data.start_timestamp);
     out.duration_ns = static_cast<int64_t>(
         data.end_timestamp >= data.start_timestamp ? data.end_timestamp - data.start_timestamp
@@ -858,14 +903,9 @@ void RocprofilerBackend::handleMemoryCopy(
     out.corr_id = TruncateCorrelationId(data.correlation_id.internal);
     std::snprintf(out.name, sizeof(out.name), "%s", CopyKindName(out.copy_kind));
 
-    // Classify src/dst memory kind from agent type (1=host, 2=device)
-    {
-        std::lock_guard<std::mutex> lock(agent_mutex_);
-        const auto src_it = agent_types_.find(data.src_agent_id.handle);
-        const auto dst_it = agent_types_.find(data.dst_agent_id.handle);
-        out.src_kind = (src_it != agent_types_.end() && src_it->second == ROCPROFILER_AGENT_TYPE_GPU) ? 2 : 1;
-        out.dst_kind = (dst_it != agent_types_.end() && dst_it->second == ROCPROFILER_AGENT_TYPE_GPU) ? 2 : 1;
-    }
+    // Memory-kind wire values: 1=host, 2=device.
+    out.src_kind = source.kind == AmdTraceAgentKind::Gpu ? 2 : 1;
+    out.dst_kind = destination.kind == AmdTraceAgentKind::Gpu ? 2 : 1;
 
     if (data.correlation_id.external.value != 0) {
         std::lock_guard<std::mutex> lock(external_scope_mutex_);
