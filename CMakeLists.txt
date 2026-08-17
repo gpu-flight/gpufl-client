@@ -159,6 +159,8 @@ set_target_properties(gpufl PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(gpufl PUBLIC gpufl_counters)
 
 target_sources(gpufl PRIVATE
+    include/gpufl/backends/amd/amd_profiling_policy.cpp
+    include/gpufl/backends/amd/amd_capture_capabilities.cpp
     include/gpufl/core/dictionary_manager.cpp
     include/gpufl/core/sass_compressor.cpp
     include/gpufl/core/logger/logger.cpp

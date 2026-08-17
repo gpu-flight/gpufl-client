@@ -343,6 +343,9 @@ class Monitor {
      */
     static ProfilingEngine ResolvedProfilingEngine();
 
+    /** Vendor-specific wire name of the engine path actually selected. */
+    static std::string ResolvedProfilingEngineWireName();
+
     static void BeginDeepWindowScope(const char* name);
     /**
      * @brief Disarms, and returns the wire names of the engines that were

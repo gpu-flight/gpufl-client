@@ -77,6 +77,15 @@ class IMonitorBackend {
     virtual bool IsProfilingMode() = 0;
 
     /**
+     * @brief Vendor-specific wire name of the profiling path actually selected.
+     *
+     * Empty preserves the legacy enum-based NVIDIA mapping. Backends that
+     * translate a user request to a different native engine override this so
+     * records do not claim an engine that never ran.
+     */
+    virtual std::string SelectedEngineWireName() const { return {}; }
+
+    /**
      * @brief True if the selected profiling engine attempted to start but
      *        was blocked by CUPTI_ERROR_INSUFFICIENT_PRIVILEGES (or the
      *        virtualized equivalent). Checked by gpufl::init() after

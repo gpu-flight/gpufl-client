@@ -34,6 +34,9 @@ class AmdProfilingEngine {
     /// Release resources.
     virtual void shutdown() = 0;
 
+    /// True once this engine has emitted at least one profiling sample.
+    virtual bool hasData() const = 0;
+
     /// Scope hooks - engines may filter collection to scoped regions.
     virtual void onScopeStart(const char* /*name*/) {}
     virtual void onScopeStop(const char* /*name*/) {}

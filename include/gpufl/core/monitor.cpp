@@ -761,6 +761,14 @@ ProfilingEngine Monitor::ResolvedProfilingEngine() {
     return g_resolvedProfilingEngine.load(std::memory_order_acquire);
 }
 
+std::string Monitor::ResolvedProfilingEngineWireName() {
+    if (const auto* backend = GetBackend()) {
+        const auto selected = backend->SelectedEngineWireName();
+        if (!selected.empty()) return selected;
+    }
+    return ProfilingEngineWireName(ResolvedProfilingEngine());
+}
+
 void Monitor::BeginDeepWindowScope(const char* name) { if (auto* b = GetBackend()) b->OnDeepWindowStart(name); }
 std::vector<std::string> Monitor::EndDeepWindowScope(const char* name) {
     if (auto* b = GetBackend()) return b->OnDeepWindowStop(name);

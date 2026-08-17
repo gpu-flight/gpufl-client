@@ -11,6 +11,7 @@ FetchContent_MakeAvailable(googletest)
 # 2. Create the test executable
 set(GPUFL_TEST_SOURCES
     main_test_runner.cpp
+    backends/amd/test_amd_profiling_policy.cpp
     core/test_analyzer.cpp
     core/test_api_path_routing.cpp
     core/test_batch_models.cpp
