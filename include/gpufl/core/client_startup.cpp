@@ -236,7 +236,7 @@ void ClientStartup::emitInitialEvent(Runtime& active_runtime,
     }
     event.host = active_runtime.host_collector->sample();
     event.session_kind = ProfilingEngineSessionKind(state_->monitor_options.profiling_engine);
-    event.profiling_engine = ProfilingEngineWireName(state_->monitor_options.profiling_engine);
+    event.profiling_engine = Monitor::ResolvedProfilingEngineWireName();
     event.run_id = segment.run_id;
     event.segment_index = segment.segment_index;
     if (segment.run_part) {

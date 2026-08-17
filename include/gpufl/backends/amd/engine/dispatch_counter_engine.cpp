@@ -277,6 +277,7 @@ void DispatchCounterEngine::recordCallback(
         samples.push_back(std::move(s));
     }
     Monitor::PushProfileSamples(samples);
+    engine->sample_count_.fetch_add(samples.size(), std::memory_order_relaxed);
 }
 
 }  // namespace gpufl::amd

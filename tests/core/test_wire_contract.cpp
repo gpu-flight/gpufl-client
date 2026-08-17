@@ -560,6 +560,7 @@ TEST(WireContract, MemcpyEventBatchColumns) {
     row.bytes = 4096;
     row.copy_kind = 1;
     row.corr_id = 100;
+    row.device_id = 7;
     batch.push(row);
 
     const std::string json =
@@ -569,8 +570,8 @@ TEST(WireContract, MemcpyEventBatchColumns) {
     EXPECT_TRUE(JsonContains(
         json,
         "\"columns\":[\"dt_ns\",\"stream_id\",\"duration_ns\",\"bytes\","
-        "\"copy_kind\",\"corr_id\"]"));
-    EXPECT_TRUE(JsonContains(json, "\"rows\":[[0,1,400,4096,1,100]]"));
+        "\"copy_kind\",\"corr_id\",\"device_id\"]"));
+    EXPECT_TRUE(JsonContains(json, "\"rows\":[[0,1,400,4096,1,100,7]]"));
 }
 
 // ── device_metric_batch ───────────────────────────────────────────────────

@@ -511,6 +511,8 @@ class GpuFlightSession:
                         'bytes':       row[ci['bytes']],
                         'copy_kind':   row[ci['copy_kind']],
                         'corr_id':     row[ci['corr_id']],
+                        'device_id':   row[ci['device_id']]
+                                       if 'device_id' in ci else 0,
                     })
         memcpy_df = pd.DataFrame(memcpy_rows)
 

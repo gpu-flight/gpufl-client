@@ -25,9 +25,13 @@
 #include <zlib.h>
 
 #include "gpufl/backends/amd/engine/dispatch_counter_engine.hpp"
+#include "gpufl/backends/amd/amd_capture_capabilities.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/monitor.hpp"
+#include "gpufl/core/logger/logger.hpp"
+#include "gpufl/core/model/lifecycle_model.hpp"
+#include "gpufl/core/runtime.hpp"
 #include "gpufl/core/stack_trace.hpp"
 #include "gpufl/core/ring_buffer.hpp"
 #include "gpufl/core/trace_type.hpp"
@@ -94,12 +98,43 @@ bool RocprofilerBackend::IsAvailable(std::string* reason) {
     return true;
 }
 
+AmdResolvedProfilingPlan RocprofilerBackend::resolvedPlan() const {
+    std::lock_guard lock(profiling_plan_mutex_);
+    return resolved_plan_;
+}
+
+void RocprofilerBackend::setResolvedPlan(AmdResolvedProfilingPlan plan) {
+    std::lock_guard lock(profiling_plan_mutex_);
+    resolved_plan_ = std::move(plan);
+}
+
+std::string RocprofilerBackend::SelectedEngineWireName() const {
+    return AmdSelectedPathWireName(resolvedPlan().selected_path);
+}
+
 void RocprofilerBackend::initialize(const MonitorOptions& opts) {
     if (initialized_.exchange(true)) return;
 
     opts_ = opts;
+    kernel_rows_emitted_.store(0, std::memory_order_relaxed);
+    memcpy_rows_emitted_.store(0, std::memory_order_relaxed);
+    trace_records_dropped_.store(0, std::memory_order_relaxed);
+    trace_records_unattributed_.store(0, std::memory_order_relaxed);
+    {
+        std::lock_guard lock(capture_capabilities_mutex_);
+        capture_capabilities_session_id_.clear();
+        capability_kernel_rows_baseline_ = 0;
+        capability_memcpy_rows_baseline_ = 0;
+        capability_dropped_records_baseline_ = 0;
+        capability_unattributed_records_baseline_ = 0;
+    }
+
+    AmdProfilingSupport support;
+    setResolvedPlan(ResolveAmdProfilingPlan(opts.profiling_engine, support));
     std::string reason;
     if (!configureRocprofiler(opts, &reason)) {
+        support.buffer_tracing = false;
+        setResolvedPlan(ResolveAmdProfilingPlan(opts.profiling_engine, support));
         initialized_.store(false);
         GFL_LOG_ERROR("[ROCProfilerBackend] initialization failed: ", reason);
         return;
@@ -133,6 +168,8 @@ void RocprofilerBackend::resetToolState() {
         std::lock_guard<std::mutex> lock(agent_mutex_);
         gpu_device_ids_.clear();
         agent_types_.clear();
+        gpu_arch_props_.clear();
+        primary_gpu_agent_ = {};
     }
 }
 
@@ -259,36 +296,31 @@ int RocprofilerBackend::toolInitialize() {
         return -1;
     }
 
-    // Create profiling engine based on user configuration.
-    // On AMD, PC sampling and counter collection cannot coexist in the same
-    // context, so PcSamplingWithSass falls back to dispatch counters.
-    // Trace (activity records only) creates no engine - the switch
-    // default covers it. ProfilingEngine::Monitor never reaches this
-    // backend (CreateMonitorAdapter returns nullptr for it), but guard
-    // anyway so a directly-constructed Monitor backend stays engine-free.
-    if (opts_.profiling_engine != ProfilingEngine::Trace &&
-        opts_.profiling_engine != ProfilingEngine::Monitor &&
-        primary_gpu_agent_.handle != 0) {
-        switch (opts_.profiling_engine) {
-            case ProfilingEngine::PcSampling:
-                // TODO: engine_ = std::make_unique<AmdPcSamplingEngine>();
-                GFL_LOG_DEBUG("[ROCProfilerBackend] PC sampling engine requested (not yet implemented)");
-                break;
-            case ProfilingEngine::SassMetrics:
-            case ProfilingEngine::Deep:
-            case ProfilingEngine::RangeProfiler:
-            case ProfilingEngine::RangeProfilerKernelReplay:
-                engine_ = std::make_unique<DispatchCounterEngine>();
-                break;
-            default:
-                break;
-        }
-        if (engine_) {
-            if (!engine_->initialize(context_, primary_gpu_agent_, opts_)) {
-                GFL_LOG_ERROR("[ROCProfilerBackend] Profiling engine initialization failed - "
-                              "continuing in monitoring-only mode");
-                engine_.reset();
-            }
+    // Resolve the user-facing request to an AMD-native path before creating an
+    // engine. Unsupported requests remain trace-capable and are reported as
+    // explicit fallbacks rather than silently pretending the requested engine ran.
+    AmdProfilingSupport support;
+    support.dispatch_counting = primary_gpu_agent_.handle != 0;
+    auto plan = ResolveAmdProfilingPlan(opts_.profiling_engine, support);
+    setResolvedPlan(plan);
+
+    if (plan.degraded) {
+        GFL_LOG_WARN("[ROCProfilerBackend] Requested ",
+                     AmdRequestIntentWireName(plan.requested_engine),
+                     "; selected ", AmdSelectedPathWireName(plan.selected_path),
+                     " (", plan.reason_code, ")");
+    }
+
+    if (plan.selected_path == AmdProfilingPath::DispatchCounting) {
+        engine_ = std::make_unique<DispatchCounterEngine>();
+        if (!engine_->initialize(context_, primary_gpu_agent_, opts_)) {
+            GFL_LOG_ERROR(
+                "[ROCProfilerBackend] Dispatch-counter initialization failed; "
+                "continuing with ROCprofiler trace activity only");
+            engine_.reset();
+            support.dispatch_counting = false;
+            setResolvedPlan(
+                ResolveAmdProfilingPlan(opts_.profiling_engine, support));
         }
     }
 
@@ -333,10 +365,59 @@ void RocprofilerBackend::OnPerfScopeStop(const char* name) {
     if (engine_) engine_->onScopeStop(name);
 }
 
+void RocprofilerBackend::emitCapabilities() {
+    const Runtime* runtime_state = runtime();
+    const auto segment =
+        runtime_state ? runtime_state->acquireSegmentContext() : nullptr;
+    if (!segment || !segment->logger) return;
+
+    std::lock_guard lock(capture_capabilities_mutex_);
+    if (capture_capabilities_session_id_ == segment->session_id) return;
+
+    const auto delta = [](const uint64_t value, const uint64_t baseline) {
+        return value >= baseline ? value - baseline : value;
+    };
+    const uint64_t kernel_rows =
+        kernel_rows_emitted_.load(std::memory_order_relaxed);
+    const uint64_t memcpy_rows =
+        memcpy_rows_emitted_.load(std::memory_order_relaxed);
+    const uint64_t dropped_records =
+        trace_records_dropped_.load(std::memory_order_relaxed);
+    const uint64_t unattributed_records =
+        trace_records_unattributed_.load(std::memory_order_relaxed);
+
+    AmdCaptureCapabilityInput input;
+    input.session_id = segment->session_id;
+    input.ts_ns = detail::GetTimestampNs();
+    input.plan = resolvedPlan();
+    input.trace_configured =
+        tool_registered_.load(std::memory_order_acquire);
+    input.kernel_rows =
+        delta(kernel_rows, capability_kernel_rows_baseline_);
+    input.memcpy_rows =
+        delta(memcpy_rows, capability_memcpy_rows_baseline_);
+    input.profiling_sample_rows =
+        engine_ && engine_->hasData() ? 1 : 0;
+    input.dropped_trace_records =
+        delta(dropped_records, capability_dropped_records_baseline_);
+    input.unattributed_trace_records = delta(
+        unattributed_records, capability_unattributed_records_baseline_);
+
+    segment->logger->write(model::CaptureCapabilitiesModel(
+        BuildAmdCaptureCapabilitiesEvent(input)));
+
+    capability_kernel_rows_baseline_ = kernel_rows;
+    capability_memcpy_rows_baseline_ = memcpy_rows;
+    capability_dropped_records_baseline_ = dropped_records;
+    capability_unattributed_records_baseline_ = unattributed_records;
+    capture_capabilities_session_id_ = segment->session_id;
+}
+
 void RocprofilerBackend::shutdown() {
     if (!initialized_.exchange(false)) return;
 
     stop();
+    emitCapabilities();
 
     if (engine_) {
         engine_->shutdown();
@@ -444,9 +525,12 @@ void RocprofilerBackend::bufferTracingShim(rocprofiler_context_id_t,
                                            rocprofiler_record_header_t** headers,
                                            const size_t num_headers,
                                            void* data,
-                                           uint64_t) {
+                                           const uint64_t drop_count) {
     auto* backend = static_cast<RocprofilerBackend*>(data);
-    if (!backend || headers == nullptr) return;
+    if (!backend) return;
+    backend->trace_records_dropped_.fetch_add(drop_count,
+                                              std::memory_order_relaxed);
+    if (headers == nullptr) return;
 
     for (size_t i = 0; i < num_headers; ++i) {
         auto* header = headers[i];
@@ -512,41 +596,59 @@ rocprofiler_status_t RocprofilerBackend::queryAgentsShim(
     std::lock_guard<std::mutex> lock(backend->agent_mutex_);
     backend->gpu_device_ids_.clear();
     backend->agent_types_.clear();
+    backend->gpu_arch_props_.clear();
+    backend->primary_gpu_agent_ = {};
 
     for (size_t i = 0; i < num_agents; ++i) {
         const auto* agent = static_cast<const rocprofiler_agent_t*>(agents[i]);
         if (!agent) continue;
 
         backend->agent_types_[agent->id.handle] = agent->type;
-        if (agent->type == ROCPROFILER_AGENT_TYPE_GPU) {
-            int dev_id = std::max(agent->logical_node_type_id, 0);
-            backend->gpu_device_ids_[agent->id.handle] = dev_id;
+        if (agent->type == ROCPROFILER_AGENT_TYPE_GPU &&
+            agent->logical_node_type_id >= 0) {
+            const int device_id = agent->logical_node_type_id;
+            backend->gpu_device_ids_[agent->id.handle] = device_id;
 
-            // Track the first GPU agent for profiling engine initialization
+            // Track the first attributable GPU agent for profiling engine
+            // initialization. Dispatch counting remains single-agent today.
             if (backend->primary_gpu_agent_.handle == 0) {
                 backend->primary_gpu_agent_ = agent->id;
             }
 
             GpuArchProps props{};
-            props.wave_front_size = agent->wave_front_size > 0 ? agent->wave_front_size : 64;
+            props.wave_front_size =
+                agent->wave_front_size > 0 ? agent->wave_front_size : 64;
             props.max_waves_per_cu = agent->max_waves_per_cu;
             props.simd_per_cu = agent->simd_per_cu;
             props.lds_size_bytes = agent->lds_size_in_kb * 1024;
             props.cu_count = agent->cu_count;
             props.workgroup_max_size = agent->workgroup_max_size;
-            backend->gpu_arch_props_[dev_id] = props;
+            backend->gpu_arch_props_[device_id] = props;
         }
     }
 
     return ROCPROFILER_STATUS_SUCCESS;
 }
 
-int RocprofilerBackend::resolveDeviceId(const rocprofiler_agent_id_t agent_id) const {
+AmdTraceEndpoint RocprofilerBackend::resolveTraceEndpoint(
+    const rocprofiler_agent_id_t agent_id) const {
     std::lock_guard<std::mutex> lock(agent_mutex_);
-    if (auto itr = gpu_device_ids_.find(agent_id.handle); itr != gpu_device_ids_.end()) {
-        return itr->second;
+    AmdTraceEndpoint endpoint;
+
+    const auto type_it = agent_types_.find(agent_id.handle);
+    if (type_it == agent_types_.end()) return endpoint;
+    if (type_it->second == ROCPROFILER_AGENT_TYPE_CPU) {
+        endpoint.kind = AmdTraceAgentKind::Cpu;
+        return endpoint;
     }
-    return 0;
+    if (type_it->second != ROCPROFILER_AGENT_TYPE_GPU) return endpoint;
+
+    endpoint.kind = AmdTraceAgentKind::Gpu;
+    if (const auto device_it = gpu_device_ids_.find(agent_id.handle);
+        device_it != gpu_device_ids_.end()) {
+        endpoint.device_id = static_cast<uint32_t>(device_it->second);
+    }
+    return endpoint;
 }
 
 uint32_t RocprofilerBackend::classifyMemcpyKind(const rocprofiler_agent_id_t src_agent,
@@ -631,9 +733,16 @@ void RocprofilerBackend::handleKernelDispatch(
     const uint64_t start_timestamp,
     const uint64_t end_timestamp,
     const rocprofiler_async_correlation_id_t& correlation_id) {
+    const auto device_id =
+        ResolveAmdKernelDeviceId(resolveTraceEndpoint(info.agent_id));
+    if (!device_id.has_value()) {
+        trace_records_unattributed_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
     ActivityRecord out{};
     out.type = TraceType::KERNEL;
-    out.device_id = static_cast<uint32_t>(resolveDeviceId(info.agent_id));
+    out.device_id = *device_id;
     out.stream = static_cast<StreamHandle>(info.queue_id.handle);
     out.cpu_start_ns = static_cast<int64_t>(start_timestamp);
     out.duration_ns =
@@ -762,14 +871,27 @@ void RocprofilerBackend::handleKernelDispatch(
         }
     }
 
-    g_monitorBuffer.Push(out);
+    if (g_monitorBuffer.Push(out)) {
+        kernel_rows_emitted_.fetch_add(1, std::memory_order_relaxed);
+    }
 }
 
 void RocprofilerBackend::handleMemoryCopy(
     const rocprofiler_buffer_tracing_memory_copy_record_t& data) {
+    const auto source = resolveTraceEndpoint(data.src_agent_id);
+    const auto destination = resolveTraceEndpoint(data.dst_agent_id);
+    const auto device_id =
+        ResolveAmdMemoryCopyDeviceId(source, destination);
+    const bool host_only = source.kind == AmdTraceAgentKind::Cpu &&
+                           destination.kind == AmdTraceAgentKind::Cpu;
+    if (!device_id.has_value() && !host_only) {
+        trace_records_unattributed_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
     ActivityRecord out{};
     out.type = TraceType::MEMCPY;
-    out.device_id = static_cast<uint32_t>(resolveDeviceId(data.dst_agent_id));
+    out.device_id = device_id.value_or(0);
     out.cpu_start_ns = static_cast<int64_t>(data.start_timestamp);
     out.duration_ns = static_cast<int64_t>(
         data.end_timestamp >= data.start_timestamp ? data.end_timestamp - data.start_timestamp
@@ -781,14 +903,9 @@ void RocprofilerBackend::handleMemoryCopy(
     out.corr_id = TruncateCorrelationId(data.correlation_id.internal);
     std::snprintf(out.name, sizeof(out.name), "%s", CopyKindName(out.copy_kind));
 
-    // Classify src/dst memory kind from agent type (1=host, 2=device)
-    {
-        std::lock_guard<std::mutex> lock(agent_mutex_);
-        const auto src_it = agent_types_.find(data.src_agent_id.handle);
-        const auto dst_it = agent_types_.find(data.dst_agent_id.handle);
-        out.src_kind = (src_it != agent_types_.end() && src_it->second == ROCPROFILER_AGENT_TYPE_GPU) ? 2 : 1;
-        out.dst_kind = (dst_it != agent_types_.end() && dst_it->second == ROCPROFILER_AGENT_TYPE_GPU) ? 2 : 1;
-    }
+    // Memory-kind wire values: 1=host, 2=device.
+    out.src_kind = source.kind == AmdTraceAgentKind::Gpu ? 2 : 1;
+    out.dst_kind = destination.kind == AmdTraceAgentKind::Gpu ? 2 : 1;
 
     if (data.correlation_id.external.value != 0) {
         std::lock_guard<std::mutex> lock(external_scope_mutex_);
@@ -800,7 +917,9 @@ void RocprofilerBackend::handleMemoryCopy(
         }
     }
 
-    g_monitorBuffer.Push(out);
+    if (g_monitorBuffer.Push(out)) {
+        memcpy_rows_emitted_.fetch_add(1, std::memory_order_relaxed);
+    }
 }
 
 }  // namespace gpufl::amd

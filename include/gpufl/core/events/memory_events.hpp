@@ -73,8 +73,9 @@ struct MemcpyBatchRow {
     uint32_t stream_id   = 0;
     int64_t  duration_ns = 0;
     uint64_t bytes       = 0;
-    uint32_t copy_kind   = 0;  // numeric CUpti kind value
+    uint32_t copy_kind   = 0;  // numeric CUPTI/ROCprofiler kind value
     unsigned corr_id     = 0;
+    uint32_t device_id   = 0;  // GPU that executed the transfer
 };
 
 /**

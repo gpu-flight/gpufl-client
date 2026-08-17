@@ -333,7 +333,7 @@ void DeepWindow::Close(const DeepWindowClose reason) {
             // disarm means this window armed nothing, and overwriting that
             // would erase the one record of it.
             ev.engines = {
-                ProfilingEngineWireName(Monitor::ResolvedProfilingEngine())};
+                Monitor::ResolvedProfilingEngineWireName()};
         }
 
         // Close the scope last. The disarm above drains what the engines

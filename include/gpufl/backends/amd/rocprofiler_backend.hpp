@@ -16,6 +16,8 @@
 #include <rocprofiler-sdk/registration.h>
 
 #include "gpufl/backends/amd/engine/amd_profiling_engine.hpp"
+#include "gpufl/backends/amd/amd_profiling_policy.hpp"
+#include "gpufl/backends/amd/amd_trace_policy.hpp"
 #include "gpufl/core/activity_record.hpp"
 #include "gpufl/core/monitor_backend.hpp"
 
@@ -28,11 +30,13 @@ class RocprofilerBackend final : public IMonitorBackend {
 
     void initialize(const MonitorOptions& opts) override;
     void shutdown() override;
+    void emitCapabilities() override;
     void start() override;
     void stop() override;
 
     bool IsMonitoringMode() override { return initialized_.load(); }
     bool IsProfilingMode() override { return engine_ != nullptr; }
+    std::string SelectedEngineWireName() const override;
 
     void OnScopeStart(const char* name) override;
     void OnScopeStop(const char* name) override;
@@ -66,6 +70,8 @@ class RocprofilerBackend final : public IMonitorBackend {
     bool configureRocprofiler(const MonitorOptions& opts, std::string* reason);
     void resetToolState();
     bool registerTool(std::string* reason);
+    AmdResolvedProfilingPlan resolvedPlan() const;
+    void setResolvedPlan(AmdResolvedProfilingPlan plan);
 
     int toolInitialize();
     void toolFinalize();
@@ -77,7 +83,8 @@ class RocprofilerBackend final : public IMonitorBackend {
     void handleCodeObjectLoad(const rocprofiler_callback_tracing_code_object_load_data_t& data);
 
     std::string resolveKernelName(uint64_t kernel_id) const;
-    int resolveDeviceId(rocprofiler_agent_id_t agent_id) const;
+    AmdTraceEndpoint resolveTraceEndpoint(
+        rocprofiler_agent_id_t agent_id) const;
     uint32_t classifyMemcpyKind(rocprofiler_agent_id_t src_agent,
                                 rocprofiler_agent_id_t dst_agent) const;
 
@@ -135,6 +142,20 @@ class RocprofilerBackend final : public IMonitorBackend {
     rocprofiler_client_finalize_t client_finalize_{nullptr};
 
     std::unique_ptr<AmdProfilingEngine> engine_;
+
+    mutable std::mutex profiling_plan_mutex_;
+    AmdResolvedProfilingPlan resolved_plan_{};
+
+    std::atomic<uint64_t> kernel_rows_emitted_{0};
+    std::atomic<uint64_t> memcpy_rows_emitted_{0};
+    std::atomic<uint64_t> trace_records_dropped_{0};
+    std::atomic<uint64_t> trace_records_unattributed_{0};
+    mutable std::mutex capture_capabilities_mutex_;
+    mutable std::string capture_capabilities_session_id_;
+    mutable uint64_t capability_kernel_rows_baseline_ = 0;
+    mutable uint64_t capability_memcpy_rows_baseline_ = 0;
+    mutable uint64_t capability_dropped_records_baseline_ = 0;
+    mutable uint64_t capability_unattributed_records_baseline_ = 0;
 
     std::atomic<bool> initialized_{false};
     std::atomic<bool> active_{false};

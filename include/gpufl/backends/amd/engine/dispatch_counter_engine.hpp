@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -28,6 +29,7 @@ class DispatchCounterEngine final : public AmdProfilingEngine {
     void stop() override;
     void drain() override;
     void shutdown() override;
+    bool hasData() const override { return sample_count_.load() > 0; }
 
    private:
     /// Counter metadata for resolving record IDs to human-readable names.
@@ -60,6 +62,7 @@ class DispatchCounterEngine final : public AmdProfilingEngine {
     mutable std::mutex counter_mu_;
     std::unordered_map<uint64_t, CounterInfo> counter_info_;  // counter_id.handle → info
     std::vector<std::string> requested_counters_;             // names of counters we want
+    std::atomic<uint64_t> sample_count_{0};
 };
 
 }  // namespace gpufl::amd
