@@ -82,6 +82,10 @@ constexpr const char* kExpectNoKernelEvents = "GPUFL_EXPECT_NO_KERNEL_EVENTS";
 // injected target - same switch InitOptions.enable_debug_output exposes to
 // embedding callers, but reachable for `gpufl trace` runs.
 constexpr const char* kDebugOutput          = "GPUFL_DEBUG";
+// Launcher-owned source-capture contract. `gpufl trace` always publishes an
+// explicit value: "1" by default, or "0" for --no-source. Applying it after
+// file configuration makes the command-line privacy choice authoritative.
+constexpr const char* kIncludeSource        = "GPUFL_INCLUDE_SOURCE";
 
 // Override the per-file log rotation threshold in bytes (default:
 // Logger::kDefaultRotateBytes = 64 MiB). Mainly for tests - a tiny value

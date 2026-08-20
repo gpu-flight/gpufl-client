@@ -64,6 +64,14 @@ void resolveStartupOptions(InitOptions& options) {
         ConfigFileLoader::apply(options, config_path);
     }
 
+    // The trace launcher owns this explicit source-capture decision and always
+    // sets 1 or 0. Apply it after the config file so --no-source cannot be
+    // silently undone by inherited target configuration. Embedded users that
+    // do not set the variable retain their InitOptions behavior.
+    if (const char* value = std::getenv(env::kIncludeSource)) {
+        options.enable_source_collection = std::strcmp(value, "1") == 0;
+    }
+
     std::string api_path = options.api_path;
     if (api_path.empty()) {
         if (const char* value = std::getenv(env::kApiPath)) {

@@ -442,6 +442,12 @@ const CliOptionManager<TraceArgs>& traceOptions() {
                  "monitoring-only telemetry. PcSampling / PM / Range passes may "
                  "need NVIDIA performance-counter access.",
                  kSection(TraceHelpSection::Capture), &parsePasses)
+            .add({"--no-source"}, "",
+                 "Do not capture discovered CUDA source file content. Source "
+                 "capture is enabled by default for analysis and source-line "
+                 "correlation",
+                 kSection(TraceHelpSection::Capture),
+                 &setFlag<&TraceArgs::no_source>)
 
             // Runtime
             .add({"-q", "--quiet"}, "",

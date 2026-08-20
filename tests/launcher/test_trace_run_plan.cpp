@@ -177,6 +177,31 @@ TEST(TraceRunPlanTest, TraceCommonExecutesThePlannedSinglePass) {
     EXPECT_EQ(platform.env[gpufl::env::kAppName], "trace-plan-test");
     EXPECT_EQ(platform.env[gpufl::env::kLogDir], args.output_dir);
     EXPECT_EQ(platform.env[gpufl::env::kProfilingEngine], "Trace");
+    EXPECT_EQ(platform.env[gpufl::env::kIncludeSource], "1");
+
+    fs::remove_all(root, ec);
+}
+
+TEST(TraceRunPlanTest, TraceCommonHonorsExplicitSourceCaptureOptOut) {
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() /
+        ("gpufl_trace_source_privacy_" +
+         std::to_string(gpufl::detail::GetPid()));
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    fs::create_directories(root, ec);
+    ASSERT_FALSE(ec) << ec.message();
+    { std::ofstream inject(root / "gpufl_inject.so"); ASSERT_TRUE(inject); }
+
+    ExecutingPlanningPlatform platform(root);
+    platform.env[gpufl::env::kIncludeSource] = "1";
+    TraceArgs args;
+    args.command = {"target"};
+    args.output_dir = (root / "capture").string();
+    args.no_source = true;
+
+    EXPECT_EQ(gpufl::launcher::runTraceCommon(args, platform), 0);
+    EXPECT_EQ(platform.env[gpufl::env::kIncludeSource], "0");
 
     fs::remove_all(root, ec);
 }

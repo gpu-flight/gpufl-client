@@ -33,6 +33,7 @@ protected:
     void SetUp() override {
         saveAndUnset_(gpufl::env::kConfigFile, config_file_);
         saveAndUnset_(gpufl::env::kApiPath, api_path_);
+        saveAndUnset_(gpufl::env::kIncludeSource, include_source_);
         saveAndUnset_(gpufl::env::kRunId, run_id_);
         saveAndUnset_(gpufl::env::kSegmentEveryMs, segment_every_ms_);
         saveAndUnset_(gpufl::env::kSegmentMaxRows, segment_max_rows_);
@@ -43,6 +44,7 @@ protected:
     void TearDown() override {
         restore_(gpufl::env::kConfigFile, config_file_);
         restore_(gpufl::env::kApiPath, api_path_);
+        restore_(gpufl::env::kIncludeSource, include_source_);
         restore_(gpufl::env::kRunId, run_id_);
         restore_(gpufl::env::kSegmentEveryMs, segment_every_ms_);
         restore_(gpufl::env::kSegmentMaxRows, segment_max_rows_);
@@ -64,6 +66,7 @@ private:
 
     std::optional<std::string> config_file_;
     std::optional<std::string> api_path_;
+    std::optional<std::string> include_source_;
     std::optional<std::string> run_id_;
     std::optional<std::string> segment_every_ms_;
     std::optional<std::string> segment_max_rows_;
@@ -101,6 +104,41 @@ TEST_F(StartupConfigurationTest, ApiPathEnvironmentFallbackIsNormalized) {
     gpufl::detail::resolveStartupOptions(options);
 
     EXPECT_EQ(options.api_path, "/environment/v1");
+}
+
+TEST_F(StartupConfigurationTest, IncludeSourceEnvironmentEnablesCollection) {
+    setEnv(gpufl::env::kIncludeSource, "1");
+
+    gpufl::InitOptions options;
+    options.enable_source_collection = false;
+    gpufl::detail::resolveStartupOptions(options);
+
+    EXPECT_TRUE(options.enable_source_collection);
+}
+
+TEST_F(StartupConfigurationTest, IncludeSourceEnvironmentOverridesConfigFile) {
+    const auto temp_root =
+        std::filesystem::temp_directory_path() /
+        ("gpufl_source_privacy_config_" +
+         std::to_string(gpufl::detail::GetPid()));
+    const auto config_path = temp_root / "config.json";
+    std::error_code ec;
+    std::filesystem::remove_all(temp_root, ec);
+    std::filesystem::create_directories(temp_root, ec);
+    ASSERT_FALSE(ec) << ec.message();
+    {
+        std::ofstream config(config_path);
+        ASSERT_TRUE(config);
+        config << R"({"enable_source_collection":true})";
+    }
+    setEnv(gpufl::env::kIncludeSource, "0");
+
+    gpufl::InitOptions options;
+    options.config_file = config_path.string();
+    gpufl::detail::resolveStartupOptions(options);
+
+    EXPECT_FALSE(options.enable_source_collection);
+    std::filesystem::remove_all(temp_root, ec);
 }
 
 TEST_F(StartupConfigurationTest, ValidSegmentationAndRolloverAreReadTogether) {
