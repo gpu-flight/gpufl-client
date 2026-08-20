@@ -86,6 +86,10 @@ constexpr const char* kDebugOutput          = "GPUFL_DEBUG";
 // explicit value: "1" by default, or "0" for --no-source. Applying it after
 // file configuration makes the command-line privacy choice authoritative.
 constexpr const char* kIncludeSource        = "GPUFL_INCLUDE_SOURCE";
+// Launcher-owned approved project root for bounded correlated source capture.
+// This is local process configuration only; it must not be serialized into
+// product events or broad logs.
+constexpr const char* kSourceRoot           = "GPUFL_SOURCE_ROOT";
 
 // Override the per-file log rotation threshold in bytes (default:
 // Logger::kDefaultRotateBytes = 64 MiB). Mainly for tests - a tiny value

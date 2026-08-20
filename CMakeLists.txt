@@ -163,6 +163,7 @@ target_sources(gpufl PRIVATE
     include/gpufl/backends/amd/amd_capture_capabilities.cpp
     include/gpufl/backends/amd/amd_trace_policy.cpp
     include/gpufl/core/dictionary_manager.cpp
+    include/gpufl/core/source_capture_policy.cpp
     include/gpufl/core/sass_compressor.cpp
     include/gpufl/core/logger/logger.cpp
     include/gpufl/core/logger/lifecycle_control_journal.cpp

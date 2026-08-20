@@ -34,6 +34,7 @@ protected:
         saveAndUnset_(gpufl::env::kConfigFile, config_file_);
         saveAndUnset_(gpufl::env::kApiPath, api_path_);
         saveAndUnset_(gpufl::env::kIncludeSource, include_source_);
+        saveAndUnset_(gpufl::env::kSourceRoot, source_root_);
         saveAndUnset_(gpufl::env::kRunId, run_id_);
         saveAndUnset_(gpufl::env::kSegmentEveryMs, segment_every_ms_);
         saveAndUnset_(gpufl::env::kSegmentMaxRows, segment_max_rows_);
@@ -45,6 +46,7 @@ protected:
         restore_(gpufl::env::kConfigFile, config_file_);
         restore_(gpufl::env::kApiPath, api_path_);
         restore_(gpufl::env::kIncludeSource, include_source_);
+        restore_(gpufl::env::kSourceRoot, source_root_);
         restore_(gpufl::env::kRunId, run_id_);
         restore_(gpufl::env::kSegmentEveryMs, segment_every_ms_);
         restore_(gpufl::env::kSegmentMaxRows, segment_max_rows_);
@@ -67,6 +69,7 @@ private:
     std::optional<std::string> config_file_;
     std::optional<std::string> api_path_;
     std::optional<std::string> include_source_;
+    std::optional<std::string> source_root_;
     std::optional<std::string> run_id_;
     std::optional<std::string> segment_every_ms_;
     std::optional<std::string> segment_max_rows_;
@@ -114,6 +117,21 @@ TEST_F(StartupConfigurationTest, IncludeSourceEnvironmentEnablesCollection) {
     gpufl::detail::resolveStartupOptions(options);
 
     EXPECT_TRUE(options.enable_source_collection);
+    ASSERT_EQ(options.source_capture.approved_roots.size(), 1u);
+    EXPECT_FALSE(options.source_capture.approved_roots.front().empty());
+}
+
+TEST_F(StartupConfigurationTest, LauncherSourceRootOverridesProgrammaticRoots) {
+    const auto root = std::filesystem::temp_directory_path() /
+                      "gpufl-explicit-source-root";
+    setEnv(gpufl::env::kSourceRoot, root.string().c_str());
+
+    gpufl::InitOptions options;
+    options.source_capture.approved_roots = {"stale-root"};
+    gpufl::detail::resolveStartupOptions(options);
+
+    EXPECT_EQ(options.source_capture.approved_roots,
+              (std::vector<std::string>{root.string()}));
 }
 
 TEST_F(StartupConfigurationTest, IncludeSourceEnvironmentOverridesConfigFile) {

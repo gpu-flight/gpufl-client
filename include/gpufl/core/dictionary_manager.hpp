@@ -7,6 +7,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "gpufl/core/source_capture_policy.hpp"
+
 namespace gpufl {
 
 class Logger;
@@ -38,11 +40,10 @@ class SegmentDictionaryEmitter {
 
 class DictionaryManager {
    public:
-    /// When false, internSourceFile() still interns the path (needed for
-    /// the function key) but does NOT read the file content from disk.
-    /// flushSourceContent() becomes a no-op.  Users who don't want their
-    /// source code sent to the backend can set this to false.
-    bool enable_source_collection = true;
+    /// Configure the root/type/file-kind/budget policy used before any
+    /// profiler-discovered path is opened.
+    void configureSourceCapture(bool enabled,
+                                const SourceCaptureSettings& settings);
 
     uint32_t internKernel(const std::string& name) {
         std::lock_guard lk(mu_);
@@ -97,6 +98,7 @@ class DictionaryManager {
     }
 
     uint32_t internSourceFile(const std::string& path);
+    std::string sourceFileName(uint32_t source_file_id);
 
     // Emits a dictionary_update JSON line to Channel::All for any new entries
     // accumulated since the last call.  No-op if nothing is dirty.
@@ -148,9 +150,11 @@ class DictionaryManager {
         dirty_metrics_.clear();
         next_metric_id_ = 1;
         source_file_dict_.clear();
+        source_file_names_.clear();
         dirty_source_files_.clear();
         next_source_file_id_ = 1;
         pending_source_content_.clear();
+        source_capture_.reset();
         pending_disasm_cubins_.clear();
     }
 
@@ -177,11 +181,15 @@ class DictionaryManager {
     uint32_t next_metric_id_ = 1;
 
     std::unordered_map<std::string, uint32_t> source_file_dict_;
+    // file_id -> normalized logical path emitted to product-facing logs.
+    // source_file_dict_ keeps the local lookup key but is never serialized.
+    std::unordered_map<uint32_t, std::string> source_file_names_;
     std::unordered_map<std::string, uint32_t> dirty_source_files_;
     uint32_t next_source_file_id_ = 1;
 
     // file_id → lines (populated once per new source file, flushed via flushSourceContent)
     std::unordered_map<uint32_t, std::vector<std::string>> pending_source_content_;
+    detail::SourceCapturePolicy source_capture_;
 
     // cubin_crc → raw bytes (populated once per cubin, flushed via flushDisassembly)
     std::unordered_map<uint64_t, std::vector<uint8_t>> pending_disasm_cubins_;

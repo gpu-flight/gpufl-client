@@ -30,7 +30,8 @@ public:
     void reset();
     void bindFlushRuntime(Runtime* runtime);
     void clearFlushSink();
-    void setSourceCollectionEnabled(bool enabled);
+    void configureSourceCapture(bool enabled,
+                                const SourceCaptureSettings& settings);
     void flushAll(FlushMode mode = FlushMode::Fast);
     void flushDictionarySnapshot(SegmentDictionaryEmitter& emitter,
                                  Logger& logger,
@@ -42,6 +43,7 @@ public:
                             const std::string& func_symbol = std::string());
     uint32_t internMetric(const std::string& name);
     uint32_t internSourceFile(const std::string& path);
+    std::string sourceFileName(uint32_t source_file_id);
 
     void enqueueDisassembly(uint64_t crc, const uint8_t* data, size_t size);
     void flushDisassembly();

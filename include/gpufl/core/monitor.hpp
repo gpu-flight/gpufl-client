@@ -9,6 +9,7 @@
 #include "gpufl/core/activity_record.hpp"
 #include "gpufl/core/events.hpp"
 #include "gpufl/core/ring_buffer.hpp"
+#include "gpufl/core/source_capture_policy.hpp"
 #include "gpufl/core/stream_handle.hpp"
 #include "gpufl/core/trace_type.hpp"
 
@@ -157,6 +158,7 @@ struct MonitorOptions {
     bool enable_debug_output = false;
     bool enable_stack_trace = false;
     bool enable_source_collection = true;
+    SourceCaptureSettings source_capture;
     // Gate for CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION. Mirror of
     // InitOptions::enable_external_correlation; copied across in the
     // gpufl::init() → CuptiBackend::initialize() conversion path.

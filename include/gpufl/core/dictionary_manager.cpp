@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
@@ -75,6 +76,45 @@ void appendDict(std::ostringstream& oss, const char* key,
     oss << '}';
 }
 
+std::string buildSourceCaptureManifestJson(
+    const detail::SourceCaptureManifest& manifest,
+    const std::string& session_id) {
+    std::ostringstream oss;
+    oss << "{\"version\":1,\"type\":\"source_capture_manifest\""
+        << ",\"session_id\":\"" << model::jsonEscape(session_id) << '"'
+        << ",\"policy\":\"correlated-project-source-v1\""
+        << ",\"enabled\":" << (manifest.enabled ? "true" : "false")
+        << ",\"approved_root_count\":" << manifest.approved_root_count
+        << ",\"limits\":{\"max_files\":" << manifest.limits.max_files
+        << ",\"max_bytes_per_file\":"
+        << manifest.limits.max_bytes_per_file
+        << ",\"max_total_bytes\":" << manifest.limits.max_total_bytes
+        << ",\"max_line_bytes\":" << manifest.limits.max_line_bytes
+        << ",\"max_manifest_entries\":"
+        << manifest.limits.max_manifest_entries << "},\"files\":[";
+    bool first = true;
+    for (const auto& file : manifest.files) {
+        if (!first) oss << ',';
+        first = false;
+        oss << "{\"source_file_id\":" << file.source_file_id
+            << ",\"logical_path\":\""
+            << model::jsonEscape(file.logical_path) << '"'
+            << ",\"discovery_reason\":\""
+            << model::jsonEscape(file.discovery_reason) << '"'
+            << ",\"disposition\":\""
+            << detail::sourceCaptureDispositionName(file.disposition) << '"'
+            << ",\"bytes\":" << file.bytes << '}';
+    }
+    oss << "],\"totals\":{\"captured_files\":"
+        << manifest.captured_files
+        << ",\"captured_bytes\":" << manifest.captured_bytes
+        << ",\"skipped_files\":" << manifest.skipped_files
+        << ",\"truncated_files\":0"
+        << ",\"omitted_manifest_entries\":"
+        << manifest.omitted_manifest_entries << "}}";
+    return oss.str();
+}
+
 #ifndef _WIN32
 // Launch argv[0] with stdout connected to a pipe we read and stderr sent
 // to /dev/null, via posix_spawn - deliberately NOT popen/system.
@@ -123,6 +163,12 @@ FILE *spawnReadPipe(char *const argv[], pid_t &outPid) {
 
 }  // namespace
 
+void DictionaryManager::configureSourceCapture(
+    const bool enabled, const SourceCaptureSettings& settings) {
+    std::lock_guard lk(mu_);
+    source_capture_.configure(enabled, settings);
+}
+
 uint32_t DictionaryManager::internSourceFile(const std::string& path) {
     if (path.empty()) return 0;
     std::lock_guard lk(mu_);
@@ -131,32 +177,39 @@ uint32_t DictionaryManager::internSourceFile(const std::string& path) {
         return it->second;
     const uint32_t id = next_source_file_id_++;
     source_file_dict_[path] = id;
-    dirty_source_files_[path] = id;
-
-    // Read file content eagerly when source collection is enabled.
-    // When disabled, we still intern the path (needed for function keys
-    // and source_file_id in profile samples) but skip reading the actual
-    // source code from disk - users who don't want their source code
-    // sent to the backend can set enable_source_collection = false.
-    if (enable_source_collection) {
-        std::ifstream f(path);
-        if (f.is_open()) {
-            std::vector<std::string> lines;
-            std::string line;
-            while (std::getline(f, line)) lines.push_back(line);
-            if (!lines.empty()) pending_source_content_[id] = std::move(lines);
-        }
+    auto capture = source_capture_.capture(
+        path, id, "profiler_source_correlation");
+    source_file_names_[id] = capture.record.logical_path;
+    dirty_source_files_[capture.record.logical_path] = id;
+    if (capture.record.disposition ==
+        detail::SourceCaptureDisposition::Captured) {
+        pending_source_content_[id] = std::move(capture.lines);
     }
     return id;
+}
+
+std::string DictionaryManager::sourceFileName(
+    const uint32_t source_file_id) {
+    std::lock_guard lk(mu_);
+    const auto it = source_file_names_.find(source_file_id);
+    return it == source_file_names_.end() ? std::string() : it->second;
 }
 
 void DictionaryManager::flushSourceContent(Logger& logger,
                                             const std::string& session_id) {
     std::unordered_map<uint32_t, std::vector<std::string>> pending;
+    std::optional<detail::SourceCaptureManifest> manifest;
     {
         std::lock_guard lk(mu_);
-        if (pending_source_content_.empty()) return;
         pending = std::move(pending_source_content_);
+        if (source_capture_.manifestDirty()) {
+            manifest = source_capture_.manifest();
+            source_capture_.markManifestFlushed();
+        }
+    }
+    if (manifest) {
+        logger.write(SassLine{
+            buildSourceCaptureManifestJson(*manifest, session_id)});
     }
     for (auto& [file_id, lines] : pending) {
         std::ostringstream oss;
@@ -732,8 +785,12 @@ void DictionaryManager::flushDisassembly(Logger& logger,
                     // Demangle the name so it merges with the PC-sample function
                     // entry (which is demangled), and carry the mangled symbol so
                     // the funcKey/disassembly join still keys off md5(symbol).
+                    const auto source_id = sourceFileIds.find(primarySourceFile);
+                    const std::string source_name = source_id == sourceFileIds.end()
+                        ? std::string()
+                        : sourceFileName(source_id->second);
                     internFunction(
-                        core::DemangleFunctionKey(funcName + "@" + primarySourceFile),
+                        core::DemangleFunctionKey(funcName + "@" + source_name),
                         funcName);
                 }
 
@@ -781,8 +838,12 @@ void DictionaryManager::flushDisassembly(Logger& logger,
                             bestCount = cnt;
                         }
                     }
+                    const auto source_id = sourceFileIds.find(primarySourceFile);
+                    const std::string source_name = source_id == sourceFileIds.end()
+                        ? std::string()
+                        : sourceFileName(source_id->second);
                     const std::string funcKey =
-                        core::DemangleFunctionKey(funcName + "@" + primarySourceFile);
+                        core::DemangleFunctionKey(funcName + "@" + source_name);
                     const uint32_t functionId = internFunction(funcKey, funcName);
 
                     // Build profile_sample_batch JSON
@@ -901,7 +962,7 @@ void DictionaryManager::flushDictionaryForSegment(
         for (const auto& [name, id] : metric_dict_) {
             if (emitter.metrics_.insert(id).second) dm.emplace(name, id);
         }
-        for (const auto& [name, id] : source_file_dict_) {
+        for (const auto& [id, name] : source_file_names_) {
             if (emitter.source_files_.insert(id).second) dsf.emplace(name, id);
         }
     }
