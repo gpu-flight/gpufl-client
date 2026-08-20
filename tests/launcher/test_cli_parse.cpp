@@ -286,6 +286,17 @@ TEST(CliParseTrace, VerboseAndQuiet) {
     EXPECT_TRUE(r.args->quiet);
 }
 
+TEST(CliParseTrace, SourceCaptureDefaultsOnAndCanBeDisabled) {
+    auto defaults = parseTraceArgs(argsFor({"--", "./bin"}));
+    ASSERT_TRUE(defaults.args.has_value()) << defaults.error;
+    EXPECT_FALSE(defaults.args->no_source);
+
+    auto opted_out = parseTraceArgs(
+        argsFor({"--no-source", "--", "./bin"}));
+    ASSERT_TRUE(opted_out.args.has_value()) << opted_out.error;
+    EXPECT_TRUE(opted_out.args->no_source);
+}
+
 TEST(CliParseTrace, BooleanFlagsRejectInlineValues) {
     const auto r = parseTraceArgs(
         argsFor({"--verbose=true", "--", "./bin"}));
@@ -297,6 +308,7 @@ TEST(CliParseHelp, TraceSimpleOptionsComeFromTheRegistry) {
     const std::string help = traceHelp();
     EXPECT_NE(help.find("-n, --name=<NAME>"), std::string::npos);
     EXPECT_NE(help.find("--backend-url=<URL>"), std::string::npos);
+    EXPECT_NE(help.find("--no-source"), std::string::npos);
     EXPECT_NE(help.find("GPUFL_BACKEND_URL"), std::string::npos);
 }
 

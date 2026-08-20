@@ -747,6 +747,8 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
         !setEnvOrPrint(platform, env::kAppName, app_name) ||
         !setEnvOrPrint(platform, env::kLogDir, output_dir.string()) ||
         !setEnvOrPrint(platform, env::kInjectProfile, inject::kProfileComprehensive) ||
+        !setEnvOrPrint(platform, env::kIncludeSource,
+                       args.no_source ? "0" : "1") ||
         !setEnvOrPrint(platform, env::kInjectUpload, "0")) {
         return 2;
     }
@@ -818,6 +820,13 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
 
     if (!args.quiet) {
         std::fprintf(stderr, "[gpufl] capturing -> %s\n", output_dir.string().c_str());
+        if (!args.no_source && args.upload) {
+            std::fprintf(
+                stderr,
+                "[gpufl] source upload enabled: discovered source file "
+                "content will be stored in this trace and uploaded; use "
+                "--no-source to exclude it\n");
+        }
         if (args.deep_requested) {
             const AdaptiveCapturePlan adaptive = resolveAdaptivePlan(args);
             std::fprintf(stderr, "[gpufl] adaptive capture: base=%s; selected deep=",
