@@ -6,6 +6,7 @@ PYTHON_BIN="${PYTHON:-python3}"
 MODE="install"
 WHEEL_DIR="$ROOT_DIR/dist"
 BUILD_DIR="$ROOT_DIR/build-macos-monitor"
+MONITOR_LOG_DIR="${GPUFL_MONITOR_LOG_DIR:-$ROOT_DIR/gpufl-monitor-macos/session}"
 
 usage() {
   cat <<'EOF'
@@ -104,7 +105,11 @@ elif [[ "$MODE" == "monitor" ]]; then
   echo "  $BUILD_DIR/daemon/monitor/gpufl-monitor"
   echo ""
   echo "Run:"
-  echo "  GPUFL_MONITOR_BACKEND=metal $BUILD_DIR/daemon/monitor/gpufl-monitor"
+  echo "  GPUFL_MONITOR_LOG_DIR=\"$MONITOR_LOG_DIR\" \\"
+  echo "    GPUFL_MONITOR_BACKEND=metal \"$BUILD_DIR/daemon/monitor/gpufl-monitor\""
+  echo ""
+  echo "Build and run with defaults:"
+  echo "  $ROOT_DIR/scripts/run-monitor-macos.sh"
 else
   "$PYTHON_BIN" -m pip install "$ROOT_DIR" -v "${COMMON_CONFIG[@]}"
 fi

@@ -161,3 +161,39 @@ jobs:
       - name: Verify Logging Pipeline
         run: |
           python -u tests/verify_pipeline.py
+
+  build-macos:
+    name: Build macOS Metal monitor
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: python -m pip install cmake==3.31.6
+
+      - name: Build native Metal monitor
+        run: ./build.sh --monitor --build-dir build-macos-ci
+
+      - name: Configure C++ tests
+        run: |
+          cmake -S . -B build-macos-ci \
+            -DBUILD_TESTING=ON \
+            -DBUILD_GPUFL_EXAMPLE=OFF \
+            -DBUILD_PYTHON=OFF \
+            -DBUILD_GPUFL_MONITOR=ON \
+            -DBUILD_GPUFL_LAUNCHER=OFF \
+            -DBUILD_GPUFL_INJECT=OFF \
+            -DGPUFL_ENABLE_NVIDIA=OFF \
+            -DGPUFL_ENABLE_AMD=OFF \
+            -DGPUFL_ENABLE_METAL=ON
+
+      - name: Run C++ unit tests
+        run: |
+          cmake --build build-macos-ci --target gpufl_tests --parallel
+          ctest --test-dir build-macos-ci --output-on-failure --verbose --timeout 60

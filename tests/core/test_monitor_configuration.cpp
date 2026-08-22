@@ -119,6 +119,15 @@ TEST_F(MonitorConfigurationTest, EnvironmentOverridesTakePrecedence) {
     EXPECT_TRUE(actual.pm_sampling_scope_only);
 }
 
+TEST_F(MonitorConfigurationTest, MapsMetalBackendToMetalMonitorBackend) {
+    gpufl::InitOptions options;
+    options.backend = gpufl::BackendKind::Metal;
+
+    const auto actual = gpufl::detail::buildMonitorOptions(options);
+
+    EXPECT_EQ(actual.backend_kind, gpufl::MonitorBackendKind::Metal);
+}
+
 TEST_F(MonitorConfigurationTest, InvalidOverridesPreserveConfiguredValues) {
     setEnv(gpufl::env::kProfilingEngine, "not-an-engine");
     setEnv(gpufl::env::kPcSamplingPeriod, "32");

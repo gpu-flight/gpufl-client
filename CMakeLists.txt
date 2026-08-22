@@ -746,7 +746,7 @@ if(GPUFL_ENABLE_AMD)
 endif()
 
 # -----------------------
-# Metal backend (phase-1: buildable stub path)
+# Metal backend (basic native monitoring)
 # -----------------------
 if(GPUFL_ENABLE_METAL)
     if(APPLE)

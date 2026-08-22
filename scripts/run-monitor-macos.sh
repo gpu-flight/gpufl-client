@@ -4,17 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${GPUFL_MONITOR_BUILD_DIR:-$ROOT_DIR/build-macos-monitor}"
 
-cmake -S "$ROOT_DIR" -B "$BUILD_DIR" \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DBUILD_GPUFL_EXAMPLE=OFF \
-  -DBUILD_TESTING=OFF \
-  -DBUILD_PYTHON=OFF \
-  -DBUILD_GPUFL_MONITOR=ON \
-  -DGPUFL_ENABLE_NVIDIA=OFF \
-  -DGPUFL_ENABLE_AMD=OFF \
-  -DGPUFL_ENABLE_METAL=ON
-
-cmake --build "$BUILD_DIR" --target gpufl-monitor --parallel
+"$ROOT_DIR/build-macos.sh" --monitor --build-dir "$BUILD_DIR"
 
 export GPUFL_MONITOR_BACKEND="${GPUFL_MONITOR_BACKEND:-metal}"
 export GPUFL_MONITOR_APP="${GPUFL_MONITOR_APP:-gpufl-monitor-macos}"

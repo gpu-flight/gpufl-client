@@ -102,6 +102,9 @@ Useful options:
 On macOS, `build.sh` delegates to `build-macos.sh`. The script builds with
 Metal enabled and NVIDIA/AMD disabled.
 
+The Metal backend currently supports native monitoring only. CUDA trace
+injection and the `--trace` build mode are not available on macOS.
+
 ```bash
 # Install into the active Python environment
 ./build.sh
@@ -111,6 +114,9 @@ Metal enabled and NVIDIA/AMD disabled.
 
 # Build the native monitor binary
 ./build.sh --monitor
+
+# Build and run the monitor with a writable local log directory
+./scripts/run-monitor-macos.sh
 
 # Use an explicit Python venv
 ./build-macos.sh --wheel --python .venv/bin/python
