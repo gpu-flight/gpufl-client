@@ -100,7 +100,8 @@ Useful options:
 #### macOS / Apple Metal
 
 On macOS, `build.sh` delegates to `build-macos.sh`. The script builds with
-Metal enabled and NVIDIA/AMD disabled.
+Metal enabled and NVIDIA/AMD disabled. When Homebrew's `openssl@3` is
+installed, the script passes its keg-only prefix to CMake automatically.
 
 The Metal backend currently supports native monitoring only. CUDA trace
 injection and the `--trace` build mode are not available on macOS.

@@ -7,6 +7,11 @@ MODE="install"
 WHEEL_DIR="$ROOT_DIR/dist"
 BUILD_DIR="$ROOT_DIR/build-macos-monitor"
 MONITOR_LOG_DIR="${GPUFL_MONITOR_LOG_DIR:-$ROOT_DIR/gpufl-monitor-macos/session}"
+OPENSSL_ROOT="${OPENSSL_ROOT_DIR:-}"
+
+if [[ -z "$OPENSSL_ROOT" ]] && command -v brew >/dev/null 2>&1; then
+  OPENSSL_ROOT="$(brew --prefix openssl@3 2>/dev/null || true)"
+fi
 
 usage() {
   cat <<'EOF'
@@ -79,9 +84,28 @@ COMMON_CONFIG=(
   -C cmake.define.GPUFL_ENABLE_METAL=ON
 )
 
+OPENSSL_CMAKE_ARG=()
+if [[ -n "$OPENSSL_ROOT" ]]; then
+  COMMON_CONFIG+=(
+    -C "cmake.define.OPENSSL_ROOT_DIR=$OPENSSL_ROOT"
+    -C "cmake.define.OPENSSL_INCLUDE_DIR=$OPENSSL_ROOT/include"
+    -C "cmake.define.OPENSSL_SSL_LIBRARY=$OPENSSL_ROOT/lib/libssl.dylib"
+    -C "cmake.define.OPENSSL_CRYPTO_LIBRARY=$OPENSSL_ROOT/lib/libcrypto.dylib"
+  )
+  OPENSSL_CMAKE_ARG=(
+    "-DOPENSSL_ROOT_DIR=$OPENSSL_ROOT"
+    "-DOPENSSL_INCLUDE_DIR=$OPENSSL_ROOT/include"
+    "-DOPENSSL_SSL_LIBRARY=$OPENSSL_ROOT/lib/libssl.dylib"
+    "-DOPENSSL_CRYPTO_LIBRARY=$OPENSSL_ROOT/lib/libcrypto.dylib"
+  )
+fi
+
 echo "GPUFlight macOS build"
 echo "  mode:   $MODE"
 echo "  python: $PYTHON_BIN"
+if [[ -n "$OPENSSL_ROOT" ]]; then
+  echo "  OpenSSL: $OPENSSL_ROOT"
+fi
 
 if [[ "$MODE" == "wheel" ]]; then
   mkdir -p "$WHEEL_DIR"
@@ -98,7 +122,8 @@ elif [[ "$MODE" == "monitor" ]]; then
     -DBUILD_GPUFL_INJECT=OFF \
     -DGPUFL_ENABLE_NVIDIA=OFF \
     -DGPUFL_ENABLE_AMD=OFF \
-    -DGPUFL_ENABLE_METAL=ON
+    -DGPUFL_ENABLE_METAL=ON \
+    "${OPENSSL_CMAKE_ARG[@]}"
   cmake --build "$BUILD_DIR" --target gpufl-monitor --parallel
   echo ""
   echo "Built native monitor:"
