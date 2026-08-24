@@ -168,6 +168,7 @@ TEST(TraceRunPlanTest, TraceCommonExecutesThePlannedSinglePass) {
     args.command = {"target", "--work"};
     args.name = "trace-plan-test";
     args.output_dir = (root / "requested-output").string();
+    args.source_root = root.string();
     args.warmup_ms = 100;
     args.window_ms = 200;
 
@@ -178,6 +179,8 @@ TEST(TraceRunPlanTest, TraceCommonExecutesThePlannedSinglePass) {
     EXPECT_EQ(platform.env[gpufl::env::kLogDir], args.output_dir);
     EXPECT_EQ(platform.env[gpufl::env::kProfilingEngine], "Trace");
     EXPECT_EQ(platform.env[gpufl::env::kIncludeSource], "1");
+    EXPECT_EQ(fs::weakly_canonical(platform.env[gpufl::env::kSourceRoot]),
+              fs::weakly_canonical(root));
 
     fs::remove_all(root, ec);
 }
@@ -198,10 +201,13 @@ TEST(TraceRunPlanTest, TraceCommonHonorsExplicitSourceCaptureOptOut) {
     TraceArgs args;
     args.command = {"target"};
     args.output_dir = (root / "capture").string();
+    args.source_root = root.string();
     args.no_source = true;
 
     EXPECT_EQ(gpufl::launcher::runTraceCommon(args, platform), 0);
     EXPECT_EQ(platform.env[gpufl::env::kIncludeSource], "0");
+    EXPECT_EQ(fs::weakly_canonical(platform.env[gpufl::env::kSourceRoot]),
+              fs::weakly_canonical(root));
 
     fs::remove_all(root, ec);
 }

@@ -295,6 +295,11 @@ TEST(CliParseTrace, SourceCaptureDefaultsOnAndCanBeDisabled) {
         argsFor({"--no-source", "--", "./bin"}));
     ASSERT_TRUE(opted_out.args.has_value()) << opted_out.error;
     EXPECT_TRUE(opted_out.args->no_source);
+
+    auto rooted = parseTraceArgs(
+        argsFor({"--source-root", "./cuda-project", "--", "./bin"}));
+    ASSERT_TRUE(rooted.args.has_value()) << rooted.error;
+    EXPECT_EQ(rooted.args->source_root, "./cuda-project");
 }
 
 TEST(CliParseTrace, BooleanFlagsRejectInlineValues) {
@@ -309,6 +314,7 @@ TEST(CliParseHelp, TraceSimpleOptionsComeFromTheRegistry) {
     EXPECT_NE(help.find("-n, --name=<NAME>"), std::string::npos);
     EXPECT_NE(help.find("--backend-url=<URL>"), std::string::npos);
     EXPECT_NE(help.find("--no-source"), std::string::npos);
+    EXPECT_NE(help.find("--source-root=<DIR>"), std::string::npos);
     EXPECT_NE(help.find("GPUFL_BACKEND_URL"), std::string::npos);
 }
 

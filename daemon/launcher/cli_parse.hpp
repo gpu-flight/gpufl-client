@@ -22,6 +22,7 @@ struct TraceArgs {
     bool verbose = false;               // -v
     bool quiet = false;                 // -q
     bool no_source = false;             // --no-source: explicit source-content opt-out
+    std::string source_root;            // --source-root: approved project source boundary
     bool upload = false;                // --upload: start gpufl-agent for live upload
     std::string backend_url;            // --backend-url; else GPUFL_BACKEND_URL
     std::string api_key;                // --api-key; else GPUFL_API_KEY

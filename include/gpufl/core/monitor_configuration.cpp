@@ -110,6 +110,7 @@ MonitorOptions buildMonitorOptions(const InitOptions& options) {
     monitor_options.kernel_sample_rate_ms = options.kernel_sample_rate_ms;
     monitor_options.enable_stack_trace = options.enable_stack_trace;
     monitor_options.enable_source_collection = options.enable_source_collection;
+    monitor_options.source_capture = options.source_capture;
     monitor_options.enable_external_correlation =
         options.enable_external_correlation;
     monitor_options.enable_synchronization = options.enable_synchronization;

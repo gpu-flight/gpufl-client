@@ -387,13 +387,15 @@ private:
     static void handlePcSample(const ActivityRecord& rec, Runtime* rt) {
         uint8_t kind = rec.metric_name[0] != '\0' ||
                     (rec.sample_kind[0] != '\0' && rec.sample_kind[0] == 's') ? 1 : 0;
-        const std::string func_key = std::string(rec.function_name) + "@" + rec.source_file;
+        const uint32_t source_file_id =
+            g_state.batches.internSourceFile(rec.source_file);
+        const std::string func_key = std::string(rec.function_name) + "@" +
+            g_state.batches.sourceFileName(source_file_id);
         const uint32_t function_id = g_state.batches.internFunction(
             g_state.metadata.demangleFunctionKey(func_key), std::string(rec.function_name));
         const std::string metric_key = (rec.metric_name[0] != '\0') ? std::string(rec.metric_name) : rec.reason_name;
         const uint32_t metric_id = g_state.batches.internMetric(metric_key);
         const uint32_t scope_name_id = g_state.batches.activeScopeNameId();
-        const uint32_t source_file_id = g_state.batches.internSourceFile(rec.source_file);
         const ProfileSampleBatchRow row = detail::MakeProfileSampleBatchRow(
             rec, kind, function_id, metric_id, scope_name_id, source_file_id);
 
@@ -576,7 +578,8 @@ void Monitor::Initialize(const MonitorOptions& opts) {
     detail::ActiveCounterProvider()->begin_session();
     g_state.batches.reset();
     g_state.metadata.reset();
-    g_state.batches.setSourceCollectionEnabled(opts.enable_source_collection);
+    g_state.batches.configureSourceCapture(opts.enable_source_collection,
+                                           opts.source_capture);
     if (Runtime* rt = runtime(); rt && rt->hasSegmentContext()) {
         g_state.batches.bindFlushRuntime(rt);
     }
@@ -822,15 +825,20 @@ void Monitor::PushProfileSamples(const std::vector<ProfileSampleInput>& samples)
     for (const auto& s : samples) {
         ProfileSampleBatchRow row;
         row.ts_ns = s.ts_ns; row.corr_id = s.corr_id; row.device_id = s.device_id;
-        const std::string funcSymbol = s.function_key.substr(0, s.function_key.find('@'));
-        row.function_id = g_state.batches.internFunction(demangledKey(s.function_key), funcSymbol);
+        const std::string funcSymbol =
+            s.function_key.substr(0, s.function_key.find('@'));
+        row.source_file_id =
+            g_state.batches.internSourceFile(s.source_file);
+        const std::string normalizedFunctionKey = funcSymbol + "@" +
+            g_state.batches.sourceFileName(row.source_file_id);
+        row.function_id = g_state.batches.internFunction(
+            demangledKey(normalizedFunctionKey), funcSymbol);
         row.pc_offset = s.pc_offset;
         row.metric_id = g_state.batches.internMetric(s.metric_name);
         row.metric_value = s.metric_value;
         row.stall_reason = s.stall_reason;
         row.sample_kind = s.sample_kind;
         row.scope_name_id = scope_name_id;
-        row.source_file_id = g_state.batches.internSourceFile(s.source_file);
         row.source_line = s.source_line;
         rows.push_back(row);
     }

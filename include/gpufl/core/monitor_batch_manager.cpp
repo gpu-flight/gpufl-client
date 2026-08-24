@@ -63,8 +63,9 @@ void MonitorBatchManager::clearFlushSink() {
     flushSink_ = {};
 }
 
-void MonitorBatchManager::setSourceCollectionEnabled(bool enabled) {
-    dictManager_.enable_source_collection = enabled;
+void MonitorBatchManager::configureSourceCapture(
+    const bool enabled, const SourceCaptureSettings& settings) {
+    dictManager_.configureSourceCapture(enabled, settings);
 }
 
 void MonitorBatchManager::flushAll(FlushMode mode) {
@@ -198,6 +199,11 @@ uint32_t MonitorBatchManager::internMetric(const std::string& name) {
 
 uint32_t MonitorBatchManager::internSourceFile(const std::string& path) {
     return dictManager_.internSourceFile(path);
+}
+
+std::string MonitorBatchManager::sourceFileName(
+    const uint32_t source_file_id) {
+    return dictManager_.sourceFileName(source_file_id);
 }
 
 void MonitorBatchManager::enqueueDisassembly(uint64_t crc, const uint8_t* data, size_t size) {

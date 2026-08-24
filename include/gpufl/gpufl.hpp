@@ -49,6 +49,10 @@ struct InitOptions {
     bool enable_debug_output = false;
     bool enable_stack_trace = false;
     bool enable_source_collection = true;  // collect source file content for source/SASS correlation
+    // Capture remains correlation-driven: these roots constrain which
+    // profiler-reported CUDA/C++ files may be opened. Normal startup supplies
+    // the current working directory when callers leave the list empty.
+    SourceCaptureSettings source_capture;
     bool flush_logs_always = false;
     // Enable CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION so frameworks
     // (PyTorch's torch.profiler, TF's profile.trace, JAX, XLA) that

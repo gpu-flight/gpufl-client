@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 
 #include "gpufl/core/config_file_loader.hpp"
@@ -70,6 +71,18 @@ void resolveStartupOptions(InitOptions& options) {
     // do not set the variable retain their InitOptions behavior.
     if (const char* value = std::getenv(env::kIncludeSource)) {
         options.enable_source_collection = std::strcmp(value, "1") == 0;
+    }
+    if (const char* value = std::getenv(env::kSourceRoot); value && *value) {
+        options.source_capture.approved_roots = {value};
+    }
+    if (options.enable_source_collection &&
+        options.source_capture.approved_roots.empty()) {
+        std::error_code ec;
+        const std::filesystem::path current =
+            std::filesystem::current_path(ec);
+        if (!ec) {
+            options.source_capture.approved_roots = {current.string()};
+        }
     }
 
     std::string api_path = options.api_path;

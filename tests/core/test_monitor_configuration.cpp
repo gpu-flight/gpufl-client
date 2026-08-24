@@ -62,6 +62,8 @@ TEST_F(MonitorConfigurationTest, CopiesEveryInitOptionWithNoEnvironmentOverride)
     options.enable_debug_output = true;
     options.enable_stack_trace = true;
     options.enable_source_collection = false;
+    options.source_capture.approved_roots = {"project-a", "project-b"};
+    options.source_capture.limits.max_files = 12;
     options.enable_external_correlation = false;
     options.enable_synchronization = false;
     options.enable_memory_tracking = false;
@@ -80,6 +82,9 @@ TEST_F(MonitorConfigurationTest, CopiesEveryInitOptionWithNoEnvironmentOverride)
     EXPECT_TRUE(actual.enable_debug_output);
     EXPECT_TRUE(actual.enable_stack_trace);
     EXPECT_FALSE(actual.enable_source_collection);
+    EXPECT_EQ(actual.source_capture.approved_roots,
+              (std::vector<std::string>{"project-a", "project-b"}));
+    EXPECT_EQ(actual.source_capture.limits.max_files, 12u);
     EXPECT_FALSE(actual.enable_external_correlation);
     EXPECT_FALSE(actual.enable_synchronization);
     EXPECT_FALSE(actual.enable_memory_tracking);

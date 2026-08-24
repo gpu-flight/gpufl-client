@@ -448,6 +448,11 @@ const CliOptionManager<TraceArgs>& traceOptions() {
                  "correlation",
                  kSection(TraceHelpSection::Capture),
                  &setFlag<&TraceArgs::no_source>)
+            .add({"--source-root"}, "<DIR>",
+                 "Allow correlated CUDA/C++ source only within this project "
+                 "directory (default: current working directory)",
+                 kSection(TraceHelpSection::Capture),
+                 &parseNonEmptyStringOption<&TraceArgs::source_root>)
 
             // Runtime
             .add({"-q", "--quiet"}, "",

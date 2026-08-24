@@ -40,6 +40,24 @@ fs::path findInjectLib(const TracePlatform& platform, const fs::path& exe) {
     return {};
 }
 
+fs::path resolveSourceRoot(const TraceArgs& args, std::string& error) {
+    std::error_code ec;
+    fs::path root = args.source_root.empty()
+                        ? fs::current_path(ec)
+                        : fs::path(args.source_root);
+    if (ec) {
+        error = "cannot resolve the current working directory for source "
+                "capture: " + ec.message();
+        return {};
+    }
+    root = fs::weakly_canonical(root, ec);
+    if (ec || !fs::is_directory(root, ec) || ec) {
+        error = "--source-root is not an accessible directory";
+        return {};
+    }
+    return root;
+}
+
 // A '+'-joined pass token ("Trace+PcSampling") runs those engines together in
 // one process via GPUFL_ENGINE_COMBO. Returns the comma-joined combo for a
 // composite token, or "" for a single-engine token.
@@ -736,6 +754,11 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
     DebugLogger::setEnabled(args.verbose);
 
     std::string error;
+    const fs::path source_root = resolveSourceRoot(args, error);
+    if (source_root.empty()) {
+        std::fprintf(stderr, "gpufl: %s\n", error.c_str());
+        return 2;
+    }
     if (!platform.prepareInjectionEnv(inject_lib, error)) {
         std::fprintf(stderr, "gpufl: %s\n", error.c_str());
         return 2;
@@ -749,6 +772,8 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
         !setEnvOrPrint(platform, env::kInjectProfile, inject::kProfileComprehensive) ||
         !setEnvOrPrint(platform, env::kIncludeSource,
                        args.no_source ? "0" : "1") ||
+        !setEnvOrPrint(platform, env::kSourceRoot,
+                       source_root.string()) ||
         !setEnvOrPrint(platform, env::kInjectUpload, "0")) {
         return 2;
     }
