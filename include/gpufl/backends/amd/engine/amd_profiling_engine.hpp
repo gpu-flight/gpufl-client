@@ -37,6 +37,13 @@ class AmdProfilingEngine {
     /// True once this engine has emitted at least one profiling sample.
     virtual bool hasData() const = 0;
 
+    /// True once the context-bound service and its counter configuration are
+    /// ready for a deep window to arm.
+    virtual bool isPrepared() const = 0;
+
+    /// Point-in-time state used by deep-window audit rows before disarming.
+    virtual bool isArmed() const = 0;
+
     /// Scope hooks - engines may filter collection to scoped regions.
     virtual void onScopeStart(const char* /*name*/) {}
     virtual void onScopeStop(const char* /*name*/) {}

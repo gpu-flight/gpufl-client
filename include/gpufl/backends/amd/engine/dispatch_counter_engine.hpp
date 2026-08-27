@@ -10,6 +10,7 @@
 #include <rocprofiler-sdk/counters.h>
 #include <rocprofiler-sdk/dispatch_counting_service.h>
 
+#include "gpufl/backends/amd/amd_dispatch_collection_gate.hpp"
 #include "gpufl/backends/amd/engine/amd_profiling_engine.hpp"
 
 namespace gpufl::amd {
@@ -30,6 +31,14 @@ class DispatchCounterEngine final : public AmdProfilingEngine {
     void drain() override;
     void shutdown() override;
     bool hasData() const override { return sample_count_.load() > 0; }
+    bool isPrepared() const override {
+        return config_valid_.load(std::memory_order_acquire);
+    }
+    bool isArmed() const override {
+        return isPrepared() && collection_gate_.armed();
+    }
+    void onScopeStart(const char* name) override;
+    void onScopeStop(const char* name) override;
 
    private:
     /// Counter metadata for resolving record IDs to human-readable names.
@@ -57,7 +66,8 @@ class DispatchCounterEngine final : public AmdProfilingEngine {
 
     rocprofiler_context_id_t context_{};
     rocprofiler_counter_config_id_t config_id_{};
-    bool config_valid_ = false;
+    std::atomic<bool> config_valid_{false};
+    AmdDispatchCollectionGate collection_gate_;
 
     mutable std::mutex counter_mu_;
     std::unordered_map<uint64_t, CounterInfo> counter_info_;  // counter_id.handle → info

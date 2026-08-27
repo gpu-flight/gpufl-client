@@ -41,8 +41,13 @@ class RocprofilerBackend final : public IMonitorBackend {
     void OnScopeStart(const char* name) override;
     void OnScopeStop(const char* name) override;
     void DrainProfilingData() override;
+    void ServiceDeepWindow() override;
+    bool DeepEnginesPrepared() const override;
+    std::vector<std::string> OnDeepWindowStop(const char* name) override;
     void OnPerfScopeStart(const char* name) override;
     void OnPerfScopeStop(const char* name) override;
+    void OnDeepWindowPerfStart(const char* name) override;
+    void OnDeepWindowPerfStop(const char* name) override;
 
     bool flushBuffers();
 

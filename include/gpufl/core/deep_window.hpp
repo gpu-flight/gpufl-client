@@ -175,14 +175,17 @@ class DeepWindow {
      * @brief Per-launch bound accounting, driven from the CUPTI launch
      * callback.
      *
-     * Consumes one launch of budget and RECORDS that a bound was reached.
+     * Claims one launch of budget and RECORDS that a bound was reached.
      * It deliberately does not close: this runs inside a CUPTI callback,
      * and the engines' teardown calls (cuptiPmSamplingDecodeData,
      * cuptiPCSamplingStop) return CUPTI_ERROR_UNKNOWN when invoked from
      * there. Verified on Linux/driver 610.43; Windows happened to tolerate
      * it, which is why the first version looked correct.
+     *
+     * @return True when this launch claimed a slot in the active window;
+     *         false when no window is active or its budget is already spent.
      */
-    static void OnLaunch();
+    static bool OnLaunch();
 
     /**
      * @brief Cheap, lock-free: is there an arm or a disarm waiting?

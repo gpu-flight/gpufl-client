@@ -8,7 +8,10 @@
 #include <cstdio>
 #include <cstring>
 
+#include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
+#include "gpufl/core/deep_window.hpp"
+#include "gpufl/core/deep_window_rules.hpp"
 #include "gpufl/core/monitor.hpp"
 
 namespace gpufl::amd {
@@ -54,8 +57,9 @@ bool CheckStatus(rocprofiler_status_t status, const char* call) {
 
 bool DispatchCounterEngine::initialize(const rocprofiler_context_id_t context,
                                        const rocprofiler_agent_id_t gpu_agent,
-                                       const MonitorOptions& /*opts*/) {
+                                       const MonitorOptions& opts) {
     context_ = context;
+    collection_gate_.configure(opts.deep_arm_mode);
 
     if (!discoverCounters(gpu_agent)) {
         GFL_LOG_ERROR("[DispatchCounterEngine] No counters discovered");
@@ -83,11 +87,14 @@ bool DispatchCounterEngine::initialize(const rocprofiler_context_id_t context,
 }
 
 void DispatchCounterEngine::start() {
-    // Context start is handled by the backend
+    // Context start is handled by the backend. The collection gate decides
+    // whether callbacks receive a profile immediately (Always) or only while
+    // a deep window is active (WindowOnly).
+    collection_gate_.start();
 }
 
 void DispatchCounterEngine::stop() {
-    // Context stop is handled by the backend
+    collection_gate_.stop();
 }
 
 void DispatchCounterEngine::drain() {
@@ -95,10 +102,19 @@ void DispatchCounterEngine::drain() {
 }
 
 void DispatchCounterEngine::shutdown() {
-    if (config_valid_) {
-        rocprofiler_destroy_counter_config(config_id_);
-        config_valid_ = false;
+    collection_gate_.stop();
+    if (config_valid_.exchange(false, std::memory_order_acq_rel)) {
+        (void) CheckStatus(rocprofiler_destroy_counter_config(config_id_),
+                           "rocprofiler_destroy_counter_config");
     }
+}
+
+void DispatchCounterEngine::onScopeStart(const char*) {
+    collection_gate_.openWindow();
+}
+
+void DispatchCounterEngine::onScopeStop(const char*) {
+    collection_gate_.closeWindow();
 }
 
 bool DispatchCounterEngine::discoverCounters(const rocprofiler_agent_id_t agent) {
@@ -208,7 +224,7 @@ bool DispatchCounterEngine::createCounterConfig(const rocprofiler_agent_id_t age
         GFL_LOG_DEBUG("[DispatchCounterEngine]   - ", name);
     }
 
-    config_valid_ = true;
+    config_valid_.store(true, std::memory_order_release);
     return true;
 }
 
@@ -218,8 +234,22 @@ void DispatchCounterEngine::dispatchCallback(
     rocprofiler_user_data_t* /*user_data*/,
     void* callback_data) {
     auto* engine = static_cast<DispatchCounterEngine*>(callback_data);
-    if (engine && engine->config_valid_ && config) {
+    if (!engine) return;
+
+    // ROCprofiler treats a callback that supplies no profile as an explicit
+    // "collect no counters for this dispatch" decision. Clear the output so
+    // WindowOnly stays cheap outside the window. Claim the budget first: the
+    // Nth dispatch still receives the profile, while later callbacks reject
+    // collection immediately without running teardown on this callback path.
+    const bool window_claimed_launch = DeepWindow::OnLaunch();
+    if (config) *config = {};
+    if (config &&
+        engine->collection_gate_.collectDispatch(window_claimed_launch)) {
         *config = engine->config_id_;
+    }
+
+    if (detail::DeepWindowRules::WantsLaunchFeed()) {
+        detail::DeepWindowRules::NoteKernelLaunch(detail::GetTimestampNs());
     }
 }
 

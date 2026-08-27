@@ -3,6 +3,7 @@
 #include <string>
 
 #include "gpufl/backends/amd/amd_capture_capabilities.hpp"
+#include "gpufl/backends/amd/amd_dispatch_collection_gate.hpp"
 #include "gpufl/backends/amd/amd_profiling_policy.hpp"
 
 namespace {
@@ -17,6 +18,50 @@ const gpufl::CaptureCapability* FindCapability(
 }
 
 }  // namespace
+
+TEST(AmdDispatchCollectionGate, AlwaysModeFollowsSessionLifetime) {
+    gpufl::amd::AmdDispatchCollectionGate gate;
+    gate.configure(gpufl::DeepArmMode::Always);
+
+    EXPECT_FALSE(gate.armed());
+    gate.start();
+    EXPECT_TRUE(gate.armed());
+    EXPECT_TRUE(gate.collectDispatch(false));
+    gate.closeWindow();
+    EXPECT_TRUE(gate.armed());
+    gate.stop();
+    EXPECT_FALSE(gate.armed());
+}
+
+TEST(AmdDispatchCollectionGate, WindowOnlyArmsExactlyInsideWindow) {
+    gpufl::amd::AmdDispatchCollectionGate gate;
+    gate.configure(gpufl::DeepArmMode::WindowOnly);
+
+    gate.start();
+    EXPECT_FALSE(gate.armed());
+    gate.openWindow();
+    EXPECT_TRUE(gate.armed());
+    EXPECT_TRUE(gate.collectDispatch(true));
+    EXPECT_FALSE(gate.collectDispatch(false));
+    gate.closeWindow();
+    EXPECT_FALSE(gate.armed());
+    // A callback that claimed the final slot before collector-thread disarm
+    // still owns that dispatch.
+    EXPECT_TRUE(gate.collectDispatch(true));
+    EXPECT_FALSE(gate.collectDispatch(false));
+}
+
+TEST(AmdDispatchCollectionGate, StopClearsWindowBeforeRestart) {
+    gpufl::amd::AmdDispatchCollectionGate gate;
+    gate.configure(gpufl::DeepArmMode::WindowOnly);
+
+    gate.openWindow();
+    gate.start();
+    ASSERT_TRUE(gate.armed());
+    gate.stop();
+    gate.start();
+    EXPECT_FALSE(gate.armed());
+}
 
 TEST(AmdProfilingPolicy, RequestIntentNeverInventsAmdNativeNames) {
     EXPECT_STREQ(gpufl::amd::AmdRequestIntentWireName(

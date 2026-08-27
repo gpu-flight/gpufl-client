@@ -28,6 +28,7 @@
 #include "gpufl/backends/amd/amd_capture_capabilities.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
+#include "gpufl/core/deep_window.hpp"
 #include "gpufl/core/monitor.hpp"
 #include "gpufl/core/logger/logger.hpp"
 #include "gpufl/core/model/lifecycle_model.hpp"
@@ -373,11 +374,44 @@ void RocprofilerBackend::DrainProfilingData() {
     if (engine_) engine_->drain();
 }
 
+void RocprofilerBackend::ServiceDeepWindow() {
+    if (!initialized_.load(std::memory_order_acquire) ||
+        !active_.load(std::memory_order_acquire) ||
+        !DeepWindow::HasPendingWork()) {
+        return;
+    }
+    DeepWindow::ServicePending();
+}
+
+bool RocprofilerBackend::DeepEnginesPrepared() const {
+    return engine_ != nullptr && engine_->isPrepared();
+}
+
+std::vector<std::string> RocprofilerBackend::OnDeepWindowStop(
+    const char* name) {
+    std::vector<std::string> armed;
+    if (engine_ && engine_->isArmed()) {
+        armed.emplace_back(SelectedEngineWireName());
+    }
+    OnScopeStop(name);
+    return armed;
+}
+
 void RocprofilerBackend::OnPerfScopeStart(const char* name) {
-    if (engine_) engine_->onScopeStart(name);
+    if (opts_.deep_arm_mode == DeepArmMode::WindowOnly) return;
+    OnDeepWindowPerfStart(name);
 }
 
 void RocprofilerBackend::OnPerfScopeStop(const char* name) {
+    if (opts_.deep_arm_mode == DeepArmMode::WindowOnly) return;
+    OnDeepWindowPerfStop(name);
+}
+
+void RocprofilerBackend::OnDeepWindowPerfStart(const char* name) {
+    if (engine_) engine_->onScopeStart(name);
+}
+
+void RocprofilerBackend::OnDeepWindowPerfStop(const char* name) {
     if (engine_) engine_->onScopeStop(name);
 }
 
