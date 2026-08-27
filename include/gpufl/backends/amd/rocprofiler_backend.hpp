@@ -44,7 +44,7 @@ class RocprofilerBackend final : public IMonitorBackend {
     void OnPerfScopeStart(const char* name) override;
     void OnPerfScopeStop(const char* name) override;
 
-    void flushBuffers();
+    bool flushBuffers();
 
     // Expose context and agent for engine initialization
     rocprofiler_context_id_t context() const { return context_; }
@@ -149,13 +149,20 @@ class RocprofilerBackend final : public IMonitorBackend {
     std::atomic<uint64_t> kernel_rows_emitted_{0};
     std::atomic<uint64_t> memcpy_rows_emitted_{0};
     std::atomic<uint64_t> trace_records_dropped_{0};
+    std::atomic<uint64_t> trace_records_queue_dropped_{0};
+    std::atomic<uint64_t> trace_buffer_flush_failures_{0};
     std::atomic<uint64_t> trace_records_unattributed_{0};
+    std::atomic<uint64_t> scope_correlation_failures_{0};
+    std::atomic<uint64_t> next_scope_external_{1};
     mutable std::mutex capture_capabilities_mutex_;
     mutable std::string capture_capabilities_session_id_;
     mutable uint64_t capability_kernel_rows_baseline_ = 0;
     mutable uint64_t capability_memcpy_rows_baseline_ = 0;
     mutable uint64_t capability_dropped_records_baseline_ = 0;
+    mutable uint64_t capability_queue_dropped_records_baseline_ = 0;
+    mutable uint64_t capability_buffer_flush_failures_baseline_ = 0;
     mutable uint64_t capability_unattributed_records_baseline_ = 0;
+    mutable uint64_t capability_scope_correlation_failures_baseline_ = 0;
 
     std::atomic<bool> initialized_{false};
     std::atomic<bool> active_{false};

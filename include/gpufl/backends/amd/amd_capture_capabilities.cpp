@@ -172,21 +172,59 @@ CaptureCapabilitiesEvent BuildAmdCaptureCapabilitiesEvent(
             ? "not_requested"
             : (!input.trace_configured
                    ? "skipped"
-                   : (input.dropped_trace_records > 0 ? "partial" : "enabled")),
+                   : (input.dropped_trace_records > 0 ||
+                              input.trace_buffer_flush_failures > 0 ||
+                              input.dropped_client_records > 0
+                          ? "partial"
+                          : "enabled")),
         input.trace_configured ? "rocprofiler_buffer_tracing" : "disabled",
         !input.trace_configured
             ? (tracing_requested ? "rocprofiler_buffer_tracing_unavailable"
                                  : "not_selected")
-            : (input.dropped_trace_records > 0
-                   ? "rocprofiler_records_dropped"
-                   : ""),
+            : (input.trace_buffer_flush_failures > 0
+                   ? "rocprofiler_buffer_flush_failed"
+                   : (input.dropped_trace_records > 0
+                          ? "rocprofiler_records_dropped"
+                          : (input.dropped_client_records > 0
+                                 ? "gpufl_activity_queue_full"
+                                 : ""))),
         !input.trace_configured
             ? "ROCprofiler trace-buffer delivery was not active."
-            : (input.dropped_trace_records > 0
-                   ? "ROCprofiler reported " +
-                         std::to_string(input.dropped_trace_records) +
-                         " dropped trace record(s); this session is incomplete."
-                   : "ROCprofiler reported no dropped trace records."));
+            : (input.trace_buffer_flush_failures > 0
+                   ? "ROCprofiler trace-buffer flush failed " +
+                         std::to_string(input.trace_buffer_flush_failures) +
+                         " time(s); buffered activity may be incomplete or in the wrong segment."
+                   : (input.dropped_trace_records > 0
+                          ? "ROCprofiler reported " +
+                                std::to_string(input.dropped_trace_records) +
+                                " dropped trace record(s); this session is incomplete."
+                          : (input.dropped_client_records > 0
+                                 ? "GPUFlight dropped " +
+                                       std::to_string(input.dropped_client_records) +
+                                       " trace record(s) because its activity queue was full."
+                                 : "ROCprofiler and GPUFlight reported complete trace delivery."))));
+
+    AddCapability(
+        event, "scope_correlation", tracing_requested,
+        !tracing_requested
+            ? "not_requested"
+            : (!input.trace_configured
+                   ? "skipped"
+                   : (input.scope_correlation_failures > 0 ? "partial" : "enabled")),
+        input.trace_configured ? "rocprofiler_external_correlation" : "disabled",
+        !input.trace_configured
+            ? (tracing_requested ? "rocprofiler_buffer_tracing_unavailable"
+                                 : "not_selected")
+            : (input.scope_correlation_failures > 0
+                   ? "rocprofiler_scope_correlation_failed"
+                   : ""),
+        !input.trace_configured
+            ? "ROCprofiler scope correlation was not active."
+            : (input.scope_correlation_failures > 0
+                   ? "ROCprofiler scope correlation failed " +
+                         std::to_string(input.scope_correlation_failures) +
+                         " time(s); some trace rows may have no user scope."
+                   : "ROCprofiler accepted every GPUFlight scope-correlation push and pop."));
 
     return event;
 }

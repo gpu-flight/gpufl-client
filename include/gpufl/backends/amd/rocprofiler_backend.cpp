@@ -119,14 +119,21 @@ void RocprofilerBackend::initialize(const MonitorOptions& opts) {
     kernel_rows_emitted_.store(0, std::memory_order_relaxed);
     memcpy_rows_emitted_.store(0, std::memory_order_relaxed);
     trace_records_dropped_.store(0, std::memory_order_relaxed);
+    trace_records_queue_dropped_.store(0, std::memory_order_relaxed);
+    trace_buffer_flush_failures_.store(0, std::memory_order_relaxed);
     trace_records_unattributed_.store(0, std::memory_order_relaxed);
+    scope_correlation_failures_.store(0, std::memory_order_relaxed);
+    next_scope_external_.store(1, std::memory_order_relaxed);
     {
         std::lock_guard lock(capture_capabilities_mutex_);
         capture_capabilities_session_id_.clear();
         capability_kernel_rows_baseline_ = 0;
         capability_memcpy_rows_baseline_ = 0;
         capability_dropped_records_baseline_ = 0;
+        capability_queue_dropped_records_baseline_ = 0;
+        capability_buffer_flush_failures_baseline_ = 0;
         capability_unattributed_records_baseline_ = 0;
+        capability_scope_correlation_failures_baseline_ = 0;
     }
 
     AmdProfilingSupport support;
@@ -330,8 +337,9 @@ int RocprofilerBackend::toolInitialize() {
 
 void RocprofilerBackend::toolFinalize() {
     if (buffer_.handle != 0) {
-        (void) rocprofiler_flush_buffer(buffer_);
-        (void) rocprofiler_destroy_buffer(buffer_);
+        flushBuffers();
+        (void) CheckStatus(rocprofiler_destroy_buffer(buffer_),
+                           "rocprofiler_destroy_buffer");
     }
 
     resetToolState();
@@ -349,11 +357,19 @@ void RocprofilerBackend::start() {
 void RocprofilerBackend::stop() {
     if (!active_.exchange(false) || context_.handle == 0) return;
     if (engine_) engine_->stop();
-    (void) rocprofiler_stop_context(context_);
+    (void) CheckStatus(rocprofiler_stop_context(context_),
+                       "rocprofiler_stop_context");
     flushBuffers();
 }
 
 void RocprofilerBackend::DrainProfilingData() {
+    // SegmentRuntime calls this immediately before choosing a segment
+    // boundary. Deliver the ROCprofiler activity buffer first so completed
+    // kernels and copies enter g_monitorBuffer while the retiring segment is
+    // still current; Monitor then drains that ring before publishing the next
+    // segment. Without this flush, a quiet workload can retain activity below
+    // the ROCprofiler watermark until a later segment or shutdown.
+    if (active_.load(std::memory_order_acquire)) flushBuffers();
     if (engine_) engine_->drain();
 }
 
@@ -383,8 +399,14 @@ void RocprofilerBackend::emitCapabilities() {
         memcpy_rows_emitted_.load(std::memory_order_relaxed);
     const uint64_t dropped_records =
         trace_records_dropped_.load(std::memory_order_relaxed);
+    const uint64_t queue_dropped_records =
+        trace_records_queue_dropped_.load(std::memory_order_relaxed);
+    const uint64_t buffer_flush_failures =
+        trace_buffer_flush_failures_.load(std::memory_order_relaxed);
     const uint64_t unattributed_records =
         trace_records_unattributed_.load(std::memory_order_relaxed);
+    const uint64_t scope_correlation_failures =
+        scope_correlation_failures_.load(std::memory_order_relaxed);
 
     AmdCaptureCapabilityInput input;
     input.session_id = segment->session_id;
@@ -400,8 +422,15 @@ void RocprofilerBackend::emitCapabilities() {
         engine_ && engine_->hasData() ? 1 : 0;
     input.dropped_trace_records =
         delta(dropped_records, capability_dropped_records_baseline_);
+    input.dropped_client_records = delta(
+        queue_dropped_records, capability_queue_dropped_records_baseline_);
+    input.trace_buffer_flush_failures = delta(
+        buffer_flush_failures, capability_buffer_flush_failures_baseline_);
     input.unattributed_trace_records = delta(
         unattributed_records, capability_unattributed_records_baseline_);
+    input.scope_correlation_failures = delta(
+        scope_correlation_failures,
+        capability_scope_correlation_failures_baseline_);
 
     segment->logger->write(model::CaptureCapabilitiesModel(
         BuildAmdCaptureCapabilitiesEvent(input)));
@@ -409,7 +438,11 @@ void RocprofilerBackend::emitCapabilities() {
     capability_kernel_rows_baseline_ = kernel_rows;
     capability_memcpy_rows_baseline_ = memcpy_rows;
     capability_dropped_records_baseline_ = dropped_records;
+    capability_queue_dropped_records_baseline_ = queue_dropped_records;
+    capability_buffer_flush_failures_baseline_ = buffer_flush_failures;
     capability_unattributed_records_baseline_ = unattributed_records;
+    capability_scope_correlation_failures_baseline_ =
+        scope_correlation_failures;
     capture_capabilities_session_id_ = segment->session_id;
 }
 
@@ -434,47 +467,96 @@ void RocprofilerBackend::shutdown() {
     }
 }
 
-void RocprofilerBackend::flushBuffers() {
-    if (buffer_.handle != 0) (void) rocprofiler_flush_buffer(buffer_);
+bool RocprofilerBackend::flushBuffers() {
+    if (buffer_.handle == 0) return true;
+    if (CheckStatus(rocprofiler_flush_buffer(buffer_),
+                    "rocprofiler_flush_buffer")) {
+        return true;
+    }
+    trace_buffer_flush_failures_.fetch_add(1, std::memory_order_relaxed);
+    return false;
 }
 
 void RocprofilerBackend::OnScopeStart(const char* name) {
     if (!active_.load() || context_.handle == 0 || name == nullptr) return;
 
     rocprofiler_thread_id_t tid{};
-    if (rocprofiler_get_thread_id(&tid) != ROCPROFILER_STATUS_SUCCESS) return;
-
-    static std::atomic<uint64_t> next_scope_external{1};
-    const uint64_t external_value =
-        next_scope_external.fetch_add(1, std::memory_order_relaxed);
-
-    g_scope_name_stack.emplace_back(name);
-    std::string scope_path;
-    for (size_t i = 0; i < g_scope_name_stack.size(); ++i) {
-        if (i > 0) scope_path += "|";
-        scope_path += g_scope_name_stack[i];
+    if (!CheckStatus(rocprofiler_get_thread_id(&tid),
+                     "rocprofiler_get_thread_id(scope start)")) {
+        scope_correlation_failures_.fetch_add(1, std::memory_order_relaxed);
+        return;
     }
 
+    // Thread-local scope state can outlive a backend lifecycle when a user
+    // shuts GPUFlight down inside an open scope. The metadata map is cleared
+    // with the ROCprofiler context, so a missing top ID identifies a stale
+    // stack and prevents it from contaminating the next session's scope path.
+    if (!g_scope_external_stack.empty()) {
+        std::lock_guard<std::mutex> lock(external_scope_mutex_);
+        if (external_scope_metadata_.count(g_scope_external_stack.back()) == 0) {
+            g_scope_external_stack.clear();
+            g_scope_name_stack.clear();
+        }
+    }
+
+    const uint64_t external_value =
+        next_scope_external_.fetch_add(1, std::memory_order_relaxed);
+
+    std::string scope_path;
+    for (const auto& component : g_scope_name_stack) {
+        if (!scope_path.empty()) scope_path += "|";
+        scope_path += component;
+    }
+    if (!scope_path.empty()) scope_path += "|";
+    scope_path += name;
+
+    rocprofiler_user_data_t user_data{};
+    user_data.value = external_value;
+    if (!CheckStatus(rocprofiler_push_external_correlation_id(
+                         context_, tid, user_data),
+                     "rocprofiler_push_external_correlation_id")) {
+        scope_correlation_failures_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    g_scope_name_stack.emplace_back(name);
+    g_scope_external_stack.push_back(external_value);
     {
         std::lock_guard<std::mutex> lock(external_scope_mutex_);
         external_scope_metadata_[external_value] = ExternalScopeMetadata{
-            scope_path, static_cast<int>(g_scope_name_stack.size())};
+            std::move(scope_path), static_cast<int>(g_scope_name_stack.size())};
     }
-
-    g_scope_external_stack.push_back(external_value);
-    rocprofiler_user_data_t user_data{};
-    user_data.value = external_value;
-    (void) rocprofiler_push_external_correlation_id(context_, tid, user_data);
 }
 
-void RocprofilerBackend::OnScopeStop(const char*) {
+void RocprofilerBackend::OnScopeStop(const char* name) {
     if (!active_.load() || context_.handle == 0) return;
 
     rocprofiler_thread_id_t tid{};
-    if (rocprofiler_get_thread_id(&tid) != ROCPROFILER_STATUS_SUCCESS) return;
+    if (!CheckStatus(rocprofiler_get_thread_id(&tid),
+                     "rocprofiler_get_thread_id(scope stop)")) {
+        scope_correlation_failures_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
 
     rocprofiler_user_data_t user_data{};
-    (void) rocprofiler_pop_external_correlation_id(context_, tid, &user_data);
+    if (!CheckStatus(rocprofiler_pop_external_correlation_id(
+                         context_, tid, &user_data),
+                     "rocprofiler_pop_external_correlation_id")) {
+        scope_correlation_failures_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    bool matched = !g_scope_external_stack.empty() &&
+                   g_scope_external_stack.back() == user_data.value;
+    if (name && !g_scope_name_stack.empty()) {
+        matched = matched && g_scope_name_stack.back() == name;
+    }
+    if (!matched) {
+        scope_correlation_failures_.fetch_add(1, std::memory_order_relaxed);
+        GFL_LOG_ERROR(
+            "[ROCProfilerBackend] scope correlation stack mismatch; "
+            "discarding the local top to preserve push/pop depth");
+    }
     if (!g_scope_external_stack.empty()) g_scope_external_stack.pop_back();
     if (!g_scope_name_stack.empty()) g_scope_name_stack.pop_back();
 }
@@ -873,6 +955,8 @@ void RocprofilerBackend::handleKernelDispatch(
 
     if (g_monitorBuffer.Push(out)) {
         kernel_rows_emitted_.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        trace_records_queue_dropped_.fetch_add(1, std::memory_order_relaxed);
     }
 }
 
@@ -919,6 +1003,8 @@ void RocprofilerBackend::handleMemoryCopy(
 
     if (g_monitorBuffer.Push(out)) {
         memcpy_rows_emitted_.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        trace_records_queue_dropped_.fetch_add(1, std::memory_order_relaxed);
     }
 }
 

@@ -152,3 +152,55 @@ TEST(AmdCaptureCapabilities, DispatchSamplesAndDroppedTraceAreVisible) {
     EXPECT_NE(delivery->message.find("3 dropped trace record(s)"),
               std::string::npos);
 }
+
+TEST(AmdCaptureCapabilities, LifecycleDeliveryAndCorrelationFailuresAreVisible) {
+    gpufl::amd::AmdCaptureCapabilityInput input;
+    input.session_id = "amd-session";
+    input.plan = gpufl::amd::ResolveAmdProfilingPlan(
+        gpufl::ProfilingEngine::Trace, {});
+    input.trace_configured = true;
+    input.dropped_client_records = 5;
+    input.trace_buffer_flush_failures = 2;
+    input.scope_correlation_failures = 3;
+
+    const auto event = gpufl::amd::BuildAmdCaptureCapabilitiesEvent(input);
+
+    const auto* delivery = FindCapability(event, "trace_buffer_delivery");
+    ASSERT_NE(delivery, nullptr);
+    EXPECT_EQ(delivery->status, "partial");
+    EXPECT_EQ(delivery->reason_code, "rocprofiler_buffer_flush_failed");
+    EXPECT_NE(delivery->message.find("failed 2 time(s)"), std::string::npos);
+    EXPECT_NE(delivery->message.find("wrong segment"), std::string::npos);
+
+    const auto* correlation = FindCapability(event, "scope_correlation");
+    ASSERT_NE(correlation, nullptr);
+    EXPECT_TRUE(correlation->requested);
+    EXPECT_EQ(correlation->status, "partial");
+    EXPECT_EQ(correlation->mode, "rocprofiler_external_correlation");
+    EXPECT_EQ(correlation->reason_code,
+              "rocprofiler_scope_correlation_failed");
+    EXPECT_NE(correlation->message.find("failed 3 time(s)"),
+              std::string::npos);
+}
+
+TEST(AmdCaptureCapabilities, ClientQueueDropsDegradeEndToEndDelivery) {
+    gpufl::amd::AmdCaptureCapabilityInput input;
+    input.session_id = "amd-session";
+    input.plan = gpufl::amd::ResolveAmdProfilingPlan(
+        gpufl::ProfilingEngine::Trace, {});
+    input.trace_configured = true;
+    input.dropped_client_records = 5;
+
+    const auto event = gpufl::amd::BuildAmdCaptureCapabilitiesEvent(input);
+
+    const auto* delivery = FindCapability(event, "trace_buffer_delivery");
+    ASSERT_NE(delivery, nullptr);
+    EXPECT_EQ(delivery->status, "partial");
+    EXPECT_EQ(delivery->reason_code, "gpufl_activity_queue_full");
+    EXPECT_NE(delivery->message.find("dropped 5 trace record(s)"),
+              std::string::npos);
+
+    const auto* correlation = FindCapability(event, "scope_correlation");
+    ASSERT_NE(correlation, nullptr);
+    EXPECT_EQ(correlation->status, "enabled");
+}

@@ -16,7 +16,10 @@ struct AmdCaptureCapabilityInput {
     uint64_t memcpy_rows = 0;
     uint64_t profiling_sample_rows = 0;
     uint64_t dropped_trace_records = 0;
+    uint64_t dropped_client_records = 0;
+    uint64_t trace_buffer_flush_failures = 0;
     uint64_t unattributed_trace_records = 0;
+    uint64_t scope_correlation_failures = 0;
 };
 
 CaptureCapabilitiesEvent BuildAmdCaptureCapabilitiesEvent(
