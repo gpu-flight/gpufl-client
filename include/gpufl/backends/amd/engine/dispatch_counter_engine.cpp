@@ -8,6 +8,8 @@
 #include <cstdio>
 #include <cstring>
 
+#include "gpufl/backends/amd/amd_profiling_policy.hpp"
+
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/deep_window.hpp"
@@ -57,8 +59,11 @@ bool CheckStatus(rocprofiler_status_t status, const char* call) {
 
 bool DispatchCounterEngine::initialize(const rocprofiler_context_id_t context,
                                        const rocprofiler_agent_id_t gpu_agent,
+                                       const uint32_t gpu_device_id,
                                        const MonitorOptions& opts) {
     context_ = context;
+    gpu_agent_ = gpu_agent;
+    gpu_device_id_ = gpu_device_id;
     collection_gate_.configure(opts.deep_arm_mode);
 
     if (!discoverCounters(gpu_agent)) {
@@ -229,7 +234,7 @@ bool DispatchCounterEngine::createCounterConfig(const rocprofiler_agent_id_t age
 }
 
 void DispatchCounterEngine::dispatchCallback(
-    rocprofiler_dispatch_counting_service_data_t /*dispatch_data*/,
+    rocprofiler_dispatch_counting_service_data_t dispatch_data,
     rocprofiler_counter_config_id_t* config,
     rocprofiler_user_data_t* /*user_data*/,
     void* callback_data) {
@@ -242,8 +247,11 @@ void DispatchCounterEngine::dispatchCallback(
     // Nth dispatch still receives the profile, while later callbacks reject
     // collection immediately without running teardown on this callback path.
     const bool window_claimed_launch = DeepWindow::OnLaunch();
+    const auto device_id = ResolveAmdDispatchDeviceId(
+        engine->gpu_agent_.handle, engine->gpu_device_id_,
+        dispatch_data.dispatch_info.agent_id.handle);
     if (config) *config = {};
-    if (config &&
+    if (config && device_id.has_value() &&
         engine->collection_gate_.collectDispatch(window_claimed_launch)) {
         *config = engine->config_id_;
     }
@@ -262,8 +270,10 @@ void DispatchCounterEngine::recordCallback(
     auto* engine = static_cast<DispatchCounterEngine*>(callback_data);
     if (!engine || !record_data || record_count == 0) return;
 
-    const auto& info = dispatch_data.dispatch_info;
-    (void)info;  // reserved for future agent_id → device_id resolution
+    const auto device_id = ResolveAmdDispatchDeviceId(
+        engine->gpu_agent_.handle, engine->gpu_device_id_,
+        dispatch_data.dispatch_info.agent_id.handle);
+    if (!device_id.has_value()) return;
     const auto corr_id = dispatch_data.correlation_id.internal;
     const int64_t now_ns =
         static_cast<int64_t>(dispatch_data.start_timestamp);
@@ -298,7 +308,7 @@ void DispatchCounterEngine::recordCallback(
         ProfileSampleInput s;
         s.ts_ns        = now_ns;
         s.corr_id      = static_cast<uint32_t>(corr_id & 0xFFFFFFFF);
-        s.device_id    = 0;  // TODO: resolve from agent_id
+        s.device_id    = *device_id;
         s.sample_kind  = 1;  // sass_metric
         s.metric_name  = counter_name;
         s.metric_value = static_cast<uint64_t>(rec.counter_value);

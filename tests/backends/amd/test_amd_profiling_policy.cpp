@@ -138,6 +138,19 @@ TEST(AmdProfilingPolicy, DeepReportsDispatchOnlyPartialImplementation) {
     EXPECT_EQ(plan.reason_code, "deep_services_unavailable_dispatch_counting_selected");
 }
 
+TEST(AmdProfilingPolicy, DispatchSamplesKeepConfiguredDeviceIdentity) {
+    EXPECT_EQ(gpufl::amd::ResolveAmdDispatchDeviceId(101, 7, 101), 7u);
+}
+
+TEST(AmdProfilingPolicy, DispatchSamplesRejectOtherOrUnknownAgents) {
+    EXPECT_FALSE(
+        gpufl::amd::ResolveAmdDispatchDeviceId(101, 7, 202).has_value());
+    EXPECT_FALSE(
+        gpufl::amd::ResolveAmdDispatchDeviceId(0, 7, 101).has_value());
+    EXPECT_FALSE(
+        gpufl::amd::ResolveAmdDispatchDeviceId(101, 7, 0).has_value());
+}
+
 TEST(AmdCaptureCapabilities, PcFallbackNamesRequestAndSelectionSeparately) {
     gpufl::amd::AmdCaptureCapabilityInput input;
     input.session_id = "amd-session";

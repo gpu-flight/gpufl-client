@@ -20,6 +20,7 @@ class AmdProfilingEngine {
     /// Returns false if the hardware/driver doesn't support this engine.
     virtual bool initialize(rocprofiler_context_id_t context,
                             rocprofiler_agent_id_t gpu_agent,
+                            uint32_t gpu_device_id,
                             const MonitorOptions& opts) = 0;
 
     /// Begin profiling (context is already started).

@@ -9,6 +9,7 @@
 #include <array>
 #include <cstdio>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -307,8 +308,18 @@ int RocprofilerBackend::toolInitialize() {
     // Resolve the user-facing request to an AMD-native path before creating an
     // engine. Unsupported requests remain trace-capable and are reported as
     // explicit fallbacks rather than silently pretending the requested engine ran.
+    std::optional<uint32_t> primary_device_id;
+    {
+        std::lock_guard<std::mutex> lock(agent_mutex_);
+        if (const auto it = gpu_device_ids_.find(primary_gpu_agent_.handle);
+            it != gpu_device_ids_.end()) {
+            primary_device_id = static_cast<uint32_t>(it->second);
+        }
+    }
+
     AmdProfilingSupport support;
-    support.dispatch_counting = primary_gpu_agent_.handle != 0;
+    support.dispatch_counting = primary_gpu_agent_.handle != 0 &&
+                                primary_device_id.has_value();
     auto plan = ResolveAmdProfilingPlan(opts_.profiling_engine, support);
     setResolvedPlan(plan);
 
@@ -321,7 +332,8 @@ int RocprofilerBackend::toolInitialize() {
 
     if (plan.selected_path == AmdProfilingPath::DispatchCounting) {
         engine_ = std::make_unique<DispatchCounterEngine>();
-        if (!engine_->initialize(context_, primary_gpu_agent_, opts_)) {
+        if (!engine_->initialize(context_, primary_gpu_agent_,
+                                 *primary_device_id, opts_)) {
             GFL_LOG_ERROR(
                 "[ROCProfilerBackend] Dispatch-counter initialization failed; "
                 "continuing with ROCprofiler trace activity only");

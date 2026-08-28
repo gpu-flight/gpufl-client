@@ -25,6 +25,7 @@ class DispatchCounterEngine final : public AmdProfilingEngine {
 
     bool initialize(rocprofiler_context_id_t context,
                     rocprofiler_agent_id_t gpu_agent,
+                    uint32_t gpu_device_id,
                     const MonitorOptions& opts) override;
     void start() override;
     void stop() override;
@@ -65,6 +66,8 @@ class DispatchCounterEngine final : public AmdProfilingEngine {
         void* callback_data);
 
     rocprofiler_context_id_t context_{};
+    rocprofiler_agent_id_t gpu_agent_{};
+    uint32_t gpu_device_id_ = 0;
     rocprofiler_counter_config_id_t config_id_{};
     std::atomic<bool> config_valid_{false};
     AmdDispatchCollectionGate collection_gate_;

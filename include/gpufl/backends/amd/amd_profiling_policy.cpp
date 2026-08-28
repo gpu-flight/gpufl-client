@@ -60,6 +60,17 @@ bool AmdRequestNeedsDeviceCounting(const ProfilingEngine engine) {
            engine == ProfilingEngine::Deep;
 }
 
+std::optional<uint32_t> ResolveAmdDispatchDeviceId(
+    const uint64_t configured_agent_handle,
+    const uint32_t configured_device_id,
+    const uint64_t dispatch_agent_handle) {
+    if (configured_agent_handle == 0 || dispatch_agent_handle == 0 ||
+        configured_agent_handle != dispatch_agent_handle) {
+        return std::nullopt;
+    }
+    return configured_device_id;
+}
+
 AmdResolvedProfilingPlan ResolveAmdProfilingPlan(
     const ProfilingEngine requested,
     const AmdProfilingSupport& support) {
