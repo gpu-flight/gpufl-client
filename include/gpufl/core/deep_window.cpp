@@ -31,7 +31,10 @@ std::mutex g_mu;
 std::atomic g_active{false};
 
 std::atomic<int64_t>  g_deadline_ns{0};        // 0 = no time bound
-std::atomic<uint64_t> g_launches_remaining{0};  // 0 = no launch bound
+// Separating "bounded" from remaining=0 distinguishes an unlimited window
+// from a bounded window whose final slot was already claimed.
+std::atomic<bool>     g_launch_bound_enabled{false};
+std::atomic<uint64_t> g_launches_remaining{0};
 std::atomic<uint64_t> g_launches_covered{0};
 // Set by the launch callback when a bound is reached; consumed by the
 // collector, which is the thread allowed to run the engines' teardown.
@@ -242,6 +245,8 @@ bool DeepWindow::Open(const DeepWindowSpec& spec) {
                                 : 0,
                             std::memory_order_relaxed);
         g_launches_remaining.store(spec.max_launches, std::memory_order_relaxed);
+        g_launch_bound_enabled.store(spec.max_launches > 0,
+                                     std::memory_order_relaxed);
         g_launches_covered.store(0, std::memory_order_relaxed);
         g_close_requested.store(false, std::memory_order_relaxed);
         name = g_name;
@@ -514,20 +519,30 @@ void DeepWindow::TakePendingOpen_() {
     g_claimed_token = 0;
 }
 
-void DeepWindow::OnLaunch() {
+bool DeepWindow::OnLaunch() {
     // Arming is the collector's job too - see ServicePending. This callback
     // only counts.
-    if (!g_active.load(std::memory_order_acquire)) return;
+    if (!g_active.load(std::memory_order_acquire)) return false;
+
+    if (g_launch_bound_enabled.load(std::memory_order_relaxed)) {
+        uint64_t remaining =
+            g_launches_remaining.load(std::memory_order_relaxed);
+        while (remaining > 0) {
+            if (g_launches_remaining.compare_exchange_weak(
+                    remaining, remaining - 1, std::memory_order_acq_rel,
+                    std::memory_order_relaxed)) {
+                g_launches_covered.fetch_add(1, std::memory_order_relaxed);
+                if (remaining == 1) {
+                    RequestClose_(DeepWindowClose::LaunchBudget);
+                }
+                return true;
+            }
+        }
+        return false;
+    }
 
     g_launches_covered.fetch_add(1, std::memory_order_relaxed);
-
-    if (g_launches_remaining.load(std::memory_order_relaxed) > 0) {
-        // fetch_sub returns the PREVIOUS value, so 1 means this launch
-        // consumed the last of the budget.
-        if (g_launches_remaining.fetch_sub(1, std::memory_order_relaxed) <= 1) {
-            RequestClose_(DeepWindowClose::LaunchBudget);
-        }
-    }
+    return true;
 }
 
 void DeepWindow::RequestClose_(const DeepWindowClose reason) {
@@ -583,6 +598,7 @@ void DeepWindow::ResetForTesting() {
     g_pending = PendingOpen{};
     g_deadline_ns.store(0, std::memory_order_relaxed);
     g_launches_remaining.store(0, std::memory_order_relaxed);
+    g_launch_bound_enabled.store(false, std::memory_order_relaxed);
     g_launches_covered.store(0, std::memory_order_relaxed);
     g_close_requested.store(false, std::memory_order_relaxed);
     g_close_reason.store(static_cast<int>(DeepWindowClose::Deadline),

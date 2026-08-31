@@ -3,6 +3,7 @@
 #include <string>
 
 #include "gpufl/backends/amd/amd_capture_capabilities.hpp"
+#include "gpufl/backends/amd/amd_dispatch_collection_gate.hpp"
 #include "gpufl/backends/amd/amd_profiling_policy.hpp"
 
 namespace {
@@ -17,6 +18,50 @@ const gpufl::CaptureCapability* FindCapability(
 }
 
 }  // namespace
+
+TEST(AmdDispatchCollectionGate, AlwaysModeFollowsSessionLifetime) {
+    gpufl::amd::AmdDispatchCollectionGate gate;
+    gate.configure(gpufl::DeepArmMode::Always);
+
+    EXPECT_FALSE(gate.armed());
+    gate.start();
+    EXPECT_TRUE(gate.armed());
+    EXPECT_TRUE(gate.collectDispatch(false));
+    gate.closeWindow();
+    EXPECT_TRUE(gate.armed());
+    gate.stop();
+    EXPECT_FALSE(gate.armed());
+}
+
+TEST(AmdDispatchCollectionGate, WindowOnlyArmsExactlyInsideWindow) {
+    gpufl::amd::AmdDispatchCollectionGate gate;
+    gate.configure(gpufl::DeepArmMode::WindowOnly);
+
+    gate.start();
+    EXPECT_FALSE(gate.armed());
+    gate.openWindow();
+    EXPECT_TRUE(gate.armed());
+    EXPECT_TRUE(gate.collectDispatch(true));
+    EXPECT_FALSE(gate.collectDispatch(false));
+    gate.closeWindow();
+    EXPECT_FALSE(gate.armed());
+    // A callback that claimed the final slot before collector-thread disarm
+    // still owns that dispatch.
+    EXPECT_TRUE(gate.collectDispatch(true));
+    EXPECT_FALSE(gate.collectDispatch(false));
+}
+
+TEST(AmdDispatchCollectionGate, StopClearsWindowBeforeRestart) {
+    gpufl::amd::AmdDispatchCollectionGate gate;
+    gate.configure(gpufl::DeepArmMode::WindowOnly);
+
+    gate.openWindow();
+    gate.start();
+    ASSERT_TRUE(gate.armed());
+    gate.stop();
+    gate.start();
+    EXPECT_FALSE(gate.armed());
+}
 
 TEST(AmdProfilingPolicy, RequestIntentNeverInventsAmdNativeNames) {
     EXPECT_STREQ(gpufl::amd::AmdRequestIntentWireName(
@@ -93,6 +138,19 @@ TEST(AmdProfilingPolicy, DeepReportsDispatchOnlyPartialImplementation) {
     EXPECT_EQ(plan.reason_code, "deep_services_unavailable_dispatch_counting_selected");
 }
 
+TEST(AmdProfilingPolicy, DispatchSamplesKeepConfiguredDeviceIdentity) {
+    EXPECT_EQ(gpufl::amd::ResolveAmdDispatchDeviceId(101, 7, 101), 7u);
+}
+
+TEST(AmdProfilingPolicy, DispatchSamplesRejectOtherOrUnknownAgents) {
+    EXPECT_FALSE(
+        gpufl::amd::ResolveAmdDispatchDeviceId(101, 7, 202).has_value());
+    EXPECT_FALSE(
+        gpufl::amd::ResolveAmdDispatchDeviceId(0, 7, 101).has_value());
+    EXPECT_FALSE(
+        gpufl::amd::ResolveAmdDispatchDeviceId(101, 7, 0).has_value());
+}
+
 TEST(AmdCaptureCapabilities, PcFallbackNamesRequestAndSelectionSeparately) {
     gpufl::amd::AmdCaptureCapabilityInput input;
     input.session_id = "amd-session";
@@ -151,4 +209,56 @@ TEST(AmdCaptureCapabilities, DispatchSamplesAndDroppedTraceAreVisible) {
     EXPECT_EQ(delivery->reason_code, "rocprofiler_records_dropped");
     EXPECT_NE(delivery->message.find("3 dropped trace record(s)"),
               std::string::npos);
+}
+
+TEST(AmdCaptureCapabilities, LifecycleDeliveryAndCorrelationFailuresAreVisible) {
+    gpufl::amd::AmdCaptureCapabilityInput input;
+    input.session_id = "amd-session";
+    input.plan = gpufl::amd::ResolveAmdProfilingPlan(
+        gpufl::ProfilingEngine::Trace, {});
+    input.trace_configured = true;
+    input.dropped_client_records = 5;
+    input.trace_buffer_flush_failures = 2;
+    input.scope_correlation_failures = 3;
+
+    const auto event = gpufl::amd::BuildAmdCaptureCapabilitiesEvent(input);
+
+    const auto* delivery = FindCapability(event, "trace_buffer_delivery");
+    ASSERT_NE(delivery, nullptr);
+    EXPECT_EQ(delivery->status, "partial");
+    EXPECT_EQ(delivery->reason_code, "rocprofiler_buffer_flush_failed");
+    EXPECT_NE(delivery->message.find("failed 2 time(s)"), std::string::npos);
+    EXPECT_NE(delivery->message.find("wrong segment"), std::string::npos);
+
+    const auto* correlation = FindCapability(event, "scope_correlation");
+    ASSERT_NE(correlation, nullptr);
+    EXPECT_TRUE(correlation->requested);
+    EXPECT_EQ(correlation->status, "partial");
+    EXPECT_EQ(correlation->mode, "rocprofiler_external_correlation");
+    EXPECT_EQ(correlation->reason_code,
+              "rocprofiler_scope_correlation_failed");
+    EXPECT_NE(correlation->message.find("failed 3 time(s)"),
+              std::string::npos);
+}
+
+TEST(AmdCaptureCapabilities, ClientQueueDropsDegradeEndToEndDelivery) {
+    gpufl::amd::AmdCaptureCapabilityInput input;
+    input.session_id = "amd-session";
+    input.plan = gpufl::amd::ResolveAmdProfilingPlan(
+        gpufl::ProfilingEngine::Trace, {});
+    input.trace_configured = true;
+    input.dropped_client_records = 5;
+
+    const auto event = gpufl::amd::BuildAmdCaptureCapabilitiesEvent(input);
+
+    const auto* delivery = FindCapability(event, "trace_buffer_delivery");
+    ASSERT_NE(delivery, nullptr);
+    EXPECT_EQ(delivery->status, "partial");
+    EXPECT_EQ(delivery->reason_code, "gpufl_activity_queue_full");
+    EXPECT_NE(delivery->message.find("dropped 5 trace record(s)"),
+              std::string::npos);
+
+    const auto* correlation = FindCapability(event, "scope_correlation");
+    ASSERT_NE(correlation, nullptr);
+    EXPECT_EQ(correlation->status, "enabled");
 }

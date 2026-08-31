@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+#include <optional>
 #include <string>
 
 #include "gpufl/core/monitor.hpp"
@@ -40,5 +42,13 @@ AmdResolvedProfilingPlan ResolveAmdProfilingPlan(
 bool AmdRequestNeedsDispatchCounting(ProfilingEngine engine);
 bool AmdRequestNeedsPcSampling(ProfilingEngine engine);
 bool AmdRequestNeedsDeviceCounting(ProfilingEngine engine);
+
+// Dispatch counting is currently configured for one GPU agent. Resolve only
+// records from that agent so a secondary GPU can never be mislabeled as device
+// zero (or as the configured primary device).
+std::optional<uint32_t> ResolveAmdDispatchDeviceId(
+    uint64_t configured_agent_handle,
+    uint32_t configured_device_id,
+    uint64_t dispatch_agent_handle);
 
 }  // namespace gpufl::amd

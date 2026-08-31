@@ -212,7 +212,9 @@ TEST_F(DeepWindowTest, OnLaunchWithNoWindowOpenIsHarmless) {
 
 TEST_F(DeepWindowTest, LaunchAloneNeverClosesTheWindow) {
     ASSERT_TRUE(gpufl::DeepWindow::Open(Spec(0, /*launches=*/1)));
-    gpufl::DeepWindow::OnLaunch();  // budget spent, but no teardown here
+    EXPECT_TRUE(gpufl::DeepWindow::OnLaunch());
+    EXPECT_FALSE(gpufl::DeepWindow::OnLaunch())
+        << "a later launch must not exceed the claimed budget";
     EXPECT_TRUE(gpufl::DeepWindow::Active())
         << "the launch callback must not run the teardown";
 

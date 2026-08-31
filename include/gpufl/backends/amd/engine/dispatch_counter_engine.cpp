@@ -8,7 +8,12 @@
 #include <cstdio>
 #include <cstring>
 
+#include "gpufl/backends/amd/amd_profiling_policy.hpp"
+
+#include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
+#include "gpufl/core/deep_window.hpp"
+#include "gpufl/core/deep_window_rules.hpp"
 #include "gpufl/core/monitor.hpp"
 
 namespace gpufl::amd {
@@ -54,8 +59,12 @@ bool CheckStatus(rocprofiler_status_t status, const char* call) {
 
 bool DispatchCounterEngine::initialize(const rocprofiler_context_id_t context,
                                        const rocprofiler_agent_id_t gpu_agent,
-                                       const MonitorOptions& /*opts*/) {
+                                       const uint32_t gpu_device_id,
+                                       const MonitorOptions& opts) {
     context_ = context;
+    gpu_agent_ = gpu_agent;
+    gpu_device_id_ = gpu_device_id;
+    collection_gate_.configure(opts.deep_arm_mode);
 
     if (!discoverCounters(gpu_agent)) {
         GFL_LOG_ERROR("[DispatchCounterEngine] No counters discovered");
@@ -83,11 +92,14 @@ bool DispatchCounterEngine::initialize(const rocprofiler_context_id_t context,
 }
 
 void DispatchCounterEngine::start() {
-    // Context start is handled by the backend
+    // Context start is handled by the backend. The collection gate decides
+    // whether callbacks receive a profile immediately (Always) or only while
+    // a deep window is active (WindowOnly).
+    collection_gate_.start();
 }
 
 void DispatchCounterEngine::stop() {
-    // Context stop is handled by the backend
+    collection_gate_.stop();
 }
 
 void DispatchCounterEngine::drain() {
@@ -95,10 +107,19 @@ void DispatchCounterEngine::drain() {
 }
 
 void DispatchCounterEngine::shutdown() {
-    if (config_valid_) {
-        rocprofiler_destroy_counter_config(config_id_);
-        config_valid_ = false;
+    collection_gate_.stop();
+    if (config_valid_.exchange(false, std::memory_order_acq_rel)) {
+        (void) CheckStatus(rocprofiler_destroy_counter_config(config_id_),
+                           "rocprofiler_destroy_counter_config");
     }
+}
+
+void DispatchCounterEngine::onScopeStart(const char*) {
+    collection_gate_.openWindow();
+}
+
+void DispatchCounterEngine::onScopeStop(const char*) {
+    collection_gate_.closeWindow();
 }
 
 bool DispatchCounterEngine::discoverCounters(const rocprofiler_agent_id_t agent) {
@@ -208,18 +229,35 @@ bool DispatchCounterEngine::createCounterConfig(const rocprofiler_agent_id_t age
         GFL_LOG_DEBUG("[DispatchCounterEngine]   - ", name);
     }
 
-    config_valid_ = true;
+    config_valid_.store(true, std::memory_order_release);
     return true;
 }
 
 void DispatchCounterEngine::dispatchCallback(
-    rocprofiler_dispatch_counting_service_data_t /*dispatch_data*/,
+    rocprofiler_dispatch_counting_service_data_t dispatch_data,
     rocprofiler_counter_config_id_t* config,
     rocprofiler_user_data_t* /*user_data*/,
     void* callback_data) {
     auto* engine = static_cast<DispatchCounterEngine*>(callback_data);
-    if (engine && engine->config_valid_ && config) {
+    if (!engine) return;
+
+    // ROCprofiler treats a callback that supplies no profile as an explicit
+    // "collect no counters for this dispatch" decision. Clear the output so
+    // WindowOnly stays cheap outside the window. Claim the budget first: the
+    // Nth dispatch still receives the profile, while later callbacks reject
+    // collection immediately without running teardown on this callback path.
+    const bool window_claimed_launch = DeepWindow::OnLaunch();
+    const auto device_id = ResolveAmdDispatchDeviceId(
+        engine->gpu_agent_.handle, engine->gpu_device_id_,
+        dispatch_data.dispatch_info.agent_id.handle);
+    if (config) *config = {};
+    if (config && device_id.has_value() &&
+        engine->collection_gate_.collectDispatch(window_claimed_launch)) {
         *config = engine->config_id_;
+    }
+
+    if (detail::DeepWindowRules::WantsLaunchFeed()) {
+        detail::DeepWindowRules::NoteKernelLaunch(detail::GetTimestampNs());
     }
 }
 
@@ -232,8 +270,10 @@ void DispatchCounterEngine::recordCallback(
     auto* engine = static_cast<DispatchCounterEngine*>(callback_data);
     if (!engine || !record_data || record_count == 0) return;
 
-    const auto& info = dispatch_data.dispatch_info;
-    (void)info;  // reserved for future agent_id → device_id resolution
+    const auto device_id = ResolveAmdDispatchDeviceId(
+        engine->gpu_agent_.handle, engine->gpu_device_id_,
+        dispatch_data.dispatch_info.agent_id.handle);
+    if (!device_id.has_value()) return;
     const auto corr_id = dispatch_data.correlation_id.internal;
     const int64_t now_ns =
         static_cast<int64_t>(dispatch_data.start_timestamp);
@@ -268,7 +308,7 @@ void DispatchCounterEngine::recordCallback(
         ProfileSampleInput s;
         s.ts_ns        = now_ns;
         s.corr_id      = static_cast<uint32_t>(corr_id & 0xFFFFFFFF);
-        s.device_id    = 0;  // TODO: resolve from agent_id
+        s.device_id    = *device_id;
         s.sample_kind  = 1;  // sass_metric
         s.metric_name  = counter_name;
         s.metric_value = static_cast<uint64_t>(rec.counter_value);

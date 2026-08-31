@@ -20,6 +20,7 @@ class AmdProfilingEngine {
     /// Returns false if the hardware/driver doesn't support this engine.
     virtual bool initialize(rocprofiler_context_id_t context,
                             rocprofiler_agent_id_t gpu_agent,
+                            uint32_t gpu_device_id,
                             const MonitorOptions& opts) = 0;
 
     /// Begin profiling (context is already started).
@@ -36,6 +37,13 @@ class AmdProfilingEngine {
 
     /// True once this engine has emitted at least one profiling sample.
     virtual bool hasData() const = 0;
+
+    /// True once the context-bound service and its counter configuration are
+    /// ready for a deep window to arm.
+    virtual bool isPrepared() const = 0;
+
+    /// Point-in-time state used by deep-window audit rows before disarming.
+    virtual bool isArmed() const = 0;
 
     /// Scope hooks - engines may filter collection to scoped regions.
     virtual void onScopeStart(const char* /*name*/) {}
