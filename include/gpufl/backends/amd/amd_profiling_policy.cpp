@@ -1,5 +1,7 @@
 #include "gpufl/backends/amd/amd_profiling_policy.hpp"
 
+#include <unordered_set>
+
 namespace gpufl::amd {
 namespace {
 
@@ -58,6 +60,22 @@ bool AmdRequestNeedsPcSampling(const ProfilingEngine engine) {
 bool AmdRequestNeedsDeviceCounting(const ProfilingEngine engine) {
     return engine == ProfilingEngine::PmSampling ||
            engine == ProfilingEngine::Deep;
+}
+
+std::vector<std::string> ResolveAmdDeviceCountingMetrics(
+    const std::vector<std::string>& requested_metrics) {
+    if (requested_metrics.empty()) return {"GPUBusy"};
+
+    std::vector<std::string> resolved;
+    resolved.reserve(requested_metrics.size());
+    std::unordered_set<std::string> seen;
+    for (const auto& metric : requested_metrics) {
+        if (!metric.empty() && seen.emplace(metric).second) {
+            resolved.push_back(metric);
+        }
+    }
+    return resolved.empty() ? std::vector<std::string>{"GPUBusy"}
+                            : resolved;
 }
 
 std::optional<uint32_t> ResolveAmdDispatchDeviceId(

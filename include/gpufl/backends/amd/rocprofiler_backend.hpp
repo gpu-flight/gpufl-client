@@ -75,6 +75,7 @@ class RocprofilerBackend final : public IMonitorBackend {
     bool configureRocprofiler(const MonitorOptions& opts, std::string* reason);
     void resetToolState();
     bool registerTool(std::string* reason);
+    bool tryStartContext(bool force);
     AmdResolvedProfilingPlan resolvedPlan() const;
     void setResolvedPlan(AmdResolvedProfilingPlan plan);
 
@@ -163,6 +164,7 @@ class RocprofilerBackend final : public IMonitorBackend {
     mutable std::string capture_capabilities_session_id_;
     mutable uint64_t capability_kernel_rows_baseline_ = 0;
     mutable uint64_t capability_memcpy_rows_baseline_ = 0;
+    mutable uint64_t capability_pm_sample_rows_baseline_ = 0;
     mutable uint64_t capability_dropped_records_baseline_ = 0;
     mutable uint64_t capability_queue_dropped_records_baseline_ = 0;
     mutable uint64_t capability_buffer_flush_failures_baseline_ = 0;
@@ -171,6 +173,11 @@ class RocprofilerBackend final : public IMonitorBackend {
 
     std::atomic<bool> initialized_{false};
     std::atomic<bool> active_{false};
+    std::atomic<bool> start_requested_{false};
+    std::atomic<int64_t> next_start_retry_ns_{0};
+    std::atomic<bool> deferred_start_logged_{false};
+    std::atomic<bool> start_failure_logged_{false};
+    std::mutex start_stop_mutex_;
     std::atomic<bool> tool_registered_{false};
 };
 

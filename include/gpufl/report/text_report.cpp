@@ -77,6 +77,18 @@ std::string shortenKernelName(const std::string& name) {
     std::string s = name;
     auto at = s.find('@');
     if (at != std::string::npos) s = s.substr(0, at);
+
+    // GCC/ROCm demangling prefixes internal kernels with a parenthesized
+    // namespace, for example `(anonymous namespace)::kernel(float*)`. The
+    // argument-list scan below would otherwise mistake that first `(` for
+    // the function parameters and shorten the display name to an empty
+    // string.
+    constexpr const char* kAnonymousNamespace = "(anonymous namespace)::";
+    for (auto pos = s.find(kAnonymousNamespace); pos != std::string::npos;
+         pos = s.find(kAnonymousNamespace)) {
+        s.erase(pos, std::char_traits<char>::length(kAnonymousNamespace));
+    }
+
     for (const auto* prefix : {"void ", "int ", "float ", "double ", "__global__ "}) {
         if (s.rfind(prefix, 0) == 0) {
             s = s.substr(std::string(prefix).size());
@@ -353,6 +365,7 @@ void TextReport::parseJobStart(const JsonValue& rec, SessionInfo& info) {
         if (!rec.contains(field) || !rec[field].is_array() || rec[field].empty()) continue;
         const auto& dev = rec[field][0];
         info.gpu_name = dev.value<std::string>("name", "");
+        info.gpu_vendor = dev.value<std::string>("vendor", "");
         info.compute_major = dev.contains("compute_capability_major")
             ? dev.value<int>("compute_capability_major", 0) : dev.value<int>("major", 0);
         info.compute_minor = dev.contains("compute_capability_minor")
@@ -365,8 +378,23 @@ void TextReport::parseJobStart(const JsonValue& rec, SessionInfo& info) {
     }
 
     if (info.gpu_name.empty() && rec.contains("devices") &&
-        rec["devices"].is_array() && !rec["devices"].empty())
+        rec["devices"].is_array() && !rec["devices"].empty()) {
         info.gpu_name = rec["devices"][0].value<std::string>("name", "");
+        info.gpu_vendor = rec["devices"][0].value<std::string>("vendor", "");
+    }
+}
+
+bool TextReport::isAmdSession() const {
+    if (selected_engine_.rfind("amd.", 0) == 0) return true;
+
+    std::string identity = info_.gpu_vendor + " " + info_.gpu_name;
+    std::transform(identity.begin(), identity.end(), identity.begin(),
+                   [](const unsigned char ch) {
+                       return static_cast<char>(std::tolower(ch));
+                   });
+    return identity.find("amd") != std::string::npos ||
+           identity.find("radeon") != std::string::npos ||
+           identity.find("advanced micro devices") != std::string::npos;
 }
 
 void TextReport::parseDeviceLog(const std::vector<JsonValue>& records,
@@ -639,11 +667,15 @@ void TextReport::writeSessionSummary(std::ostringstream& out) const {
         out << "  Duration:             " << fmtDuration((info_.end_ns - info_.start_ns) / 1e6) << "\n";
 
     if (!info_.gpu_name.empty()) {
+        const bool amd = isAmdSession();
         out << "  GPU Device:           " << info_.gpu_name << "\n";
         if (info_.compute_major > 0)
             out << "    Compute:            " << info_.compute_major << "." << info_.compute_minor << "\n";
-        if (info_.sm_count > 0)
-            out << "    SMs:                " << info_.sm_count << "\n";
+        if (info_.sm_count > 0) {
+            out << "    " << std::left << std::setw(20)
+                << (amd ? "Compute Units:" : "SMs:") << info_.sm_count
+                << std::right << "\n";
+        }
         if (info_.shared_mem_per_block > 0)
             out << "    Shared Mem/Block:   " << fmtBytes(info_.shared_mem_per_block) << "\n";
         if (info_.regs_per_block > 0)
@@ -792,6 +824,7 @@ void TextReport::writeKernelDetails(std::ostringstream& out) const {
     for (const auto& k : kernels_) totalByName[k.name] += k.duration_ms;
     auto ranked = sortedTopN(totalByName, top_n_, [](double v) { return v; });
 
+    const bool amd = isAmdSession();
     for (const auto& [name, _] : ranked) {
         // Find representative kernel with detail data
         auto rep = std::find_if(kernels_.begin(), kernels_.end(),
@@ -813,8 +846,10 @@ void TextReport::writeKernelDetails(std::ostringstream& out) const {
                     << std::fixed << std::setprecision(1) << (val * 100) << "%\n";
         };
         writeOcc("Reg Occupancy", rep->reg_occupancy);
-        writeOcc("SMem Occupancy", rep->smem_occupancy);
-        writeOcc("Warp Occupancy", rep->warp_occupancy);
+        writeOcc(amd ? "LDS Occupancy" : "SMem Occupancy",
+                 rep->smem_occupancy);
+        writeOcc(amd ? "Wave Occupancy" : "Warp Occupancy",
+                 rep->warp_occupancy);
         writeOcc("Block Occupancy", rep->block_occupancy);
 
         if (!rep->limiting_resource.empty())
@@ -836,7 +871,9 @@ void TextReport::writeKernelDetails(std::ostringstream& out) const {
                 double waves =
                     static_cast<double>(gridTotal) /
                     (static_cast<double>(rep->max_active_blocks) * info_.sm_count);
-                out << "    Waves/SM:           " << std::fixed
+                out << (amd ? "    Waves/CU:           "
+                            : "    Waves/SM:           ")
+                    << std::fixed
                     << std::setprecision(2) << waves << "\n";
             }
         }
@@ -1084,7 +1121,7 @@ void TextReport::writeScopeSummary(std::ostringstream& out) const {
 
         if (!scopeGpu.empty()) {
             auto ranked = sortedTopN(scopeGpu, 0, [](const AggStats& s) { return s.total; });
-            out << "\n  GPU Time by Scope (kernel execution only - SM time from CUPTI):\n";
+            out << "\n  GPU Time by Scope (kernel execution only):\n";
             out << "  " << std::left << std::setw(30) << "Scope"
                 << std::right << std::setw(8) << "Kernels"
                 << std::setw(14) << "GPU Time" << std::setw(12) << "Avg" << "\n";
@@ -1102,7 +1139,7 @@ void TextReport::writeScopeSummary(std::ostringstream& out) const {
         if (!scopeGpu.empty()) {
             out << "\n  Note: Scope Timing is what your CPU thread saw "
                    "(includes JIT, sync, launch overhead).\n";
-            out << "        GPU Time is pure kernel execution on the SM. "
+            out << "        GPU Time is pure kernel execution on the GPU. "
                    "Use GPU Time to compare kernel perf.\n";
         }
     }
@@ -1262,17 +1299,31 @@ static std::string makeBar(double pct, int maxWidth = 20) {
 using FuncProfile = gpufl::report::FuncProfile;
 
 void TextReport::writeProfileAnalysis(std::ostringstream& out) const {
-    out << "\n" << SEP << "\n  Profile / SASS Analysis\n" << SEP << "\n";
-    if (profile_samples_.empty()) { out << "  (No profile sample data)\n"; return; }
+    // `isa_inst_present` rows describe disassembly/source-map availability;
+    // they are metadata rather than performance samples. Do not create an
+    // otherwise empty instruction-analysis section for trace or PM-only runs.
+    const bool hasAnalysisSample = std::any_of(
+        profile_samples_.begin(), profile_samples_.end(),
+        [](const ProfileSampleRecord& ps) {
+            return ps.metric_name != "isa_inst_present";
+        });
+    if (!hasAnalysisSample) return;
+
+    out << "\n" << SEP << "\n  Profile / Instruction Analysis\n" << SEP
+        << "\n";
 
     const bool hasNonZeroSample = std::any_of(
         profile_samples_.begin(), profile_samples_.end(),
-        [](const ProfileSampleRecord& ps) { return ps.metric_value > 0; });
+        [](const ProfileSampleRecord& ps) {
+            return ps.metric_name != "isa_inst_present" &&
+                   ps.metric_value > 0;
+        });
     if (!hasNonZeroSample) {
         out << "  (Profile sample rows were present, but every metric value was 0.)\n";
         if (sass_active_) {
-            out << "  SASS instrumentation was configured, but CUPTI returned no "
-                   "non-zero SASS counter values for this session.\n";
+            out << "  Instruction instrumentation was configured, but the "
+                   "profiler returned no non-zero counter values for this "
+                   "session.\n";
         }
         return;
     }
@@ -1322,6 +1373,7 @@ void TextReport::writeProfileAnalysis(std::ostringstream& out) const {
     // ── Collect per-function data ───────────────────────────────────────────
     std::map<std::string, FuncProfile> byFunc;
     for (const auto& ps : profile_samples_) {
+        if (ps.metric_name == "isa_inst_present") continue;
         std::string fn = ps.function_name.empty() ? "(unknown)" : ps.function_name;
         auto& fp = byFunc[fn];
 
@@ -1425,6 +1477,7 @@ void TextReport::writeProfileAnalysis(std::ostringstream& out) const {
     std::map<std::string, uint64_t> otherMetrics;
     for (const auto& ps : profile_samples_) {
         if (ps.metric_name.empty()) continue;
+        if (ps.metric_name == "isa_inst_present") continue;
         if (ps.stall_reason > 1 && ps.sample_kind == 0) continue;  // stall data already shown
         if (ps.metric_name == "smsp__sass_inst_executed") continue;
         if (ps.metric_name == "smsp__sass_thread_inst_executed") continue;
@@ -1437,7 +1490,7 @@ void TextReport::writeProfileAnalysis(std::ostringstream& out) const {
 
     if (!otherMetrics.empty()) {
         auto metricRanked = sortedTopN(otherMetrics, 0, [](uint64_t v) { return static_cast<double>(v); });
-        out << "\n  Other SASS Metrics:\n";
+        out << "\n  Other Profile Metrics:\n";
         out << "  " << std::left << std::setw(50) << "Metric"
             << std::right << std::setw(16) << "Total" << "\n";
         out << "  " << std::string(66, '-') << "\n";

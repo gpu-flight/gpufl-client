@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "gpufl/core/monitor.hpp"
 
@@ -42,6 +43,12 @@ AmdResolvedProfilingPlan ResolveAmdProfilingPlan(
 bool AmdRequestNeedsDispatchCounting(ProfilingEngine engine);
 bool AmdRequestNeedsPcSampling(ProfilingEngine engine);
 bool AmdRequestNeedsDeviceCounting(ProfilingEngine engine);
+
+// AMD's device-counting service consumes native ROCprofiler counter names.
+// Explicit user metrics win; the default is a portable device-utilization
+// signal that is available as a derived counter across supported AMD GPUs.
+std::vector<std::string> ResolveAmdDeviceCountingMetrics(
+    const std::vector<std::string>& requested_metrics);
 
 // Dispatch counting is currently configured for one GPU agent. Resolve only
 // records from that agent so a secondary GPU can never be mislabeled as device

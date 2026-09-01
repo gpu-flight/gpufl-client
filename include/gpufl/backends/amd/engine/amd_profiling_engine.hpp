@@ -32,6 +32,10 @@ class AmdProfilingEngine {
     /// Periodically drain buffered profiling data into the monitor ring buffer.
     virtual void drain() = 0;
 
+    /// Cheap collector-loop service tick. Pull-based engines use this to
+    /// honor their sampling cadence; callback/buffer engines leave it idle.
+    virtual void service() {}
+
     /// Release resources.
     virtual void shutdown() = 0;
 
