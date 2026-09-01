@@ -95,6 +95,12 @@ if(GPUFL_ENABLE_AMD AND (GPUFL_HAS_ROCM_SMI OR GPUFL_HAS_HIP))
   )
 endif()
 
+if(APPLE AND GPUFL_ENABLE_METAL AND GPUFL_HAS_METAL)
+  list(APPEND GPUFL_TEST_SOURCES
+    backends/metal/test_metal_collector.mm
+  )
+endif()
+
 add_executable(gpufl_tests ${GPUFL_TEST_SOURCES})
 
 # Standalone target for the Linux injection readiness regression. It

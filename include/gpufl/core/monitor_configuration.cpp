@@ -17,6 +17,8 @@ MonitorBackendKind toMonitorBackendKind(const BackendKind backend) {
             return MonitorBackendKind::Amd;
         case BackendKind::None:
             return MonitorBackendKind::None;
+        case BackendKind::Metal:
+            return MonitorBackendKind::Metal;
         case BackendKind::Auto:
         default:
             return MonitorBackendKind::Auto;

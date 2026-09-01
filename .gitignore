@@ -1,12 +1,15 @@
 ### ai
 .claude/
 .junie/
+.cache/
 
 ### idea
 .idea/**
 build/
 build-*/
+build_metal_stub/
 build_tests/
+gpufl-monitor-macos/
 cmake-build-*/
 CMakeFiles/
 CMakeCache.txt
@@ -91,6 +94,8 @@ dist/
 *.hex
 
 *.log
+
+AGENTS.md
 
 ### Python
 # Byte-compiled / optimized files

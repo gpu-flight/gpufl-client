@@ -12,6 +12,10 @@
 #include "gpufl/backends/amd/rocm_collector.hpp"
 #endif
 
+#if GPUFL_ENABLE_METAL && GPUFL_HAS_METAL
+#include "gpufl/backends/metal/metal_collector.hpp"
+#endif
+
 namespace gpufl {
 
 #if GPUFL_HAS_CUDA
@@ -70,6 +74,22 @@ BackendCollectors CreateBackendCollectors(const BackendKind backend,
 #endif
     };
 
+    auto tryMetalUnified = [&]() -> std::shared_ptr<IUnifiedGpuCollector> {
+#if GPUFL_ENABLE_METAL && GPUFL_HAS_METAL
+        std::string reason;
+        if (!gpufl::metal::MetalCollector::IsAvailable(&reason)) {
+            setReason("Metal backend unavailable: " + reason);
+            return nullptr;
+        }
+        return std::make_shared<gpufl::metal::MetalCollector>();
+#else
+        setReason(
+            "Metal backend not available (GPUFL_ENABLE_METAL=OFF or Metal "
+            "framework not found).");
+        return nullptr;
+#endif
+    };
+
     switch (backend) {
         case BackendKind::None:
             break;
@@ -78,6 +98,8 @@ BackendCollectors CreateBackendCollectors(const BackendKind backend,
             out.telemetry_collector = tryNvml();
             if (!out.telemetry_collector) {
                 setReason("Requested backend=nvidia but NVML is unavailable.");
+            } else {
+                out.telemetry_backend = "nvidia";
             }
             out.static_info_collector = tryNvidiaStatic();
             break;
@@ -90,6 +112,24 @@ BackendCollectors CreateBackendCollectors(const BackendKind backend,
                 if (out.unified_collector->canSampleTelemetry()) {
                     out.telemetry_collector = std::static_pointer_cast<
                         ISystemCollector<DeviceSample>>(out.unified_collector);
+                    out.telemetry_backend = "amd";
+                }
+                if (out.unified_collector->canSampleStaticInfo()) {
+                    out.static_info_collector = std::static_pointer_cast<
+                        IGpuStaticInfoCollector>(out.unified_collector);
+                }
+            }
+            break;
+
+        case BackendKind::Metal:
+            out.unified_collector = tryMetalUnified();
+            if (!out.unified_collector) {
+                setReason("Requested backend=metal but Metal is unavailable.");
+            } else {
+                if (out.unified_collector->canSampleTelemetry()) {
+                    out.telemetry_collector = std::static_pointer_cast<
+                        ISystemCollector<DeviceSample>>(out.unified_collector);
+                    out.telemetry_backend = "metal";
                 }
                 if (out.unified_collector->canSampleStaticInfo()) {
                     out.static_info_collector = std::static_pointer_cast<
@@ -102,6 +142,7 @@ BackendCollectors CreateBackendCollectors(const BackendKind backend,
         default:
             out.telemetry_collector = tryNvml();
             if (out.telemetry_collector) {
+                out.telemetry_backend = "nvidia";
                 out.static_info_collector = tryNvidiaStatic();
                 break;
             }
@@ -111,6 +152,21 @@ BackendCollectors CreateBackendCollectors(const BackendKind backend,
                 if (out.unified_collector->canSampleTelemetry()) {
                     out.telemetry_collector = std::static_pointer_cast<
                         ISystemCollector<DeviceSample>>(out.unified_collector);
+                    out.telemetry_backend = "amd";
+                }
+                if (out.unified_collector->canSampleStaticInfo()) {
+                    out.static_info_collector = std::static_pointer_cast<
+                        IGpuStaticInfoCollector>(out.unified_collector);
+                }
+                break;
+            }
+
+            out.unified_collector = tryMetalUnified();
+            if (out.unified_collector) {
+                if (out.unified_collector->canSampleTelemetry()) {
+                    out.telemetry_collector = std::static_pointer_cast<
+                        ISystemCollector<DeviceSample>>(out.unified_collector);
+                    out.telemetry_backend = "metal";
                 }
                 if (out.unified_collector->canSampleStaticInfo()) {
                     out.static_info_collector = std::static_pointer_cast<
@@ -121,7 +177,7 @@ BackendCollectors CreateBackendCollectors(const BackendKind backend,
 
             if (!out.telemetry_collector) {
                 setReason(
-                    "No GPU backend available (NVML/ROCm not compiled in or "
+                    "No GPU backend available (NVML/ROCm/Metal not compiled in or "
                     "not available).");
             }
             out.static_info_collector = tryNvidiaStatic();

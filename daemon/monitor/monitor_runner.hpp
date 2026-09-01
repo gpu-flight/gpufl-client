@@ -2,12 +2,15 @@
 
 #include <string>
 
+#include "gpufl/gpufl.hpp"
+
 namespace gpufl::daemon {
 
 struct MonitorRunOptions {
     std::string app_name = "gpufl-monitor";
     std::string log_path;
     int interval_ms = 5000;
+    BackendKind backend = BackendKind::Auto;
     bool quiet = false;
 };
 

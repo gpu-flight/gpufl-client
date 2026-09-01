@@ -3,6 +3,11 @@
 
 #if defined(_WIN32)
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/mach_host.h>
+#include <sys/sysctl.h>
+#include <unistd.h>
 #else
 #include <sys/sysinfo.h>
 
@@ -83,6 +88,73 @@ class HostCollector {
             s.ram_total_mib = memInfo.ullTotalPhys / (1024 * 1024);
             s.ram_used_mib =
                 (memInfo.ullTotalPhys - memInfo.ullAvailPhys) / (1024 * 1024);
+        }
+    }
+
+#elif defined(__APPLE__)
+    // --- MACOS IMPLEMENTATION ---
+    struct CpuTicks {
+        uint64_t user = 0;
+        uint64_t system = 0;
+        uint64_t idle = 0;
+        uint64_t nice = 0;
+    };
+    CpuTicks prev_;
+
+    static bool readCpuTicks(CpuTicks& ticks) {
+        host_cpu_load_info_data_t info{};
+        mach_msg_type_number_t count = HOST_CPU_LOAD_INFO_COUNT;
+        const kern_return_t rc = host_statistics(
+            mach_host_self(), HOST_CPU_LOAD_INFO,
+            reinterpret_cast<host_info_t>(&info), &count);
+        if (rc != KERN_SUCCESS) return false;
+
+        ticks.user = info.cpu_ticks[CPU_STATE_USER];
+        ticks.system = info.cpu_ticks[CPU_STATE_SYSTEM];
+        ticks.idle = info.cpu_ticks[CPU_STATE_IDLE];
+        ticks.nice = info.cpu_ticks[CPU_STATE_NICE];
+        return true;
+    }
+
+    double sampleCpu() {
+        CpuTicks cur;
+        if (!readCpuTicks(cur)) return 0.0;
+
+        const uint64_t prevTotal =
+            prev_.user + prev_.system + prev_.idle + prev_.nice;
+        const uint64_t curTotal = cur.user + cur.system + cur.idle + cur.nice;
+        const uint64_t totalDiff = curTotal - prevTotal;
+        const uint64_t idleDiff = cur.idle - prev_.idle;
+
+        double percent = 0.0;
+        if (totalDiff > 0) {
+            percent = static_cast<double>(totalDiff - idleDiff) /
+                      static_cast<double>(totalDiff) * 100.0;
+        }
+
+        prev_ = cur;
+        return percent;
+    }
+
+    static void sampleRam(HostSample& s) {
+        uint64_t totalBytes = 0;
+        size_t totalSize = sizeof(totalBytes);
+        if (sysctlbyname("hw.memsize", &totalBytes, &totalSize, nullptr, 0) == 0) {
+            s.ram_total_mib = totalBytes / (1024 * 1024);
+        }
+
+        vm_statistics64_data_t vmStats{};
+        mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+        const kern_return_t rc = host_statistics64(
+            mach_host_self(), HOST_VM_INFO64,
+            reinterpret_cast<host_info64_t>(&vmStats), &count);
+        if (rc == KERN_SUCCESS && s.ram_total_mib > 0) {
+            const uint64_t pageSize = static_cast<uint64_t>(getpagesize());
+            const uint64_t freeBytes =
+                static_cast<uint64_t>(vmStats.free_count) * pageSize;
+            const uint64_t totalMiB = s.ram_total_mib;
+            const uint64_t freeMiB = freeBytes / (1024 * 1024);
+            s.ram_used_mib = totalMiB > freeMiB ? totalMiB - freeMiB : 0;
         }
     }
 

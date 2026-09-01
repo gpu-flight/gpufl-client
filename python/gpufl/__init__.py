@@ -238,6 +238,7 @@ except ImportError as e:
         Auto = "Auto"
         Nvidia = "Nvidia"
         Amd = "Amd"
+        Metal = "Metal"
         None_ = "None"
 
     class ProfilingEngine:

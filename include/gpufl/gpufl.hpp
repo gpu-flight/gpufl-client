@@ -10,7 +10,7 @@
 #include "gpufl/core/monitor.hpp"
 
 namespace gpufl {
-enum class BackendKind { Auto, Nvidia, Amd, None };
+enum class BackendKind { Auto, Nvidia, Amd, None, Metal };
 
 struct InitOptions {
     std::string app_name = "gpufl";

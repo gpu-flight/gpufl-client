@@ -26,8 +26,17 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # -----------------------
 # Options
 # -----------------------
-option(GPUFL_ENABLE_NVIDIA "Enable NVIDIA backends (CUDA + NVML when available)" ON)
+if(APPLE)
+    set(GPUFL_ENABLE_NVIDIA_DEFAULT OFF)
+    set(GPUFL_ENABLE_METAL_DEFAULT ON)
+else()
+    set(GPUFL_ENABLE_NVIDIA_DEFAULT ON)
+    set(GPUFL_ENABLE_METAL_DEFAULT OFF)
+endif()
+
+option(GPUFL_ENABLE_NVIDIA "Enable NVIDIA backends (CUDA + NVML when available)" ${GPUFL_ENABLE_NVIDIA_DEFAULT})
 option(GPUFL_ENABLE_AMD    "Enable AMD backends (ROCm when available)" OFF)
+option(GPUFL_ENABLE_METAL  "Enable Apple Metal backend (macOS basic monitoring)" ${GPUFL_ENABLE_METAL_DEFAULT})
 option(GPUFL_ENABLE_AMD_ROCPROFILER "Enable AMD rocprofiler-sdk tracing backend when available" ON)
 # OFF builds the configuration release wheels ship (manylinux has no nvperf),
 # so CI can catch #if GPUFL_HAS_PERFWORKS mistakes.
@@ -226,6 +235,7 @@ set(GPUFL_HAS_ROCM 0)
 set(GPUFL_HAS_ROCM_SMI 0)
 set(GPUFL_HAS_HIP 0)
 set(GPUFL_HAS_ROCPROFILER_SDK 0)
+set(GPUFL_HAS_METAL 0)
 set(GPUFL_HAS_CUPTI 0)
 set(GPUFL_HAS_PERFWORKS 0)
 # ZLIB - try system install first, fall back to FetchContent so every platform
@@ -285,6 +295,12 @@ target_sources(gpufl PRIVATE include/gpufl/core/logger/file_compressor.cpp)
 # and log a warning so the user knows HTTPS endpoints will fail.
 # -----------------------
 include(FetchContent)
+
+# Resolve OpenSSL in this directory before cpp-httplib configures itself.
+# Imported targets created only inside FetchContent's subdirectory are not
+# guaranteed to be visible here, even though OpenSSL_FOUND can remain true.
+find_package(OpenSSL 3.0 QUIET COMPONENTS SSL Crypto)
+
 FetchContent_Declare(
     httplib
     GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
@@ -302,8 +318,7 @@ set(HTTPLIB_COMPILE OFF CACHE BOOL "" FORCE)
 set(HTTPLIB_INSTALL ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(httplib)
 
-find_package(OpenSSL QUIET)
-if(OpenSSL_FOUND)
+if(TARGET OpenSSL::SSL AND TARGET OpenSSL::Crypto)
     message(STATUS "Found OpenSSL: ${OPENSSL_VERSION} - HTTPS upload enabled")
     target_compile_definitions(gpufl PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT=1)
     target_link_libraries(gpufl PRIVATE OpenSSL::SSL OpenSSL::Crypto)
@@ -312,7 +327,7 @@ else()
     message(WARNING
         "OpenSSL not found - gpufl::uploadLogs will support HTTP only. "
         "Pointing backend_url at an https:// endpoint will fail to verify. "
-        "Install OpenSSL (apt: libssl-dev, vcpkg: openssl, brew: openssl) "
+        "Install OpenSSL (apt: libssl-dev, vcpkg: openssl, brew: openssl@3) "
         "to enable TLS.")
     set(GPUFL_HTTPLIB_TLS 0)
 endif()
@@ -351,6 +366,12 @@ if(GPUFL_ENABLE_AMD)
     target_compile_definitions(gpufl PUBLIC GPUFL_ENABLE_AMD=1)
 else()
     target_compile_definitions(gpufl PUBLIC GPUFL_ENABLE_AMD=0)
+endif()
+
+if(GPUFL_ENABLE_METAL)
+    target_compile_definitions(gpufl PUBLIC GPUFL_ENABLE_METAL=1)
+else()
+    target_compile_definitions(gpufl PUBLIC GPUFL_ENABLE_METAL=0)
 endif()
 
 if(GPUFL_ENABLE_NVIDIA)
@@ -729,6 +750,32 @@ if(GPUFL_ENABLE_AMD)
     endif()
 endif()
 
+# -----------------------
+# Metal backend (basic native monitoring)
+# -----------------------
+if(GPUFL_ENABLE_METAL)
+    if(APPLE)
+        enable_language(OBJCXX)
+        find_library(METAL_FRAMEWORK Metal)
+        find_library(FOUNDATION_FRAMEWORK Foundation)
+        if(METAL_FRAMEWORK AND FOUNDATION_FRAMEWORK)
+            set(GPUFL_HAS_METAL 1)
+            target_sources(gpufl PRIVATE
+                include/gpufl/backends/metal/metal_collector.mm
+            )
+            target_link_libraries(gpufl PRIVATE
+                ${METAL_FRAMEWORK}
+                ${FOUNDATION_FRAMEWORK}
+            )
+            message(STATUS "Found Metal framework: ${METAL_FRAMEWORK}")
+        else()
+            message(WARNING "GPUFL_ENABLE_METAL=ON but Metal/Foundation framework not found; GPUFL_HAS_METAL=0.")
+        endif()
+    else()
+        message(WARNING "GPUFL_ENABLE_METAL=ON is only supported on macOS; GPUFL_HAS_METAL=0.")
+    endif()
+endif()
+
 target_compile_definitions(gpufl PUBLIC
     GPUFL_HAS_CUDA=${GPUFL_HAS_CUDA}
     GPUFL_HAS_NVML=${GPUFL_HAS_NVML}
@@ -739,6 +786,7 @@ target_compile_definitions(gpufl PUBLIC
     GPUFL_HAS_ROCM_SMI=${GPUFL_HAS_ROCM_SMI}
     GPUFL_HAS_HIP=${GPUFL_HAS_HIP}
     GPUFL_HAS_ROCPROFILER_SDK=${GPUFL_HAS_ROCPROFILER_SDK}
+    GPUFL_HAS_METAL=${GPUFL_HAS_METAL}
 )
 
 # -----------------------

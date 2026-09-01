@@ -41,6 +41,7 @@ enum class MonitorBackendKind {
     Nvidia,
     Amd,
     None,
+    Metal,
 };
 
 /**
@@ -120,6 +121,14 @@ inline const char* ProfilingEngineWireName(const ProfilingEngine engine) {
         case ProfilingEngine::Deep:          return "nvidia.pc_sampling_with_sass";
     }
     return "nvidia.unknown";
+}
+
+inline std::string ProfilingEngineWireNameForBackend(
+    const ProfilingEngine engine, const std::string& telemetry_backend) {
+    if (engine == ProfilingEngine::Monitor && !telemetry_backend.empty()) {
+        return telemetry_backend + ".none";
+    }
+    return ProfilingEngineWireName(engine);
 }
 
 inline const char* ProfilingEngineSessionKind(const ProfilingEngine engine) {

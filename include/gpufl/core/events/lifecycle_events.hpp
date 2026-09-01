@@ -27,10 +27,10 @@ struct InitEvent {
     //                    sessions ran with an engine?".
     // profiling_engine : vendor-namespaced detail like
     //                    "nvidia.pc_sampling" / "nvidia.sass_metrics"
-    //                    / "nvidia.none" (the latter is what
-    //                    ProfilingEngine::Monitor - telemetry only -
-    //                    emits). Stored verbatim by the backend.
-    //                    The "nvidia.none" string lets the backend
+    //                    / "nvidia.none" / "amd.none" / "metal.none".
+    //                    The *.none forms identify telemetry-only sessions.
+    //                    Stored verbatim by the backend.
+    //                    The explicit none string lets the backend
     //                    distinguish "user explicitly disabled
     //                    profiling" from "pre-V40 client that omitted
     //                    the field" - both used to collapse to NULL.
@@ -39,6 +39,9 @@ struct InitEvent {
     // lives next to the InitEvent build site (gpufl.cpp).
     std::string session_kind;
     std::string profiling_engine;
+    // Telemetry provider selected after auto-detection: nvidia, amd, or metal.
+    // Additive and omitted when no GPU telemetry provider was initialized.
+    std::string telemetry_backend;
     // Multi-pass profiling grouping (P1 of the multi-pass workstream).
     // A single "analysis" = N separately-launched passes (one CUPTI engine
     // each, isolated to dodge the SASS/kernel-activity deadlock + cross-

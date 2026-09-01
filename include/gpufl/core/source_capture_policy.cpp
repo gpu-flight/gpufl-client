@@ -60,6 +60,23 @@ std::vector<fs::path> existingCanonicalRoots(
     return result;
 }
 
+std::vector<fs::path> existingLexicalRoots(
+    const std::vector<std::string>& roots) {
+    std::vector<fs::path> result;
+    for (const auto& value : roots) {
+        if (value.empty()) continue;
+        std::error_code ec;
+        fs::path lexical = fs::absolute(fs::path(value), ec).lexically_normal();
+        if (ec) continue;
+        const fs::path canonical = fs::weakly_canonical(lexical, ec);
+        if (ec || !fs::is_directory(canonical, ec) || ec) continue;
+        if (std::find(result.begin(), result.end(), lexical) == result.end()) {
+            result.push_back(std::move(lexical));
+        }
+    }
+    return result;
+}
+
 void appendEnvironmentRoot(std::vector<fs::path>& roots, const char* key) {
     const char* raw = std::getenv(key);
     if (!raw || !*raw) return;
@@ -186,6 +203,7 @@ void SourceCapturePolicy::configure(
     const bool enabled, const SourceCaptureSettings& settings) {
     enabled_ = enabled;
     settings_ = settings;
+    approved_lexical_roots_ = existingLexicalRoots(settings.approved_roots);
     approved_roots_ = existingCanonicalRoots(settings.approved_roots);
     manifest_ = {};
     manifest_.enabled = enabled_;
@@ -197,6 +215,7 @@ void SourceCapturePolicy::configure(
 void SourceCapturePolicy::reset() {
     enabled_ = false;
     settings_ = {};
+    approved_lexical_roots_.clear();
     approved_roots_.clear();
     manifest_ = {};
     manifest_dirty_ = false;
@@ -260,20 +279,18 @@ SourceCaptureResult SourceCapturePolicy::capture(
     const fs::path canonical = fs::weakly_canonical(absolute, ec);
     if (ec) return reject(SourceCaptureDisposition::InvalidPath);
 
-    std::size_t lexical_root = approved_roots_.size();
     std::size_t canonical_root = approved_roots_.size();
     for (std::size_t i = 0; i < approved_roots_.size(); ++i) {
-        if (lexical_root == approved_roots_.size() &&
-            isWithin(absolute, approved_roots_[i])) {
-            lexical_root = i;
-        }
         if (canonical_root == approved_roots_.size() &&
             isWithin(canonical, approved_roots_[i])) {
             canonical_root = i;
         }
     }
     if (canonical_root == approved_roots_.size()) {
-        return reject(lexical_root != approved_roots_.size()
+        const bool lexically_approved = std::any_of(
+            approved_lexical_roots_.begin(), approved_lexical_roots_.end(),
+            [&](const fs::path& root) { return isWithin(absolute, root); });
+        return reject(lexically_approved
                           ? SourceCaptureDisposition::SymlinkEscape
                           : SourceCaptureDisposition::OutsideApprovedRoots);
     }

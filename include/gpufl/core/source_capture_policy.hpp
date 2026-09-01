@@ -110,6 +110,7 @@ class SourceCapturePolicy {
 
     bool enabled_ = false;
     SourceCaptureSettings settings_;
+    std::vector<std::filesystem::path> approved_lexical_roots_;
     std::vector<std::filesystem::path> approved_roots_;
     SourceCaptureManifest manifest_;
     bool manifest_dirty_ = false;

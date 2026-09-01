@@ -64,11 +64,11 @@ CMAKE_ARGS="-DBUILD_TESTING=OFF" pip install "./gpufl-client[analyzer,viz]"
 
 The repository includes platform-specific helper scripts for local source
 builds. Use these scripts when you need to build against a specific CUDA
-Toolkit, Python virtual environment, or wheel ABI.
+Toolkit, Python virtual environment, Metal backend, or wheel ABI.
 
 #### Ubuntu / Linux
 
-`build.sh` is the Linux entrypoint. It delegates to `build-ubuntu.sh`.
+On Linux, `build.sh` delegates to `build-ubuntu.sh`.
 
 ```bash
 # Install into the active Python environment
@@ -96,6 +96,43 @@ Useful options:
 | `--python PATH` | Python executable to use. Use your target virtual environment's Python when building wheels. |
 | `--cuda-root PATH` | CUDA Toolkit root, for example `/usr/local/cuda-13.2`. |
 | `--wheel-dir PATH` | Output directory for built wheels. |
+
+#### macOS / Apple Metal
+
+On macOS, `build.sh` delegates to `build-macos.sh`. The script builds with
+Metal enabled and NVIDIA/AMD disabled. When Homebrew's `openssl@3` is
+installed, the script passes its keg-only prefix to CMake automatically.
+
+The Metal backend currently supports native monitoring only. CUDA trace
+injection and the `--trace` build mode are not available on macOS.
+
+```bash
+# Install into the active Python environment
+./build.sh
+
+# Build a wheel into ./dist
+./build.sh --wheel
+
+# Build the native monitor binary
+./build.sh --monitor
+
+# Build and run the monitor with a writable local log directory
+./scripts/run-monitor-macos.sh
+
+# Use an explicit Python venv
+./build-macos.sh --wheel --python .venv/bin/python
+```
+
+Useful options:
+
+| Option | Meaning |
+|---|---|
+| `--install` | Install the package into the selected Python environment. This is the default. |
+| `--wheel` | Build a wheel into `./dist` or `--wheel-dir`. |
+| `--monitor` | Build the native `gpufl-monitor` binary with the Metal backend. |
+| `--python PATH` | Python executable to use for install or wheel mode. |
+| `--wheel-dir PATH` | Output directory for built wheels. |
+| `--build-dir PATH` | CMake build directory for `--monitor`. |
 
 #### Windows
 
@@ -128,7 +165,7 @@ Useful parameters:
 | `-WheelDir PATH` | Output directory for built wheels. |
 | `-NoVcVars` | Skip importing `vcvars64.bat` and use the current shell environment. |
 
-Both platform scripts pass the current CMake options:
+Linux and Windows Python builds pass the current CUDA CMake options:
 
 ```text
 BUILD_PYTHON=ON
@@ -139,6 +176,18 @@ GPUFL_ENABLE_NVIDIA=ON
 GPUFL_ENABLE_AMD=OFF
 CUDAToolkit_ROOT=<selected CUDA Toolkit>
 CMAKE_CUDA_COMPILER=<selected nvcc>
+```
+
+macOS Python builds pass:
+
+```text
+BUILD_PYTHON=ON
+BUILD_GPUFL_EXAMPLE=OFF
+BUILD_TESTING=OFF
+PYBIND11_FINDPYTHON=ON
+GPUFL_ENABLE_NVIDIA=OFF
+GPUFL_ENABLE_AMD=OFF
+GPUFL_ENABLE_METAL=ON
 ```
 
 ### C++ (CMake FetchContent)

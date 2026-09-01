@@ -26,6 +26,7 @@ struct BackendCollectors {
     std::shared_ptr<IUnifiedGpuCollector> unified_collector;
     std::shared_ptr<ISystemCollector<DeviceSample>> telemetry_collector;
     std::shared_ptr<IGpuStaticInfoCollector> static_info_collector;
+    std::string telemetry_backend;
 };
 
 }  // namespace gpufl

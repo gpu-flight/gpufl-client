@@ -24,6 +24,16 @@ inline std::string hostToJson(const HostSample& h) {
     return oss.str();
 }
 
+inline void appendStringArray(std::ostringstream& oss,
+                              const std::vector<std::string>& values) {
+    oss << '[';
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i != 0) oss << ',';
+        oss << '"' << jsonEscape(values[i]) << '"';
+    }
+    oss << ']';
+}
+
 inline std::string devicesToJson(const std::vector<DeviceSample>& devs) {
     std::ostringstream oss;
     oss << "[";
@@ -49,10 +59,72 @@ inline std::string devicesToJson(const std::vector<DeviceSample>& devs) {
             << ",\"throttle_pwr\":"   << (d.throttle_power   ? 1 : 0)
             << ",\"throttle_therm\":" << (d.throttle_thermal ? 1 : 0)
             << ",\"pcie_rx_bw_bps\":" << d.pcie_rx_bps
-            << ",\"pcie_tx_bw_bps\":" << d.pcie_tx_bps << "}";
+            << ",\"pcie_tx_bw_bps\":" << d.pcie_tx_bps;
+        const auto& capabilities = d.telemetry_capabilities;
+        if (!capabilities.available.empty() ||
+            !capabilities.unavailable.empty() ||
+            !capabilities.memory_model.empty() ||
+            !capabilities.allocation_scope.empty()) {
+            oss << ",\"telemetry_capabilities\":{\"available\":";
+            appendStringArray(oss, capabilities.available);
+            oss << ",\"unavailable\":";
+            appendStringArray(oss, capabilities.unavailable);
+            oss << ",\"memory_model\":\""
+                << jsonEscape(capabilities.memory_model) << "\""
+                << ",\"allocation_scope\":\""
+                << jsonEscape(capabilities.allocation_scope) << "\""
+                << ",\"process_allocated_mib\":"
+                << capabilities.process_allocated_mib
+                << ",\"recommended_max_working_set_mib\":"
+                << capabilities.recommended_max_working_set_mib << '}';
+        }
+        oss << '}';
     }
     oss << "]";
     return oss.str();
+}
+
+inline void appendStaticDeviceJson(std::ostringstream& oss,
+                                   const GpuStaticDeviceInfo& d) {
+    oss << "{\"id\":" << d.id << ",\"name\":\"" << jsonEscape(d.name) << "\""
+        << ",\"uuid\":\"" << jsonEscape(d.uuid) << "\""
+        << ",\"vendor\":\"" << jsonEscape(d.vendor) << "\""
+        << ",\"architecture\":\"" << jsonEscape(d.architecture) << "\""
+        << ",\"compute_major\":" << d.compute_major
+        << ",\"compute_minor\":" << d.compute_minor
+        << ",\"l2_cache_size_bytes\":" << d.l2_cache_size
+        << ",\"shared_mem_per_block_bytes\":" << d.shared_mem_per_block
+        << ",\"regs_per_block\":" << d.regs_per_block
+        << ",\"multi_processor_count\":" << d.multi_processor_count
+        << ",\"warp_size\":" << d.warp_size;
+
+    if (d.metal.available) {
+        oss << ",\"metal\":{\"registry_id\":\""
+            << jsonEscape(d.metal.registry_id) << "\""
+            << ",\"architecture_name\":\""
+            << jsonEscape(d.metal.architecture_name) << "\""
+            << ",\"low_power\":" << (d.metal.low_power ? "true" : "false")
+            << ",\"headless\":" << (d.metal.headless ? "true" : "false")
+            << ",\"removable\":" << (d.metal.removable ? "true" : "false")
+            << ",\"unified_memory\":"
+            << (d.metal.unified_memory ? "true" : "false") << ",\"location\":\""
+            << jsonEscape(d.metal.location) << "\""
+            << ",\"location_number\":" << d.metal.location_number
+            << ",\"recommended_max_working_set_bytes\":"
+            << d.metal.recommended_max_working_set_bytes
+            << ",\"max_transfer_rate_bps\":" << d.metal.max_transfer_rate_bps
+            << ",\"max_buffer_length_bytes\":"
+            << d.metal.max_buffer_length_bytes
+            << ",\"max_threads_per_threadgroup\":["
+            << d.metal.max_threads_per_threadgroup[0] << ','
+            << d.metal.max_threads_per_threadgroup[1] << ','
+            << d.metal.max_threads_per_threadgroup[2] << "],\"gpu_families\":";
+        appendStringArray(oss, d.metal.gpu_families);
+        oss << ",\"counter_sets\":";
+        appendStringArray(oss, d.metal.counter_sets);
+        oss << '}';
+    }
+    oss << '}';
 }
 
 inline std::string staticDevicesToJson(
@@ -63,18 +135,7 @@ inline std::string staticDevicesToJson(
     for (const auto& d : devs) {
         if (!first) oss << ",";
         first = false;
-        oss << "{\"id\":" << d.id
-            << ",\"name\":\""          << jsonEscape(d.name) << "\""
-            << ",\"uuid\":\""          << jsonEscape(d.uuid) << "\""
-            << ",\"vendor\":\""        << jsonEscape(d.vendor) << "\""
-            << ",\"architecture\":\""  << jsonEscape(d.architecture) << "\""
-            << ",\"compute_major\":"   << d.compute_major
-            << ",\"compute_minor\":"   << d.compute_minor
-            << ",\"l2_cache_size_bytes\":"        << d.l2_cache_size
-            << ",\"shared_mem_per_block_bytes\":"  << d.shared_mem_per_block
-            << ",\"regs_per_block\":"              << d.regs_per_block
-            << ",\"multi_processor_count\":"       << d.multi_processor_count
-            << ",\"warp_size\":"       << d.warp_size << "}";
+        appendStaticDeviceJson(oss, d);
     }
     oss << "]";
     return oss.str();
@@ -89,18 +150,7 @@ inline std::string staticDevicesToJsonForVendor(
         if (d.vendor != vendor) continue;
         if (!first) oss << ",";
         first = false;
-        oss << "{\"id\":" << d.id
-            << ",\"name\":\""          << jsonEscape(d.name) << "\""
-            << ",\"uuid\":\""          << jsonEscape(d.uuid) << "\""
-            << ",\"vendor\":\""        << jsonEscape(d.vendor) << "\""
-            << ",\"architecture\":\""  << jsonEscape(d.architecture) << "\""
-            << ",\"compute_major\":"   << d.compute_major
-            << ",\"compute_minor\":"   << d.compute_minor
-            << ",\"l2_cache_size_bytes\":"        << d.l2_cache_size
-            << ",\"shared_mem_per_block_bytes\":"  << d.shared_mem_per_block
-            << ",\"regs_per_block\":"              << d.regs_per_block
-            << ",\"multi_processor_count\":"       << d.multi_processor_count
-            << ",\"warp_size\":"       << d.warp_size << "}";
+        appendStaticDeviceJson(oss, d);
     }
     oss << "]";
     return oss.str();

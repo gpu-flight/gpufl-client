@@ -1,15 +1,16 @@
 # gpufl-monitor - Standalone GPU Monitoring Daemon
 
-`gpufl-monitor` is a **low-overhead, always-on** daemon that continuously samples GPU and host metrics (utilization, memory, temperature, power, CPU, RAM) via NVML (NVIDIA) or ROCm SMI (AMD) and writes them as JSONL event logs. A bundled Java agent (`gpufl-agent`) tails those logs and ships the data to a GPUFlight backend.
+`gpufl-monitor` is a **low-overhead, always-on** daemon that continuously samples GPU and host metrics and writes them as JSONL event logs. On Linux it samples NVIDIA via NVML and AMD via ROCm SMI. On macOS it runs natively and samples Apple GPU inventory plus explicitly scoped Metal working-set information; public Metal APIs do not expose NVML-style global utilization, temperature, power, or clocks.
 
-Both processes run inside a single Docker container managed by `supervisord`.
+For NVIDIA and AMD Linux deployments, the C++ daemon and bundled Java agent (`gpufl-agent`) run inside a single Docker container managed by `supervisord`. For macOS, the Metal collector must run natively because Docker Desktop containers run inside a Linux VM and cannot access `Metal.framework`.
 
 GPU vendor support:
 
-| Vendor | Dockerfile | Compose file |
+| Vendor | Runtime | Entry point |
 |---|---|---|
-| NVIDIA | `Dockerfile.monitor` | `docker-compose.monitor.yml` |
-| AMD | `Dockerfile.monitor.amd` | `docker-compose.monitor.amd.yml` |
+| NVIDIA | Linux Docker | `docker-compose.monitor.yml` |
+| AMD | Linux Docker | `docker-compose.monitor.amd.yml` |
+| Apple Metal | Native macOS | `scripts/run-monitor-macos.sh` |
 
 ---
 
@@ -42,6 +43,14 @@ docker run --rm --device /dev/kfd --device /dev/dri \
   rocm/dev-ubuntu-24.04:6.4-complete rocm-smi
 ```
 
+### macOS / Apple Metal
+
+- macOS with Xcode Command Line Tools or Xcode installed
+- A Metal-capable Apple GPU
+- CMake 3.31+
+
+The monitor runs natively on macOS. Docker is useful only for a log-upload agent, not for Metal collection.
+
 ---
 
 ## Building the image
@@ -69,6 +78,16 @@ docker build \
   -t gpufl/monitor-amd:latest \
   .
 ```
+
+### macOS / Apple Metal
+
+From the **repository root**:
+
+```bash
+./scripts/run-monitor-macos.sh
+```
+
+The script configures and builds `gpufl-monitor` with `GPUFL_ENABLE_METAL=ON`, `GPUFL_ENABLE_NVIDIA=OFF`, and `GPUFL_ENABLE_AMD=OFF`, then runs the native daemon.
 
 ---
 
@@ -116,6 +135,35 @@ Stop:
 docker compose -f docker-compose.monitor.amd.yml down
 ```
 
+### macOS / Apple Metal
+
+Run the native monitor:
+
+```bash
+GPUFL_MONITOR_LOG_DIR="$PWD/gpufl-monitor-macos/session" \
+./scripts/run-monitor-macos.sh
+```
+
+Stop it with `Ctrl-C`. To upload macOS logs, run the Java agent natively or mount the log directory into an agent-only container. The collector itself must remain native.
+
+The macOS `job_start` record identifies `telemetry_backend` as `metal` and
+uses `profiling_engine: metal.none` for the telemetry-only daemon. Each Metal
+device includes:
+
+- `telemetry_capabilities`, which separates available observations from fixed
+  batch metrics that public Metal cannot provide.
+- `process_allocated_mib`, scoped to the current monitor process rather than
+  system-wide GPU memory.
+- `recommended_max_working_set_mib`, Metal's performance recommendation rather
+  than total or free VRAM.
+- A nested `metal` inventory containing public architecture, registry, unified
+  memory, location, threadgroup, buffer, GPU-family, and counter-set metadata.
+
+The legacy numeric device batch columns are retained for wire compatibility.
+For unsupported Metal metrics they remain zero; consumers must use
+`telemetry_capabilities.unavailable` to treat those values as unavailable, not
+as measured zero.
+
 ---
 
 ## Running with docker run
@@ -160,6 +208,7 @@ The named volume persists the agent's read cursor so it resumes from where it le
 | `GPUFL_MONITOR_APP` | `gpufl-monitor` | App name tag written into every event |
 | `GPUFL_MONITOR_LOG_DIR` | `/var/gpufl/monitor/session` | Directory where JSONL log files are written |
 | `GPUFL_MONITOR_INTERVAL_MS` | `5000` | Sampling interval in milliseconds |
+| `GPUFL_MONITOR_BACKEND` | `auto` on Linux, `metal` on macOS | Backend selector: `auto`, `nvidia`, `amd`, `metal`, or `none` |
 
 ### Agent - log source
 

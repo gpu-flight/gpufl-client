@@ -62,6 +62,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
         .value("Nvidia", gpufl::BackendKind::Nvidia)
         .value("Amd",    gpufl::BackendKind::Amd)
         .value("None",   gpufl::BackendKind::None)
+        .value("Metal",  gpufl::BackendKind::Metal)
         .export_values();
     backendKindEnum.attr("None_") = backendKindEnum.attr("__members__")[py::str("None")];
 

@@ -231,6 +231,7 @@ constexpr const char* kSassDeferScopeFlush         = "GPUFL_SASS_DEFER_SCOPE_FLU
 constexpr const char* kMonitorApp        = "GPUFL_MONITOR_APP";
 constexpr const char* kMonitorLogDir     = "GPUFL_MONITOR_LOG_DIR";
 constexpr const char* kMonitorIntervalMs = "GPUFL_MONITOR_INTERVAL_MS";
+constexpr const char* kMonitorBackend    = "GPUFL_MONITOR_BACKEND";
 
 // ── External / platform names GPUFlight reads or sets ───────────────────────
 // Not our knobs (CUDA-driver / dynamic-loader contracts) but referenced from
