@@ -129,17 +129,20 @@ CaptureCapabilitiesEvent BuildAmdCaptureCapabilitiesEvent(
         !device_counting_requested
             ? "not_requested"
             : (device_counting_selected
-                   ? (input.profiling_sample_rows > 0 ? "collected"
-                                                      : "enabled_no_data")
+                   ? (input.pm_sample_rows > 0 ? "collected"
+                                               : "enabled_no_data")
                    : "skipped"),
         device_counting_selected ? "rocprofiler_device_counting_service"
                                  : "disabled",
         device_counting_selected
-            ? (input.profiling_sample_rows > 0 ? "" : "enabled_but_no_records")
+            ? (input.pm_sample_rows > 0 ? "" : "enabled_but_no_records")
             : (device_counting_requested ? input.plan.reason_code
                                          : "not_selected"),
         device_counting_selected
-            ? "AMD device counting was selected."
+            ? (input.pm_sample_rows > 0
+                   ? "Device-wide AMD hardware-counter samples were collected."
+                   : "AMD device counting was selected but emitted no samples "
+                     "this session.")
             : "AMD device counting is not available in the current "
               "implementation.");
 

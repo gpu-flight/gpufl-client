@@ -26,6 +26,7 @@
 #include <zlib.h>
 
 #include "gpufl/backends/amd/engine/dispatch_counter_engine.hpp"
+#include "gpufl/backends/amd/engine/device_counter_engine.hpp"
 #include "gpufl/backends/amd/amd_capture_capabilities.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
@@ -131,6 +132,7 @@ void RocprofilerBackend::initialize(const MonitorOptions& opts) {
         capture_capabilities_session_id_.clear();
         capability_kernel_rows_baseline_ = 0;
         capability_memcpy_rows_baseline_ = 0;
+        capability_pm_sample_rows_baseline_ = 0;
         capability_dropped_records_baseline_ = 0;
         capability_queue_dropped_records_baseline_ = 0;
         capability_buffer_flush_failures_baseline_ = 0;
@@ -165,6 +167,10 @@ void RocprofilerBackend::resetToolState() {
     client_finalize_ = nullptr;
     tool_registered_.store(false);
     active_.store(false);
+    start_requested_.store(false);
+    next_start_retry_ns_.store(0);
+    deferred_start_logged_.store(false);
+    start_failure_logged_.store(false);
     {
         std::lock_guard<std::mutex> lock(kernel_meta_mutex_);
         kernel_metadata_.clear();
@@ -320,6 +326,8 @@ int RocprofilerBackend::toolInitialize() {
     AmdProfilingSupport support;
     support.dispatch_counting = primary_gpu_agent_.handle != 0 &&
                                 primary_device_id.has_value();
+    support.device_counting = primary_gpu_agent_.handle != 0 &&
+                              primary_device_id.has_value();
     auto plan = ResolveAmdProfilingPlan(opts_.profiling_engine, support);
     setResolvedPlan(plan);
 
@@ -342,6 +350,18 @@ int RocprofilerBackend::toolInitialize() {
             setResolvedPlan(
                 ResolveAmdProfilingPlan(opts_.profiling_engine, support));
         }
+    } else if (plan.selected_path == AmdProfilingPath::DeviceCounting) {
+        engine_ = std::make_unique<DeviceCounterEngine>();
+        if (!engine_->initialize(context_, primary_gpu_agent_,
+                                 *primary_device_id, opts_)) {
+            GFL_LOG_ERROR(
+                "[ROCProfilerBackend] Device-counter initialization failed; "
+                "continuing with ROCprofiler trace activity only");
+            engine_.reset();
+            support.device_counting = false;
+            setResolvedPlan(
+                ResolveAmdProfilingPlan(opts_.profiling_engine, support));
+        }
     }
 
     tool_registered_.store(true, std::memory_order_release);
@@ -360,14 +380,64 @@ void RocprofilerBackend::toolFinalize() {
 }
 
 void RocprofilerBackend::start() {
-    if (!initialized_.load() || context_.handle == 0 || active_.load()) return;
-    if (CheckStatus(rocprofiler_start_context(context_), "rocprofiler_start_context")) {
-        active_.store(true);
-        if (engine_) engine_->start();
+    if (!initialized_.load(std::memory_order_acquire) ||
+        context_.handle == 0) return;
+    start_requested_.store(true, std::memory_order_release);
+    (void) tryStartContext(true);
+}
+
+bool RocprofilerBackend::tryStartContext(const bool force) {
+    if (!start_requested_.load(std::memory_order_acquire) ||
+        !initialized_.load(std::memory_order_acquire) ||
+        context_.handle == 0 ||
+        active_.load(std::memory_order_acquire)) {
+        return active_.load(std::memory_order_acquire);
     }
+
+    const int64_t now_ns = detail::GetTimestampNs();
+    if (!force &&
+        now_ns < next_start_retry_ns_.load(std::memory_order_relaxed)) {
+        return false;
+    }
+
+    std::lock_guard lock(start_stop_mutex_);
+    if (!start_requested_.load(std::memory_order_acquire) ||
+        active_.load(std::memory_order_acquire)) {
+        return active_.load(std::memory_order_acquire);
+    }
+
+    const auto status = rocprofiler_start_context(context_);
+    if (status == ROCPROFILER_STATUS_SUCCESS) {
+        active_.store(true, std::memory_order_release);
+        deferred_start_logged_.store(false, std::memory_order_relaxed);
+        start_failure_logged_.store(false, std::memory_order_relaxed);
+        if (engine_) engine_->start();
+        return true;
+    }
+
+    // gpufl::init commonly runs before the application's first HIP call.
+    // ROCprofiler cannot start until that call loads HSA, so retain the
+    // configured context and retry from the collector or first scope.
+    next_start_retry_ns_.store(now_ns + 10'000'000,
+                               std::memory_order_relaxed);
+    if (status == ROCPROFILER_STATUS_ERROR_HSA_NOT_LOADED) {
+        if (!deferred_start_logged_.exchange(true,
+                                             std::memory_order_relaxed)) {
+            GFL_LOG_DEBUG(
+                "[ROCProfilerBackend] deferring context start until HSA is "
+                "loaded");
+        }
+    } else if (!start_failure_logged_.exchange(
+                   true, std::memory_order_relaxed)) {
+        GFL_LOG_ERROR("[ROCProfilerBackend] rocprofiler_start_context failed: ",
+                      StatusToString(status));
+    }
+    return false;
 }
 
 void RocprofilerBackend::stop() {
+    start_requested_.store(false, std::memory_order_release);
+    std::lock_guard lock(start_stop_mutex_);
     if (!active_.exchange(false) || context_.handle == 0) return;
     if (engine_) engine_->stop();
     (void) CheckStatus(rocprofiler_stop_context(context_),
@@ -387,12 +457,11 @@ void RocprofilerBackend::DrainProfilingData() {
 }
 
 void RocprofilerBackend::ServiceDeepWindow() {
-    if (!initialized_.load(std::memory_order_acquire) ||
-        !active_.load(std::memory_order_acquire) ||
-        !DeepWindow::HasPendingWork()) {
-        return;
-    }
-    DeepWindow::ServicePending();
+    if (!initialized_.load(std::memory_order_acquire)) return;
+    if (!active_.load(std::memory_order_acquire) &&
+        !tryStartContext(false)) return;
+    if (DeepWindow::HasPendingWork()) DeepWindow::ServicePending();
+    if (engine_) engine_->service();
 }
 
 bool RocprofilerBackend::DeepEnginesPrepared() const {
@@ -410,6 +479,9 @@ std::vector<std::string> RocprofilerBackend::OnDeepWindowStop(
 }
 
 void RocprofilerBackend::OnPerfScopeStart(const char* name) {
+    if (!active_.load(std::memory_order_acquire)) {
+        (void) tryStartContext(true);
+    }
     if (opts_.deep_arm_mode == DeepArmMode::WindowOnly) return;
     OnDeepWindowPerfStart(name);
 }
@@ -420,6 +492,9 @@ void RocprofilerBackend::OnPerfScopeStop(const char* name) {
 }
 
 void RocprofilerBackend::OnDeepWindowPerfStart(const char* name) {
+    if (!active_.load(std::memory_order_acquire)) {
+        (void) tryStartContext(true);
+    }
     if (engine_) engine_->onScopeStart(name);
 }
 
@@ -453,6 +528,7 @@ void RocprofilerBackend::emitCapabilities() {
         trace_records_unattributed_.load(std::memory_order_relaxed);
     const uint64_t scope_correlation_failures =
         scope_correlation_failures_.load(std::memory_order_relaxed);
+    const uint64_t pm_sample_rows = Monitor::PmSampleRowsSeen();
 
     AmdCaptureCapabilityInput input;
     input.session_id = segment->session_id;
@@ -466,6 +542,8 @@ void RocprofilerBackend::emitCapabilities() {
         delta(memcpy_rows, capability_memcpy_rows_baseline_);
     input.profiling_sample_rows =
         engine_ && engine_->hasData() ? 1 : 0;
+    input.pm_sample_rows =
+        delta(pm_sample_rows, capability_pm_sample_rows_baseline_);
     input.dropped_trace_records =
         delta(dropped_records, capability_dropped_records_baseline_);
     input.dropped_client_records = delta(
@@ -483,6 +561,7 @@ void RocprofilerBackend::emitCapabilities() {
 
     capability_kernel_rows_baseline_ = kernel_rows;
     capability_memcpy_rows_baseline_ = memcpy_rows;
+    capability_pm_sample_rows_baseline_ = pm_sample_rows;
     capability_dropped_records_baseline_ = dropped_records;
     capability_queue_dropped_records_baseline_ = queue_dropped_records;
     capability_buffer_flush_failures_baseline_ = buffer_flush_failures;
@@ -524,7 +603,9 @@ bool RocprofilerBackend::flushBuffers() {
 }
 
 void RocprofilerBackend::OnScopeStart(const char* name) {
-    if (!active_.load() || context_.handle == 0 || name == nullptr) return;
+    if (context_.handle == 0 || name == nullptr) return;
+    if (!active_.load(std::memory_order_acquire) &&
+        !tryStartContext(true)) return;
 
     rocprofiler_thread_id_t tid{};
     if (!CheckStatus(rocprofiler_get_thread_id(&tid),

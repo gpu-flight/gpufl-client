@@ -48,6 +48,7 @@ list(APPEND HIP_HIPCC_FLAGS "-g")
 set(AMD_EXAMPLE_SOURCES
   check_device.cpp
   gpufl_scope_demo.cpp
+  pm_sampling_sample_rows.cpp
   vector_add_benchmark.cpp
 )
 
@@ -58,14 +59,17 @@ set_source_files_properties(
 
 hip_add_executable(amd_check_device check_device.cpp)
 hip_add_executable(amd_gpufl_scope_demo gpufl_scope_demo.cpp)
+hip_add_executable(amd_pm_sampling_sample_rows pm_sampling_sample_rows.cpp)
 hip_add_executable(amd_vector_add_benchmark vector_add_benchmark.cpp)
 
 if(TARGET hip::host)
   target_link_libraries(amd_check_device PRIVATE hip::host)
   target_link_libraries(amd_gpufl_scope_demo PRIVATE hip::host)
+  target_link_libraries(amd_pm_sampling_sample_rows PRIVATE hip::host)
   target_link_libraries(amd_vector_add_benchmark PRIVATE hip::host)
 endif()
 
 target_link_libraries(amd_check_device PRIVATE gpufl::gpufl)
 target_link_libraries(amd_gpufl_scope_demo PRIVATE gpufl::gpufl)
+target_link_libraries(amd_pm_sampling_sample_rows PRIVATE gpufl::gpufl)
 target_link_libraries(amd_vector_add_benchmark PRIVATE gpufl::gpufl)

@@ -139,6 +139,7 @@ class TextReport {
         int64_t start_ns = 0;
         int64_t end_ns = 0;
         std::string gpu_name;
+        std::string gpu_vendor;
         int compute_major = 0;
         int compute_minor = 0;
         int sm_count = 0;
@@ -199,6 +200,7 @@ class TextReport {
     void parseSystemLog(const std::vector<JsonValue>& records);
     void parseCaptureCapabilities(const std::vector<JsonValue>& records);
     void mergeKernelDetails(std::unordered_map<unsigned, JsonValue>& details);
+    bool isAmdSession() const;
 
     static void parseJobStart(const JsonValue& record, SessionInfo& info);
 

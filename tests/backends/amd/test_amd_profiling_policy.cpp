@@ -88,6 +88,17 @@ TEST(AmdProfilingPolicy, RequestIntentNeverInventsAmdNativeNames) {
                  "amd.device_counting");
 }
 
+TEST(AmdProfilingPolicy, DeviceCountingUsesPortableDefaultMetric) {
+    EXPECT_EQ(gpufl::amd::ResolveAmdDeviceCountingMetrics({}),
+              std::vector<std::string>{"GPUBusy"});
+}
+
+TEST(AmdProfilingPolicy, DeviceCountingPreservesUniqueExplicitMetrics) {
+    EXPECT_EQ(gpufl::amd::ResolveAmdDeviceCountingMetrics(
+                  {"SQ_WAVES", "", "GPUBusy", "SQ_WAVES"}),
+              (std::vector<std::string>{"SQ_WAVES", "GPUBusy"}));
+}
+
 TEST(AmdProfilingPolicy, TraceSelectsBufferTracingService) {
     const auto plan = gpufl::amd::ResolveAmdProfilingPlan(
         gpufl::ProfilingEngine::Trace, {});
@@ -209,6 +220,34 @@ TEST(AmdCaptureCapabilities, DispatchSamplesAndDroppedTraceAreVisible) {
     EXPECT_EQ(delivery->reason_code, "rocprofiler_records_dropped");
     EXPECT_NE(delivery->message.find("3 dropped trace record(s)"),
               std::string::npos);
+}
+
+TEST(AmdCaptureCapabilities, DeviceCountingUsesPmRowsForDataStatus) {
+    gpufl::amd::AmdProfilingSupport support;
+    support.device_counting = true;
+
+    gpufl::amd::AmdCaptureCapabilityInput input;
+    input.session_id = "amd-session";
+    input.plan = gpufl::amd::ResolveAmdProfilingPlan(
+        gpufl::ProfilingEngine::PmSampling, support);
+    input.trace_configured = true;
+    input.profiling_sample_rows = 0;
+    input.pm_sample_rows = 3;
+
+    const auto event = gpufl::amd::BuildAmdCaptureCapabilitiesEvent(input);
+    const auto* counters = FindCapability(event, "device_counting");
+    ASSERT_NE(counters, nullptr);
+    EXPECT_TRUE(counters->requested);
+    EXPECT_EQ(counters->status, "collected");
+    EXPECT_EQ(counters->mode, "rocprofiler_device_counting_service");
+
+    input.profiling_sample_rows = 3;
+    input.pm_sample_rows = 0;
+    const auto no_pm_event =
+        gpufl::amd::BuildAmdCaptureCapabilitiesEvent(input);
+    counters = FindCapability(no_pm_event, "device_counting");
+    ASSERT_NE(counters, nullptr);
+    EXPECT_EQ(counters->status, "enabled_no_data");
 }
 
 TEST(AmdCaptureCapabilities, LifecycleDeliveryAndCorrelationFailuresAreVisible) {
