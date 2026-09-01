@@ -581,8 +581,10 @@ std::unique_ptr<httplib::Client> makeClient(const UrlParts& url,
     if (url.port > 0) scheme_host_port += ":" + std::to_string(url.port);
     try {
         auto cli = std::make_unique<httplib::Client>(scheme_host_port);
-        cli->set_connection_timeout(0, opts.connect_timeout_ms * 1000);
-        cli->set_read_timeout(0, opts.read_timeout_ms * 1000);
+        cli->set_connection_timeout(opts.connect_timeout_ms / 1000,
+                                    (opts.connect_timeout_ms % 1000) * 1000);
+        cli->set_read_timeout(opts.read_timeout_ms / 1000,
+                              (opts.read_timeout_ms % 1000) * 1000);
         cli->set_keep_alive(true);
         return cli;
     } catch (const std::exception& e) {
