@@ -51,6 +51,7 @@ struct Runtime {
     std::shared_ptr<ISystemCollector<DeviceSample>> collector;
     std::unique_ptr<HostCollector> host_collector;
     std::shared_ptr<IGpuStaticInfoCollector> static_info_collector;
+    std::string telemetry_backend;
 
     // background system sampling
     std::atomic<bool> system_sampling{false};

@@ -129,6 +129,82 @@ TEST(WireContract, JobStartEmitsNvidiaNoneSentinel) {
         << "explicit-None sessions must emit profiling_engine: nvidia.none: " << json;
 }
 
+// Backend selection and Metal capability metadata are additive fields.
+TEST(WireContract, MonitorEngineUsesResolvedTelemetryBackend) {
+    EXPECT_EQ(gpufl::ProfilingEngineWireNameForBackend(
+                  gpufl::ProfilingEngine::Monitor, "metal"),
+              "metal.none");
+    EXPECT_EQ(gpufl::ProfilingEngineWireNameForBackend(
+                  gpufl::ProfilingEngine::Monitor, "amd"),
+              "amd.none");
+    EXPECT_EQ(gpufl::ProfilingEngineWireNameForBackend(
+                  gpufl::ProfilingEngine::Monitor, "nvidia"),
+              "nvidia.none");
+}
+
+TEST(WireContract, JobStartEmitsMetalMetadataAndMetricAvailability) {
+    gpufl::InitEvent e;
+    e.pid = 1;
+    e.app = "metal_monitor";
+    e.session_id = "sess-metal";
+    e.ts_ns = 1;
+    e.session_kind = "monitor";
+    e.profiling_engine = "metal.none";
+    e.telemetry_backend = "metal";
+
+    gpufl::DeviceSample sample{};
+    sample.device_id = 0;
+    sample.name = "Apple Test GPU";
+    sample.uuid = "metal-registry-0x1";
+    sample.vendor = "Apple";
+    sample.telemetry_capabilities.available = {
+        "process_allocated_mib", "recommended_max_working_set_mib"};
+    sample.telemetry_capabilities.unavailable = {"gpu_util", "temp_c",
+                                                 "power_mw"};
+    sample.telemetry_capabilities.memory_model = "unified";
+    sample.telemetry_capabilities.allocation_scope = "current_process";
+    sample.telemetry_capabilities.process_allocated_mib = 128;
+    sample.telemetry_capabilities.recommended_max_working_set_mib = 16384;
+    e.devices.push_back(sample);
+
+    gpufl::GpuStaticDeviceInfo info{};
+    info.name = "Apple Test GPU";
+    info.uuid = sample.uuid;
+    info.vendor = "Apple";
+    info.architecture = "apple8";
+    info.metal.available = true;
+    info.metal.registry_id = "0x1";
+    info.metal.architecture_name = "apple8";
+    info.metal.unified_memory = true;
+    info.metal.location = "built_in";
+    info.metal.recommended_max_working_set_bytes = 17179869184ULL;
+    info.metal.max_buffer_length_bytes = 4294967296ULL;
+    info.metal.max_threads_per_threadgroup = {1024, 1024, 1024};
+    info.metal.gpu_families = {"apple8", "common3", "metal3"};
+    info.metal.counter_sets = {"timestamp", "stage_utilization"};
+    e.gpu_static_device_infos.push_back(info);
+
+    const std::string json = gpufl::model::InitEventModel(e).buildJson();
+
+    EXPECT_TRUE(JsonContains(json, "\"telemetry_backend\":\"metal\""));
+    EXPECT_TRUE(JsonContains(json, "\"profiling_engine\":\"metal.none\""));
+    EXPECT_TRUE(JsonContains(json,
+                             "\"available\":[\"process_allocated_mib\","
+                             "\"recommended_max_working_set_mib\"]"));
+    EXPECT_TRUE(JsonContains(json, "\"memory_model\":\"unified\""));
+    EXPECT_TRUE(JsonContains(json, "\"allocation_scope\":\"current_process\""));
+    EXPECT_TRUE(JsonContains(json, "\"process_allocated_mib\":128"));
+    EXPECT_TRUE(JsonContains(json, "\"used_mib\":0"));
+    EXPECT_TRUE(JsonContains(json, "\"total_mib\":0"));
+    EXPECT_TRUE(JsonContains(json, "\"metal\":{\"registry_id\":\"0x1\""));
+    EXPECT_TRUE(JsonContains(json, "\"architecture_name\":\"apple8\""));
+    EXPECT_TRUE(JsonContains(json, "\"unified_memory\":true"));
+    EXPECT_TRUE(JsonContains(
+        json, "\"gpu_families\":[\"apple8\",\"common3\",\"metal3\"]"));
+    EXPECT_TRUE(JsonContains(json, "\"cuda_static_devices\":[]"));
+    EXPECT_TRUE(JsonContains(json, "\"rocm_static_devices\":[]"));
+}
+
 // ── job_start multi-pass grouping (P1) ─────────────────────────────────────
 //
 // analysis_id / pass_index / pass_count are emitted together, and ONLY when

@@ -34,6 +34,10 @@ std::string InitEventModel::buildJson() const {
         << staticDevicesToJsonForVendor(e_.gpu_static_device_infos, "AMD");
 
     oss << ",\"session_kind\":\"" << jsonEscape(e_.session_kind) << "\"";
+    if (!e_.telemetry_backend.empty()) {
+        oss << ",\"telemetry_backend\":\"" << jsonEscape(e_.telemetry_backend)
+            << "\"";
+    }
     if (!e_.profiling_engine.empty()) {
         oss << ",\"profiling_engine\":\"" << jsonEscape(e_.profiling_engine) << "\"";
     }

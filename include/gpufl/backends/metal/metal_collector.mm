@@ -7,7 +7,6 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
-#include <algorithm>
 #include <cstdint>
 #include <iomanip>
 #include <sstream>
@@ -25,11 +24,60 @@ std::string NSStringToString(NSString* value) {
     return utf8 ? std::string(utf8) : std::string{};
 }
 
-std::string RegistryUuid(id<MTLDevice> device) {
+std::string RegistryId(id<MTLDevice> device) {
     std::ostringstream oss;
-    oss << "metal-registry-0x" << std::hex << std::setw(16)
-        << std::setfill('0') << [device registryID];
+    oss << "0x" << std::hex << std::setw(16) << std::setfill('0')
+        << [device registryID];
     return oss.str();
+}
+
+std::string RegistryUuid(id<MTLDevice> device) {
+    return "metal-registry-" + RegistryId(device);
+}
+
+std::string DeviceLocationName(const MTLDeviceLocation location) {
+    switch (location) {
+        case MTLDeviceLocationBuiltIn: return "built_in";
+        case MTLDeviceLocationSlot: return "slot";
+        case MTLDeviceLocationExternal: return "external";
+        case MTLDeviceLocationUnspecified: return "unspecified";
+    }
+    return "unknown";
+}
+
+void AppendSupportedGpuFamilies(
+    id<MTLDevice> device, std::vector<std::string>& families) {
+    if (@available(macOS 10.15, *)) {
+        for (int family = 1; family <= 10; ++family) {
+            if ([device supportsFamily:static_cast<MTLGPUFamily>(1000 + family)]) {
+                families.push_back("apple" + std::to_string(family));
+            }
+        }
+        if ([device supportsFamily:static_cast<MTLGPUFamily>(2002)]) {
+            families.push_back("mac2");
+        }
+        for (int family = 1; family <= 3; ++family) {
+            if ([device supportsFamily:static_cast<MTLGPUFamily>(3000 + family)]) {
+                families.push_back("common" + std::to_string(family));
+            }
+        }
+        for (int family = 3; family <= 4; ++family) {
+            if ([device supportsFamily:static_cast<MTLGPUFamily>(4998 + family)]) {
+                families.push_back("metal" + std::to_string(family));
+            }
+        }
+    }
+}
+
+void AppendCounterSetNames(
+    id<MTLDevice> device, std::vector<std::string>& counterSets) {
+    if (@available(macOS 10.15, *)) {
+        NSArray<id<MTLCounterSet>>* sets = [device counterSets];
+        for (id<MTLCounterSet> set in sets) {
+            const std::string name = NSStringToString([set name]);
+            if (!name.empty()) counterSets.push_back(name);
+        }
+    }
 }
 
 DeviceSample DeviceToSample(id<MTLDevice> device, int id) {
@@ -39,15 +87,23 @@ DeviceSample DeviceToSample(id<MTLDevice> device, int id) {
     sample.uuid = RegistryUuid(device);
     sample.vendor = "Apple";
 
-    const uint64_t totalBytes = [device recommendedMaxWorkingSetSize];
-    const uint64_t usedBytes = [device currentAllocatedSize];
-    sample.total_mib = static_cast<size_t>(totalBytes / kMiB);
-    sample.used_mib = static_cast<size_t>(usedBytes / kMiB);
-    sample.free_mib =
-        sample.total_mib > sample.used_mib ? sample.total_mib - sample.used_mib : 0;
-    if (sample.total_mib > 0) {
-        sample.mem_util = static_cast<unsigned int>(
-            std::min<uint64_t>(100, (100ULL * sample.used_mib) / sample.total_mib));
+    auto& capabilities = sample.telemetry_capabilities;
+    capabilities.available = {
+        "process_allocated_mib", "recommended_max_working_set_mib"};
+    capabilities.unavailable = {
+        "gpu_util", "mem_util", "temp_c", "power_mw", "used_mib",
+        "total_mib", "clock_sm", "fan_speed_pct", "temp_mem_c",
+        "temp_junction_c", "voltage_mv", "energy_uj", "clock_mem",
+        "pcie_bw_bps", "ecc_corrected", "ecc_uncorrected"};
+    capabilities.allocation_scope = "current_process";
+    capabilities.process_allocated_mib =
+        static_cast<uint64_t>([device currentAllocatedSize]) / kMiB;
+    capabilities.recommended_max_working_set_mib =
+        [device recommendedMaxWorkingSetSize] / kMiB;
+    if (@available(macOS 10.15, *)) {
+        capabilities.memory_model = [device hasUnifiedMemory]
+                                        ? "unified"
+                                        : "discrete";
     }
 
     return sample;
@@ -60,6 +116,38 @@ GpuStaticDeviceInfo DeviceToStaticInfo(id<MTLDevice> device, int id) {
     info.uuid = RegistryUuid(device);
     info.vendor = "Apple";
     info.architecture = "Metal";
+
+    auto& metal = info.metal;
+    metal.available = true;
+    metal.registry_id = RegistryId(device);
+    if (@available(macOS 14.0, *)) {
+        metal.architecture_name =
+            NSStringToString([[device architecture] name]);
+        if (!metal.architecture_name.empty()) {
+            info.architecture = metal.architecture_name;
+        }
+    }
+    metal.low_power = [device isLowPower];
+    metal.headless = [device isHeadless];
+    metal.removable = [device isRemovable];
+    metal.recommended_max_working_set_bytes =
+        [device recommendedMaxWorkingSetSize];
+    metal.max_buffer_length_bytes = [device maxBufferLength];
+
+    const MTLSize threads = [device maxThreadsPerThreadgroup];
+    metal.max_threads_per_threadgroup = {
+        static_cast<uint64_t>(threads.width),
+        static_cast<uint64_t>(threads.height),
+        static_cast<uint64_t>(threads.depth)};
+
+    if (@available(macOS 10.15, *)) {
+        metal.unified_memory = [device hasUnifiedMemory];
+        metal.location = DeviceLocationName([device location]);
+        metal.location_number = [device locationNumber];
+        metal.max_transfer_rate_bps = [device maxTransferRate];
+    }
+    AppendSupportedGpuFamilies(device, metal.gpu_families);
+    AppendCounterSetNames(device, metal.counter_sets);
     return info;
 }
 

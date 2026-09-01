@@ -98,6 +98,8 @@ BackendCollectors CreateBackendCollectors(const BackendKind backend,
             out.telemetry_collector = tryNvml();
             if (!out.telemetry_collector) {
                 setReason("Requested backend=nvidia but NVML is unavailable.");
+            } else {
+                out.telemetry_backend = "nvidia";
             }
             out.static_info_collector = tryNvidiaStatic();
             break;
@@ -110,6 +112,7 @@ BackendCollectors CreateBackendCollectors(const BackendKind backend,
                 if (out.unified_collector->canSampleTelemetry()) {
                     out.telemetry_collector = std::static_pointer_cast<
                         ISystemCollector<DeviceSample>>(out.unified_collector);
+                    out.telemetry_backend = "amd";
                 }
                 if (out.unified_collector->canSampleStaticInfo()) {
                     out.static_info_collector = std::static_pointer_cast<
@@ -126,6 +129,7 @@ BackendCollectors CreateBackendCollectors(const BackendKind backend,
                 if (out.unified_collector->canSampleTelemetry()) {
                     out.telemetry_collector = std::static_pointer_cast<
                         ISystemCollector<DeviceSample>>(out.unified_collector);
+                    out.telemetry_backend = "metal";
                 }
                 if (out.unified_collector->canSampleStaticInfo()) {
                     out.static_info_collector = std::static_pointer_cast<
@@ -138,6 +142,7 @@ BackendCollectors CreateBackendCollectors(const BackendKind backend,
         default:
             out.telemetry_collector = tryNvml();
             if (out.telemetry_collector) {
+                out.telemetry_backend = "nvidia";
                 out.static_info_collector = tryNvidiaStatic();
                 break;
             }
@@ -147,6 +152,7 @@ BackendCollectors CreateBackendCollectors(const BackendKind backend,
                 if (out.unified_collector->canSampleTelemetry()) {
                     out.telemetry_collector = std::static_pointer_cast<
                         ISystemCollector<DeviceSample>>(out.unified_collector);
+                    out.telemetry_backend = "amd";
                 }
                 if (out.unified_collector->canSampleStaticInfo()) {
                     out.static_info_collector = std::static_pointer_cast<
@@ -160,6 +166,7 @@ BackendCollectors CreateBackendCollectors(const BackendKind backend,
                 if (out.unified_collector->canSampleTelemetry()) {
                     out.telemetry_collector = std::static_pointer_cast<
                         ISystemCollector<DeviceSample>>(out.unified_collector);
+                    out.telemetry_backend = "metal";
                 }
                 if (out.unified_collector->canSampleStaticInfo()) {
                     out.static_info_collector = std::static_pointer_cast<

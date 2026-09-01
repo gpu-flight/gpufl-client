@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace gpufl {
 struct HostSample {
@@ -12,6 +13,24 @@ struct HostSample {
 };
 
 struct GpuStaticDeviceInfo {
+    struct MetalProperties {
+        bool available = false;
+        std::string registry_id;
+        std::string architecture_name;
+        bool low_power = false;
+        bool headless = false;
+        bool removable = false;
+        bool unified_memory = false;
+        std::string location;
+        uint64_t location_number = 0;
+        uint64_t recommended_max_working_set_bytes = 0;
+        uint64_t max_transfer_rate_bps = 0;
+        uint64_t max_buffer_length_bytes = 0;
+        std::array<uint64_t, 3> max_threads_per_threadgroup{};
+        std::vector<std::string> gpu_families;
+        std::vector<std::string> counter_sets;
+    };
+
     int id = 0;
     std::string name;
     std::string uuid;
@@ -49,9 +68,22 @@ struct GpuStaticDeviceInfo {
     bool memory_pools_supported = false;
     bool cluster_launch = false;
     bool tensor_map_access_supported = false;
+
+    // Public MTLDevice inventory. Serialized as an additive nested object only
+    // for Metal devices so existing NVIDIA/AMD job_start shapes stay stable.
+    MetalProperties metal;
 };
 
 struct DeviceSample {
+    struct TelemetryCapabilities {
+        std::vector<std::string> available;
+        std::vector<std::string> unavailable;
+        std::string memory_model;
+        std::string allocation_scope;
+        uint64_t process_allocated_mib = 0;
+        uint64_t recommended_max_working_set_mib = 0;
+    };
+
     int device_id = 0;
     std::string name;
     std::string uuid;
@@ -87,6 +119,11 @@ struct DeviceSample {
 
     unsigned long long pcie_rx_bps;  // Host -> Device (Upload)
     unsigned long long pcie_tx_bps;  // Device -> Host (Download)
+
+    // Optional semantics for backends that cannot populate the fixed NVML-like
+    // metric columns. This lets readers distinguish unavailable values from a
+    // real measurement of zero without changing the batch column contract.
+    TelemetryCapabilities telemetry_capabilities;
 };
 
 }  // namespace gpufl

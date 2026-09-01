@@ -1,6 +1,6 @@
 # gpufl-monitor - Standalone GPU Monitoring Daemon
 
-`gpufl-monitor` is a **low-overhead, always-on** daemon that continuously samples GPU and host metrics and writes them as JSONL event logs. On Linux it samples NVIDIA via NVML and AMD via ROCm SMI. On macOS it runs natively and samples Apple GPU inventory plus safe Metal memory fields; public Metal APIs do not expose NVML-style global utilization, temperature, power, or clocks.
+`gpufl-monitor` is a **low-overhead, always-on** daemon that continuously samples GPU and host metrics and writes them as JSONL event logs. On Linux it samples NVIDIA via NVML and AMD via ROCm SMI. On macOS it runs natively and samples Apple GPU inventory plus explicitly scoped Metal working-set information; public Metal APIs do not expose NVML-style global utilization, temperature, power, or clocks.
 
 For NVIDIA and AMD Linux deployments, the C++ daemon and bundled Java agent (`gpufl-agent`) run inside a single Docker container managed by `supervisord`. For macOS, the Metal collector must run natively because Docker Desktop containers run inside a Linux VM and cannot access `Metal.framework`.
 
@@ -145,6 +145,24 @@ GPUFL_MONITOR_LOG_DIR="$PWD/gpufl-monitor-macos/session" \
 ```
 
 Stop it with `Ctrl-C`. To upload macOS logs, run the Java agent natively or mount the log directory into an agent-only container. The collector itself must remain native.
+
+The macOS `job_start` record identifies `telemetry_backend` as `metal` and
+uses `profiling_engine: metal.none` for the telemetry-only daemon. Each Metal
+device includes:
+
+- `telemetry_capabilities`, which separates available observations from fixed
+  batch metrics that public Metal cannot provide.
+- `process_allocated_mib`, scoped to the current monitor process rather than
+  system-wide GPU memory.
+- `recommended_max_working_set_mib`, Metal's performance recommendation rather
+  than total or free VRAM.
+- A nested `metal` inventory containing public architecture, registry, unified
+  memory, location, threadgroup, buffer, GPU-family, and counter-set metadata.
+
+The legacy numeric device batch columns are retained for wire compatibility.
+For unsupported Metal metrics they remain zero; consumers must use
+`telemetry_capabilities.unavailable` to treat those values as unavailable, not
+as measured zero.
 
 ---
 

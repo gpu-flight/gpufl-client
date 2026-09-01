@@ -211,6 +211,7 @@ void ClientStartup::configureCollectors(Runtime& active_runtime) const {
     active_runtime.collector = std::move(collectors.telemetry_collector);
     active_runtime.static_info_collector =
         std::move(collectors.static_info_collector);
+    active_runtime.telemetry_backend = std::move(collectors.telemetry_backend);
     if (!active_runtime.collector) {
         GFL_LOG_ERROR("Failed to initialize GPU backend: ", backend_reason);
     }
@@ -236,7 +237,14 @@ void ClientStartup::emitInitialEvent(Runtime& active_runtime,
     }
     event.host = active_runtime.host_collector->sample();
     event.session_kind = ProfilingEngineSessionKind(state_->monitor_options.profiling_engine);
-    event.profiling_engine = Monitor::ResolvedProfilingEngineWireName();
+    event.telemetry_backend = active_runtime.telemetry_backend;
+    if (state_->monitor_options.profiling_engine == ProfilingEngine::Monitor) {
+        event.profiling_engine = ProfilingEngineWireNameForBackend(
+            state_->monitor_options.profiling_engine,
+            active_runtime.telemetry_backend);
+    } else {
+        event.profiling_engine = Monitor::ResolvedProfilingEngineWireName();
+    }
     event.run_id = segment.run_id;
     event.segment_index = segment.segment_index;
     if (segment.run_part) {
