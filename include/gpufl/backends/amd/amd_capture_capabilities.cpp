@@ -90,6 +90,30 @@ CaptureCapabilitiesEvent BuildAmdCaptureCapabilitiesEvent(
                    : "Memory-copy tracing was not active."));
 
     AddCapability(
+        event, "memory_activity", input.memory_activity_requested,
+        !input.memory_activity_requested
+            ? "not_requested"
+            : (input.memory_activity_configured
+                   ? (input.memory_activity_rows > 0 ? "collected"
+                                                     : "enabled_no_data")
+                   : "skipped"),
+        input.memory_activity_configured ? "rocprofiler_memory_allocation"
+                                         : "disabled",
+        input.memory_activity_configured
+            ? (input.memory_activity_rows > 0 ? "" : "enabled_but_no_records")
+            : (input.memory_activity_requested
+                   ? "rocprofiler_memory_allocation_unavailable"
+                   : ""),
+        input.memory_activity_configured
+            ? (input.memory_activity_rows > 0
+                   ? "ROCprofiler memory-allocation records were collected."
+                   : "ROCprofiler memory-allocation tracing was enabled but "
+                     "emitted no rows this session.")
+            : (input.memory_activity_requested
+                   ? "ROCprofiler memory-allocation tracing was requested but unavailable."
+                   : "Memory-allocation tracing was not requested."));
+
+    AddCapability(
         event, "dispatch_counting", dispatch_requested,
         !dispatch_requested
             ? "not_requested"

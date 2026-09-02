@@ -458,6 +458,8 @@ class Monitor {
     static uint64_t ScopeAttributionTruncated();
     /** @brief PM metric rows that passed through scope attribution. */
     static uint64_t PmSampleRowsSeen();
+    /** @brief Memory-allocation rows accepted by the batch pipeline. */
+    static uint64_t MemoryAllocRowsSeen();
 
     /**
      * Flush all currently available records and batches before publishing a

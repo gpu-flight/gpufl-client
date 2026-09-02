@@ -42,26 +42,20 @@ enum class TraceType : uint8_t {
     //                   event-wait); see ActivityRecord::sync_type
     //   sync_event_id - for event-based syncs; 0 for stream/device
     SYNCHRONIZATION,
-    // CUDA memory allocation event captured via
-    // CUPTI_ACTIVITY_KIND_MEMORY2. One record per cudaMalloc / cudaFree
-    // / cudaMallocAsync / cudaFreeAsync / cudaMallocManaged / cudaMallocHost.
-    // Volume per session is mid-low (typically <1k events even for big
-    // workloads - PyTorch's caching allocator absorbs most fine-grained
-    // allocations into a few large CUDA-level blocks), so we emit per-event
-    // JSON (no batching).
+    // GPU memory-allocation event captured via CUPTI MEMORY2 or
+    // ROCprofiler memory-allocation tracing. Rows are normalized and batched
+    // into the shared memory_alloc_event_batch wire format.
     //
     // Fields used on ActivityRecord:
     //   cpu_start_ns  - host call wall time
+    //   duration_ns   - host call duration when the backend supplies it
     //   bytes         - size of the allocation
-    //   device_id     - target device (0 for host allocs)
-    //   corr_id       - CUPTI correlationId, useful for joining to the
-    //                   API call that triggered the alloc
-    //   stream        - stream id for cudaMallocAsync; 0 otherwise
-    //   memory_op     - alloc / free (uint8_t enum)
-    //   memory_kind   - device / host / managed / pinned (uint8_t enum)
-    //   address       - VA address of the allocation; for free, the
-    //                   address being freed (lets us pair alloc/free
-    //                   in a future v2 backend pass)
+    //   device_id     - target device (0 for host allocations)
+    //   corr_id       - backend correlation id
+    //   stream        - stream id for asynchronous CUDA allocation; 0 on AMD
+    //   memory_op     - portable 1=ALLOC, 2=FREE value
+    //   memory_kind   - portable device / host / managed / pinned value
+    //   address       - VA allocated or freed
     MEMORY_ALLOC,
     // F4: CUDA graph launch event captured via
     // CUPTI_ACTIVITY_KIND_GRAPH_TRACE. One record per cudaGraphLaunch

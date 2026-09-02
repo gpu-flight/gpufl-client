@@ -51,16 +51,15 @@ struct MemsetEvent {
     uint64_t bytes = 0;
 };
 
-// One CUPTI MEMORY2 record - `cudaMalloc` / `cudaFree` / `cudaMallocAsync` /
-// etc. Replaces per-event `memory_alloc_event` JSON with a packed row
-// inside `memory_alloc_event_batch`. Pure-numeric fields → no dictionary
-// encoding, just envelope amortization. Saves ~85% on alloc-heavy
-// workloads.
+// One CUPTI MEMORY2 or ROCprofiler memory-allocation record. Packed rows
+// replace per-event `memory_alloc_event` JSON inside
+// `memory_alloc_event_batch`. Pure-numeric fields need no dictionary
+// encoding, which keeps allocation-heavy workloads compact.
 struct MemoryAllocEventBatchRow {
     int64_t  start_ns    = 0;
-    int64_t  duration_ns = 0;   // 0 in v1 - CUPTI doesn't emit alloc duration
+    int64_t  duration_ns = 0;   // host-call duration when available
     uint8_t  memory_op   = 0;   // 1=ALLOC, 2=FREE
-    uint8_t  memory_kind = 0;   // CUpti_ActivityMemoryKind
+    uint8_t  memory_kind = 0;   // portable values; see ActivityRecord
     uint64_t address     = 0;   // GPU virtual address
     uint64_t bytes       = 0;
     uint32_t device_id   = 0;
@@ -79,27 +78,17 @@ struct MemcpyBatchRow {
 };
 
 /**
- * One CUDA memory-management event captured by CUPTI's
- * CUPTI_ACTIVITY_KIND_MEMORY2 stream.
+ * One GPU memory-management event captured by CUPTI or ROCprofiler.
  *
- * Covers cudaMalloc / cudaFree / cudaMallocAsync / cudaFreeAsync /
- * cudaMallocManaged / cudaMallocHost (and their driver-API cousins).
- * One event per call. Note that cudaMallocAsync is associated with a
- * stream and the reported {@code start_ns} is the host call time
- * (not the GPU completion time) - the host-side cost is what users
- * actually pay for in their python/c++ code.
+ * CUDA covers allocation variants such as cudaMalloc, cudaFree, and their
+ * asynchronous or managed-memory forms. AMD ROCprofiler reports ALLOCATE,
+ * VMEM_ALLOCATE, FREE, and VMEM_FREE; the backend normalizes those to the
+ * same portable alloc/free operation values.
  *
- * Per-event JSON. Volume in PyTorch workloads is typically <1k events
- * per session because torch's caching allocator absorbs most python-
- * level allocations; only large-block CUDA-level mallocs reach this
- * stream. TensorFlow eager mode is the high-volume edge case - if it
- * becomes a problem the gating flag {@code enable_memory_tracking}
- * lets users opt out without losing other CUPTI streams.
- *
- * The {@code address} field is the VA returned by cudaMalloc (or
- * being freed by cudaFree). Pairing alloc → free across the session
- * for leak / fragmentation analysis is a v2 follow-up; v1 just
- * stores raw events.
+ * The reported timestamps describe the host call. The address and byte
+ * count allow alloc/free pairing and future leak or fragmentation analysis.
+ * Allocation tracking can be disabled with enable_memory_tracking without
+ * disabling the other activity streams.
  */
 struct MemoryAllocEvent {
     int pid = 0;
@@ -108,7 +97,7 @@ struct MemoryAllocEvent {
     int64_t start_ns = 0;
     int64_t duration_ns = 0;     // host-side; usually tiny but non-zero
     uint8_t  memory_op = 0;       // 1 = ALLOC, 2 = FREE
-    uint8_t  memory_kind = 0;     // CUpti_ActivityMemoryKind
+    uint8_t  memory_kind = 0;     // portable CUPTI-compatible kind value
     uint64_t address = 0;
     uint64_t bytes = 0;
     uint32_t device_id = 0;

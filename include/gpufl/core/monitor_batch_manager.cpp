@@ -41,6 +41,7 @@ void MonitorBatchManager::reset() {
     }
     syncBatch_.clear();
     memAllocBatch_.clear();
+    memoryAllocRowsSeen_.store(0, std::memory_order_relaxed);
     pendingDetails_.clear();
 
     kernelBatchId_ = 0;
@@ -432,6 +433,10 @@ uint64_t MonitorBatchManager::pmSampleRowsSeen() const {
     return pmSampleRowsSeen_;
 }
 
+uint64_t MonitorBatchManager::memoryAllocRowsSeen() const {
+    return memoryAllocRowsSeen_.load(std::memory_order_relaxed);
+}
+
 void MonitorBatchManager::resolveScopeIdsForTesting(std::vector<PmSampleBatchRow>& rows,
                                                     uint32_t fallback_id) {
     std::vector<ScopeWindow> candidates;
@@ -604,6 +609,7 @@ void MonitorBatchManager::resolveScopeIdsForBatch(std::vector<ScopeWindow>& cand
 }
 
 bool MonitorBatchManager::pushMemoryAlloc(const MemoryAllocEventBatchRow& row) {
+    memoryAllocRowsSeen_.fetch_add(1, std::memory_order_relaxed);
     memAllocBatch_.push(row);
     return memAllocBatch_.needsFlush();
 }

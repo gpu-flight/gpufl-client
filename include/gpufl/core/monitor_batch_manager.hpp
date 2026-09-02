@@ -84,6 +84,8 @@ public:
     uint64_t scopeAttributionTruncated() const;
     /** @brief PM metric rows that have passed through scope attribution. */
     uint64_t pmSampleRowsSeen() const;
+    /** @brief Memory-allocation rows accepted by the batch pipeline. */
+    uint64_t memoryAllocRowsSeen() const;
 
     /** @brief Test seam: resolve a batch exactly as the drain path does. */
     void resolveScopeIdsForTesting(std::vector<PmSampleBatchRow>& rows, uint32_t fallback_id);
@@ -225,6 +227,7 @@ private:
     uint64_t pmSampleRowsSeen_ = 0;
 
     BatchBuffer<SynchronizationEventBatchRow> syncBatch_;
+    std::atomic<uint64_t> memoryAllocRowsSeen_{0};
     BatchBuffer<MemoryAllocEventBatchRow> memAllocBatch_;
     uint64_t syncBatchId_ = 0;
     uint64_t memAllocBatchId_ = 0;

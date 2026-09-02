@@ -164,6 +164,20 @@ std::string resolveCopyKind(int kind) {
     return (it != kCopyKindNames.end()) ? it->second : "Unknown(" + std::to_string(kind) + ")";
 }
 
+std::string resolveMemoryKind(int kind) {
+    switch (kind) {
+        case 0: return "Unknown";
+        case 1: return "Pageable";
+        case 2: return "Pinned";
+        case 3: return "Device";
+        case 4: return "Array";
+        case 5: return "Managed";
+        case 6: return "DeviceStatic";
+        case 7: return "ManagedStatic";
+        default: return "Unknown(" + std::to_string(kind) + ")";
+    }
+}
+
 // Values match CUpti_ActivityPCSamplingStallReason enum from cupti_activity.h
 const std::map<int, std::string> kStallNames = {
     {2,  "Instruction Fetch"},       {3,  "Execution Dependency"},
@@ -397,12 +411,43 @@ bool TextReport::isAmdSession() const {
            identity.find("advanced micro devices") != std::string::npos;
 }
 
+bool TextReport::tryParseMemoryAllocationRecord(const JsonValue& rec) {
+    const std::string type = rec.value<std::string>("type", "");
+    if (type == "memory_alloc_event_batch") {
+        auto ci = buildColumnIndex(rec["columns"]);
+        int64_t base = rec.value<int64_t>("base_time_ns", 0);
+        for (const auto& row : rec["rows"].get_array()) {
+            memory_allocations_.push_back({
+                base + rowInt(row, ci, "dt_ns"),
+                static_cast<uint8_t>(rowInt(row, ci, "memory_op")),
+                static_cast<uint8_t>(rowInt(row, ci, "memory_kind")),
+                rowU64(row, ci, "address"),
+                rowU64(row, ci, "bytes"),
+            });
+        }
+        return true;
+    }
+
+    if (type == "memory_alloc_event") {
+        memory_allocations_.push_back({
+            rec.value<int64_t>("start_ns", 0),
+            static_cast<uint8_t>(rec.value<int>("memory_op", 0)),
+            static_cast<uint8_t>(rec.value<int>("memory_kind", 0)),
+            rec.value<uint64_t>("address", 0),
+            rec.value<uint64_t>("bytes", 0),
+        });
+        return true;
+    }
+    return false;
+}
+
 void TextReport::parseDeviceLog(const std::vector<JsonValue>& records,
                                 const std::unordered_map<int, std::string>& kernel_dict) {
     std::unordered_map<unsigned, JsonValue> details;
 
     for (const auto& rec : records) {
         const std::string type = rec.value<std::string>("type", "");
+        if (tryParseMemoryAllocationRecord(rec)) continue;
 
         if ((type == "job_start" || type == "init") && info_.app_name.empty()) {
             parseJobStart(rec, info_);
@@ -506,6 +551,7 @@ void TextReport::parseScopeLog(const std::vector<JsonValue>& records,
 
     for (const auto& rec : records) {
         const std::string type = rec.value<std::string>("type", "");
+        if (tryParseMemoryAllocationRecord(rec)) continue;
 
         if ((type == "job_start" || type == "init") && info_.app_name.empty()) {
             parseJobStart(rec, info_);
@@ -641,6 +687,7 @@ std::string TextReport::generate() const {
     writeTopKernels(out);
     writeKernelDetails(out);
     writeMemcpySummary(out);
+    writeMemoryAllocationSummary(out);
     writeSystemMetrics(out);
     writeScopeSummary(out);
     writePerfMetricsSummary(out);
@@ -914,6 +961,96 @@ void TextReport::writeMemcpySummary(std::ostringstream& out) const {
             << std::right << std::setw(8) << recs.size()
             << std::setw(16) << fmtBytes(kb) << std::setw(18) << tp << "\n";
     }
+}
+
+void TextReport::writeMemoryAllocationSummary(std::ostringstream& out) const {
+    out << "\n" << SEP << "\n  Memory Allocation Summary\n" << SEP << "\n";
+    if (memory_allocations_.empty()) {
+        out << "  (No memory allocation data)\n";
+        return;
+    }
+
+    struct KindStats {
+        size_t allocations = 0;
+        size_t frees = 0;
+        uint64_t bytes_allocated = 0;
+    };
+
+    std::vector<const MemoryAllocationRecord*> ordered;
+    ordered.reserve(memory_allocations_.size());
+    for (const auto& record : memory_allocations_) ordered.push_back(&record);
+    std::stable_sort(ordered.begin(), ordered.end(),
+                     [](const auto* lhs, const auto* rhs) {
+                         return lhs->start_ns < rhs->start_ns;
+                     });
+
+    std::map<int, KindStats> grouped;
+    std::unordered_map<uint64_t, uint64_t> live_bytes;
+    uint64_t bytes_allocated = 0;
+    uint64_t bytes_freed = 0;
+    uint64_t current_live_bytes = 0;
+    uint64_t peak_live_bytes = 0;
+    size_t allocation_count = 0;
+    size_t free_count = 0;
+
+    for (const auto* record : ordered) {
+        if (record->memory_op == 1) {
+            ++allocation_count;
+            auto& stats = grouped[record->memory_kind];
+            ++stats.allocations;
+            stats.bytes_allocated += record->bytes;
+            bytes_allocated += record->bytes;
+
+            if (record->address != 0) {
+                auto existing = live_bytes.find(record->address);
+                if (existing != live_bytes.end()) {
+                    current_live_bytes -=
+                        (std::min)(current_live_bytes, existing->second);
+                }
+                live_bytes[record->address] = record->bytes;
+                current_live_bytes += record->bytes;
+                peak_live_bytes = (std::max)(peak_live_bytes, current_live_bytes);
+            }
+        } else if (record->memory_op == 2) {
+            ++free_count;
+            ++grouped[record->memory_kind].frees;
+
+            uint64_t freed_bytes = record->bytes;
+            if (record->address != 0) {
+                auto existing = live_bytes.find(record->address);
+                if (existing != live_bytes.end()) {
+                    if (freed_bytes == 0) freed_bytes = existing->second;
+                    current_live_bytes -=
+                        (std::min)(current_live_bytes, existing->second);
+                    live_bytes.erase(existing);
+                }
+            }
+            bytes_freed += freed_bytes;
+        }
+    }
+
+    out << "  Total Events:         " << memory_allocations_.size() << "\n";
+    out << "  Allocations:          " << allocation_count << "\n";
+    out << "  Frees:                " << free_count << "\n";
+    out << "  Bytes Allocated:      " << fmtBytes(bytes_allocated) << "\n";
+    out << "  Bytes Freed:          " << fmtBytes(bytes_freed) << "\n";
+    out << "  Peak Tracked Live:    " << fmtBytes(peak_live_bytes) << "\n\n";
+
+    out << "  By Memory Kind:\n";
+    out << "  " << std::left << std::setw(18) << "Kind"
+        << std::right << std::setw(13) << "Allocations"
+        << std::setw(10) << "Frees"
+        << std::setw(18) << "Bytes Allocated" << "\n";
+    out << "  " << std::string(59, '-') << "\n";
+    for (const auto& [kind, stats] : grouped) {
+        out << "  " << std::left << std::setw(18) << resolveMemoryKind(kind)
+            << std::right << std::setw(13) << stats.allocations
+            << std::setw(10) << stats.frees
+            << std::setw(18) << fmtBytes(stats.bytes_allocated) << "\n";
+    }
+
+    out << "\n  Note: Peak tracked live memory is derived from matched observed addresses.\n"
+        << "        Runtime and allocator-internal activity may be included.\n";
 }
 
 void TextReport::writeSystemMetrics(std::ostringstream& out) const {

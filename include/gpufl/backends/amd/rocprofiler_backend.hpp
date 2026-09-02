@@ -72,6 +72,12 @@ class RocprofilerBackend final : public IMonitorBackend {
         int scope_depth = 0;
     };
 
+    struct MemoryAllocationMetadata {
+        uint32_t device_id = 0;
+        uint8_t memory_kind = 0;
+        uint64_t bytes = 0;
+    };
+
     bool configureRocprofiler(const MonitorOptions& opts, std::string* reason);
     void resetToolState();
     bool registerTool(std::string* reason);
@@ -86,6 +92,8 @@ class RocprofilerBackend final : public IMonitorBackend {
                               uint64_t end_timestamp,
                               const rocprofiler_async_correlation_id_t& correlation_id);
     void handleMemoryCopy(const rocprofiler_buffer_tracing_memory_copy_record_t& data);
+    void handleMemoryAllocation(
+        const rocprofiler_buffer_tracing_memory_allocation_record_t& data);
     void handleCodeObjectLoad(const rocprofiler_callback_tracing_code_object_load_data_t& data);
 
     std::string resolveKernelName(uint64_t kernel_id) const;
@@ -120,6 +128,8 @@ class RocprofilerBackend final : public IMonitorBackend {
     mutable std::unordered_map<std::string, std::string> demangle_cache_;
     mutable std::mutex external_scope_mutex_;
     std::unordered_map<uint64_t, ExternalScopeMetadata> external_scope_metadata_;
+    mutable std::mutex memory_allocation_mutex_;
+    std::unordered_map<uint64_t, MemoryAllocationMetadata> memory_allocations_;
 
     mutable std::mutex agent_mutex_;
     std::unordered_map<uint64_t, int> gpu_device_ids_;
@@ -154,6 +164,7 @@ class RocprofilerBackend final : public IMonitorBackend {
 
     std::atomic<uint64_t> kernel_rows_emitted_{0};
     std::atomic<uint64_t> memcpy_rows_emitted_{0};
+    std::atomic<uint64_t> memory_activity_rows_emitted_{0};
     std::atomic<uint64_t> trace_records_dropped_{0};
     std::atomic<uint64_t> trace_records_queue_dropped_{0};
     std::atomic<uint64_t> trace_buffer_flush_failures_{0};
@@ -164,6 +175,7 @@ class RocprofilerBackend final : public IMonitorBackend {
     mutable std::string capture_capabilities_session_id_;
     mutable uint64_t capability_kernel_rows_baseline_ = 0;
     mutable uint64_t capability_memcpy_rows_baseline_ = 0;
+    mutable uint64_t capability_memory_activity_rows_baseline_ = 0;
     mutable uint64_t capability_pm_sample_rows_baseline_ = 0;
     mutable uint64_t capability_dropped_records_baseline_ = 0;
     mutable uint64_t capability_queue_dropped_records_baseline_ = 0;
@@ -179,6 +191,7 @@ class RocprofilerBackend final : public IMonitorBackend {
     std::atomic<bool> start_failure_logged_{false};
     std::mutex start_stop_mutex_;
     std::atomic<bool> tool_registered_{false};
+    std::atomic<bool> memory_activity_configured_{false};
 };
 
 }  // namespace gpufl::amd

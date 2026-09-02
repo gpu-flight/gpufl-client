@@ -505,3 +505,21 @@ TEST(ScopeAttributionTest, OldTraceHistoryEvictedDuringPmIsNotPartialAttribution
 
     EXPECT_EQ(m.scopeAttributionTruncated(), 0u);
 }
+
+TEST(MemoryAllocationBatchTest, CountsAcceptedRowsAndResets) {
+    gpufl::detail::MonitorBatchManager manager;
+    manager.reset();
+
+    EXPECT_EQ(manager.memoryAllocRowsSeen(), 0u);
+    gpufl::MemoryAllocEventBatchRow row{};
+    row.start_ns = 100;
+    (void)manager.pushMemoryAlloc(row);
+    EXPECT_EQ(manager.memoryAllocRowsSeen(), 1u);
+
+    row.start_ns = 200;
+    (void)manager.pushMemoryAlloc(row);
+    EXPECT_EQ(manager.memoryAllocRowsSeen(), 2u);
+
+    manager.reset();
+    EXPECT_EQ(manager.memoryAllocRowsSeen(), 0u);
+}

@@ -8,6 +8,7 @@ This folder mirrors the CUDA example area with runnable HIP examples for AMD GPU
 - AMD static device inventory via HIP
 - AMD kernel dispatch tracing via `rocprofiler-sdk`
 - AMD memcpy tracing via `rocprofiler-sdk`
+- AMD memory-allocation tracing via `rocprofiler-sdk`
 - Per-dispatch AMD hardware counters via ROCprofiler dispatch counting
 - Device-wide `PmSampling` timelines via ROCprofiler device counting
 - `gpufl` initialization with `backend = gpufl::BackendKind::Amd`
@@ -23,7 +24,7 @@ Today, the AMD backend is useful for:
 
 - system metric logging
 - device inventory
-- automatic HIP kernel and memcpy tracing
+- automatic HIP kernel, memcpy, and memory-allocation tracing
 - per-dispatch and device-wide hardware-counter profiling
 - scope-level application instrumentation
 
@@ -39,6 +40,8 @@ It is not yet useful for:
   - HIP vector add benchmark with result verification
 - `amd_gpufl_scope_demo`
   - Initializes `gpufl` with the AMD backend, runs HIP work inside scopes, and writes logs
+- `amd_memory_allocation_rows`
+  - Exits successfully only when two HIP allocation/free phases emit memory-allocation rows
 - `amd_pm_sampling_sample_rows`
   - Selects AMD device counting and exits successfully only when each of two named scopes emits PM sample rows
 
@@ -57,6 +60,7 @@ cmake -S . -B build-rocm-examples \
 cmake --build build-rocm-examples --target amd_check_device
 cmake --build build-rocm-examples --target amd_vector_add_benchmark
 cmake --build build-rocm-examples --target amd_gpufl_scope_demo
+cmake --build build-rocm-examples --target amd_memory_allocation_rows
 cmake --build build-rocm-examples --target amd_pm_sampling_sample_rows
 ```
 
@@ -113,8 +117,14 @@ subproject and disables the parent example/test targets to avoid recursion.
 ./build-rocm-examples/example/amd/amd_check_device
 ./build-rocm-examples/example/amd/amd_vector_add_benchmark
 ./build-rocm-examples/example/amd/amd_gpufl_scope_demo
+./build-rocm-examples/example/amd/amd_memory_allocation_rows
 ./build-rocm-examples/example/amd/amd_pm_sampling_sample_rows
 ```
+
+`amd_memory_allocation_rows` enables `enable_memory_tracking`, runs two
+allocation/free phases, and checks that every expected allocate and free
+operation produces a `memory_alloc_event_batch` row. It returns exit code 2
+when ROCprofiler allocation tracing is unavailable or rows are missing.
 
 `amd_pm_sampling_sample_rows` requests the portable `GPUBusy` counter, runs
 GPU work in `pm_rows_phase_a` and `pm_rows_phase_b`, and checks that the PM row
@@ -149,6 +159,12 @@ Success! Device 0: AMD Radeon RX 9070 XT (arch gfx1201, capability 12.0)
 gfl_amd_scope
 ```
 
+`amd_memory_allocation_rows` writes logs with prefix:
+
+```bash
+gfl_amd_memory_rows
+```
+
 `amd_pm_sampling_sample_rows` writes logs with prefix:
 
 ```bash
@@ -162,6 +178,7 @@ With `rocprofiler-sdk` available, expect:
 - `kernel_event_batch`
 - `kernel_detail`
 - `memcpy_event_batch`
+- `memory_alloc_event_batch` when `enable_memory_tracking` is enabled
 - `profile_sample_batch` for dispatch-counting requests
 - `pm_sampling_config` and `pm_sample_batch` for `PmSampling`
 - system metric samples
