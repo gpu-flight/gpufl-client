@@ -348,8 +348,8 @@ std::string MemoryAllocEventBatchModel::buildJson() const {
     if (rows.empty()) return {};
     const int64_t base = rows.front().start_ns;
 
-    // All numeric fields → no dictionary lookup needed. address is a
-    // 64-bit GPU virtual address (can exceed 32 bits on Blackwell).
+    // All numeric fields → no dictionary lookup needed. Address is a
+    // 64-bit GPU virtual address and may exceed 32 bits.
     std::ostringstream oss;
     oss << "{\"version\":1,\"type\":\"memory_alloc_event_batch\""
         << ",\"session_id\":\"" << jsonEscape(session_id_) << '"'

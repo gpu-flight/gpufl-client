@@ -121,6 +121,7 @@ void RocprofilerBackend::initialize(const MonitorOptions& opts) {
     opts_ = opts;
     kernel_rows_emitted_.store(0, std::memory_order_relaxed);
     memcpy_rows_emitted_.store(0, std::memory_order_relaxed);
+    memory_activity_rows_emitted_.store(0, std::memory_order_relaxed);
     trace_records_dropped_.store(0, std::memory_order_relaxed);
     trace_records_queue_dropped_.store(0, std::memory_order_relaxed);
     trace_buffer_flush_failures_.store(0, std::memory_order_relaxed);
@@ -132,6 +133,7 @@ void RocprofilerBackend::initialize(const MonitorOptions& opts) {
         capture_capabilities_session_id_.clear();
         capability_kernel_rows_baseline_ = 0;
         capability_memcpy_rows_baseline_ = 0;
+        capability_memory_activity_rows_baseline_ = 0;
         capability_pm_sample_rows_baseline_ = 0;
         capability_dropped_records_baseline_ = 0;
         capability_queue_dropped_records_baseline_ = 0;
@@ -166,6 +168,7 @@ void RocprofilerBackend::resetToolState() {
     client_handle_ = 0;
     client_finalize_ = nullptr;
     tool_registered_.store(false);
+    memory_activity_configured_.store(false);
     active_.store(false);
     start_requested_.store(false);
     next_start_retry_ns_.store(0);
@@ -178,6 +181,10 @@ void RocprofilerBackend::resetToolState() {
     {
         std::lock_guard<std::mutex> lock(external_scope_mutex_);
         external_scope_metadata_.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(memory_allocation_mutex_);
+        memory_allocations_.clear();
     }
     {
         std::lock_guard<std::mutex> lock(agent_mutex_);
@@ -309,6 +316,19 @@ int RocprofilerBackend::toolInitialize() {
                      "rocprofiler_configure_buffer_tracing_service(memory_copy)",
                      &reason)) {
         return -1;
+    }
+    if (opts_.enable_memory_tracking) {
+        const auto status =
+            rocprofiler_configure_buffer_tracing_service(
+                context_, ROCPROFILER_BUFFER_TRACING_MEMORY_ALLOCATION,
+                nullptr, 0, buffer_);
+        if (status == ROCPROFILER_STATUS_SUCCESS) {
+            memory_activity_configured_.store(true, std::memory_order_release);
+        } else {
+            GFL_LOG_WARN(
+                "[ROCProfilerBackend] memory-allocation tracing unavailable: ",
+                StatusToString(status));
+        }
     }
 
     // Resolve the user-facing request to an AMD-native path before creating an
@@ -518,6 +538,8 @@ void RocprofilerBackend::emitCapabilities() {
         kernel_rows_emitted_.load(std::memory_order_relaxed);
     const uint64_t memcpy_rows =
         memcpy_rows_emitted_.load(std::memory_order_relaxed);
+    const uint64_t memory_activity_rows =
+        memory_activity_rows_emitted_.load(std::memory_order_relaxed);
     const uint64_t dropped_records =
         trace_records_dropped_.load(std::memory_order_relaxed);
     const uint64_t queue_dropped_records =
@@ -536,10 +558,15 @@ void RocprofilerBackend::emitCapabilities() {
     input.plan = resolvedPlan();
     input.trace_configured =
         tool_registered_.load(std::memory_order_acquire);
+    input.memory_activity_requested = opts_.enable_memory_tracking;
+    input.memory_activity_configured =
+        memory_activity_configured_.load(std::memory_order_acquire);
     input.kernel_rows =
         delta(kernel_rows, capability_kernel_rows_baseline_);
     input.memcpy_rows =
         delta(memcpy_rows, capability_memcpy_rows_baseline_);
+    input.memory_activity_rows = delta(
+        memory_activity_rows, capability_memory_activity_rows_baseline_);
     input.profiling_sample_rows =
         engine_ && engine_->hasData() ? 1 : 0;
     input.pm_sample_rows =
@@ -561,6 +588,7 @@ void RocprofilerBackend::emitCapabilities() {
 
     capability_kernel_rows_baseline_ = kernel_rows;
     capability_memcpy_rows_baseline_ = memcpy_rows;
+    capability_memory_activity_rows_baseline_ = memory_activity_rows;
     capability_pm_sample_rows_baseline_ = pm_sample_rows;
     capability_dropped_records_baseline_ = dropped_records;
     capability_queue_dropped_records_baseline_ = queue_dropped_records;
@@ -766,6 +794,14 @@ void RocprofilerBackend::bufferTracingShim(rocprofiler_context_id_t,
                 backend->handleMemoryCopy(*record);
                 break;
             }
+            case ROCPROFILER_BUFFER_TRACING_MEMORY_ALLOCATION: {
+                const auto* record = static_cast<
+                    const rocprofiler_buffer_tracing_memory_allocation_record_t*>(
+                        header->payload);
+                backend->handleMemoryAllocation(*record);
+                break;
+            }
+
             default:
                 break;
         }
@@ -1130,6 +1166,90 @@ void RocprofilerBackend::handleMemoryCopy(
 
     if (g_monitorBuffer.Push(out)) {
         memcpy_rows_emitted_.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        trace_records_queue_dropped_.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+void RocprofilerBackend::handleMemoryAllocation(
+    const rocprofiler_buffer_tracing_memory_allocation_record_t& data) {
+    const auto operation = NormalizeAmdMemoryAllocationOperation(
+        static_cast<uint32_t>(data.operation));
+    if (!operation.has_value()) return;
+
+    const uint64_t address = data.address.value;
+    const auto endpoint = resolveTraceEndpoint(data.agent_id);
+    const auto direct_device_id =
+        ResolveAmdMemoryAllocationDeviceId(endpoint);
+    const bool direct_host = endpoint.kind == AmdTraceAgentKind::Cpu;
+
+    MemoryAllocationMetadata metadata;
+    bool attributed = false;
+    if (*operation == 1) {
+        if (direct_device_id.has_value() || direct_host) {
+            metadata.device_id = direct_device_id.value_or(0);
+            metadata.memory_kind = ResolveAmdMemoryAllocationKind(endpoint);
+            metadata.bytes = data.allocation_size;
+            attributed = true;
+            if (address != 0) {
+                std::lock_guard<std::mutex> lock(memory_allocation_mutex_);
+                memory_allocations_[address] = metadata;
+            }
+        }
+    } else {
+        if (address != 0) {
+            std::lock_guard<std::mutex> lock(memory_allocation_mutex_);
+            if (const auto itr = memory_allocations_.find(address);
+                itr != memory_allocations_.end()) {
+                metadata = itr->second;
+                memory_allocations_.erase(itr);
+                attributed = true;
+            }
+        }
+        if (!attributed && (direct_device_id.has_value() || direct_host)) {
+            metadata.device_id = direct_device_id.value_or(0);
+            metadata.memory_kind = ResolveAmdMemoryAllocationKind(endpoint);
+            metadata.bytes = data.allocation_size;
+            attributed = true;
+        }
+    }
+
+    if (!attributed) {
+        trace_records_unattributed_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    ActivityRecord out{};
+    out.type = TraceType::MEMORY_ALLOC;
+    out.device_id = metadata.device_id;
+    out.cpu_start_ns = static_cast<int64_t>(data.start_timestamp);
+    out.duration_ns = static_cast<int64_t>(
+        data.end_timestamp >= data.start_timestamp
+            ? data.end_timestamp - data.start_timestamp
+            : 0);
+    out.api_start_ns = out.cpu_start_ns;
+    out.api_exit_ns = out.cpu_start_ns + out.duration_ns;
+    out.memory_op = *operation;
+    out.memory_kind = metadata.memory_kind;
+    out.address = address;
+    out.bytes = data.allocation_size > 0 ? data.allocation_size : metadata.bytes;
+    out.corr_id = TruncateCorrelationId(data.correlation_id.internal);
+
+    if (data.correlation_id.external.value != 0) {
+        std::lock_guard<std::mutex> lock(external_scope_mutex_);
+        if (auto itr = external_scope_metadata_.find(
+                data.correlation_id.external.value);
+            itr != external_scope_metadata_.end() &&
+            !itr->second.user_scope.empty()) {
+            std::snprintf(out.user_scope, sizeof(out.user_scope), "%s",
+                          itr->second.user_scope.c_str());
+            out.scope_depth = itr->second.scope_depth;
+        }
+    }
+
+    if (g_monitorBuffer.Push(out)) {
+        memory_activity_rows_emitted_.fetch_add(1,
+                                                std::memory_order_relaxed);
     } else {
         trace_records_queue_dropped_.fetch_add(1, std::memory_order_relaxed);
     }

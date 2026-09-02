@@ -880,6 +880,10 @@ uint64_t Monitor::PmSampleRowsSeen() {
     return g_state.batches.pmSampleRowsSeen();
 }
 
+uint64_t Monitor::MemoryAllocRowsSeen() {
+    return g_state.batches.memoryAllocRowsSeen();
+}
+
 void Monitor::EmitPmSamplingConfig(uint32_t device_id, uint32_t interval_us, uint32_t max_samples, const std::string& preset, const std::vector<std::string>& metrics) {
     const Runtime* rt = runtime();
     const auto segment = rt ? rt->acquireSegmentContext() : nullptr;

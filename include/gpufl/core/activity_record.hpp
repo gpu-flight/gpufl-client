@@ -107,20 +107,18 @@ struct ActivityRecord {
 
     // Memory-allocation specific.
     //
-    // memory_op: 1 = ALLOC, 2 = FREE. Mirrors CUpti_ActivityMemoryOperationType
-    // (we collapse the variants we don't surface in v1 - release-async
-    // and so on - into the two top-level buckets; the dashboard only
-    // distinguishes alloc-vs-free in its first iteration).
+    // memory_op is the portable 1 = ALLOC, 2 = FREE contract. Backends
+    // collapse native variants into those two top-level operations.
     //
-    // memory_kind values mirror CUpti_ActivityMemoryKind:
+    // memory_kind retains CUPTI-compatible wire values so existing consumers
+    // remain cross-vendor:
     //   0 = UNKNOWN, 1 = PAGEABLE_HOST, 2 = PINNED_HOST, 3 = DEVICE,
     //   4 = ARRAY, 5 = MANAGED, 6 = DEVICE_STATIC, 7 = MANAGED_STATIC.
-    // Backend stores the raw integer; frontend maps to a label.
+    // ROCprofiler identifies only the owning agent, so AMD GPU allocations
+    // map to DEVICE and CPU allocations remain UNKNOWN.
     //
-    // address is the GPU virtual address (uint64) returned by cudaMalloc
-    // (or freed by cudaFree). Stored as uint64 because Blackwell-class
-    // addresses can be large; the dashboard renders it as 0x-prefixed
-    // hex.
+    // address is the uint64 virtual address allocated or freed. The
+    // dashboard renders it as 0x-prefixed hexadecimal text.
     uint8_t  memory_op = 0;
     uint8_t  memory_kind = 0;
     uint64_t address = 0;

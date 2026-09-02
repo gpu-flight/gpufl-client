@@ -301,3 +301,42 @@ TEST(AmdCaptureCapabilities, ClientQueueDropsDegradeEndToEndDelivery) {
     ASSERT_NE(correlation, nullptr);
     EXPECT_EQ(correlation->status, "enabled");
 }
+
+TEST(AmdCaptureCapabilities, MemoryActivityReportsCollectionAndAvailability) {
+    gpufl::amd::AmdCaptureCapabilityInput input;
+    input.session_id = "amd-session";
+    input.plan = gpufl::amd::ResolveAmdProfilingPlan(
+        gpufl::ProfilingEngine::Trace, {});
+    input.trace_configured = true;
+    input.memory_activity_requested = true;
+    input.memory_activity_configured = true;
+    input.memory_activity_rows = 4;
+
+    auto event = gpufl::amd::BuildAmdCaptureCapabilitiesEvent(input);
+    const auto* memory = FindCapability(event, "memory_activity");
+    ASSERT_NE(memory, nullptr);
+    EXPECT_TRUE(memory->requested);
+    EXPECT_EQ(memory->status, "collected");
+    EXPECT_EQ(memory->mode, "rocprofiler_memory_allocation");
+
+    input.memory_activity_rows = 0;
+    event = gpufl::amd::BuildAmdCaptureCapabilitiesEvent(input);
+    memory = FindCapability(event, "memory_activity");
+    ASSERT_NE(memory, nullptr);
+    EXPECT_EQ(memory->status, "enabled_no_data");
+    EXPECT_EQ(memory->reason_code, "enabled_but_no_records");
+
+    input.memory_activity_configured = false;
+    event = gpufl::amd::BuildAmdCaptureCapabilitiesEvent(input);
+    memory = FindCapability(event, "memory_activity");
+    ASSERT_NE(memory, nullptr);
+    EXPECT_EQ(memory->status, "skipped");
+    EXPECT_EQ(memory->reason_code,
+              "rocprofiler_memory_allocation_unavailable");
+
+    input.memory_activity_requested = false;
+    event = gpufl::amd::BuildAmdCaptureCapabilitiesEvent(input);
+    memory = FindCapability(event, "memory_activity");
+    ASSERT_NE(memory, nullptr);
+    EXPECT_EQ(memory->status, "not_requested");
+}

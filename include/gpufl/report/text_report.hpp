@@ -63,6 +63,14 @@ class TextReport {
         int copy_kind = 0;
     };
 
+    struct MemoryAllocationRecord {
+        int64_t start_ns = 0;
+        uint8_t memory_op = 0;
+        uint8_t memory_kind = 0;
+        uint64_t address = 0;
+        uint64_t bytes = 0;
+    };
+
     struct DeviceMetricRecord {
         int64_t ts_ns = 0;
         int gpu_util = 0;
@@ -171,6 +179,7 @@ class TextReport {
     SessionInfo info_;
     std::vector<KernelRecord> kernels_;
     std::vector<MemcpyRecord> memcpy_;
+    std::vector<MemoryAllocationRecord> memory_allocations_;
     std::vector<DeviceMetricRecord> device_metrics_;
     std::vector<HostMetricRecord> host_metrics_;
     std::vector<ScopeEventRecord> scope_events_;
@@ -193,6 +202,7 @@ class TextReport {
                            std::unordered_map<int, std::string>& metric_dict);
     void parseDeviceLog(const std::vector<JsonValue>& records,
                         const std::unordered_map<int, std::string>& kernel_dict);
+    bool tryParseMemoryAllocationRecord(const JsonValue& record);
     void parseScopeLog(const std::vector<JsonValue>& records,
                        const std::unordered_map<int, std::string>& scope_name_dict,
                        const std::unordered_map<int, std::string>& function_dict,
@@ -212,6 +222,7 @@ class TextReport {
     void writeTopKernels(std::ostringstream& out) const;
     void writeKernelDetails(std::ostringstream& out) const;
     void writeMemcpySummary(std::ostringstream& out) const;
+    void writeMemoryAllocationSummary(std::ostringstream& out) const;
     void writeSystemMetrics(std::ostringstream& out) const;
     void writeScopeSummary(std::ostringstream& out) const;
     void writePerfMetricsSummary(std::ostringstream& out) const;
