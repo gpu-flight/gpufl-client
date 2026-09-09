@@ -340,3 +340,41 @@ TEST(AmdCaptureCapabilities, MemoryActivityReportsCollectionAndAvailability) {
     ASSERT_NE(memory, nullptr);
     EXPECT_EQ(memory->status, "not_requested");
 }
+
+TEST(AmdCaptureCapabilities, SynchronizationReportsCollectionAndAvailability) {
+    gpufl::amd::AmdCaptureCapabilityInput input;
+    input.session_id = "amd-session";
+    input.plan = gpufl::amd::ResolveAmdProfilingPlan(
+        gpufl::ProfilingEngine::Trace, {});
+    input.trace_configured = true;
+    input.synchronization_requested = true;
+    input.synchronization_configured = true;
+    input.synchronization_rows = 4;
+
+    auto event = gpufl::amd::BuildAmdCaptureCapabilitiesEvent(input);
+    const auto* sync = FindCapability(event, "sync_activity");
+    ASSERT_NE(sync, nullptr);
+    EXPECT_TRUE(sync->requested);
+    EXPECT_EQ(sync->status, "collected");
+    EXPECT_EQ(sync->mode, "rocprofiler_hip_runtime_api_ext");
+
+    input.synchronization_rows = 0;
+    event = gpufl::amd::BuildAmdCaptureCapabilitiesEvent(input);
+    sync = FindCapability(event, "sync_activity");
+    ASSERT_NE(sync, nullptr);
+    EXPECT_EQ(sync->status, "enabled_no_data");
+    EXPECT_EQ(sync->reason_code, "enabled_but_no_records");
+
+    input.synchronization_configured = false;
+    event = gpufl::amd::BuildAmdCaptureCapabilitiesEvent(input);
+    sync = FindCapability(event, "sync_activity");
+    ASSERT_NE(sync, nullptr);
+    EXPECT_EQ(sync->status, "skipped");
+    EXPECT_EQ(sync->reason_code, "rocprofiler_hip_runtime_api_unavailable");
+
+    input.synchronization_requested = false;
+    event = gpufl::amd::BuildAmdCaptureCapabilitiesEvent(input);
+    sync = FindCapability(event, "sync_activity");
+    ASSERT_NE(sync, nullptr);
+    EXPECT_EQ(sync->status, "not_requested");
+}

@@ -92,11 +92,15 @@ class RocprofilerBackend final : public IMonitorBackend {
                               uint64_t end_timestamp,
                               const rocprofiler_async_correlation_id_t& correlation_id);
     void handleMemoryCopy(const rocprofiler_buffer_tracing_memory_copy_record_t& data);
+    void handleSynchronization(
+        const rocprofiler_buffer_tracing_hip_api_ext_record_t& data);
     void handleMemoryAllocation(
         const rocprofiler_buffer_tracing_memory_allocation_record_t& data);
     void handleCodeObjectLoad(const rocprofiler_callback_tracing_code_object_load_data_t& data);
 
     std::string resolveKernelName(uint64_t kernel_id) const;
+    uint32_t internHipStreamHandle(uint64_t handle);
+    uint32_t internHipEventHandle(uint64_t handle);
     AmdTraceEndpoint resolveTraceEndpoint(
         rocprofiler_agent_id_t agent_id) const;
     uint32_t classifyMemcpyKind(rocprofiler_agent_id_t src_agent,
@@ -131,6 +135,12 @@ class RocprofilerBackend final : public IMonitorBackend {
     mutable std::mutex memory_allocation_mutex_;
     std::unordered_map<uint64_t, MemoryAllocationMetadata> memory_allocations_;
 
+    mutable std::mutex synchronization_handle_mutex_;
+    std::unordered_map<uint64_t, uint32_t> hip_stream_ids_;
+    std::unordered_map<uint64_t, uint32_t> hip_event_ids_;
+    uint32_t next_hip_stream_id_ = 1;
+    uint32_t next_hip_event_id_ = 1;
+
     mutable std::mutex agent_mutex_;
     std::unordered_map<uint64_t, int> gpu_device_ids_;
     std::unordered_map<uint64_t, rocprofiler_agent_type_t> agent_types_;
@@ -164,6 +174,7 @@ class RocprofilerBackend final : public IMonitorBackend {
 
     std::atomic<uint64_t> kernel_rows_emitted_{0};
     std::atomic<uint64_t> memcpy_rows_emitted_{0};
+    std::atomic<uint64_t> synchronization_rows_emitted_{0};
     std::atomic<uint64_t> memory_activity_rows_emitted_{0};
     std::atomic<uint64_t> trace_records_dropped_{0};
     std::atomic<uint64_t> trace_records_queue_dropped_{0};
@@ -175,6 +186,7 @@ class RocprofilerBackend final : public IMonitorBackend {
     mutable std::string capture_capabilities_session_id_;
     mutable uint64_t capability_kernel_rows_baseline_ = 0;
     mutable uint64_t capability_memcpy_rows_baseline_ = 0;
+    mutable uint64_t capability_synchronization_rows_baseline_ = 0;
     mutable uint64_t capability_memory_activity_rows_baseline_ = 0;
     mutable uint64_t capability_pm_sample_rows_baseline_ = 0;
     mutable uint64_t capability_dropped_records_baseline_ = 0;
@@ -183,6 +195,8 @@ class RocprofilerBackend final : public IMonitorBackend {
     mutable uint64_t capability_unattributed_records_baseline_ = 0;
     mutable uint64_t capability_scope_correlation_failures_baseline_ = 0;
 
+    // Fixed before tracing starts; converts ROCprofiler's clock to Unix ns.
+    int64_t trace_epoch_offset_ns_ = 0;
     std::atomic<bool> initialized_{false};
     std::atomic<bool> active_{false};
     std::atomic<bool> start_requested_{false};
@@ -191,6 +205,7 @@ class RocprofilerBackend final : public IMonitorBackend {
     std::atomic<bool> start_failure_logged_{false};
     std::mutex start_stop_mutex_;
     std::atomic<bool> tool_registered_{false};
+    std::atomic<bool> synchronization_configured_{false};
     std::atomic<bool> memory_activity_configured_{false};
 };
 

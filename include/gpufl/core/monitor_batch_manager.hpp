@@ -84,6 +84,8 @@ public:
     uint64_t scopeAttributionTruncated() const;
     /** @brief PM metric rows that have passed through scope attribution. */
     uint64_t pmSampleRowsSeen() const;
+    /** @brief Synchronization rows accepted by the batch pipeline. */
+    uint64_t synchronizationRowsSeen() const;
     /** @brief Memory-allocation rows accepted by the batch pipeline. */
     uint64_t memoryAllocRowsSeen() const;
 
@@ -227,6 +229,7 @@ private:
     uint64_t pmSampleRowsSeen_ = 0;
 
     BatchBuffer<SynchronizationEventBatchRow> syncBatch_;
+    std::atomic<uint64_t> synchronizationRowsSeen_{0};
     std::atomic<uint64_t> memoryAllocRowsSeen_{0};
     BatchBuffer<MemoryAllocEventBatchRow> memAllocBatch_;
     uint64_t syncBatchId_ = 0;

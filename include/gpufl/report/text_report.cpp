@@ -178,6 +178,16 @@ std::string resolveMemoryKind(int kind) {
     }
 }
 
+std::string resolveSynchronizationType(int type) {
+    switch (type) {
+        case 1: return "Event Synchronize";
+        case 2: return "Stream Wait Event";
+        case 3: return "Stream Synchronize";
+        case 4: return "Context Synchronize";
+        default: return "Unknown(" + std::to_string(type) + ")";
+    }
+}
+
 // Values match CUpti_ActivityPCSamplingStallReason enum from cupti_activity.h
 const std::map<int, std::string> kStallNames = {
     {2,  "Instruction Fetch"},       {3,  "Execution Dependency"},
@@ -411,6 +421,39 @@ bool TextReport::isAmdSession() const {
            identity.find("advanced micro devices") != std::string::npos;
 }
 
+bool TextReport::tryParseSynchronizationRecord(const JsonValue& rec) {
+    const std::string type = rec.value<std::string>("type", "");
+    if (type == "synchronization_event_batch") {
+        auto ci = buildColumnIndex(rec["columns"]);
+        const int64_t base = rec.value<int64_t>("base_time_ns", 0);
+        for (const auto& row : rec["rows"].get_array()) {
+            const int64_t duration_ns = rowInt(row, ci, "duration_ns");
+            synchronizations_.push_back({
+                base + rowInt(row, ci, "dt_ns"),
+                duration_ns / 1e6,
+                static_cast<uint8_t>(rowInt(row, ci, "sync_type")),
+                static_cast<uint32_t>(rowInt(row, ci, "stream_id")),
+                static_cast<uint32_t>(rowInt(row, ci, "event_id")),
+                static_cast<uint32_t>(rowInt(row, ci, "context_id")),
+            });
+        }
+        return true;
+    }
+
+    if (type == "synchronization_event") {
+        synchronizations_.push_back({
+            rec.value<int64_t>("start_ns", 0),
+            rec.value<int64_t>("duration_ns", 0) / 1e6,
+            static_cast<uint8_t>(rec.value<int>("sync_type", 0)),
+            rec.value<uint32_t>("stream_id", 0),
+            rec.value<uint32_t>("event_id", 0),
+            rec.value<uint32_t>("context_id", 0),
+        });
+        return true;
+    }
+    return false;
+}
+
 bool TextReport::tryParseMemoryAllocationRecord(const JsonValue& rec) {
     const std::string type = rec.value<std::string>("type", "");
     if (type == "memory_alloc_event_batch") {
@@ -447,6 +490,7 @@ void TextReport::parseDeviceLog(const std::vector<JsonValue>& records,
 
     for (const auto& rec : records) {
         const std::string type = rec.value<std::string>("type", "");
+        if (tryParseSynchronizationRecord(rec)) continue;
         if (tryParseMemoryAllocationRecord(rec)) continue;
 
         if ((type == "job_start" || type == "init") && info_.app_name.empty()) {
@@ -551,6 +595,7 @@ void TextReport::parseScopeLog(const std::vector<JsonValue>& records,
 
     for (const auto& rec : records) {
         const std::string type = rec.value<std::string>("type", "");
+        if (tryParseSynchronizationRecord(rec)) continue;
         if (tryParseMemoryAllocationRecord(rec)) continue;
 
         if ((type == "job_start" || type == "init") && info_.app_name.empty()) {
@@ -688,6 +733,7 @@ std::string TextReport::generate() const {
     writeKernelDetails(out);
     writeMemcpySummary(out);
     writeMemoryAllocationSummary(out);
+    writeSynchronizationSummary(out);
     writeSystemMetrics(out);
     writeScopeSummary(out);
     writePerfMetricsSummary(out);
@@ -1051,6 +1097,45 @@ void TextReport::writeMemoryAllocationSummary(std::ostringstream& out) const {
 
     out << "\n  Note: Peak tracked live memory is derived from matched observed addresses.\n"
         << "        Runtime and allocator-internal activity may be included.\n";
+}
+
+void TextReport::writeSynchronizationSummary(std::ostringstream& out) const {
+    out << "\n" << SEP << "\n  Synchronization Summary\n" << SEP << "\n";
+    if (synchronizations_.empty()) {
+        out << "  (No synchronization data)\n";
+        return;
+    }
+
+    AggStats total;
+    std::map<int, AggStats> grouped;
+    for (const auto& record : synchronizations_) {
+        total.add(record.duration_ms);
+        grouped[record.sync_type].add(record.duration_ms);
+    }
+
+    out << "  Total Calls:          " << synchronizations_.size() << "\n";
+    out << "  Total API Time:       " << fmtDuration(total.total) << "\n";
+    out << "  Avg API Time:         " << fmtDuration(total.avg()) << "\n";
+    out << "  Max API Time:         " << fmtDuration(total.max_val) << "\n\n";
+
+    out << "  By Synchronization Type:\n";
+    out << "  " << std::left << std::setw(28) << "Type"
+        << std::right << std::setw(9) << "Calls"
+        << std::setw(14) << "Total"
+        << std::setw(14) << "Avg"
+        << std::setw(14) << "Max" << "\n";
+    out << "  " << std::string(65, '-') << "\n";
+    for (const auto& [type, stats] : grouped) {
+        out << "  " << std::left << std::setw(28)
+            << resolveSynchronizationType(type)
+            << std::right << std::setw(9) << stats.count
+            << std::setw(14) << fmtDuration(stats.total)
+            << std::setw(14) << fmtDuration(stats.avg())
+            << std::setw(14) << fmtDuration(stats.max_val) << "\n";
+    }
+
+    out << "\n  Note: API time is the host-observed HIP/CUDA call duration.\n"
+        << "        Stream Wait Event may enqueue a dependency without blocking.\n";
 }
 
 void TextReport::writeSystemMetrics(std::ostringstream& out) const {

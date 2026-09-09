@@ -132,4 +132,42 @@ TEST_F(TextReportTest, LegacyMemoryAllocationEventProducesSummary) {
     EXPECT_NE(report.find("Managed"), std::string::npos);
 }
 
+TEST_F(TextReportTest, SynchronizationBatchRowsProduceSummary) {
+    WriteLog("scope", {
+        R"({"type":"job_start","session_id":"s1","app":"sync_report","ts_ns":1000,"gpu_static_devices":[{"name":"AMD Radeon Test","vendor":"AMD","multi_processor_count":32}]})",
+        R"({"type":"synchronization_event_batch","session_id":"s1","base_time_ns":1000,"columns":["dt_ns","duration_ns","sync_type","stream_id","event_id","context_id","corr_id","function_id"],"rows":[[10,1000,1,0,1,0,1,0],[20,2000,2,1,1,0,2,0],[30,3000,3,1,0,0,3,0],[40,4000,4,0,0,0,4,0]]})",
+        R"({"type":"shutdown","session_id":"s1","ts_ns":10000})",
+    });
+
+    const std::string report = Generate();
+    EXPECT_NE(report.find("Synchronization Summary"), std::string::npos);
+    EXPECT_NE(report.find("Total Calls:          4"), std::string::npos);
+    EXPECT_NE(report.find("Total API Time:       10.00 usec"), std::string::npos);
+    EXPECT_NE(report.find("Avg API Time:         2.50 usec"), std::string::npos);
+    EXPECT_NE(report.find("Max API Time:         4.00 usec"), std::string::npos);
+    EXPECT_NE(report.find("Event Synchronize"), std::string::npos);
+    EXPECT_NE(report.find("Stream Wait Event"), std::string::npos);
+    EXPECT_NE(report.find("Stream Synchronize"), std::string::npos);
+    EXPECT_NE(report.find("Context Synchronize"), std::string::npos);
+
+    const auto allocations = report.find("Memory Allocation Summary");
+    const auto synchronization = report.find("Synchronization Summary");
+    const auto system_metrics = report.find("System Metrics");
+    EXPECT_LT(allocations, synchronization);
+    EXPECT_LT(synchronization, system_metrics);
+}
+
+TEST_F(TextReportTest, LegacySynchronizationEventProducesSummary) {
+    WriteLog("device", {
+        R"({"type":"job_start","session_id":"s1","app":"legacy_sync_report","ts_ns":1000,"gpu_static_devices":[{"name":"NVIDIA Test GPU","vendor":"NVIDIA","multi_processor_count":10}]})",
+        R"({"type":"synchronization_event","session_id":"s1","start_ns":1100,"end_ns":6100,"duration_ns":5000,"sync_type":1,"stream_id":0,"event_id":7,"context_id":0,"corr_id":1})",
+        R"({"type":"shutdown","session_id":"s1","ts_ns":10000})",
+    });
+
+    const std::string report = Generate();
+    EXPECT_NE(report.find("Total Calls:          1"), std::string::npos);
+    EXPECT_NE(report.find("Total API Time:       5.00 usec"), std::string::npos);
+    EXPECT_NE(report.find("Event Synchronize"), std::string::npos);
+}
+
 }  // namespace

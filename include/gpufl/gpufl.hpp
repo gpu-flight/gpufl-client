@@ -63,16 +63,16 @@ struct InitOptions {
     // disable only if running on a CUPTI version that errors on the
     // kind (logs a soft-warning if so, doesn't crash).
     bool enable_external_correlation = true;
-    // Enable CUPTI_ACTIVITY_KIND_SYNCHRONIZATION so that every
-    // cudaStreamSynchronize / cudaDeviceSynchronize / cudaEventSynchronize
-    // / cuStreamWaitEvent call gets a wall-clock timed record. The
-    // primary insight: time spent here = host blocked on GPU = a
-    // direct measure of GPU underutilization. Default-on because the
-    // overhead is small (one record per sync call, mid volume) and
-    // the answer it unlocks ("X% of your wall time is `cudaStreamSync`")
-    // is a top-five most-asked question. If a workload performs
-    // millions of synchronizations and the volume becomes a problem,
-    // disable this flag - the rest of the pipeline keeps working.
+    // Enable synchronization activity. NVIDIA uses CUPTI synchronization
+    // records; AMD trace sessions use filtered ROCprofiler HIP runtime API
+    // records. Event synchronize, stream wait-event, stream synchronize,
+    // and context/device synchronize calls are normalized to portable wire
+    // values with host-observed API durations. Most synchronize calls expose
+    // host time blocked on GPU work; stream wait-event may only enqueue a
+    // dependency. Default-on because the overhead is small (one record per
+    // selected call, mid volume). If a workload performs millions of
+    // synchronizations and the volume becomes a problem, disable this flag;
+    // the rest of the pipeline keeps working.
     bool enable_synchronization = true;
     // Enable CUPTI_ACTIVITY_KIND_MEMORY2 to capture cudaMalloc /
     // cudaFree / cudaMallocAsync / cudaMallocManaged / cudaMallocHost

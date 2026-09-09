@@ -41,6 +41,7 @@ void MonitorBatchManager::reset() {
     }
     syncBatch_.clear();
     memAllocBatch_.clear();
+    synchronizationRowsSeen_.store(0, std::memory_order_relaxed);
     memoryAllocRowsSeen_.store(0, std::memory_order_relaxed);
     pendingDetails_.clear();
 
@@ -433,6 +434,10 @@ uint64_t MonitorBatchManager::pmSampleRowsSeen() const {
     return pmSampleRowsSeen_;
 }
 
+uint64_t MonitorBatchManager::synchronizationRowsSeen() const {
+    return synchronizationRowsSeen_.load(std::memory_order_relaxed);
+}
+
 uint64_t MonitorBatchManager::memoryAllocRowsSeen() const {
     return memoryAllocRowsSeen_.load(std::memory_order_relaxed);
 }
@@ -615,6 +620,7 @@ bool MonitorBatchManager::pushMemoryAlloc(const MemoryAllocEventBatchRow& row) {
 }
 
 void MonitorBatchManager::pushSynchronization(const SynchronizationEventBatchRow& row) {
+    synchronizationRowsSeen_.fetch_add(1, std::memory_order_relaxed);
     syncBatch_.push(row);
 }
 

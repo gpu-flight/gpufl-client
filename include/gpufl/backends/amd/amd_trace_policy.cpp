@@ -40,4 +40,19 @@ uint8_t ResolveAmdMemoryAllocationKind(const AmdTraceEndpoint& agent) {
     return agent.kind == AmdTraceAgentKind::Gpu ? uint8_t{3} : uint8_t{0};
 }
 
+uint8_t ResolveAmdSynchronizationType(
+    const AmdSynchronizationOperation operation) {
+    switch (operation) {
+        case AmdSynchronizationOperation::EventSynchronize:
+            return 1;
+        case AmdSynchronizationOperation::StreamWaitEvent:
+            return 2;
+        case AmdSynchronizationOperation::StreamSynchronize:
+            return 3;
+        case AmdSynchronizationOperation::ContextSynchronize:
+            return 4;
+    }
+    return 0;
+}
+
 }  // namespace gpufl::amd

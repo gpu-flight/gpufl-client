@@ -172,10 +172,10 @@ struct MonitorOptions {
     // InitOptions::enable_external_correlation; copied across in the
     // gpufl::init() → CuptiBackend::initialize() conversion path.
     bool enable_external_correlation = true;
-    // Gate for CUPTI_ACTIVITY_KIND_SYNCHRONIZATION. Mirror of
-    // InitOptions::enable_synchronization. Backend honors this in
-    // CuptiBackend::start() - flag false means we never call
-    // cuptiActivityEnable for the kind, so zero overhead.
+    // Gate for synchronization activity. NVIDIA uses CUPTI activity;
+    // AMD trace sessions use filtered ROCprofiler HIP runtime API records.
+    // Mirror of InitOptions::enable_synchronization. False leaves the
+    // vendor service disabled, so there is no synchronization record volume.
     bool enable_synchronization = true;
     // Gate for CUPTI_ACTIVITY_KIND_MEMORY2.
     bool enable_memory_tracking = true;
@@ -458,6 +458,8 @@ class Monitor {
     static uint64_t ScopeAttributionTruncated();
     /** @brief PM metric rows that passed through scope attribution. */
     static uint64_t PmSampleRowsSeen();
+    /** @brief Synchronization rows accepted by the batch pipeline. */
+    static uint64_t SynchronizationRowsSeen();
     /** @brief Memory-allocation rows accepted by the batch pipeline. */
     static uint64_t MemoryAllocRowsSeen();
 

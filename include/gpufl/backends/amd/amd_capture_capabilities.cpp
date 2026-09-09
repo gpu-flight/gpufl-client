@@ -90,6 +90,29 @@ CaptureCapabilitiesEvent BuildAmdCaptureCapabilitiesEvent(
                    : "Memory-copy tracing was not active."));
 
     AddCapability(
+        event, "sync_activity", input.synchronization_requested,
+        !input.synchronization_requested
+            ? "not_requested"
+            : input.synchronization_configured
+            ? (input.synchronization_rows > 0 ? "collected" : "enabled_no_data")
+            : "skipped",
+        input.synchronization_configured
+            ? "rocprofiler_hip_runtime_api_ext"
+            : "disabled",
+        input.synchronization_configured
+            ? (input.synchronization_rows > 0 ? "" : "enabled_but_no_records")
+            : input.synchronization_requested
+            ? "rocprofiler_hip_runtime_api_unavailable"
+            : "",
+        input.synchronization_configured
+            ? (input.synchronization_rows > 0
+                   ? "HIP synchronization records were collected through ROCprofiler SDK."
+                   : "HIP synchronization tracing was enabled but emitted no rows this session.")
+            : input.synchronization_requested
+            ? "HIP synchronization tracing was requested but unavailable."
+            : "Synchronization tracing was not requested.");
+
+    AddCapability(
         event, "memory_activity", input.memory_activity_requested,
         !input.memory_activity_requested
             ? "not_requested"
