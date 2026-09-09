@@ -20,6 +20,7 @@
 #include <rocprofiler-sdk/callback_tracing.h>
 #include <rocprofiler-sdk/context.h>
 #include <rocprofiler-sdk/external_correlation.h>
+#include <rocprofiler-sdk/hip/api_id.h>
 #include <rocprofiler-sdk/rocprofiler.h>
 
 #include <unistd.h>
@@ -86,6 +87,32 @@ const char* CopyKindName(const uint32_t kind) {
     }
 }
 
+std::optional<AmdSynchronizationOperation> ClassifySynchronizationOperation(
+    const rocprofiler_tracing_operation_t operation) {
+    switch (operation) {
+        case static_cast<rocprofiler_tracing_operation_t>(
+            ROCPROFILER_HIP_RUNTIME_API_ID_hipEventSynchronize):
+            return AmdSynchronizationOperation::EventSynchronize;
+        case static_cast<rocprofiler_tracing_operation_t>(
+            ROCPROFILER_HIP_RUNTIME_API_ID_hipStreamWaitEvent):
+        case static_cast<rocprofiler_tracing_operation_t>(
+            ROCPROFILER_HIP_RUNTIME_API_ID_hipStreamWaitEvent_spt):
+            return AmdSynchronizationOperation::StreamWaitEvent;
+        case static_cast<rocprofiler_tracing_operation_t>(
+            ROCPROFILER_HIP_RUNTIME_API_ID_hipStreamSynchronize):
+        case static_cast<rocprofiler_tracing_operation_t>(
+            ROCPROFILER_HIP_RUNTIME_API_ID_hipStreamSynchronize_spt):
+            return AmdSynchronizationOperation::StreamSynchronize;
+        case static_cast<rocprofiler_tracing_operation_t>(
+            ROCPROFILER_HIP_RUNTIME_API_ID_hipCtxSynchronize):
+        case static_cast<rocprofiler_tracing_operation_t>(
+            ROCPROFILER_HIP_RUNTIME_API_ID_hipDeviceSynchronize):
+            return AmdSynchronizationOperation::ContextSynchronize;
+        default:
+            return std::nullopt;
+    }
+}
+
 }  // namespace
 
 bool RocprofilerBackend::IsAvailable(std::string* reason) {
@@ -121,6 +148,7 @@ void RocprofilerBackend::initialize(const MonitorOptions& opts) {
     opts_ = opts;
     kernel_rows_emitted_.store(0, std::memory_order_relaxed);
     memcpy_rows_emitted_.store(0, std::memory_order_relaxed);
+    synchronization_rows_emitted_.store(0, std::memory_order_relaxed);
     memory_activity_rows_emitted_.store(0, std::memory_order_relaxed);
     trace_records_dropped_.store(0, std::memory_order_relaxed);
     trace_records_queue_dropped_.store(0, std::memory_order_relaxed);
@@ -133,6 +161,7 @@ void RocprofilerBackend::initialize(const MonitorOptions& opts) {
         capture_capabilities_session_id_.clear();
         capability_kernel_rows_baseline_ = 0;
         capability_memcpy_rows_baseline_ = 0;
+        capability_synchronization_rows_baseline_ = 0;
         capability_memory_activity_rows_baseline_ = 0;
         capability_pm_sample_rows_baseline_ = 0;
         capability_dropped_records_baseline_ = 0;
@@ -158,6 +187,18 @@ bool RocprofilerBackend::configureRocprofiler(const MonitorOptions& opts,
                                               std::string* reason) {
     (void) opts;
     if (!IsAvailable(reason)) return false;
+    // ROCprofiler timestamps are not Unix timestamps. Bracket a clock sample
+    // with our epoch clock and use the midpoint to minimize calibration skew.
+    // Keep this mapping stable for the lifetime of this capture, including
+    // records delivered after a context stop.
+    rocprofiler_timestamp_t profiler_ns = 0;
+    const int64_t before_ns = detail::GetTimestampNs();
+    const auto status = rocprofiler_get_timestamp(&profiler_ns);
+    const int64_t after_ns = detail::GetTimestampNs();
+    if (!CheckStatus(status, "rocprofiler_get_timestamp", reason)) return false;
+    trace_epoch_offset_ns_ = before_ns + (after_ns - before_ns) / 2
+                             - static_cast<int64_t>(profiler_ns);
+
     if (!registerTool(reason)) return false;
     return true;
 }
@@ -168,6 +209,7 @@ void RocprofilerBackend::resetToolState() {
     client_handle_ = 0;
     client_finalize_ = nullptr;
     tool_registered_.store(false);
+    synchronization_configured_.store(false);
     memory_activity_configured_.store(false);
     active_.store(false);
     start_requested_.store(false);
@@ -175,16 +217,23 @@ void RocprofilerBackend::resetToolState() {
     deferred_start_logged_.store(false);
     start_failure_logged_.store(false);
     {
-        std::lock_guard<std::mutex> lock(kernel_meta_mutex_);
+        std::lock_guard lock(kernel_meta_mutex_);
         kernel_metadata_.clear();
     }
     {
-        std::lock_guard<std::mutex> lock(external_scope_mutex_);
+        std::lock_guard lock(external_scope_mutex_);
         external_scope_metadata_.clear();
     }
     {
-        std::lock_guard<std::mutex> lock(memory_allocation_mutex_);
+        std::lock_guard lock(memory_allocation_mutex_);
         memory_allocations_.clear();
+    }
+    {
+        std::lock_guard lock(synchronization_handle_mutex_);
+        hip_stream_ids_.clear();
+        hip_event_ids_.clear();
+        next_hip_stream_id_ = 1;
+        next_hip_event_id_ = 1;
     }
     {
         std::lock_guard<std::mutex> lock(agent_mutex_);
@@ -316,6 +365,37 @@ int RocprofilerBackend::toolInitialize() {
                      "rocprofiler_configure_buffer_tracing_service(memory_copy)",
                      &reason)) {
         return -1;
+    }
+    if (opts_.enable_synchronization) {
+        const std::array<rocprofiler_tracing_operation_t, 7>
+            synchronization_operations = {
+                static_cast<rocprofiler_tracing_operation_t>(
+                    ROCPROFILER_HIP_RUNTIME_API_ID_hipEventSynchronize),
+                static_cast<rocprofiler_tracing_operation_t>(
+                    ROCPROFILER_HIP_RUNTIME_API_ID_hipStreamWaitEvent),
+                static_cast<rocprofiler_tracing_operation_t>(
+                    ROCPROFILER_HIP_RUNTIME_API_ID_hipStreamWaitEvent_spt),
+                static_cast<rocprofiler_tracing_operation_t>(
+                    ROCPROFILER_HIP_RUNTIME_API_ID_hipStreamSynchronize),
+                static_cast<rocprofiler_tracing_operation_t>(
+                    ROCPROFILER_HIP_RUNTIME_API_ID_hipStreamSynchronize_spt),
+                static_cast<rocprofiler_tracing_operation_t>(
+                    ROCPROFILER_HIP_RUNTIME_API_ID_hipCtxSynchronize),
+                static_cast<rocprofiler_tracing_operation_t>(
+                    ROCPROFILER_HIP_RUNTIME_API_ID_hipDeviceSynchronize),
+            };
+        const auto status = rocprofiler_configure_buffer_tracing_service(
+            context_, ROCPROFILER_BUFFER_TRACING_HIP_RUNTIME_API_EXT,
+            synchronization_operations.data(),
+            synchronization_operations.size(), buffer_);
+        if (status == ROCPROFILER_STATUS_SUCCESS) {
+            synchronization_configured_.store(true,
+                                               std::memory_order_release);
+        } else {
+            GFL_LOG_WARN(
+                "[ROCProfilerBackend] HIP synchronization tracing unavailable: ",
+                StatusToString(status));
+        }
     }
     if (opts_.enable_memory_tracking) {
         const auto status =
@@ -538,6 +618,8 @@ void RocprofilerBackend::emitCapabilities() {
         kernel_rows_emitted_.load(std::memory_order_relaxed);
     const uint64_t memcpy_rows =
         memcpy_rows_emitted_.load(std::memory_order_relaxed);
+    const uint64_t synchronization_rows =
+        synchronization_rows_emitted_.load(std::memory_order_relaxed);
     const uint64_t memory_activity_rows =
         memory_activity_rows_emitted_.load(std::memory_order_relaxed);
     const uint64_t dropped_records =
@@ -561,10 +643,15 @@ void RocprofilerBackend::emitCapabilities() {
     input.memory_activity_requested = opts_.enable_memory_tracking;
     input.memory_activity_configured =
         memory_activity_configured_.load(std::memory_order_acquire);
+    input.synchronization_requested = opts_.enable_synchronization;
+    input.synchronization_configured =
+        synchronization_configured_.load(std::memory_order_acquire);
     input.kernel_rows =
         delta(kernel_rows, capability_kernel_rows_baseline_);
     input.memcpy_rows =
         delta(memcpy_rows, capability_memcpy_rows_baseline_);
+    input.synchronization_rows = delta(
+        synchronization_rows, capability_synchronization_rows_baseline_);
     input.memory_activity_rows = delta(
         memory_activity_rows, capability_memory_activity_rows_baseline_);
     input.profiling_sample_rows =
@@ -588,6 +675,7 @@ void RocprofilerBackend::emitCapabilities() {
 
     capability_kernel_rows_baseline_ = kernel_rows;
     capability_memcpy_rows_baseline_ = memcpy_rows;
+    capability_synchronization_rows_baseline_ = synchronization_rows;
     capability_memory_activity_rows_baseline_ = memory_activity_rows;
     capability_pm_sample_rows_baseline_ = pm_sample_rows;
     capability_dropped_records_baseline_ = dropped_records;
@@ -794,6 +882,13 @@ void RocprofilerBackend::bufferTracingShim(rocprofiler_context_id_t,
                 backend->handleMemoryCopy(*record);
                 break;
             }
+            case ROCPROFILER_BUFFER_TRACING_HIP_RUNTIME_API_EXT: {
+                const auto* record = static_cast<
+                    const rocprofiler_buffer_tracing_hip_api_ext_record_t*>(
+                    header->payload);
+                backend->handleSynchronization(*record);
+                break;
+            }
             case ROCPROFILER_BUFFER_TRACING_MEMORY_ALLOCATION: {
                 const auto* record = static_cast<
                     const rocprofiler_buffer_tracing_memory_allocation_record_t*>(
@@ -989,7 +1084,8 @@ void RocprofilerBackend::handleKernelDispatch(
     out.type = TraceType::KERNEL;
     out.device_id = *device_id;
     out.stream = static_cast<StreamHandle>(info.queue_id.handle);
-    out.cpu_start_ns = static_cast<int64_t>(start_timestamp);
+    out.cpu_start_ns = trace_epoch_offset_ns_ +
+                       static_cast<int64_t>(start_timestamp);
     out.duration_ns =
         static_cast<int64_t>(end_timestamp >= start_timestamp ? end_timestamp - start_timestamp
                                                               : 0);
@@ -1139,7 +1235,8 @@ void RocprofilerBackend::handleMemoryCopy(
     ActivityRecord out{};
     out.type = TraceType::MEMCPY;
     out.device_id = device_id.value_or(0);
-    out.cpu_start_ns = static_cast<int64_t>(data.start_timestamp);
+    out.cpu_start_ns = trace_epoch_offset_ns_ +
+                       static_cast<int64_t>(data.start_timestamp);
     out.duration_ns = static_cast<int64_t>(
         data.end_timestamp >= data.start_timestamp ? data.end_timestamp - data.start_timestamp
                                                    : 0);
@@ -1166,6 +1263,99 @@ void RocprofilerBackend::handleMemoryCopy(
 
     if (g_monitorBuffer.Push(out)) {
         memcpy_rows_emitted_.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        trace_records_queue_dropped_.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+uint32_t RocprofilerBackend::internHipStreamHandle(const uint64_t handle) {
+    if (handle == 0) return 0;
+    std::lock_guard<std::mutex> lock(synchronization_handle_mutex_);
+    const auto [itr, inserted] = hip_stream_ids_.emplace(handle, 0);
+    if (inserted) itr->second = next_hip_stream_id_++;
+    return itr->second;
+}
+
+uint32_t RocprofilerBackend::internHipEventHandle(const uint64_t handle) {
+    if (handle == 0) return 0;
+    std::lock_guard<std::mutex> lock(synchronization_handle_mutex_);
+    const auto [itr, inserted] = hip_event_ids_.emplace(handle, 0);
+    if (inserted) itr->second = next_hip_event_id_++;
+    return itr->second;
+}
+
+void RocprofilerBackend::handleSynchronization(
+    const rocprofiler_buffer_tracing_hip_api_ext_record_t& data) {
+    const auto operation = ClassifySynchronizationOperation(data.operation);
+    if (!operation.has_value()) return;
+
+    uint64_t stream_handle = 0;
+    uint64_t event_handle = 0;
+    switch (data.operation) {
+        case static_cast<rocprofiler_tracing_operation_t>(
+            ROCPROFILER_HIP_RUNTIME_API_ID_hipEventSynchronize):
+            event_handle = reinterpret_cast<uintptr_t>(
+                data.args.hipEventSynchronize.event);
+            break;
+        case static_cast<rocprofiler_tracing_operation_t>(
+            ROCPROFILER_HIP_RUNTIME_API_ID_hipStreamWaitEvent):
+            stream_handle = reinterpret_cast<uintptr_t>(
+                data.args.hipStreamWaitEvent.stream);
+            event_handle = reinterpret_cast<uintptr_t>(
+                data.args.hipStreamWaitEvent.event);
+            break;
+        case static_cast<rocprofiler_tracing_operation_t>(
+            ROCPROFILER_HIP_RUNTIME_API_ID_hipStreamWaitEvent_spt):
+            stream_handle = reinterpret_cast<uintptr_t>(
+                data.args.hipStreamWaitEvent_spt.stream);
+            event_handle = reinterpret_cast<uintptr_t>(
+                data.args.hipStreamWaitEvent_spt.event);
+            break;
+        case static_cast<rocprofiler_tracing_operation_t>(
+            ROCPROFILER_HIP_RUNTIME_API_ID_hipStreamSynchronize):
+            stream_handle = reinterpret_cast<uintptr_t>(
+                data.args.hipStreamSynchronize.stream);
+            break;
+        case static_cast<rocprofiler_tracing_operation_t>(
+            ROCPROFILER_HIP_RUNTIME_API_ID_hipStreamSynchronize_spt):
+            stream_handle = reinterpret_cast<uintptr_t>(
+                data.args.hipStreamSynchronize_spt.stream);
+            break;
+        default:
+            break;
+    }
+
+    ActivityRecord out{};
+    out.type = TraceType::SYNCHRONIZATION;
+    out.cpu_start_ns = trace_epoch_offset_ns_ +
+                       static_cast<int64_t>(data.start_timestamp);
+    out.duration_ns = static_cast<int64_t>(
+        data.end_timestamp >= data.start_timestamp
+            ? data.end_timestamp - data.start_timestamp
+            : 0);
+    out.api_start_ns = out.cpu_start_ns;
+    out.api_exit_ns = out.cpu_start_ns + out.duration_ns;
+    out.sync_type = ResolveAmdSynchronizationType(*operation);
+    out.stream = internHipStreamHandle(stream_handle);
+    out.sync_event_id = internHipEventHandle(event_handle);
+    out.context_id = 0;
+    out.corr_id = TruncateCorrelationId(data.correlation_id.internal);
+
+    if (data.correlation_id.external.value != 0) {
+        std::lock_guard<std::mutex> lock(external_scope_mutex_);
+        if (auto itr = external_scope_metadata_.find(
+                data.correlation_id.external.value);
+            itr != external_scope_metadata_.end() &&
+            !itr->second.user_scope.empty()) {
+            std::snprintf(out.user_scope, sizeof(out.user_scope), "%s",
+                          itr->second.user_scope.c_str());
+            out.scope_depth = itr->second.scope_depth;
+        }
+    }
+
+    if (g_monitorBuffer.Push(out)) {
+        synchronization_rows_emitted_.fetch_add(1,
+                                                std::memory_order_relaxed);
     } else {
         trace_records_queue_dropped_.fetch_add(1, std::memory_order_relaxed);
     }
@@ -1222,7 +1412,8 @@ void RocprofilerBackend::handleMemoryAllocation(
     ActivityRecord out{};
     out.type = TraceType::MEMORY_ALLOC;
     out.device_id = metadata.device_id;
-    out.cpu_start_ns = static_cast<int64_t>(data.start_timestamp);
+    out.cpu_start_ns = trace_epoch_offset_ns_ +
+                       static_cast<int64_t>(data.start_timestamp);
     out.duration_ns = static_cast<int64_t>(
         data.end_timestamp >= data.start_timestamp
             ? data.end_timestamp - data.start_timestamp

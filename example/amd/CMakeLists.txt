@@ -50,7 +50,8 @@ set(AMD_EXAMPLE_SOURCES
   gpufl_scope_demo.cpp
   memory_allocation_rows.cpp
   pm_sampling_sample_rows.cpp
-  vector_add_benchmark.cpp
+  synchronization_rows.cpp
+  vector_add_demo.cpp
 )
 
 set_source_files_properties(
@@ -62,18 +63,21 @@ hip_add_executable(amd_check_device check_device.cpp)
 hip_add_executable(amd_gpufl_scope_demo gpufl_scope_demo.cpp)
 hip_add_executable(amd_memory_allocation_rows memory_allocation_rows.cpp)
 hip_add_executable(amd_pm_sampling_sample_rows pm_sampling_sample_rows.cpp)
-hip_add_executable(amd_vector_add_benchmark vector_add_benchmark.cpp)
+hip_add_executable(amd_synchronization_rows synchronization_rows.cpp)
+hip_add_executable(amd_vector_add_demo vector_add_demo.cpp)
 
 if(TARGET hip::host)
   target_link_libraries(amd_check_device PRIVATE hip::host)
   target_link_libraries(amd_gpufl_scope_demo PRIVATE hip::host)
   target_link_libraries(amd_memory_allocation_rows PRIVATE hip::host)
   target_link_libraries(amd_pm_sampling_sample_rows PRIVATE hip::host)
-  target_link_libraries(amd_vector_add_benchmark PRIVATE hip::host)
+  target_link_libraries(amd_synchronization_rows PRIVATE hip::host)
+  target_link_libraries(amd_vector_add_demo PRIVATE hip::host)
 endif()
 
 target_link_libraries(amd_check_device PRIVATE gpufl::gpufl)
 target_link_libraries(amd_gpufl_scope_demo PRIVATE gpufl::gpufl)
 target_link_libraries(amd_memory_allocation_rows PRIVATE gpufl::gpufl)
 target_link_libraries(amd_pm_sampling_sample_rows PRIVATE gpufl::gpufl)
-target_link_libraries(amd_vector_add_benchmark PRIVATE gpufl::gpufl)
+target_link_libraries(amd_synchronization_rows PRIVATE gpufl::gpufl)
+target_link_libraries(amd_vector_add_demo PRIVATE gpufl::gpufl)

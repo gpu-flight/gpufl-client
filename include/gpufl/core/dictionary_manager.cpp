@@ -874,7 +874,8 @@ void DictionaryManager::flushDisassembly(Logger& logger,
                     }
                     poss << "]}";
                     if (!pfirst) {
-                        logger.write(DictLine{poss.str()});
+                        // Static mappings are data, not dictionaries: emit only once.
+                        logger.write(SassLine{poss.str()});
                     }
                 }
             }

@@ -880,6 +880,10 @@ uint64_t Monitor::PmSampleRowsSeen() {
     return g_state.batches.pmSampleRowsSeen();
 }
 
+uint64_t Monitor::SynchronizationRowsSeen() {
+    return g_state.batches.synchronizationRowsSeen();
+}
+
 uint64_t Monitor::MemoryAllocRowsSeen() {
     return g_state.batches.memoryAllocRowsSeen();
 }

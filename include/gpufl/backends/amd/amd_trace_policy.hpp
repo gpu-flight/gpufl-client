@@ -43,4 +43,17 @@ std::optional<uint8_t> NormalizeAmdMemoryAllocationOperation(
 // classified as DEVICE (3) while CPU allocations remain UNKNOWN (0).
 uint8_t ResolveAmdMemoryAllocationKind(const AmdTraceEndpoint& agent);
 
+// ROCprofiler identifies synchronization through HIP runtime API operations.
+// Keep native operation ids out of the portable policy layer and map the
+// classified operation to GPUFlight's CUPTI-compatible wire values here.
+enum class AmdSynchronizationOperation {
+    EventSynchronize,
+    StreamWaitEvent,
+    StreamSynchronize,
+    ContextSynchronize,
+};
+
+uint8_t ResolveAmdSynchronizationType(
+    AmdSynchronizationOperation operation);
+
 }  // namespace gpufl::amd

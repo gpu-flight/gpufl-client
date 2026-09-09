@@ -67,3 +67,19 @@ TEST(AmdTracePolicy, MemoryAllocationKindIsTruthfulAcrossAgents) {
     EXPECT_EQ(gpufl::amd::ResolveAmdMemoryAllocationKind(Cpu()), 0u);
     EXPECT_EQ(gpufl::amd::ResolveAmdMemoryAllocationKind({}), 0u);
 }
+
+TEST(AmdTracePolicy, SynchronizationOperationsUsePortableWireValues) {
+    using Operation = gpufl::amd::AmdSynchronizationOperation;
+    EXPECT_EQ(gpufl::amd::ResolveAmdSynchronizationType(
+                  Operation::EventSynchronize),
+              1u);
+    EXPECT_EQ(gpufl::amd::ResolveAmdSynchronizationType(
+                  Operation::StreamWaitEvent),
+              2u);
+    EXPECT_EQ(gpufl::amd::ResolveAmdSynchronizationType(
+                  Operation::StreamSynchronize),
+              3u);
+    EXPECT_EQ(gpufl::amd::ResolveAmdSynchronizationType(
+                  Operation::ContextSynchronize),
+              4u);
+}

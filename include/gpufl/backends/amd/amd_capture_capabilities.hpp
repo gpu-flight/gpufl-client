@@ -12,10 +12,13 @@ struct AmdCaptureCapabilityInput {
     int64_t ts_ns = 0;
     AmdResolvedProfilingPlan plan;
     bool trace_configured = false;
+    bool synchronization_requested = false;
+    bool synchronization_configured = false;
     bool memory_activity_requested = false;
     bool memory_activity_configured = false;
     uint64_t kernel_rows = 0;
     uint64_t memcpy_rows = 0;
+    uint64_t synchronization_rows = 0;
     uint64_t memory_activity_rows = 0;
     uint64_t profiling_sample_rows = 0;
     uint64_t pm_sample_rows = 0;

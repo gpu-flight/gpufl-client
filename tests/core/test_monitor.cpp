@@ -523,3 +523,21 @@ TEST(MemoryAllocationBatchTest, CountsAcceptedRowsAndResets) {
     manager.reset();
     EXPECT_EQ(manager.memoryAllocRowsSeen(), 0u);
 }
+
+TEST(SynchronizationBatchTest, CountsAcceptedRowsAndResets) {
+    gpufl::detail::MonitorBatchManager manager;
+    manager.reset();
+
+    EXPECT_EQ(manager.synchronizationRowsSeen(), 0u);
+    gpufl::SynchronizationEventBatchRow row{};
+    row.start_ns = 100;
+    manager.pushSynchronization(row);
+    EXPECT_EQ(manager.synchronizationRowsSeen(), 1u);
+
+    row.start_ns = 200;
+    manager.pushSynchronization(row);
+    EXPECT_EQ(manager.synchronizationRowsSeen(), 2u);
+
+    manager.reset();
+    EXPECT_EQ(manager.synchronizationRowsSeen(), 0u);
+}
