@@ -27,6 +27,7 @@ class SassMetricsEngine final : public IProfilingEngine {
     void onScopeStart(const char* name) override;
     void onScopeStop(const char* name) override;
     void flushBeforeCudaTeardown(const char* reason) override;
+    void beforeModuleUnload() override;
 
     bool isEnabled() const { return profiler_initialized_ && config_set_ && !insufficient_privileges_; }
 
@@ -83,6 +84,9 @@ class SassMetricsEngine final : public IProfilingEngine {
     std::vector<std::string> skipped_metrics_;
     bool enabled_ = false;
     std::atomic<bool> produced_data_{false};
+    // Module-unload drains arrive on app threads; never let one overlap
+    // another (or the scope-stop drain).
+    std::atomic<bool> module_unload_draining_{false};
     bool config_set_ = false;
     bool insufficient_privileges_ = false;
     // True after cuptiProfilerInitialize() returned CUPTI_SUCCESS in

@@ -1055,6 +1055,16 @@ void CuptiBackend::FlushOnContextDestroy() {
     context_destroy_flushing_.store(false, std::memory_order_release);
 }
 
+void CuptiBackend::FlushOnModuleUnload() {
+    if (!initialized_ || !active_.load(std::memory_order_relaxed)) return;
+    if (!engine_ || !IsSassProfilerMode()) return;
+    // Fires from the cuModuleUnload / cuLibraryUnload API-enter callback on
+    // the app thread; the module is still fully alive, so the engine can read
+    // the patched-instruction records that would be dropped with it. Only the
+    // SASS-capable engines keep per-module data; the others ignore the hook.
+    engine_->beforeModuleUnload();
+}
+
 void CuptiBackend::FlushActivityNow() {
     if (!initialized_ || !active_.load(std::memory_order_relaxed)) return;
     // Only the Windows-injection Trace case needs this (same gate as the

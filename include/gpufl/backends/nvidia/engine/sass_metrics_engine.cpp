@@ -388,6 +388,40 @@ void SassMetricsEngine::flushBeforeCudaTeardown(const char* reason) {
         "teardown, after cudaDeviceSynchronize().");
 }
 
+void SassMetricsEngine::beforeModuleUnload() {
+    if (!enabled_ || !ctx_.cuda_ctx) return;
+    bool expected = false;
+    if (!module_unload_draining_.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel)) {
+        return;
+    }
+    // Runs at the cuModuleUnload / cuLibraryUnload API-enter on the app
+    // thread, while the module is fully alive; the MODULE_UNLOAD_STARTING
+    // resource callback is too late (CUPTI already reports zero records
+    // there). CUPTI materializes the patched-instruction records only after
+    // the context has synchronized and its activity has been processed - the
+    // scope-stop drain gets that from cudaDeviceSynchronize(). Do the same
+    // here through the Driver API (never re-enter cudart from a callback) and
+    // a forced activity flush, as FlushOnContextDestroy does. Only drain what
+    // is pending: unloading a module that never launched a patched kernel is
+    // not the "armed but 0 patched" condition and must not log it.
+    const CUresult syncRes = cuCtxSynchronize();
+    const CUptiResult flushRes = cuptiActivityFlushAll(1);
+    CUpti_SassMetricsGetDataProperties_Params props = {
+        CUpti_SassMetricsGetDataProperties_Params_STRUCT_SIZE};
+    props.ctx = ctx_.cuda_ctx;
+    const CUptiResult propRes = cuptiSassMetricsGetDataProperties(&props);
+    GFL_LOG_DEBUG("[SassMetricsEngine] before module unload: sync rc=",
+                  static_cast<int>(syncRes), " activity flush rc=",
+                  static_cast<int>(flushRes), " GetDataProperties rc=",
+                  static_cast<int>(propRes), " patched records=",
+                  props.numOfPatchedInstructionRecords);
+    if (propRes == CUPTI_SUCCESS && props.numOfPatchedInstructionRecords > 0) {
+        StopAndCollectSassMetrics_();
+    }
+    module_unload_draining_.store(false, std::memory_order_release);
+}
+
 // ---- Private helpers -------------------------------------------------------
 
 void SassMetricsEngine::ConfigureSassMetrics_() {

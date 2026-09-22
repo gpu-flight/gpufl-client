@@ -23,6 +23,11 @@ CudaCleanupHandler::requiredCallbacks() const {
         {CUPTI_CB_DOMAIN_DRIVER_API, CUPTI_DRIVER_TRACE_CBID_cuMemFreeHost},
         {CUPTI_CB_DOMAIN_DRIVER_API, CUPTI_DRIVER_TRACE_CBID_cuCtxDestroy},
         {CUPTI_CB_DOMAIN_DRIVER_API, CUPTI_DRIVER_TRACE_CBID_cuCtxDestroy_v2},
+        // Module unloads: SASS metrics records live with the module and CUPTI
+        // has already dropped them by the MODULE_UNLOAD_STARTING resource
+        // callback, so the engine drains at API-enter (see FlushOnModuleUnload).
+        {CUPTI_CB_DOMAIN_DRIVER_API, CUPTI_DRIVER_TRACE_CBID_cuModuleUnload},
+        {CUPTI_CB_DOMAIN_DRIVER_API, CUPTI_DRIVER_TRACE_CBID_cuLibraryUnload},
 #if defined(CUPTI_DRIVER_TRACE_CBID_cuMemFreeAsync)
         {CUPTI_CB_DOMAIN_DRIVER_API, CUPTI_DRIVER_TRACE_CBID_cuMemFreeAsync},
 #endif
@@ -65,6 +70,8 @@ const char* CudaCleanupHandler::CleanupReason(CUpti_CallbackDomain domain,
         case CUPTI_DRIVER_TRACE_CBID_cuMemFreeHost: return "cuMemFreeHost";
         case CUPTI_DRIVER_TRACE_CBID_cuCtxDestroy: return "cuCtxDestroy";
         case CUPTI_DRIVER_TRACE_CBID_cuCtxDestroy_v2: return "cuCtxDestroy_v2";
+        case CUPTI_DRIVER_TRACE_CBID_cuModuleUnload: return "cuModuleUnload";
+        case CUPTI_DRIVER_TRACE_CBID_cuLibraryUnload: return "cuLibraryUnload";
 #if defined(CUPTI_DRIVER_TRACE_CBID_cuMemFreeAsync)
         case CUPTI_DRIVER_TRACE_CBID_cuMemFreeAsync: return "cuMemFreeAsync";
 #endif
@@ -81,6 +88,16 @@ void CudaCleanupHandler::handle(CUpti_CallbackDomain domain,
 
     auto* cbInfo = static_cast<const CUpti_CallbackData*>(cbdata);
     if (!cbInfo || cbInfo->callbackSite != CUPTI_API_ENTER) return;
+
+    // A module unload is not a teardown boundary: the module's SASS metrics
+    // records are simply about to disappear, inside or outside a scope, so
+    // the engine reads what is pending and keeps profiling.
+    if (domain == CUPTI_CB_DOMAIN_DRIVER_API &&
+        (cbid == CUPTI_DRIVER_TRACE_CBID_cuModuleUnload ||
+         cbid == CUPTI_DRIVER_TRACE_CBID_cuLibraryUnload)) {
+        backend_->FlushOnModuleUnload();
+        return;
+    }
 
     // Only use cleanup APIs as an automatic final-flush boundary outside a
     // measured scope. Frees inside an active scope are part of user work and
