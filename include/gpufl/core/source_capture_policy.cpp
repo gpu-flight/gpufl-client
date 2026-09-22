@@ -119,9 +119,12 @@ std::vector<fs::path> excludedSystemRoots() {
 }
 
 bool hasAllowedExtension(const fs::path& path) {
-    static constexpr std::array<const char*, 13> extensions = {
+    // C/C++/CUDA translation units and headers, plus Rust sources: cuda-oxide
+    // device line tables name the kernel's .rs files, and the profiler's
+    // source correlation resolves them the same way it resolves .cu files.
+    static constexpr std::array<const char*, 14> extensions = {
         ".c",   ".cc",  ".cpp", ".cxx", ".cu",  ".cuh", ".h",
-        ".hh",  ".hpp", ".hxx", ".inc", ".inl", ".tpp"};
+        ".hh",  ".hpp", ".hxx", ".inc", ".inl", ".tpp", ".rs"};
     const std::string extension = lowerAscii(path.extension().string());
     return std::any_of(extensions.begin(), extensions.end(),
                        [&](const char* allowed) {
