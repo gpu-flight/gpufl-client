@@ -203,6 +203,9 @@ class CuptiBackend : public IMonitorBackend {
     // kernel records on Windows-exit are instead recovered by Monitor::Shutdown's
     // post-join drain (see monitor.cpp). Invoked synchronously by ResourceHandler.
     void FlushOnContextDestroy();
+    // cuModuleUnload / cuLibraryUnload API-enter: let the active engine drain
+    // per-module data (SASS metrics records) while the module is still loaded.
+    void FlushOnModuleUnload();
 
     // Drain CUPTI activity from a synchronize API_EXIT (kernels done, context
     // alive). On Windows injection the at-exit flush is skipped and the

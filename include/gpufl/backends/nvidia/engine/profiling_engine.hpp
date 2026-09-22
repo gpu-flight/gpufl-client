@@ -75,6 +75,18 @@ class IProfilingEngine {
      * cudaDeviceReset can invalidate state needed by a profiling engine.
      */
     virtual void flushBeforeCudaTeardown(const char* /*reason*/) {}
+    /**
+     * @brief The app is about to unload a module (cuModuleUnload /
+     * cuLibraryUnload API-enter, on the app thread, module still fully
+     * alive). Collect anything that lives with the module: SASS metrics
+     * patched-instruction records are dropped with it, so an engine that only
+     * drains at scope stop or shutdown reports nothing for a program that
+     * unloads its modules before exit - which Driver-API hosts with RAII
+     * module handles (cuda-oxide, cudarc) do by default. The resource
+     * callback (MODULE_UNLOAD_STARTING) is too late: CUPTI already reports
+     * zero records there.
+     */
+    virtual void beforeModuleUnload() {}
 
     /**
      * @brief Cheap per-kernel-launch tick, called from the launch API_ENTER

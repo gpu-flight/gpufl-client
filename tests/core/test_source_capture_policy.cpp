@@ -95,6 +95,26 @@ TEST_F(SourceCapturePolicyTest, RejectsPathsOutsideTheApprovedRoot) {
     fs::remove(outside, ec);
 }
 
+TEST_F(SourceCapturePolicyTest, CapturesRustSourceNamedByDeviceLineTable) {
+    // cuda-oxide kernels: the cubin's line table names src/main.rs and the
+    // profiler correlation hands that path here, like a .cu file.
+    const fs::path source =
+        write("src/main.rs", "#[kernel]\npub fn vecadd() {}\n");
+    gpufl::detail::SourceCapturePolicy policy;
+    policy.configure(true, settings());
+    const auto result = policy.capture(
+        source.string(), 1, "profiler_source_correlation");
+    EXPECT_EQ(result.record.disposition, SourceCaptureDisposition::Captured);
+    EXPECT_EQ(result.record.logical_path, "src/main.rs");
+    EXPECT_EQ(result.lines,
+              (std::vector<std::string>{"#[kernel]", "pub fn vecadd() {}"}));
+    // Cargo manifests and lockfiles beside the sources are not source.
+    const fs::path manifest = write("Cargo.toml", "[package]\n");
+    EXPECT_EQ(policy.capture(manifest.string(), 2, "profiler_source_correlation")
+                  .record.disposition,
+              SourceCaptureDisposition::UnsupportedExtension);
+}
+
 TEST_F(SourceCapturePolicyTest, RejectsUnsupportedAndNonTextFiles) {
     const fs::path unsupported = write("src/notes.txt", "not source\n");
     const fs::path binary = write("src/binary.cu", std::string("a\0b", 3));

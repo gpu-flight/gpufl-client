@@ -77,6 +77,12 @@ class PcSamplingWithSassEngine final : public IProfilingEngine {
         if (pm_)   pm_->onLaunchTick();
     }
 
+    /** Module unload: only the SASS sub-engine keeps per-module records
+     *  (patched-instruction data), so it alone drains here. */
+    void beforeModuleUnload() override {
+        if (sass_ok_ && sass_) sass_->beforeModuleUnload();
+    }
+
     /** Operational if EITHER path armed: PC sampling running, or SASS
      *  enabled. On Blackwell, start() resets pc_ once SASS wins, so we must
      *  also accept sass_ok_ - otherwise an active SASS session would
