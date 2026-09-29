@@ -1550,22 +1550,23 @@ void TextReport::writeProfileAnalysis(std::ostringstream& out) const {
         return;
     }
 
+    // CUPTI counts each sample under its warp state and, when the scheduler
+    // issued nothing that cycle, again under the state's _not_issued twin.
+    const std::string notIssued = "_not_issued";
+    auto isNotIssued = [&notIssued](const std::string& raw) {
+        return raw.size() > notIssued.size() &&
+               raw.compare(raw.size() - notIssued.size(), notIssued.size(),
+                           notIssued) == 0;
+    };
+
     // Convert a raw CUPTI stall metric name to a human-readable short name.
-    // e.g. "smsp__pcsamp_warps_issue_stalled_wait_not_issued" → "Wait (not issued)"
-    auto shortenStallName = [](const std::string& raw) -> std::string {
+    // e.g. "smsp__pcsamp_warps_issue_stalled_wait_not_issued" → "Wait"
+    auto shortenStallName = [&](const std::string& raw) -> std::string {
         const std::string prefix = "smsp__pcsamp_warps_issue_stalled_";
         std::string s = raw;
         if (s.size() > prefix.size() && s.substr(0, prefix.size()) == prefix)
             s = s.substr(prefix.size());
-
-        // Handle "_not_issued" suffix
-        const std::string notIssued = "_not_issued";
-        bool isNotIssued = false;
-        if (s.size() > notIssued.size() &&
-            s.substr(s.size() - notIssued.size()) == notIssued) {
-            s = s.substr(0, s.size() - notIssued.size());
-            isNotIssued = true;
-        }
+        if (isNotIssued(s)) s.resize(s.size() - notIssued.size());
 
         // Replace underscores with spaces and capitalize first letter of each word
         for (size_t i = 0; i < s.size(); ++i) {
@@ -1573,8 +1574,6 @@ void TextReport::writeProfileAnalysis(std::ostringstream& out) const {
             if (i == 0 || (i > 0 && s[i-1] == ' '))
                 s[i] = static_cast<char>(std::toupper(static_cast<unsigned char>(s[i])));
         }
-
-        if (isNotIssued) s += " (idle)";
         return s;
     };
 
@@ -1601,8 +1600,14 @@ void TextReport::writeProfileAnalysis(std::ostringstream& out) const {
 
         if (ps.stall_reason > 1) {
             std::string reason = resolveStallDisplay(ps);
-            fp.stalls[reason] += ps.metric_value;
-            fp.totalStalls += ps.metric_value;
+            if (isNotIssued(ps.reason_name.empty() ? ps.metric_name
+                                                   : ps.reason_name)) {
+                fp.notIssuedStalls[reason] += ps.metric_value;
+                fp.totalNotIssued += ps.metric_value;
+            } else {
+                fp.stalls[reason] += ps.metric_value;
+                fp.totalStalls += ps.metric_value;
+            }
         }
         if (ps.metric_name == "smsp__sass_inst_executed")
             fp.warpInsts += ps.metric_value;
@@ -1627,6 +1632,18 @@ void TextReport::writeProfileAnalysis(std::ostringstream& out) const {
     if (static_cast<int>(ranked.size()) > top_n_)
         ranked.resize(top_n_);
 
+    auto writeStallShares = [&out](const std::map<std::string, uint64_t>& counts,
+                                   uint64_t total) {
+        auto stallRanked = sortedTopN(counts, 0, [](uint64_t v) { return static_cast<double>(v); });
+        for (const auto& [reason, count] : stallRanked) {
+            double pct = total > 0 ? count * 100.0 / total : 0;
+            out << "      " << std::left << std::setw(28) << truncate(reason, 26)
+                << std::right << std::setw(8) << fmtCount(count)
+                << std::setw(7) << std::fixed << std::setprecision(1) << pct << "%  "
+                << makeBar(pct) << "\n";
+        }
+    };
+
     // ── Write per-function analysis ─────────────────────────────────────────
     for (const auto& [fn, fp] : ranked) {
         std::string shortName = shortenKernelName(fn);
@@ -1637,15 +1654,13 @@ void TextReport::writeProfileAnalysis(std::ostringstream& out) const {
 
         // Stall distribution
         if (!fp->stalls.empty()) {
-            auto stallRanked = sortedTopN(fp->stalls, 0, [](uint64_t v) { return static_cast<double>(v); });
             out << "    Stalls:\n";
-            for (const auto& [reason, count] : stallRanked) {
-                double pct = fp->totalStalls > 0 ? count * 100.0 / fp->totalStalls : 0;
-                out << "      " << std::left << std::setw(28) << truncate(reason, 26)
-                    << std::right << std::setw(8) << fmtCount(count)
-                    << std::setw(7) << std::fixed << std::setprecision(1) << pct << "%  "
-                    << makeBar(pct) << "\n";
-            }
+            writeStallShares(fp->stalls, fp->totalStalls);
+        }
+        if (!fp->notIssuedStalls.empty()) {
+            out << "    Not issued (" << fmtCount(fp->totalNotIssued)
+                << " samples on cycles with no instruction issued):\n";
+            writeStallShares(fp->notIssuedStalls, fp->totalNotIssued);
         }
 
         // Instruction analysis
