@@ -6,8 +6,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <chrono>
+#include <map>
+#include <set>
 #include <thread>
 #include <string>
+#include <utility>
 #include <vector>
 #include <cupti_pcsampling.h>
 
@@ -73,12 +76,14 @@ struct PCSamplingBuffers {
     CUpti_PCSamplingPCData* pcRecords;
 };
 
-struct PcSampleRecord {
-    std::string functionName;
-    uint64_t pcOffset;
-    uint64_t samples;
-    uint32_t correlationId;
-};
+void freePCSamplingBuffers(PCSamplingBuffers* buffers) {
+    for (size_t i = 0; i < buffers->data->collectNumPcs; ++i) {
+        std::free(buffers->pcRecords[i].stallReason);
+    }
+    std::free(buffers->pcRecords);
+    std::free(buffers->data);
+    std::free(buffers);
+}
 
 PCSamplingBuffers* configurePCSampling(CUcontext ctx) {
     const size_t kMaxPcs = 65536;
@@ -121,7 +126,11 @@ int main() {
 
     CUcontext ctx = ensureContext();
 
+    // `buffers` becomes the SAMPLING_DATA_BUFFER. In KERNEL_SERIALIZED mode
+    // CUPTI moves every finished kernel's records into it by itself, so
+    // GetData needs a buffer of its own or it overwrites them.
     PCSamplingBuffers* buffers = configurePCSampling(ctx);
+    PCSamplingBuffers* readBuffers = configurePCSampling(ctx);
 
     printf("Enabling PC sampling...\n"); fflush(stdout);
     CUpti_PCSamplingEnableParams enableParams = {};
@@ -195,68 +204,60 @@ int main() {
     CUpti_PCSamplingGetDataParams getDataParams = {};
     getDataParams.size = sizeof(CUpti_PCSamplingGetDataParams);
     getDataParams.ctx = ctx;
-    getDataParams.pcSamplingData = buffers->data;
-    checkCupti(cuptiPCSamplingGetData(&getDataParams), "cuptiPCSamplingGetData");
+    getDataParams.pcSamplingData = readBuffers->data;
+
+    // Each call moves records out of the configured buffer (one set per
+    // kernel launch), then the per-PC overflow of launches that did not fit.
+    // Done when a call returns nothing.
+    std::map<std::pair<std::string, uint64_t>, uint64_t> samplesByPc;
+    std::set<uint32_t> correlationIds;
+    size_t recordCount = 0;
+    unsigned long long totalSamples = 0;
+    for (;;) {
+        for (size_t i = 0; i < readBuffers->data->collectNumPcs; ++i) {
+            readBuffers->pcRecords[i].stallReasonCount = 128;
+        }
+        readBuffers->data->totalNumPcs = 0;
+        checkCupti(cuptiPCSamplingGetData(&getDataParams), "cuptiPCSamplingGetData");
+        const size_t pcCount = readBuffers->data->totalNumPcs;
+        if (pcCount == 0) {
+            break;
+        }
+        recordCount += pcCount;
+        totalSamples += readBuffers->data->totalSamples;
+        for (size_t i = 0; i < pcCount; ++i) {
+            // Copies: the CUPTI structs are packed, and GCC refuses to bind
+            // packed fields to references.
+            const CUpti_PCSamplingPCData& pc = readBuffers->data->pPcData[i];
+            const std::string functionName = pc.functionName ? pc.functionName : "<unknown>";
+            const uint64_t pcOffset = pc.pcOffset;
+            const uint32_t correlationId = pc.correlationId;
+            uint64_t samples = 0;
+            for (size_t j = 0; j < pc.stallReasonCount; ++j) {
+                samples += pc.stallReason[j].samples;
+            }
+            samplesByPc[{functionName, pcOffset}] += samples;
+            correlationIds.insert(correlationId);
+        }
+    }
 
     std::fprintf(stdout, "Disabling PC sampling...\n"); std::fflush(stdout);
     CUpti_PCSamplingDisableParams disableParams = {};
     disableParams.size = sizeof(CUpti_PCSamplingDisableParams);
     disableParams.ctx = ctx;
     checkCupti(cuptiPCSamplingDisable(&disableParams), "cuptiPCSamplingDisable");
-    std::fprintf(stdout, "PC sampling data: totalSamples=%llu dropped=%llu totalPCs=%zu remaining=%zu rangeId=%llu\n",
-                    static_cast<unsigned long long>(buffers->data->totalSamples),
-                    static_cast<unsigned long long>(buffers->data->droppedSamples),
-                    buffers->data->totalNumPcs,
-                    buffers->data->remainingNumPcs,
-                    static_cast<unsigned long long>(buffers->data->rangeId));
-    std::fflush(stdout);
 
-    size_t pcCount = buffers->data->totalNumPcs;
-    if (pcCount > buffers->data->collectNumPcs) {
-        pcCount = buffers->data->collectNumPcs;
-    }
-    //
-    std::vector<PcSampleRecord> records;
-    records.reserve(pcCount);
-    //
-    for (size_t i = 0; i < pcCount; ++i) {
-        const CUpti_PCSamplingPCData& pc = buffers->data->pPcData[i];
-        uint64_t samples = 0;
-        if (pc.stallReason) {
-            for (size_t j = 0; j < pc.stallReasonCount; ++j) {
-                samples += pc.stallReason[j].samples;
-            }
-        }
-        PcSampleRecord rec;
-        if (pc.functionName) {
-            rec.functionName = pc.functionName;
-        }
-        rec.pcOffset = pc.pcOffset;
-        rec.samples = samples;
-        rec.correlationId = pc.correlationId;
-        records.push_back(std::move(rec));
+    // Launches past the configured buffer share one correlation id.
+    std::fprintf(stdout, "Collected %zu PC records, %zu correlation ids (totalSamples=%llu)\n",
+                 recordCount, correlationIds.size(), totalSamples);
+    for (const auto& [pc, samples] : samplesByPc) {
+        std::fprintf(stdout, "  %s pcOffset=0x%llx samples=%llu\n", pc.first.c_str(),
+                     static_cast<unsigned long long>(pc.second),
+                     static_cast<unsigned long long>(samples));
     }
 
-     std::fprintf(stdout, "Collected %zu PC records\n", records.size());
-     for (size_t i = 0; i < records.size(); ++i) {
-         const PcSampleRecord& rec = records[i];
-         std::fprintf(stdout, "  [%zu] %s pcOffset=0x%llx samples=%llu corr=%u\n",
-                      i,
-                      rec.functionName.empty() ? "<unknown>" : rec.functionName.c_str(),
-                      static_cast<unsigned long long>(rec.pcOffset),
-                      static_cast<unsigned long long>(rec.samples),
-                      rec.correlationId);
-     }
-
-    size_t maxPcs = buffers->data->collectNumPcs;
-    for (size_t i = 0; i < maxPcs; ++i) {
-        if (buffers->pcRecords[i].stallReason) {
-            std::free(buffers->pcRecords[i].stallReason);
-        }
-    }
-    std::free(buffers->pcRecords);
-    std::free(buffers->data);
-    std::free(buffers);
+    freePCSamplingBuffers(readBuffers);
+    freePCSamplingBuffers(buffers);
 
     std::fprintf(stdout, "PC sampling stopped.\n");
     return 0;

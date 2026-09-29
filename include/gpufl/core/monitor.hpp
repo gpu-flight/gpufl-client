@@ -25,7 +25,7 @@ class SegmentDictionaryEmitter;
 /// off the ring buffer onto a direct-to-batch path (Monitor::PushProfileSamples,
 /// taken on the user thread inside onScopeStop), the only remaining
 /// producers are CUPTI callbacks: kernel activity records, memcpy
-/// activity records, NVTX markers, and PC sampling drain.  These are
+/// activity records, NVTX markers, and legacy Activity-API PC samples.  These are
 /// usually fit comfortably below this ceiling even when Windows Trace drains
 /// CUPTI activity in periodic bursts. RingBuffer::Push retains a brief
 /// spin/yield on overrun as defense in depth.
@@ -229,8 +229,8 @@ struct ProfileSampleInput {
     uint32_t device_id     = 0;
     std::string function_key;   // "function_name@source_file"
     uint32_t pc_offset     = 0;
-    std::string metric_name;    // populated for SASS samples; empty for PC sampling
-    uint64_t metric_value  = 0;
+    std::string metric_name;    // SASS metric name, or the stall-reason name for PC sampling
+    uint64_t metric_value  = 0;  // metric value (SASS) or sample count (PC sampling)
     uint32_t stall_reason  = 0;  // populated for PC sampling; 0 for SASS
     uint8_t  sample_kind   = 0;  // 0 = pc_sampling, 1 = sass_metric
     std::string source_file;
