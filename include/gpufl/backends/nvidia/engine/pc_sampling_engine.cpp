@@ -11,15 +11,19 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <map>
+#include <string>
 #include <thread>
+#include <tuple>
+#include <unordered_map>
+#include <vector>
 
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
 #include "gpufl/backends/nvidia/sampler/cupti_sass.hpp"
-#include "gpufl/core/activity_record.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/env_vars.hpp"
-#include "gpufl/core/ring_buffer.hpp"
+#include "gpufl/core/monitor.hpp"
 #include "gpufl/core/teardown_flag.hpp"
 
 #ifndef CUPTI_PC_SAMPLING_CONFIGURATION_ATTR_TYPE_SOURCE_REPORTING
@@ -41,11 +45,43 @@ bool IsInsufficientPrivilege(const CUptiResult res) {
 
 constexpr size_t kPcSamplingConfigAttrCount = 7;
 
-// Per-record stall-reason slots. Sized to the API maximum rather than the
-// device's actual stall-reason count so the records can be allocated before
-// cuptiPCSamplingEnable - see the ordering note in EnableSamplingFeatures_.
-// This is the value NVIDIA's pc_sampling sample hardcodes.
+// Per-record stall-reason slots of the configured buffer. Sized to the API
+// maximum rather than the device's actual stall-reason count so the records
+// can be allocated before cuptiPCSamplingEnable - see the ordering note in
+// EnableSamplingFeatures_. This is the value NVIDIA's pc_sampling sample
+// hardcodes.
 constexpr size_t kStallSlots = 128;
+
+// Records per buffer. For the configured buffer this is how many per-kernel
+// records CUPTI keeps; kernels past it are merged into per-PC overflow records.
+constexpr size_t kMaxPcs = 65536;
+
+// Guard for the GetData loop, which normally ends within a few calls.
+constexpr int kMaxGetDataCalls = 1024;
+
+// Rows per Monitor::PushProfileSamples call, bounding the staging vector.
+constexpr size_t kRowsPerPush = 8192;
+
+PCSamplingBuffers* AllocatePcSamplingBuffers(const size_t numPcs,
+                                             const size_t stallSlots) {
+    auto* b = new PCSamplingBuffers();
+    b->stallSlots = stallSlots;
+    b->pcRecords = static_cast<CUpti_PCSamplingPCData*>(
+        std::calloc(numPcs, sizeof(CUpti_PCSamplingPCData)));
+    for (size_t i = 0; i < numPcs; ++i) {
+        b->pcRecords[i].size = sizeof(CUpti_PCSamplingPCData);
+        b->pcRecords[i].stallReasonCount = stallSlots;
+        b->pcRecords[i].stallReason = static_cast<CUpti_PCSamplingStallReason*>(
+            std::calloc(stallSlots, sizeof(CUpti_PCSamplingStallReason)));
+    }
+    b->data = static_cast<CUpti_PCSamplingData*>(
+        std::calloc(1, sizeof(CUpti_PCSamplingData)));
+    b->data->size = sizeof(CUpti_PCSamplingData);
+    b->data->collectNumPcs = numPcs;
+    b->data->pPcData = b->pcRecords;
+    b->data->totalNumPcs = 0;
+    return b;
+}
 
 std::array<CUpti_PCSamplingConfigurationInfo, kPcSamplingConfigAttrCount>
 BuildPcSamplingConfig(const uint32_t samplingPeriod,
@@ -59,10 +95,8 @@ BuildPcSamplingConfig(const uint32_t samplingPeriod,
     };
 
     // Kernel-serialized collection plus explicit start/stop lets GPUFL own
-    // the PC sampling lifetime. Serialized mode accumulates per kernel range
-    // and nothing is readable until enough ranges pile up, which is why a
-    // session's yield tracks kernel-launch count, not wall time (measured:
-    // 876 launches over 8 s = 0 samples, 2002 over the same 8 s = 87.8M).
+    // the PC sampling lifetime. In this mode CUPTI moves each finished
+    // kernel's records into the SAMPLING_DATA_BUFFER below by itself.
     {
         CUpti_PCSamplingConfigurationInfo info = {};
         info.attributeType =
@@ -102,9 +136,6 @@ BuildPcSamplingConfig(const uint32_t samplingPeriod,
     }
 
     // Explicit start/stop is required before cuptiPCSamplingStart/Stop.
-    // Never call cuptiPCSamplingGetData while sampling is armed: it returns
-    // nothing AND discards what was buffered, so the final read comes back
-    // empty. See the collection note above StopAndCollectPcSampling_.
     {
         CUpti_PCSamplingConfigurationInfo info = {};
         info.attributeType =
@@ -113,6 +144,8 @@ BuildPcSamplingConfig(const uint32_t samplingPeriod,
             1;
         addConfig(info);
     }
+    // CUPTI writes into this buffer on its own, so GetData must use another
+    // one - see CollectPcSamplingData_.
     {
         CUpti_PCSamplingConfigurationInfo info = {};
         info.attributeType =
@@ -344,9 +377,9 @@ void PcSamplingEngine::DrainKernelsAndCollect_() {
     if (!sampling_api_started_.load()) return;
     last_kernel_drain_ns_.store(now, std::memory_order_relaxed);
 
-    // Stop sampling: required twice over. A forced activity flush returns zero
-    // kernel records while PC sampling is armed (driver 590+), and GetData
-    // while armed discards the samples. Stop/Start mid-run are privileged
+    // Stop sampling first: a forced activity flush returns zero kernel records
+    // while PC sampling is armed (driver 590+), and samples are only read with
+    // sampling stopped. Stop/Start mid-run are privileged
     // (INSUFFICIENT_PRIVILEGES under a non-elevated run) — on that error, drop
     // to the sample-only cycle, which stops too and therefore fails the same
     // way and stands itself down. Restart after the flush; it succeeds even
@@ -410,6 +443,7 @@ void PcSamplingEngine::shutdown() {
     sampling_api_blocked_.store(false);
     pc_sampling_ref_count_.store(0);
     pc_sampling_buffers_.reset();
+    pc_read_buffers_.reset();
 }
 
 void PcSamplingEngine::onScopeStart(const char* /*name*/) {
@@ -447,7 +481,7 @@ bool PcSamplingEngine::EnableSamplingFeatures_() {
         return false;
     }
 
-    // Allocate the sample buffers BEFORE enabling, and keep Enable and
+    // Allocate the configured buffer BEFORE enabling, and keep Enable and
     // SetConfigurationAttribute adjacent.
     //
     // This ordering is load-bearing, not style. Doing this allocation between
@@ -461,31 +495,13 @@ bool PcSamplingEngine::EnableSamplingFeatures_() {
     // harmless. NVIDIA's own pc_sampling sample allocates up front too.
     //
     // Stall-reason enumeration is likewise deferred to after configure; it
-    // only feeds the reason-name map. The records are sized with the API's
-    // maximum stall-reason count rather than the device's actual count, which
-    // is what the sample does and what CollectPcSamplingData_ resets to.
+    // only feeds the reason-name map and the read buffer's size. The
+    // configured records are sized with the API's maximum stall-reason count
+    // because the device's count is not known yet, which is what the sample
+    // does.
     if (!pc_sampling_buffers_) {
-        constexpr size_t kMaxPcs = 65536;
-        pc_sampling_buffers_ =
-            std::unique_ptr<PCSamplingBuffers, PCSamplingDeleter>(
-                new PCSamplingBuffers());
-        pc_sampling_buffers_->pcRecords = static_cast<CUpti_PCSamplingPCData*>(
-            std::calloc(kMaxPcs, sizeof(CUpti_PCSamplingPCData)));
-        for (size_t i = 0; i < kMaxPcs; ++i) {
-            pc_sampling_buffers_->pcRecords[i].size =
-                sizeof(CUpti_PCSamplingPCData);
-            pc_sampling_buffers_->pcRecords[i].stallReasonCount = kStallSlots;
-            pc_sampling_buffers_->pcRecords[i].stallReason =
-                static_cast<CUpti_PCSamplingStallReason*>(std::calloc(
-                    kStallSlots, sizeof(CUpti_PCSamplingStallReason)));
-        }
-        pc_sampling_buffers_->data = static_cast<CUpti_PCSamplingData*>(
-            std::calloc(1, sizeof(CUpti_PCSamplingData)));
-        pc_sampling_buffers_->data->size = sizeof(CUpti_PCSamplingData);
-        pc_sampling_buffers_->data->collectNumPcs = kMaxPcs;
-        pc_sampling_buffers_->data->pPcData = pc_sampling_buffers_->pcRecords;
-        pc_sampling_buffers_->data->totalNumPcs = 0;
-        num_stall_reasons_ = kStallSlots;
+        pc_sampling_buffers_.reset(
+            AllocatePcSamplingBuffers(kMaxPcs, kStallSlots));
     }
 
     CUpti_PCSamplingEnableParams enableParams = {};
@@ -555,8 +571,8 @@ bool PcSamplingEngine::EnableSamplingFeatures_() {
     }
 
     // Stall-reason enumeration, after configuration: it only builds the
-    // reason-name map, and keeping it out of the Enable->configure window is
-    // the point (see the ordering note above).
+    // reason-name map and sizes the read buffer, and keeping it out of the
+    // Enable->configure window is the point (see the ordering note above).
     {
         CUpti_PCSamplingGetNumStallReasonsParams numParams = {};
         numParams.size = sizeof(CUpti_PCSamplingGetNumStallReasonsParams);
@@ -587,9 +603,7 @@ bool PcSamplingEngine::EnableSamplingFeatures_() {
             cuptiPCSamplingDisable(&dp);
             return false;
         }
-        // num_stall_reasons_ stays at the allocated slot count, not this
-        // device count: CollectPcSamplingData_ uses it to restore each
-        // record's writable capacity before every GetData.
+        num_stall_reasons_ = numStallReasons;
         {
             auto* stallIndices = static_cast<uint32_t*>(
                 malloc(numStallReasons * sizeof(uint32_t)));
@@ -687,35 +701,25 @@ void PcSamplingEngine::StartPcSampling_() {
 
 void PcSamplingEngine::flushBeforeCudaTeardown(const char* reason) {
     // Reached from a CUDA cleanup CUPTI callback, where cuptiPCSamplingStop
-    // returns 999 - and without a Stop there is no way to read samples
-    // without destroying them. The engine's cycle thread owns collection.
+    // returns 999 - and samples are only read with sampling stopped. The
+    // engine's cycle thread owns collection.
     GFL_LOG_DEBUG(
         "[PC Sampling] skipping collect from CUDA cleanup callback: ",
         reason ? reason : "unknown");
 }
 
 void PcSamplingEngine::onLaunchTick() {
-    // Deliberately does not collect. This runs on the app thread inside the
-    // launch API_ENTER callback, where Stop is unavailable, and the only
-    // callback-safe alternative - an armed GetData - silently discards the
-    // session's samples. The cycle thread does the stop/collect/restart.
+    // Deliberately does not collect: this runs inside the launch API_ENTER
+    // callback, where Stop is unavailable, and samples are only read with
+    // sampling stopped. The cycle thread does the stop/collect/restart.
 }
 
-// Sample-only sessions have no mid-run collect. Both ways of reading samples
-// while the session is live are unusable, measured on driver 610.43 / CUDA
-// 13.3 with a 400-launch workload that normally finishes in seconds:
-//
-//   armed GetData          - returns nothing and discards the buffer. A run
-//                            that collected 24.5M samples when left alone
-//                            collected 0.
-//   stop -> GetData -> start every second
-//                        - also returns 0, and cripples the target: the run
-//                          had not finished after 240 s (0.2% CPU).
-//
-// So the sampler is armed once and read once, with sampling stopped, at scope
-// end (onScopeStop) or session teardown (stop/shutdown). The cost is that a
-// long process-scope run can overflow CUPTI's scratch buffer before that read;
-// droppedSamples in the collect summary makes it visible when it happens.
+// Sample-only sessions arm once and read once, with sampling stopped, at scope
+// end (onScopeStop) or session teardown (stop/shutdown). Reading late loses no
+// samples to the configured buffer's capacity - CUPTI merges kernels past it
+// into per-PC overflow records - but a long run can still overflow the hardware
+// buffer, which the collect summary reports. A mid-run stop -> GetData -> start
+// every second stalled the target (driver 610.43 / CUDA 13.3).
 
 void PcSamplingEngine::StopAndCollectPcSampling_(const bool sync_device) {
     GFL_LOG_DEBUG("[PC Sampling] StopAndCollect entry: method=",
@@ -791,32 +795,104 @@ void PcSamplingEngine::CollectPcSamplingData_() {
     if (!ctx_.cuda_ctx || !pc_sampling_buffers_ || !pc_sampling_buffers_->data) {
         return;
     }
+    // GetData moves the records CUPTI put in the configured buffer, then the
+    // per-PC overflow, into this separate buffer. Reading into the configured
+    // buffer itself would overwrite everything held there.
+    if (!pc_read_buffers_) {
+        pc_read_buffers_.reset(AllocatePcSamplingBuffers(
+            kMaxPcs, num_stall_reasons_ > 0 ? num_stall_reasons_ : kStallSlots));
+    }
+    const CUpti_PCSamplingData* const configured = pc_sampling_buffers_->data;
+    CUpti_PCSamplingData* const batch = pc_read_buffers_->data;
 
     CUpti_PCSamplingGetDataParams getDataParams = {};
     getDataParams.size = sizeof(CUpti_PCSamplingGetDataParams);
     getDataParams.ctx = ctx_.cuda_ctx;
-    getDataParams.pcSamplingData = pc_sampling_buffers_->data;
+    getDataParams.pcSamplingData = batch;
 
-    while (true) {
-        // stallReasonCount is both input (available slots) and output (slots
-        // written).  If the previous getData call wrote fewer than
-        // num_stall_reasons_ stall reasons (including 0), those entries now
-        // have a smaller capacity from CUPTI's perspective.  Reset to the
-        // original allocation size so CUPTI can always fill at least one
-        // record, preventing an infinite loop where hasMore is true but
-        // totalNumPcs=0.
-        if (num_stall_reasons_ > 0) {
-            const size_t cap = pc_sampling_buffers_->data->collectNumPcs;
-            for (size_t i = 0; i < cap; ++i)
-                pc_sampling_buffers_->pcRecords[i].stallReasonCount =
-                    num_stall_reasons_;
+    // One row per (launch, PC, stall reason): CUPTI returns a record set per
+    // launch until the configured buffer fills, then merges later launches
+    // per PC under one correlation id. Rows go straight to the profile batch
+    // because a collect can return far more of them than the monitor ring
+    // holds.
+    const int64_t collectTs = detail::GetTimestampNs();
+    uint32_t deviceId = 0;
+    bool deviceIdKnown = false;
+    std::unordered_map<uint32_t, std::string> reasonNames;
+    {
+        std::lock_guard lk(stall_reason_mu_);
+        reasonNames = stall_reason_map_;
+    }
+
+    // Source correlation depends only on the instruction, so it is resolved
+    // once per PC rather than per launch.
+    struct PcSource {
+        std::string functionKey;  // "function_name@source_file"
+        std::string sourceFile;
+        uint32_t sourceLine = 0;
+    };
+    std::map<std::tuple<uint64_t, uint32_t, uint64_t>, PcSource> sourceByPc;
+    auto resolveSource = [this](const uint64_t cubinCrc,
+                                const char* functionName,
+                                const uint64_t pcOffset) {
+        PcSource src;
+        // Grab the cubin pointer under lock, then call CUPTI outside it to
+        // avoid deadlock when CUPTI triggers a module-load callback.
+        const uint8_t* cubinData = nullptr;
+        size_t cubinSize = 0;
+        if (ctx_.cubin_mu && ctx_.cubin_by_crc) {
+            std::lock_guard lk(*ctx_.cubin_mu);
+            auto it = ctx_.cubin_by_crc->find(cubinCrc);
+            if (it != ctx_.cubin_by_crc->end()) {
+                cubinData = it->second.data.data();
+                cubinSize = it->second.data.size();
+            }
         }
+        if (cubinData && cubinSize > 0 && functionName &&
+            functionName[0] != '\0') {
+            auto [fileName, dirName, lineNumber] =
+                nvidia::CuptiSass::sampleSourceCorrelation(
+                    cubinData, cubinSize, functionName, pcOffset);
+            if (!fileName.empty()) {
+                src.sourceFile =
+                    dirName.empty() ? fileName : dirName + "/" + fileName;
+                src.sourceLine = lineNumber;
+            }
+        }
+        src.functionKey = std::string(functionName ? functionName : "unknown") +
+                          "@" + src.sourceFile;
+        return src;
+    };
 
-        pc_sampling_buffers_->data->totalNumPcs = 0;
-        CUptiResult getRes = cuptiPCSamplingGetData(&getDataParams);
-        const bool hasMore = (getRes == CUPTI_ERROR_OUT_OF_MEMORY);
+    std::vector<ProfileSampleInput> rows;
+    size_t rowsEmitted = 0;
+    uint64_t samplesEmitted = 0;
+    auto pushRows = [&rows, &rowsEmitted] {
+        if (rows.empty()) return;
+        Monitor::PushProfileSamples(rows);
+        rowsEmitted += rows.size();
+        rows.clear();
+    };
 
-        if (getRes != CUPTI_SUCCESS && !hasMore) {
+    uint64_t sumTotal = 0;
+    uint64_t sumDropped = 0;
+    uint64_t sumNonUsr = 0;
+    bool hardwareBufferFull = false;
+    int emptyCalls = 0;
+    for (int call = 0; call < kMaxGetDataCalls; ++call) {
+        // stallReasonCount is written per record; restore each record's
+        // capacity before every call.
+        for (size_t i = 0; i < batch->collectNumPcs; ++i)
+            pc_read_buffers_->pcRecords[i].stallReasonCount =
+                pc_read_buffers_->stallSlots;
+
+        batch->totalNumPcs = 0;
+        const CUptiResult getRes = cuptiPCSamplingGetData(&getDataParams);
+        // OUT_OF_MEMORY reports a full hardware buffer (samples were lost),
+        // not more records waiting.
+        if (getRes == CUPTI_ERROR_OUT_OF_MEMORY) hardwareBufferFull = true;
+
+        if (getRes != CUPTI_SUCCESS && getRes != CUPTI_ERROR_OUT_OF_MEMORY) {
             if (IsInsufficientPrivilege(getRes) ||
                 getRes == CUPTI_ERROR_NOT_INITIALIZED) {
                 // NOT_INITIALIZED: Profiler API (cuptiProfilerInitialize) was
@@ -833,136 +909,103 @@ void PcSamplingEngine::CollectPcSamplingData_() {
             break;
         }
 
-        const auto numPcs = pc_sampling_buffers_->data->totalNumPcs;
+        const size_t numPcs = batch->totalNumPcs;
         if (numPcs > 0) produced_data_.store(true, std::memory_order_relaxed);
         // The hardware-side counters tell zero-record collections apart:
         // totalSamples=0 means the GPU never sampled (period/perms/arming),
         // while totalSamples>0 with numPcs=0 means samples were taken but
-        // attributed to non-user kernels or dropped before retrieval.
+        // attributed to non-user kernels or dropped before retrieval. They
+        // are per call, so the summary adds them up.
         // Copies, not field refs: CUpti_PCSamplingData is packed and GCC
         // refuses to bind packed fields to the logger's references.
-        const uint64_t totalSamples = pc_sampling_buffers_->data->totalSamples;
-        const uint64_t droppedSamples =
-            pc_sampling_buffers_->data->droppedSamples;
-        const uint64_t nonUsrSamples =
-            pc_sampling_buffers_->data->nonUsrKernelsTotalSamples;
-        GFL_LOG_DEBUG("[PC Sampling] Collected ", numPcs, " PC records",
-                      (hasMore ? " (more remaining)" : ""),
-                      "; totalSamples=", totalSamples,
+        const uint64_t totalSamples = batch->totalSamples;
+        const uint64_t droppedSamples = batch->droppedSamples;
+        const uint64_t nonUsrSamples = batch->nonUsrKernelsTotalSamples;
+        const size_t remainingPcs = batch->remainingNumPcs;
+        sumTotal += totalSamples;
+        sumDropped += droppedSamples;
+        sumNonUsr += nonUsrSamples;
+        GFL_LOG_DEBUG("[PC Sampling] Collected ", numPcs, " PC records (",
+                      remainingPcs, " remaining); totalSamples=", totalSamples,
                       " droppedSamples=", droppedSamples,
                       " nonUsrKernelsTotalSamples=", nonUsrSamples);
 
-        // CUPTI leaves CUpti_PCSamplingData::totalSamples at 0 in armed-GetData
-        // (KERNEL_SERIALIZED, no Stop) mode, so sum the real per-PC counts.
-        uint64_t samplesThisCollect = 0;
+        uint64_t samplesThisCall = 0;
         for (size_t i = 0; i < numPcs; ++i) {
-            const CUpti_PCSamplingPCData& pc =
-                pc_sampling_buffers_->data->pPcData[i];
-            if (pc.stallReasonCount > 0 && pc.stallReason) {
-                for (uint32_t j = 0; j < pc.stallReasonCount; ++j) {
-                    samplesThisCollect += pc.stallReason[j].samples;
-                    if (pc.stallReason[j].samples > 0) {
-                        ActivityRecord out{};
-                        out.type = TraceType::PC_SAMPLE;
-                        if (CUptiResult res =
-                                cuptiGetDeviceId(ctx_.cuda_ctx, &out.device_id);
-                            res != CUPTI_SUCCESS) {
-                            LogCuptiErrorIfFailed(this->name(),
-                                                  "cuptiGetDeviceId", res);
-                        }
-                        out.corr_id = pc.correlationId;
-                        out.pc_offset = static_cast<uint32_t>(pc.pcOffset);
-                        std::snprintf(out.sample_kind, sizeof(out.sample_kind),
-                                      "%s", "pc_sampling");
-                        out.samples_count = pc.stallReason[j].samples;
-                        out.stall_reason =
-                            pc.stallReason[j].pcSamplingStallReasonIndex;
-                        out.cpu_start_ns = detail::GetTimestampNs();
-
-                        if (pc.functionName) {
-                            std::snprintf(out.function_name,
-                                          sizeof(out.function_name), "%s",
-                                          pc.functionName);
-                            if (std::strlen(pc.functionName) >=
-                                sizeof(out.function_name)) {
-                                GFL_LOG_DEBUG(
-                                    "[PC Sampling] function name truncated in "
-                                    "ActivityRecord; using original CUPTI "
-                                    "functionName for source correlation "
-                                    "(len=", std::strlen(pc.functionName),
-                                    ")");
-                            }
-                        } else {
-                            std::snprintf(out.function_name,
-                                          sizeof(out.function_name), "unknown");
-                        }
-
-                        // Source correlation - grab data pointer under lock,
-                        // then call CUPTI outside the lock to avoid deadlock
-                        // when CUPTI triggers a module-load callback.
-                        const uint8_t* cubinData = nullptr;
-                        size_t cubinSize = 0;
-                        if (ctx_.cubin_mu && ctx_.cubin_by_crc) {
-                            std::lock_guard lk(*ctx_.cubin_mu);
-                            auto it = ctx_.cubin_by_crc->find(pc.cubinCrc);
-                            if (it != ctx_.cubin_by_crc->end()) {
-                                cubinData = it->second.data.data();
-                                cubinSize = it->second.data.size();
-                            }
-                        }
-                        if (cubinData && cubinSize > 0 && pc.functionName &&
-                            pc.functionName[0] != '\0') {
-                            GFL_LOG_DEBUG("start getting source correlation");
-                            auto [fileName, dirName, lineNumber] =
-                                nvidia::CuptiSass::sampleSourceCorrelation(
-                                    cubinData, cubinSize, pc.functionName,
-                                    pc.pcOffset);
-                            if (!fileName.empty()) {
-                                const std::string fullPath =
-                                    dirName.empty() ? fileName
-                                                    : dirName + "/" + fileName;
-                                std::snprintf(out.source_file,
-                                              sizeof(out.source_file), "%s",
-                                              fullPath.c_str());
-                                out.source_line = lineNumber;
-                            }
-                        }
-
-                        {
-                            std::lock_guard lk(stall_reason_mu_);
-                            auto it = stall_reason_map_.find(out.stall_reason);
-                            if (it != stall_reason_map_.end()) {
-                                out.reason_name = it->second;
-                            } else {
-                                out.reason_name =
-                                    "Stall_" + std::to_string(out.stall_reason);
-                            }
-                        }
-
-                        g_monitorBuffer.Push(out);
+            const CUpti_PCSamplingPCData& pc = batch->pPcData[i];
+            if (pc.stallReasonCount == 0 || !pc.stallReason) continue;
+            // Copies: packed fields cannot bind to references.
+            const uint64_t cubinCrc = pc.cubinCrc;
+            const uint32_t functionIndex = pc.functionIndex;
+            const uint64_t pcOffset = pc.pcOffset;
+            const uint32_t correlationId = pc.correlationId;
+            auto [source, inserted] = sourceByPc.try_emplace(
+                std::make_tuple(cubinCrc, functionIndex, pcOffset));
+            if (inserted) {
+                source->second = resolveSource(cubinCrc, pc.functionName,
+                                               pcOffset);
+            }
+            const size_t written = pc.stallReasonCount;
+            const size_t reasons = written < pc_read_buffers_->stallSlots
+                                       ? written
+                                       : pc_read_buffers_->stallSlots;
+            for (size_t j = 0; j < reasons; ++j) {
+                const uint32_t samples = pc.stallReason[j].samples;
+                const uint32_t reason =
+                    pc.stallReason[j].pcSamplingStallReasonIndex;
+                samplesThisCall += samples;
+                if (samples == 0) continue;
+                if (!deviceIdKnown) {
+                    deviceIdKnown = true;
+                    if (const CUptiResult res =
+                            cuptiGetDeviceId(ctx_.cuda_ctx, &deviceId);
+                        res != CUPTI_SUCCESS) {
+                        LogCuptiErrorIfFailed(this->name(), "cuptiGetDeviceId",
+                                              res);
                     }
                 }
+                ProfileSampleInput s;
+                s.ts_ns = collectTs;
+                s.corr_id = correlationId;
+                s.device_id = deviceId;
+                s.function_key = source->second.functionKey;
+                s.pc_offset = static_cast<uint32_t>(pcOffset);
+                const auto name = reasonNames.find(reason);
+                s.metric_name = name != reasonNames.end()
+                                    ? name->second
+                                    : "Stall_" + std::to_string(reason);
+                s.metric_value = samples;
+                s.stall_reason = reason;
+                s.sample_kind = 0;  // pc_sampling
+                s.source_file = source->second.sourceFile;
+                s.source_line = source->second.sourceLine;
+                rows.push_back(std::move(s));
+                samplesEmitted += samples;
             }
+            if (rows.size() >= kRowsPerPush) pushRows();
         }
+        pushRows();
 
-        GFL_LOG_DEBUG("[PC Sampling] collect produced ", samplesThisCollect,
-                      " samples across ", numPcs, " PCs");
-        // Drain fully: GetData returns up to collectNumPcs records per call and
-        // reports remainingNumPcs still buffered. Loop until the buffer is empty;
-        // stop if a call makes no progress (guards against an infinite loop).
-        const size_t remainingNow = pc_sampling_buffers_->data->remainingNumPcs;
-        if (!hasMore && (remainingNow == 0 || numPcs == 0)) break;
+        GFL_LOG_DEBUG("[PC Sampling] GetData returned ", samplesThisCall,
+                      " samples across ", numPcs, " PC records");
+        // Drained once a call returns nothing and CUPTI reports nothing
+        // pending. Two empty calls in a row with something still pending end
+        // it too, so a stuck report cannot spin.
+        const bool pending = configured->totalNumPcs > 0 ||
+                             configured->remainingNumPcs > 0 ||
+                             remainingPcs > 0;
+        if (numPcs > 0) {
+            emptyCalls = 0;
+        } else if (!pending || ++emptyCalls >= 2) {
+            break;
+        }
     }
 
-    // Copies, not field refs - see the packed-field note above.
-    const uint64_t sumTotal = pc_sampling_buffers_->data->totalSamples;
-    const uint64_t sumDropped = pc_sampling_buffers_->data->droppedSamples;
-    const uint64_t sumNonUsr =
-        pc_sampling_buffers_->data->nonUsrKernelsTotalSamples;
-    const uint64_t sumRemaining = pc_sampling_buffers_->data->remainingNumPcs;
-    GFL_LOG_DEBUG("[PC Sampling] collect summary: totalSamples=", sumTotal,
-                  " dropped=", sumDropped, " nonUsrKernels=", sumNonUsr,
-                  " remaining=", sumRemaining);
+    GFL_LOG_DEBUG("[PC Sampling] collect summary: ", rowsEmitted, " rows, ",
+                  samplesEmitted, " samples across ", sourceByPc.size(),
+                  " PCs; totalSamples=", sumTotal, " dropped=", sumDropped,
+                  " nonUsrKernels=", sumNonUsr,
+                  hardwareBufferFull ? " (hardware buffer overflowed)" : "");
 }
 
 }  // namespace gpufl

@@ -16,8 +16,9 @@ namespace gpufl {
 // ---- PC Sampling buffer management ----------------------------------------
 
 struct PCSamplingBuffers {
-    CUpti_PCSamplingData*   data      = nullptr;
-    CUpti_PCSamplingPCData* pcRecords = nullptr;
+    CUpti_PCSamplingData*   data       = nullptr;
+    CUpti_PCSamplingPCData* pcRecords  = nullptr;
+    size_t                  stallSlots = 0;  // stall-reason capacity per record
 };
 
 struct PCSamplingDeleter {
@@ -108,7 +109,8 @@ class PcSamplingEngine final : public IProfilingEngine {
     /// One drain cycle on a plain thread (KernelCollect::All): stop → forced
     /// activity flush (pulls kernel records that don't surface while sampling
     /// is armed) → GetData → restart. Elevated-only; on a privilege failure it
-    /// disables draining for the session and falls back to armed GetData.
+    /// disables draining for the session and falls back to sample-only
+    /// collection.
     void DrainKernelsAndCollect_();
     /// @param sync_device cudaDeviceSynchronize before stopping. Callers on
     ///        plain threads pass true; the CUPTI-callback path passes false -
@@ -116,11 +118,10 @@ class PcSamplingEngine final : public IProfilingEngine {
     ///        KERNEL_SERIALIZED mode every sampled kernel has already
     ///        completed by the time the next API callback runs anyway.
     void StopAndCollectPcSampling_(bool sync_device = true);
-    /// The cuptiPCSamplingGetData drain loop: parses PC records into
-    /// PC_SAMPLE activity records. MUST be called with sampling stopped.
-    /// Calling it while armed does not return the samples AND discards them
-    /// (verified on driver 610.43 / CUDA 13.3: a session that collected
-    /// 24.5M samples with stopped-GetData collected 0 with armed-GetData).
+    /// The cuptiPCSamplingGetData drain loop: turns PC records into profile
+    /// sample rows, one per (launch, PC, stall reason). Called with sampling
+    /// stopped. Reads into pc_read_buffers_, never into the configured buffer
+    /// CUPTI fills itself.
     void CollectPcSamplingData_();
 
     MonitorOptions opts_;
@@ -163,8 +164,13 @@ class PcSamplingEngine final : public IProfilingEngine {
     void StartCycleThread_();
     void StopCycleThread_();
 
+    // The SAMPLING_DATA_BUFFER given to CUPTI at configure. In
+    // KERNEL_SERIALIZED mode CUPTI moves every finished kernel's records into
+    // it on its own, so it must never be the GetData output buffer.
     std::unique_ptr<PCSamplingBuffers, PCSamplingDeleter> pc_sampling_buffers_;
-    size_t num_stall_reasons_ = 0;  // original slot count; must reset before each getData
+    // GetData output, allocated at the first collect.
+    std::unique_ptr<PCSamplingBuffers, PCSamplingDeleter> pc_read_buffers_;
+    size_t num_stall_reasons_ = 0;  // device stall-reason count; sizes pc_read_buffers_
 
     mutable std::mutex                       stall_reason_mu_;
     mutable std::unordered_map<uint32_t, std::string> stall_reason_map_;

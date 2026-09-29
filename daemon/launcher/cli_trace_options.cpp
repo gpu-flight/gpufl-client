@@ -568,8 +568,8 @@ const CliOptionManager<TraceArgs>& traceOptions() {
             // Sampling
             .add({"--pc-sample-period"}, "<N>",
                  "PC sampling period: log2 of GPU cycles per sample (5..31; "
-                 "default 10). Lower = more frequent - for short kernels that "
-                 "yield no PC samples by default.",
+                 "default 10). Lower = more samples per kernel, at higher "
+                 "overhead.",
                  kSection(TraceHelpSection::Sampling), &parsePcSamplePeriod)
 
             // Removed flags: dispatched so the migration hint prints, but

@@ -127,8 +127,7 @@ TraceParseResult parseTraceArgs(const std::vector<std::string>& argv) {
                 "a deep window needs a bound: pass --deep-launches <n> or "
                 "--deep-for <duration> (prefer --deep-launches: it is what "
                 "the engines actually scale with. The replay engines cover "
-                "far less work per second of wall time, and PC sampling "
-                "returns nothing at all below a few thousand launches)"};
+                "far less work per second of wall time)"};
     }
     return {out, ""};
 }
