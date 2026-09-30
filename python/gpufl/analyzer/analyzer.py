@@ -45,7 +45,8 @@ def _shorten_kernel_name(name: str) -> tuple[str, str]:
     return short_func, name
 
 
-# CUPTI CUpti_ActivityPCSamplingStallReason - skip 0 (invalid) and 1 (none)
+# CUPTI CUpti_ActivityPCSamplingStallReason - skip 0 (invalid) and 1 (none).
+# Only Activity API rows use these indices; PC Sampling API rows carry names.
 _STALL_NAMES: dict[int, str] = {
     2:  "Instruction Fetch",
     3:  "Execution Dependency",
@@ -55,11 +56,36 @@ _STALL_NAMES: dict[int, str] = {
     7:  "Constant Memory",
     8:  "Pipe Busy",
     9:  "Memory Throttle",
-    10: "Branch Resolving",
-    11: "Wait",
-    12: "Barrier",
-    13: "Sleeping",
+    10: "Not Selected",
+    11: "Other",
+    12: "Sleeping",
 }
+
+_PC_STALL_PREFIX = "smsp__pcsamp_warps_issue_stalled_"
+_NOT_ISSUED_SUFFIX = "_not_issued"
+
+
+def _pc_stall_reason(metric_name, stall_index) -> tuple:
+    """Return (reason, not_issued) for a pc_sampling row.
+
+    The PC Sampling API counts each sample under its warp state and, when
+    the scheduler issued nothing that cycle, again under the state's
+    ``_not_issued`` twin, so the two need separate denominators. Other
+    ``smsp__pcsamp_`` counters (sample_count, samples_data_dropped) are not
+    warp states. Activity API rows have no name, only an index.
+    """
+    if metric_name:
+        if metric_name.startswith(_PC_STALL_PREFIX):
+            reason = metric_name[len(_PC_STALL_PREFIX):]
+            if reason.endswith(_NOT_ISSUED_SUFFIX):
+                return reason[:-len(_NOT_ISSUED_SUFFIX)], True
+            return reason, False
+        if metric_name.startswith("smsp__pcsamp_"):
+            return None, False
+        return metric_name, False
+    if stall_index > 1:
+        return _STALL_NAMES.get(stall_index, f"Stall_{stall_index}"), False
+    return None, False
 
 
 class GpuFlightSession:
@@ -535,6 +561,9 @@ class GpuFlightSession:
                     scope_name  = dict_maps['scope_name'].get(sn_id) if sn_id else None
                     stall       = row[ci['stall_reason']]
                     mv          = row[ci['metric_value']]
+                    reason, not_issued = (
+                        _pc_stall_reason(metric_name, stall)
+                        if sample_kind == 'pc_sampling' else (None, False))
                     sample_rows.append({
                         'type':          'profile_sample',
                         'session_id':    batch.get('session_id'),
@@ -549,7 +578,8 @@ class GpuFlightSession:
                         'sample_kind':   sample_kind,
                         'scope_name':    scope_name,
                         # Compatibility aliases used by inspect_stalls / inspect_profile_samples
-                        'reason_name':   _STALL_NAMES.get(stall, f"Stall_{stall}") if stall > 1 else None,
+                        'reason_name':   reason,
+                        'not_issued':    not_issued,
                         'sample_count':  mv if sample_kind == 'pc_sampling' else 0,
                     })
         scopes_df = pd.DataFrame(sample_rows)
@@ -1080,13 +1110,17 @@ class GpuFlightSession:
 
         self.console.print(table)
 
-    def inspect_stalls(self, top_n: int = 10):
+    def inspect_stalls(self, top_n: int = 10, not_issued: bool = False):
         """Show per-kernel stall distribution from PC-sampling data.
 
         Requires ``enablePCSampling=true`` at session init.  Joins
         ``profile_sample`` events to kernels via ``corr_id``, then pivots by
         ``reason_name`` to show what fraction of samples each stall category
         accounts for in the hottest kernels.
+
+        Shares are of each kernel's samples, which add up to CUPTI's sample
+        count. ``not_issued=True`` shows the ``_not_issued`` samples instead:
+        the subset taken on cycles where the scheduler issued nothing.
         """
         if self.scopes.empty or 'type' not in self.scopes.columns:
             self.console.print("[yellow]No PC sampling data found - enable PC sampling at session init.[/yellow]")
@@ -1101,12 +1135,16 @@ class GpuFlightSession:
             self.console.print("[yellow]No profile_sample events found - enable PC sampling at init.[/yellow]")
             return
 
-        required = {'corr_id', 'reason_name', 'sample_count'}
+        required = {'corr_id', 'reason_name', 'sample_count', 'not_issued'}
         if not required.issubset(samples.columns):
             self.console.print(f"[yellow]profile_sample records missing columns: {required - set(samples.columns)}[/yellow]")
             return
 
         samples['sample_count'] = pd.to_numeric(samples['sample_count'], errors='coerce').fillna(0)
+        samples = samples[samples['not_issued'] == not_issued]
+        if samples.empty:
+            self.console.print("[yellow]No not-issued samples found.[/yellow]")
+            return
 
         # Aggregate sample counts: (corr_id, reason_name) → total samples
         stall_agg = (
@@ -1139,7 +1177,8 @@ class GpuFlightSession:
 
         stall_cols = [c for c in pivot.columns if c not in ('name', 'total_samples')]
 
-        table = Table(title=f"Stall Distribution - Top {top_n} Kernels (PC Sampling)")
+        family = "PC Sampling, not issued" if not_issued else "PC Sampling"
+        table = Table(title=f"Stall Distribution - Top {top_n} Kernels ({family})")
         table.add_column("Kernel", style="cyan", no_wrap=False)
         table.add_column("Samples", justify="right")
         for col in stall_cols:
@@ -1205,22 +1244,41 @@ class GpuFlightSession:
             pc_samples = pd.DataFrame()
 
         if not pc_samples.empty:
+            if 'not_issued' not in pc_samples.columns:
+                pc_samples['not_issued'] = False
+            # A _not_issued sample is also counted under its warp state, so
+            # each family gets its own denominator.
+            has_reason = pc_samples['reason_name'].notna()
+            states = pc_samples[has_reason & ~pc_samples['not_issued']]
+            twins = pc_samples[has_reason & pc_samples['not_issued']]
             by_reason = (
-                pc_samples.groupby('reason_name', dropna=False)['sample_count']
+                states.groupby('reason_name')['sample_count']
                 .sum()
                 .sort_values(ascending=False)
                 .head(top_n)
             )
+            twin_by_reason = twins.groupby('reason_name')['sample_count'].sum()
 
-            reason_table = Table(title=f"PC Sampling Reasons - Top {top_n}")
+            reason_table = Table(
+                title=f"PC Sampling Reasons - Top {top_n}",
+                caption="Not issued: samples taken on cycles where the "
+                        "scheduler issued nothing (a subset of Samples).",
+            )
             reason_table.add_column("Reason", style="cyan")
             reason_table.add_column("Samples", justify="right")
-            total_samples = float(pc_samples['sample_count'].sum()) or 1.0
             reason_table.add_column("Share", justify="right")
+            reason_table.add_column("Not issued", justify="right")
+            reason_table.add_column("Share", justify="right")
+            total_samples = float(states['sample_count'].sum()) or 1.0
+            total_twins = float(twins['sample_count'].sum()) or 1.0
 
             for reason, count in by_reason.items():
-                label = str(reason) if pd.notna(reason) and str(reason) else "unknown"
-                reason_table.add_row(label, str(int(count)), f"{(count/total_samples)*100:.1f}%")
+                twin = float(twin_by_reason.get(reason, 0))
+                reason_table.add_row(
+                    str(reason), str(int(count)),
+                    f"{(count/total_samples)*100:.1f}%",
+                    str(int(twin)), f"{(twin/total_twins)*100:.1f}%",
+                )
             self.console.print(reason_table)
 
             if not self.kernels.empty and 'corr_id' in self.kernels.columns and 'corr_id' in pc_samples.columns:
@@ -1234,7 +1292,12 @@ class GpuFlightSession:
                     )
 
                 corr_to_name, fallback_used = self._resolve_sample_kernel_names(pc_samples)
-                kernel_samples = pc_samples.groupby('corr_id', as_index=False)['sample_count'].sum()
+                kernel_samples = states.groupby('corr_id', as_index=False)['sample_count'].sum()
+                kernel_samples = kernel_samples.join(
+                    twins.groupby('corr_id')['sample_count'].sum().rename('not_issued_count'),
+                    on='corr_id',
+                )
+                kernel_samples['not_issued_count'] = kernel_samples['not_issued_count'].fillna(0)
                 if corr_to_name:
                     map_df = pd.DataFrame(
                         [(k, v) for k, v in corr_to_name.items()],
@@ -1249,8 +1312,10 @@ class GpuFlightSession:
                 kernel_table = Table(title=f"PC Sampling Kernels - Top {top_n}")
                 kernel_table.add_column("Kernel", style="cyan")
                 kernel_table.add_column("Samples", justify="right")
+                kernel_table.add_column("Not issued", justify="right")
                 for _, row in kernel_samples.iterrows():
-                    kernel_table.add_row(str(row['name']), str(int(row['sample_count'])))
+                    kernel_table.add_row(str(row['name']), str(int(row['sample_count'])),
+                                         str(int(row['not_issued_count'])))
                 self.console.print(kernel_table)
                 if fallback_used > 0:
                     self.console.print(
