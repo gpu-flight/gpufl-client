@@ -62,6 +62,16 @@ constexpr int kMaxGetDataCalls = 1024;
 // Rows per Monitor::PushProfileSamples call, bounding the staging vector.
 constexpr size_t kRowsPerPush = 8192;
 
+// CUPTI counts each sample under its warp state and, when the scheduler
+// issued nothing that cycle, again under the state's _not_issued twin, so
+// only the other reasons add up to totalSamples.
+bool IsNotIssuedReason(const std::string& name) {
+    static const std::string kSuffix = "_not_issued";
+    return name.size() > kSuffix.size() &&
+           name.compare(name.size() - kSuffix.size(), kSuffix.size(),
+                        kSuffix) == 0;
+}
+
 PCSamplingBuffers* AllocatePcSamplingBuffers(const size_t numPcs,
                                              const size_t stallSlots) {
     auto* b = new PCSamplingBuffers();
@@ -867,6 +877,7 @@ void PcSamplingEngine::CollectPcSamplingData_() {
     std::vector<ProfileSampleInput> rows;
     size_t rowsEmitted = 0;
     uint64_t samplesEmitted = 0;
+    uint64_t notIssuedEmitted = 0;
     auto pushRows = [&rows, &rowsEmitted] {
         if (rows.empty()) return;
         Monitor::PushProfileSamples(rows);
@@ -931,6 +942,7 @@ void PcSamplingEngine::CollectPcSamplingData_() {
                       " nonUsrKernelsTotalSamples=", nonUsrSamples);
 
         uint64_t samplesThisCall = 0;
+        uint64_t notIssuedThisCall = 0;
         for (size_t i = 0; i < numPcs; ++i) {
             const CUpti_PCSamplingPCData& pc = batch->pPcData[i];
             if (pc.stallReasonCount == 0 || !pc.stallReason) continue;
@@ -953,7 +965,10 @@ void PcSamplingEngine::CollectPcSamplingData_() {
                 const uint32_t samples = pc.stallReason[j].samples;
                 const uint32_t reason =
                     pc.stallReason[j].pcSamplingStallReasonIndex;
-                samplesThisCall += samples;
+                const auto name = reasonNames.find(reason);
+                const bool notIssued = name != reasonNames.end() &&
+                                       IsNotIssuedReason(name->second);
+                (notIssued ? notIssuedThisCall : samplesThisCall) += samples;
                 if (samples == 0) continue;
                 if (!deviceIdKnown) {
                     deviceIdKnown = true;
@@ -970,7 +985,6 @@ void PcSamplingEngine::CollectPcSamplingData_() {
                 s.device_id = deviceId;
                 s.function_key = source->second.functionKey;
                 s.pc_offset = static_cast<uint32_t>(pcOffset);
-                const auto name = reasonNames.find(reason);
                 s.metric_name = name != reasonNames.end()
                                     ? name->second
                                     : "Stall_" + std::to_string(reason);
@@ -980,14 +994,15 @@ void PcSamplingEngine::CollectPcSamplingData_() {
                 s.source_file = source->second.sourceFile;
                 s.source_line = source->second.sourceLine;
                 rows.push_back(std::move(s));
-                samplesEmitted += samples;
+                (notIssued ? notIssuedEmitted : samplesEmitted) += samples;
             }
             if (rows.size() >= kRowsPerPush) pushRows();
         }
         pushRows();
 
         GFL_LOG_DEBUG("[PC Sampling] GetData returned ", samplesThisCall,
-                      " samples across ", numPcs, " PC records");
+                      " samples (+", notIssuedThisCall, " not issued) across ",
+                      numPcs, " PC records");
         // Drained once a call returns nothing and CUPTI reports nothing
         // pending. Two empty calls in a row with something still pending end
         // it too, so a stuck report cannot spin.
@@ -1002,7 +1017,8 @@ void PcSamplingEngine::CollectPcSamplingData_() {
     }
 
     GFL_LOG_DEBUG("[PC Sampling] collect summary: ", rowsEmitted, " rows, ",
-                  samplesEmitted, " samples across ", sourceByPc.size(),
+                  samplesEmitted, " samples (+", notIssuedEmitted,
+                  " not issued) across ", sourceByPc.size(),
                   " PCs; totalSamples=", sumTotal, " dropped=", sumDropped,
                   " nonUsrKernels=", sumNonUsr,
                   hardwareBufferFull ? " (hardware buffer overflowed)" : "");

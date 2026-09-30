@@ -13,6 +13,10 @@ namespace report {
 struct FuncProfile {
     std::map<std::string, uint64_t> stalls;  // display-name → count
     uint64_t totalStalls   = 0;
+    // Samples also counted in `stalls`, taken on cycles where the scheduler
+    // issued no instruction (CUPTI's `_not_issued` reasons).
+    std::map<std::string, uint64_t> notIssuedStalls;
+    uint64_t totalNotIssued = 0;
     uint64_t warpInsts     = 0;
     uint64_t threadInsts   = 0;
     uint64_t globalSectors     = 0;

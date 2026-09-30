@@ -657,17 +657,26 @@ class TextReport:
         # Stall reason distribution
         if has_stalls:
             stall_data = samples[samples["reason_name"].notna()]
+            # A _not_issued sample is also counted under its warp state.
+            twins = stall_data[stall_data["not_issued"]]
+            stall_data = stall_data[~stall_data["not_issued"]]
             stall_counts = stall_data.groupby("reason_name")["sample_count"].sum()
+            twin_counts = twins.groupby("reason_name")["sample_count"].sum()
             total_stalls = stall_counts.sum()
+            total_twins = twin_counts.sum()
 
             if total_stalls > 0:
                 lines.append("  Stall Reason Distribution:")
-                hdr = f"  {'Reason':<30}{'Samples':>10}{'Pct':>8}"
+                hdr = (f"  {'Reason':<30}{'Samples':>10}{'Pct':>8}"
+                       f"{'Not issued':>12}{'Pct':>8}")
                 lines.append(hdr)
-                lines.append("  " + "-" * 48)
+                lines.append("  " + "-" * 68)
                 for reason, count in stall_counts.sort_values(ascending=False).items():
                     pct = count / total_stalls * 100
-                    lines.append(f"  {str(reason):<30}{int(count):>10}{pct:>7.1f}%")
+                    twin = twin_counts.get(reason, 0)
+                    twin_pct = twin / total_twins * 100 if total_twins > 0 else 0.0
+                    lines.append(f"  {str(reason):<30}{int(count):>10}{pct:>7.1f}%"
+                                 f"{int(twin):>12}{twin_pct:>7.1f}%")
 
                 # Per-kernel stall breakdown
                 if "function_name" in stall_data.columns:

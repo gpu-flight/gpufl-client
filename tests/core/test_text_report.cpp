@@ -170,4 +170,31 @@ TEST_F(TextReportTest, LegacySynchronizationEventProducesSummary) {
     EXPECT_NE(report.find("Event Synchronize"), std::string::npos);
 }
 
+TEST_F(TextReportTest, PcStallSharesExcludeNotIssuedSamples) {
+    // Reason names and indices as the PC Sampling API enumerates them on an
+    // RTX 5060; counts are synthetic. A _not_issued sample is also counted
+    // under its warp state, so the 100 samples here carry 90 twins.
+    WriteLog("scope", {
+        R"({"type":"job_start","session_id":"s1","app":"pcs","ts_ns":1000})",
+        R"({"type":"dictionary_update","session_id":"s1","function_dict":{"1":"memBound@"},"metric_dict":{"1":"smsp__pcsamp_warps_issue_stalled_long_scoreboard","2":"smsp__pcsamp_warps_issue_stalled_long_scoreboard_not_issued","3":"smsp__pcsamp_warps_issue_stalled_wait","4":"smsp__pcsamp_warps_issue_stalled_wait_not_issued","5":"smsp__pcsamp_warps_issue_stalled_selected"}})",
+        R"({"type":"profile_sample_batch","session_id":"s1","columns":["function_id","metric_id","metric_value","stall_reason","sample_kind"],"rows":[[1,1,90,12,0],[1,2,85,13,0],[1,3,6,34,0],[1,4,5,35,0],[1,5,4,26,0]]})",
+        R"({"type":"shutdown","session_id":"s1","ts_ns":3000})",
+    });
+
+    const std::string report = Generate();
+    EXPECT_NE(report.find("(100 stall samples)"), std::string::npos) << report;
+    const auto stalls = report.find("    Stalls:\n");
+    const auto notIssued = report.find("    Not issued");
+    ASSERT_NE(stalls, std::string::npos) << report;
+    ASSERT_NE(notIssued, std::string::npos) << report;
+    const auto base = report.find("Long Scoreboard", stalls);
+    ASSERT_LT(base, notIssued) << report;
+    EXPECT_NE(report.substr(base, 60).find(" 90.0%"), std::string::npos)
+        << report;
+    const auto twin = report.find("Long Scoreboard", notIssued);
+    ASSERT_NE(twin, std::string::npos) << report;
+    EXPECT_NE(report.substr(twin, 60).find(" 94.4%"), std::string::npos)
+        << report;
+}
+
 }  // namespace
