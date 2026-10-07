@@ -47,8 +47,17 @@ constexpr size_t kTraceBufferBytes = 1u << 20;
 
 std::atomic<RocprofilerBackend*> g_pending_backend{nullptr};
 
-thread_local std::vector<uint64_t> g_scope_external_stack;
-thread_local std::vector<std::string> g_scope_name_stack;
+// glibc destroys the main thread's TLS before running process atexit hooks.
+// Injection closes its process scope from atexit; never re-enter dead vectors
+// (or the SDK thread-correlation state) there. The trivial flag survives TLS
+// destructors, while each live thread still releases its vector allocations.
+thread_local bool g_scope_state_destroyed = false;
+struct ThreadScopeState {
+    std::vector<uint64_t> external;
+    std::vector<std::string> names;
+    ~ThreadScopeState() { g_scope_state_destroyed = true; }
+};
+thread_local ThreadScopeState g_scope_state;
 
 std::string StatusToString(const rocprofiler_status_t status) {
     const char* name = rocprofiler_get_status_name(status);
@@ -719,6 +728,7 @@ bool RocprofilerBackend::flushBuffers() {
 }
 
 void RocprofilerBackend::OnScopeStart(const char* name) {
+    if (g_scope_state_destroyed) return;
     if (context_.handle == 0 || name == nullptr) return;
     if (!active_.load(std::memory_order_acquire) &&
         !tryStartContext(true)) return;
@@ -734,11 +744,11 @@ void RocprofilerBackend::OnScopeStart(const char* name) {
     // shuts GPUFlight down inside an open scope. The metadata map is cleared
     // with the ROCprofiler context, so a missing top ID identifies a stale
     // stack and prevents it from contaminating the next session's scope path.
-    if (!g_scope_external_stack.empty()) {
+    if (!g_scope_state.external.empty()) {
         std::lock_guard<std::mutex> lock(external_scope_mutex_);
-        if (external_scope_metadata_.count(g_scope_external_stack.back()) == 0) {
-            g_scope_external_stack.clear();
-            g_scope_name_stack.clear();
+        if (external_scope_metadata_.count(g_scope_state.external.back()) == 0) {
+            g_scope_state.external.clear();
+            g_scope_state.names.clear();
         }
     }
 
@@ -746,7 +756,7 @@ void RocprofilerBackend::OnScopeStart(const char* name) {
         next_scope_external_.fetch_add(1, std::memory_order_relaxed);
 
     std::string scope_path;
-    for (const auto& component : g_scope_name_stack) {
+    for (const auto& component : g_scope_state.names) {
         if (!scope_path.empty()) scope_path += "|";
         scope_path += component;
     }
@@ -762,16 +772,17 @@ void RocprofilerBackend::OnScopeStart(const char* name) {
         return;
     }
 
-    g_scope_name_stack.emplace_back(name);
-    g_scope_external_stack.push_back(external_value);
+    g_scope_state.names.emplace_back(name);
+    g_scope_state.external.push_back(external_value);
     {
         std::lock_guard<std::mutex> lock(external_scope_mutex_);
         external_scope_metadata_[external_value] = ExternalScopeMetadata{
-            std::move(scope_path), static_cast<int>(g_scope_name_stack.size())};
+            std::move(scope_path), static_cast<int>(g_scope_state.names.size())};
     }
 }
 
 void RocprofilerBackend::OnScopeStop(const char* name) {
+    if (g_scope_state_destroyed) return;
     if (!active_.load() || context_.handle == 0) return;
 
     rocprofiler_thread_id_t tid{};
@@ -789,10 +800,10 @@ void RocprofilerBackend::OnScopeStop(const char* name) {
         return;
     }
 
-    bool matched = !g_scope_external_stack.empty() &&
-                   g_scope_external_stack.back() == user_data.value;
-    if (name && !g_scope_name_stack.empty()) {
-        matched = matched && g_scope_name_stack.back() == name;
+    bool matched = !g_scope_state.external.empty() &&
+                   g_scope_state.external.back() == user_data.value;
+    if (name && !g_scope_state.names.empty()) {
+        matched = matched && g_scope_state.names.back() == name;
     }
     if (!matched) {
         scope_correlation_failures_.fetch_add(1, std::memory_order_relaxed);
@@ -800,8 +811,8 @@ void RocprofilerBackend::OnScopeStop(const char* name) {
             "[ROCProfilerBackend] scope correlation stack mismatch; "
             "discarding the local top to preserve push/pop depth");
     }
-    if (!g_scope_external_stack.empty()) g_scope_external_stack.pop_back();
-    if (!g_scope_name_stack.empty()) g_scope_name_stack.pop_back();
+    if (!g_scope_state.external.empty()) g_scope_state.external.pop_back();
+    if (!g_scope_state.names.empty()) g_scope_state.names.pop_back();
 }
 
 void RocprofilerBackend::callbackTracingShim(rocprofiler_callback_tracing_record_t record,

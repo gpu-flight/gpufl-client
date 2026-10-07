@@ -52,11 +52,12 @@ std::string ToLower(std::string value) {
 }
 
 bool IsCpuLikeHipEntry(const hipDeviceProp_t& prop) {
+    // "AMD Radeon Graphics" is also the HIP name of discrete gfx1201 GPUs;
+    // graphics architecture and positive compute limits below identify them.
     const std::string lowerName = ToLower(prop.name);
     return lowerName.find("ryzen") != std::string::npos ||
            lowerName.find("epyc") != std::string::npos ||
-           lowerName.find("threadripper") != std::string::npos ||
-           lowerName.find("radeon graphics") != std::string::npos;
+           lowerName.find("threadripper") != std::string::npos;
 }
 
 bool IsGpuHipDevice(const hipDeviceProp_t& prop) {

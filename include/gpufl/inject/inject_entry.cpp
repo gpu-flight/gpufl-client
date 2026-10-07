@@ -706,6 +706,22 @@ void startDeferredInjectInit() {
 
 }  // namespace
 
+#if defined(GPUFL_AMD_PRELOAD_STARTUP)
+// Called after DSO constructors: doInjectInit uses nontrivial C++ globals in
+// several translation units. The early constructor above cannot safely use
+// them, even when explicitly requested with GPUFL_INJECT_USE_CONSTRUCTOR.
+namespace gpufl::inject {
+void initializeAmdInjection() noexcept {
+    try {
+        std::call_once(g_init_once, doInjectInit);
+    } catch (...) {
+        // Match the explicit CUDA handshake: failed profiling must not throw
+        // across a C startup ABI into the application.
+    }
+}
+}  // namespace gpufl::inject
+#endif
+
 extern "C" {
 
 #ifndef _WIN32
@@ -828,7 +844,7 @@ int NVTX_API InitializeInjectionNvtxExtension(nvtxExtModuleInfo_t* module_info) 
 // workloads where the first CUDA call happens deep in third-party
 // code we want to catch the lead-up to, and where the toolchain has
 // been verified to tolerate pre-cuInit subscribe.
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(GPUFL_AMD_PRELOAD_STARTUP)
 [[gnu::constructor]] static void gpuflInjectCtor() {
     const char* opt_in = std::getenv(gpufl::env::kInjectUseConstructor);
     if (!opt_in || std::strcmp(opt_in, "1") != 0) return;
@@ -837,6 +853,8 @@ int NVTX_API InitializeInjectionNvtxExtension(nvtxExtModuleInfo_t* module_info) 
 #endif  // !_WIN32 - pre-cuInit constructor path is Linux-only; on Windows
         // it would run under the loader lock, so we rely on the
         // InitializeInjection ABI path (driver-invoked, lock-safe) instead.
+
+
 
 
 // Second-chance entry: NVIDIA's CUDA_INJECTION64_PATH ABI. libcuda
