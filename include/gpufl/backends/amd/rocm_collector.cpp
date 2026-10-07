@@ -26,6 +26,14 @@
 namespace gpufl::amd {
 namespace {
 
+// ROCm SMI uses thread-local streams internally. Process atexit callbacks run
+// after TLS destruction; a final telemetry sample then reuses freed storage.
+// Sampling threads still have their normal lifetime and release their state.
+thread_local bool g_telemetry_thread_exited = false;
+struct TelemetryThreadLifetime {
+    ~TelemetryThreadLifetime() { g_telemetry_thread_exited = true; }
+};
+
 constexpr uint64_t kBytesPerMiB = 1024ull * 1024ull;
 constexpr uint64_t kMicrowattsPerMilliwatt = 1000ull;
 constexpr int64_t kMillidegreesPerDegree = 1000ll;
@@ -52,11 +60,12 @@ std::string ToLower(std::string value) {
 }
 
 bool IsCpuLikeHipEntry(const hipDeviceProp_t& prop) {
+    // "AMD Radeon Graphics" is also the HIP name of discrete gfx1201 GPUs;
+    // graphics architecture and positive compute limits below identify them.
     const std::string lowerName = ToLower(prop.name);
     return lowerName.find("ryzen") != std::string::npos ||
            lowerName.find("epyc") != std::string::npos ||
-           lowerName.find("threadripper") != std::string::npos ||
-           lowerName.find("radeon graphics") != std::string::npos;
+           lowerName.find("threadripper") != std::string::npos;
 }
 
 bool IsGpuHipDevice(const hipDeviceProp_t& prop) {
@@ -472,6 +481,8 @@ RocmCollector::~RocmCollector() {
 }
 
 std::vector<DeviceSample> RocmCollector::sampleAll() {
+    if (g_telemetry_thread_exited) return {};
+    thread_local TelemetryThreadLifetime lifetime;
     std::vector<DeviceSample> out;
     if (!telemetry_initialized_ || telemetry_device_count_ == 0) return out;
 

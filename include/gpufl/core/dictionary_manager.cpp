@@ -147,9 +147,19 @@ FILE *spawnReadPipe(char *const argv[], pid_t &outPid) {
     posix_spawn_file_actions_addclose(&fa, pipefd[0]);
     posix_spawn_file_actions_addclose(&fa, pipefd[1]);
 
+    // Disassemblers are implementation helpers, not profiling targets. Keep
+    // the parent's environment unchanged while disabling injection in the
+    // child (especially AMD startup, which does not wait for a GPU API call).
+    std::vector<char*> child_env;
+    for (char** entry = environ; entry && *entry; ++entry) {
+        if (std::strncmp(*entry, "GPUFL_INJECT=", 13) != 0) {
+            child_env.push_back(*entry);
+        }
+    }
+    child_env.push_back(nullptr);
     pid_t pid = -1;
     const int rc =
-        posix_spawn(&pid, argv[0], &fa, nullptr, argv, environ);
+        posix_spawn(&pid, argv[0], &fa, nullptr, argv, child_env.data());
     posix_spawn_file_actions_destroy(&fa);
     ::close(pipefd[1]);  // parent keeps only the read end
     if (rc != 0) {

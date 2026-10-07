@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -280,5 +281,39 @@ TEST_F(SourceCapturePolicyTest, DictionaryEmitsContentAndBoundedManifest) {
     EXPECT_NE((*lines)[2].find(R"("lines":["first","second"])"),
               std::string::npos);
 }
+
+
+#ifndef _WIN32
+TEST_F(SourceCapturePolicyTest, DisassemblerDoesNotInheritInjectionSentinel) {
+    struct SavedEnvironment {
+        const char* key;
+        bool present;
+        std::string value;
+        explicit SavedEnvironment(const char* name) : key(name),
+            present(std::getenv(name) != nullptr),
+            value(present ? std::getenv(name) : "") {}
+        ~SavedEnvironment() {
+            if (present) setenv(key, value.c_str(), 1);
+            else unsetenv(key);
+        }
+    } inject("GPUFL_INJECT"), rocm("ROCM_PATH");
+    const auto tool = write("llvm/bin/llvm-objdump",
+        "#!/bin/sh\nprintf '%s' \"${GPUFL_INJECT-unset}\" > \"$ROCM_PATH/child-env\"\n");
+    fs::permissions(tool, fs::perms::owner_all);
+    ASSERT_EQ(setenv("GPUFL_INJECT", "1", 1), 0);
+    ASSERT_EQ(setenv("ROCM_PATH", root_.c_str(), 1), 0);
+    std::vector<uint8_t> elf(20, 0);
+    elf[0] = 0x7f; elf[1] = 'E'; elf[2] = 'L'; elf[3] = 'F'; elf[18] = 0xe0;
+    gpufl::DictionaryManager dictionary;
+    dictionary.enqueueDisassembly(1, elf.data(), elf.size());
+    gpufl::Logger logger;
+    dictionary.flushDisassembly(logger, "helper-env-test");
+    std::ifstream evidence(root_ / "child-env");
+    std::string value;
+    evidence >> value;
+    EXPECT_EQ(value, "unset");
+    EXPECT_STREQ(std::getenv("GPUFL_INJECT"), "1");
+}
+#endif
 
 }  // namespace

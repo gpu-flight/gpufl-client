@@ -27,6 +27,13 @@ on:
       - 'images/**'
 
 jobs:
+  amd-startup:
+    name: AMD preload startup (CPU only)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 tests/inject/test_amd_startup.py
+
   build:
     name: Build on ${{ matrix.os }} py${{ matrix.python-version }} perfworks=${{ matrix.perfworks }}
     runs-on: ${{ matrix.os }}

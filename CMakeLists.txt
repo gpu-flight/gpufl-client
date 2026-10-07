@@ -814,6 +814,11 @@ if(BUILD_GPUFL_INJECT AND ((UNIX AND NOT APPLE) OR WIN32))
             GPUFL_TYPED_CUDA_INTERPOSE=1
         )
     endif()
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND GPUFL_ENABLE_AMD
+       AND GPUFL_HAS_HIP AND NOT GPUFL_ENABLE_NVIDIA)
+        target_sources(gpufl_inject PRIVATE include/gpufl/inject/amd_startup_linux.cpp)
+        target_compile_definitions(gpufl_inject PRIVATE GPUFL_AMD_PRELOAD_STARTUP=1)
+    endif()
     target_link_libraries(gpufl_inject PRIVATE gpufl::gpufl)
 
     # The injected DLL is loaded by the CUDA driver into the profiled target,
