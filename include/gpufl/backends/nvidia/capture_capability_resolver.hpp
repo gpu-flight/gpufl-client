@@ -23,7 +23,38 @@ struct CaptureCapabilityCounters {
     uint64_t source_rows = 0;
     uint64_t function_rows = 0;
     uint64_t launch_count = 0;
+    /**
+     * Activity records that reached the timestamp check (intentionally
+     * filtered records excluded), and the ones it rejected: start == end == 0
+     * (CUPTI's "timestamps unavailable") and any other invalid timing.
+     */
+    uint64_t kernel_records_eligible = 0;
+    uint64_t kernel_records_zero_ts = 0;
+    uint64_t kernel_records_invalid_ts = 0;
+    uint64_t mem_transfer_records_eligible = 0;
+    uint64_t mem_transfer_records_zero_ts = 0;
+    uint64_t mem_transfer_records_invalid_ts = 0;
 };
+
+enum class ActivityTimestampOutcome {
+    /** Nothing was rejected for its timing (or nothing arrived). */
+    Complete,
+    /** Records arrived, none was emitted, and every one had start == end == 0. */
+    Unavailable,
+    /** None was emitted, and the rejected ones were not all zero-zero. */
+    Invalid,
+    /** Some records were rejected for their timing; the rest still count. */
+    Partial,
+};
+
+ActivityTimestampOutcome ClassifyActivityTimestamps(uint64_t eligible,
+                                                    uint64_t emitted,
+                                                    uint64_t zero_ts,
+                                                    uint64_t invalid_ts);
+
+/** "eligible=N zero_timestamps=Z other_invalid=I" for capability messages and logs. */
+std::string DescribeActivityTimestamps(uint64_t eligible, uint64_t zero_ts,
+                                       uint64_t invalid_ts);
 
 struct CaptureCapabilityOptions {
     bool enable_memory_tracking = true;

@@ -122,6 +122,62 @@ TEST(CaptureCapabilityResolver,
     EXPECT_EQ(graph->reason_code, "invalid_timestamps_dropped");
 }
 
+// The L4 failure (2026-10-16): every kernel and memcpy record arrived with
+// start == end == 0. That is not "no record arrived".
+TEST(CaptureCapabilityResolver, AllZeroTimestampsReportTimestampsUnavailable) {
+    auto input = BaseInput(gpufl::ProfilingEngine::Trace);
+    input.kernel_activity = true;
+    input.counters.launch_count = 4096;
+    input.counters.kernel_records_eligible = 4096;
+    input.counters.kernel_records_zero_ts = 4096;
+    input.counters.mem_transfer_records_eligible = 2;
+    input.counters.mem_transfer_records_zero_ts = 2;
+
+    const auto evt = gpufl::BuildCaptureCapabilitiesEvent(input);
+
+    const auto* kernel = FindCapability(evt, "kernel_events");
+    ASSERT_NE(kernel, nullptr);
+    EXPECT_EQ(kernel->status, "enabled_no_data");
+    EXPECT_EQ(kernel->reason_code, "kernel_timestamps_unavailable");
+    EXPECT_NE(kernel->message.find("eligible=4096 zero_timestamps=4096"),
+              std::string::npos);
+    const auto* memcpy = FindCapability(evt, "memcpy_activity");
+    ASSERT_NE(memcpy, nullptr);
+    EXPECT_EQ(memcpy->status, "enabled_no_data");
+    EXPECT_EQ(memcpy->reason_code, "memcpy_timestamps_unavailable");
+}
+
+TEST(CaptureCapabilityResolver, SomeRejectedTimestampsReportPartialTimeline) {
+    auto input = BaseInput(gpufl::ProfilingEngine::Trace);
+    input.kernel_activity = true;
+    input.counters.kernel_rows = 10;
+    input.counters.kernel_records_eligible = 12;
+    input.counters.kernel_records_zero_ts = 1;
+    input.counters.kernel_records_invalid_ts = 1;
+
+    const auto evt = gpufl::BuildCaptureCapabilitiesEvent(input);
+
+    const auto* kernel = FindCapability(evt, "kernel_events");
+    ASSERT_NE(kernel, nullptr);
+    EXPECT_EQ(kernel->status, "collected");
+    EXPECT_EQ(kernel->reason_code, "kernel_timestamps_partial");
+    EXPECT_EQ(FindCapability(evt, "memcpy_activity")->reason_code,
+              "enabled_but_no_records");
+}
+
+TEST(CaptureCapabilityResolver, RecordsThatNeverArrivedKeepNoRecordsReason) {
+    auto input = BaseInput(gpufl::ProfilingEngine::Trace);
+    input.kernel_activity = true;
+    input.counters.launch_count = 3;
+
+    const auto evt = gpufl::BuildCaptureCapabilitiesEvent(input);
+
+    const auto* kernel = FindCapability(evt, "kernel_events");
+    ASSERT_NE(kernel, nullptr);
+    EXPECT_EQ(kernel->status, "enabled_no_data");
+    EXPECT_EQ(kernel->reason_code, "enabled_but_no_records");
+}
+
 TEST(CaptureCapabilityResolver, PcSamplingSyntheticMajorityReportsFallback) {
     auto input = BaseInput(gpufl::ProfilingEngine::PcSampling);
     input.counters.kernel_rows = 2;

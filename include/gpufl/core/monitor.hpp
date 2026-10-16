@@ -309,6 +309,23 @@ class Monitor {
     static void Start();
 
     /**
+     * @brief Whether the started backend set up every capture facility it
+     *        requires (see IMonitorBackend::captureFacilitiesReady). False
+     *        with "monitor_not_started" when no backend is running.
+     */
+    static bool CaptureFacilitiesReady(std::string* reason);
+
+    /**
+     * @brief A process-wide hook that appends rows to every capture
+     *        capabilities report before it is written. The Linux injection
+     *        library uses it for capture readiness and coverage. A plain
+     *        function pointer, so nothing is destroyed under a late call.
+     */
+    using CaptureCapabilityContributor = void (*)(CaptureCapabilitiesEvent& evt);
+    static void SetCaptureCapabilityContributor(CaptureCapabilityContributor fn);
+    static void ContributeCaptureCapabilities(CaptureCapabilitiesEvent& evt);
+
+    /**
      * @brief Stops global collection.
      */
     static void Stop();

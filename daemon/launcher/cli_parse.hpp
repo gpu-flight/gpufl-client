@@ -33,7 +33,7 @@ struct TraceArgs {
     int agent_drain_ms = 60000;         // --agent-drain-ms: cap on waiting for the agent to finish uploading
     // Bounded window profiling (`gpufl trace` only): bound a capture of a
     // long-running target that never exits on its own. warmup defers the
-    // capture start (via GPUFL_INJECT_INIT_DELAY_MS); window then runs for a
+    // capture start (via GPUFL_INJECT_WARMUP_MS); window then runs for a
     // fixed wall-clock before the launcher stops the target. All in ms.
     int64_t warmup_ms = 0;              // --warmup; 0 = start capturing immediately
     int64_t window_ms = 0;              // --window; 0 = run to the target's natural exit

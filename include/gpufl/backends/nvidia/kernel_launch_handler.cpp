@@ -484,6 +484,7 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
                       "internal wait kernel corr=", k->correlationId);
         return false;
     }
+    backend_->kernel_activity_timestamps_.NoteEligible();
 
     // Diagnostic: log every real activity record as it arrives.
     GFL_LOG_DEBUG("[KernelLaunchHandler] ACTIVITY_RECORD corr=",
@@ -515,6 +516,7 @@ bool KernelLaunchHandler::handleActivityRecord(const CUpti_Activity* record,
         GFL_LOG_DEBUG("[KernelLaunchHandler] dropping kernel activity with "
                       "invalid timestamps corr=", k->correlationId,
                       " start=", k->start, " end=", k->end);
+        backend_->kernel_activity_timestamps_.NoteRejected(k->start, k->end);
         ActivityRecord drop{};
         drop.type = TraceType::KERNEL_META_DISCARD;
         drop.corr_id = k->correlationId;

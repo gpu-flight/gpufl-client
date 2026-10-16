@@ -608,11 +608,25 @@ void Monitor::Shutdown() {
         // enabled_but_no_records, so the session stays self-describing.
         if (IMonitorBackend* b = g_state.adapter->backend();
             b && b->kernelActivityExpectedButMissing()) {
-            GFL_LOG_ERROR(
-                "[Monitor] Kernel activity was enabled and launches happened, "
-                "but no kernel activity record arrived this session. Kernel "
-                "rows are omitted (a synthetic fallback would carry host-gap "
-                "durations, not kernel time).");
+            // Records that arrived without timing are a different failure
+            // from records that never arrived; say which one this was.
+            const ActivityTimestampCounts ts = b->kernelActivityTimestamps();
+            if (ts.eligible == 0) {
+                GFL_LOG_ERROR(
+                    "[Monitor] Kernel activity was enabled and launches "
+                    "happened, but no kernel activity record arrived this "
+                    "session. Kernel rows are omitted (a synthetic fallback "
+                    "would carry host-gap durations, not kernel time).");
+            } else {
+                GFL_LOG_ERROR(
+                    "[Monitor] Kernel activity was enabled and launches "
+                    "happened, but no kernel activity record had valid timing "
+                    "this session (eligible=", ts.eligible,
+                    " zero_timestamps=", ts.zero_ts,
+                    " other_invalid=", ts.invalid_ts,
+                    "). Kernel rows are omitted (a synthetic fallback would "
+                    "carry host-gap durations, not kernel time).");
+            }
         }
         g_state.adapter->shutdown();
     }
@@ -725,6 +739,29 @@ void Monitor::RequestSyntheticDrainAndWait() {
 }
 
 void Monitor::Start() { if (g_state.adapter) g_state.adapter->start(); }
+bool Monitor::CaptureFacilitiesReady(std::string* reason) {
+    IMonitorBackend* backend =
+        g_state.adapter ? g_state.adapter->backend() : nullptr;
+    // The adapter, not `initialized`: Shutdown clears that flag before the
+    // final capability report, which asks this again.
+    if (!g_state.adapter) {
+        if (reason) *reason = "monitor_not_started";
+        return false;
+    }
+    // A monitoring-only session has no capture backend and needs none.
+    return !backend || backend->captureFacilitiesReady(reason);
+}
+namespace {
+std::atomic<Monitor::CaptureCapabilityContributor> g_capability_contributor{nullptr};
+}  // namespace
+void Monitor::SetCaptureCapabilityContributor(CaptureCapabilityContributor fn) {
+    g_capability_contributor.store(fn, std::memory_order_release);
+}
+void Monitor::ContributeCaptureCapabilities(CaptureCapabilitiesEvent& evt) {
+    if (const auto fn = g_capability_contributor.load(std::memory_order_acquire)) {
+        fn(evt);
+    }
+}
 void Monitor::Stop() { if (g_state.adapter) g_state.adapter->stop(); }
 
 void Monitor::PushRange(const char* name) {

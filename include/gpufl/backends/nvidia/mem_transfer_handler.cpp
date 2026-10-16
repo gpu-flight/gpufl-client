@@ -253,6 +253,7 @@ bool MemTransferHandler::handleActivityRecord(const CUpti_Activity* record,
     if (record->kind == CUPTI_ACTIVITY_KIND_MEMCPY ||
         record->kind == CUPTI_ACTIVITY_KIND_MEMCPY2) {
         const auto* m = reinterpret_cast<const CUpti_ActivityMemcpy*>(record);
+        backend_->NoteMemTransferActivityEligible();
         const int64_t wallStartNs =
             baseCpuNs + static_cast<int64_t>(m->start - baseCuptiTs);
         if (m->start == 0 || m->end < m->start ||
@@ -261,6 +262,7 @@ bool MemTransferHandler::handleActivityRecord(const CUpti_Activity* record,
             GFL_LOG_DEBUG("[MemTransferHandler] dropping memcpy activity with "
                           "invalid timestamps corr=", m->correlationId,
                           " start=", m->start, " end=", m->end);
+            backend_->NoteMemTransferActivityRejected(m->start, m->end);
             ActivityRecord drop{};
             drop.type = TraceType::KERNEL_META_DISCARD;
             drop.corr_id = m->correlationId;
@@ -289,6 +291,7 @@ bool MemTransferHandler::handleActivityRecord(const CUpti_Activity* record,
 
     if (record->kind == CUPTI_ACTIVITY_KIND_MEMSET) {
         const auto* m = reinterpret_cast<const CUpti_ActivityMemset*>(record);
+        backend_->NoteMemTransferActivityEligible();
         const int64_t wallStartNs =
             baseCpuNs + static_cast<int64_t>(m->start - baseCuptiTs);
         if (m->start == 0 || m->end < m->start ||
@@ -297,6 +300,7 @@ bool MemTransferHandler::handleActivityRecord(const CUpti_Activity* record,
             GFL_LOG_DEBUG("[MemTransferHandler] dropping memset activity with "
                           "invalid timestamps corr=", m->correlationId,
                           " start=", m->start, " end=", m->end);
+            backend_->NoteMemTransferActivityRejected(m->start, m->end);
             ActivityRecord drop{};
             drop.type = TraceType::KERNEL_META_DISCARD;
             drop.corr_id = m->correlationId;

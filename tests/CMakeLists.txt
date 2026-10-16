@@ -60,6 +60,8 @@ set(GPUFL_TEST_SOURCES
     ${CMAKE_SOURCE_DIR}/daemon/launcher/segmentation_env.cpp
     ${CMAKE_SOURCE_DIR}/daemon/launcher/trace_run_plan.cpp
     ${CMAKE_SOURCE_DIR}/daemon/launcher/agent_launcher.cpp
+    launcher/test_bootstrap_status.cpp
+    ${CMAKE_SOURCE_DIR}/daemon/launcher/bootstrap_status.cpp
 )
 
 if(GPUFL_ENABLE_NVIDIA AND GPUFL_HAS_CUPTI)
@@ -99,6 +101,14 @@ endif()
 if(APPLE AND GPUFL_ENABLE_METAL AND GPUFL_HAS_METAL)
   list(APPEND GPUFL_TEST_SOURCES
     backends/metal/test_metal_collector.mm
+  )
+endif()
+
+# The Linux injection capture gate is a pure state machine (fake driver hooks).
+if(UNIX AND NOT APPLE)
+  list(APPEND GPUFL_TEST_SOURCES
+    inject/test_capture_gate.cpp
+    ${CMAKE_SOURCE_DIR}/include/gpufl/inject/capture_gate.cpp
   )
 endif()
 
@@ -289,4 +299,67 @@ else()
         DISCOVERY_TIMEOUT 20
         DISCOVERY_MODE POST_BUILD
     )
+endif()
+
+# 8. Capture-gate end-to-end tests on CPU (Linux). Real dynamic loading: a
+# fake libcuda.so.1 / libcudart.so.13, a stand-in libgpufl_inject.so built from
+# the real gate, Linux glue and typed CUDA wrappers with a fake gpufl::init,
+# and the real `gpufl trace` launcher for the watchdog. Built with gpufl_tests
+# so the CI test step runs them.
+if(UNIX AND NOT APPLE AND GPUFL_HAS_CUDA AND CUDAToolkit_INCLUDE_DIRS)
+  find_package(Python3 COMPONENTS Interpreter)
+  set(GATE_E2E_DIR ${CMAKE_CURRENT_BINARY_DIR}/gate_e2e)
+  set(GATE_E2E_SRC ${CMAKE_CURRENT_SOURCE_DIR}/inject/gate_e2e)
+
+  add_library(gate_e2e_fake_cuda SHARED ${GATE_E2E_SRC}/fake_cuda.cpp)
+  set_target_properties(gate_e2e_fake_cuda PROPERTIES
+      OUTPUT_NAME cuda SOVERSION 1
+      LIBRARY_OUTPUT_DIRECTORY ${GATE_E2E_DIR}/fake)
+  target_link_libraries(gate_e2e_fake_cuda PRIVATE ${CMAKE_DL_LIBS} pthread)
+
+  add_library(gate_e2e_fake_cudart SHARED ${GATE_E2E_SRC}/fake_cudart.cpp)
+  set_target_properties(gate_e2e_fake_cudart PROPERTIES
+      OUTPUT_NAME cudart SOVERSION 13
+      LIBRARY_OUTPUT_DIRECTORY ${GATE_E2E_DIR}/fake)
+  target_link_libraries(gate_e2e_fake_cudart PRIVATE ${CMAKE_DL_LIBS})
+
+  add_library(gate_e2e_inject SHARED
+      ${GATE_E2E_SRC}/harness.cpp
+      ${CMAKE_SOURCE_DIR}/include/gpufl/inject/capture_gate.cpp
+      ${CMAKE_SOURCE_DIR}/include/gpufl/inject/capture_gate_linux.cpp
+      ${CMAKE_SOURCE_DIR}/include/gpufl/inject/cuda_interpose_linux.cpp)
+  set_target_properties(gate_e2e_inject PROPERTIES
+      OUTPUT_NAME gpufl_inject
+      LIBRARY_OUTPUT_DIRECTORY ${GATE_E2E_DIR}/inject
+      CXX_VISIBILITY_PRESET hidden)
+  target_include_directories(gate_e2e_inject PRIVATE
+      ${CMAKE_SOURCE_DIR}/include ${GATE_E2E_SRC} ${CUDAToolkit_INCLUDE_DIRS})
+  target_link_libraries(gate_e2e_inject PRIVATE ${CMAKE_DL_LIBS} pthread)
+
+  add_executable(gate_e2e_target ${GATE_E2E_SRC}/target.cpp)
+  set_target_properties(gate_e2e_target PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY ${GATE_E2E_DIR}
+      ENABLE_EXPORTS ON)  # the harness resolves TestOwnedTouch
+  target_include_directories(gate_e2e_target PRIVATE ${GATE_E2E_SRC})
+  target_link_libraries(gate_e2e_target PRIVATE
+      gate_e2e_fake_cudart gate_e2e_fake_cuda ${CMAKE_DL_LIBS})
+  # DT_RPATH, searched before LD_LIBRARY_PATH: the target must load the fakes
+  # even where the environment points at a real or stub libcudart.
+  target_link_options(gate_e2e_target PRIVATE -Wl,--disable-new-dtags)
+
+  add_dependencies(gpufl_tests gate_e2e_target gate_e2e_inject)
+  set(GATE_E2E_LAUNCHER_ARGS)
+  if(BUILD_GPUFL_LAUNCHER)
+    add_dependencies(gpufl_tests gpufl_launcher)
+    set(GATE_E2E_LAUNCHER_ARGS --launcher $<TARGET_FILE:gpufl_launcher>)
+  endif()
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME CaptureGateEndToEnd
+        COMMAND ${Python3_EXECUTABLE} -B ${GATE_E2E_SRC}/run_gate_e2e.py
+                --target $<TARGET_FILE:gate_e2e_target>
+                --inject $<TARGET_FILE:gate_e2e_inject>
+                --fake-dir ${GATE_E2E_DIR}/fake
+                ${GATE_E2E_LAUNCHER_ARGS})
+    set_tests_properties(CaptureGateEndToEnd PROPERTIES TIMEOUT 300)
+  endif()
 endif()

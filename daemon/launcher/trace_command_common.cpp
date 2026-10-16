@@ -153,6 +153,8 @@ struct SyntheticShutdownContext {
     bool signaled = false;
     int signal = 0;
     bool window_stopped = false;  // intentional window-end stop, not a crash
+    // Capture initialization never finished; the launcher killed the target.
+    bool init_watchdog_killed = false;
 };
 
 void inspectLifecycleLine(const std::string& line, SessionLifecycleInfo& info) {
@@ -206,6 +208,19 @@ bool decompressGzipToFile(const fs::path& gz_path, const fs::path& out_path) {
     return n == 0 && err == Z_OK && out.good();
 }
 
+#if !defined(_WIN32)
+// The bootstrap summary, saying so when the read after exit did not confirm
+// the last accepted record: that record is then history, not a current state.
+std::string describeRunBootstrap(const TraceProcessResult& run) {
+    std::string text = DescribeBootstrapStatus(run.bootstrap);
+    if (run.bootstrap.valid && !run.bootstrap_final_error.empty()) {
+        text += " [last accepted record; final status read: " +
+                run.bootstrap_final_error + "]";
+    }
+    return text;
+}
+#endif
+
 std::string syntheticShutdownLine(const std::string& session_id,
                                   const SessionLifecycleInfo& info,
                                   const SyntheticShutdownContext& context) {
@@ -222,8 +237,9 @@ std::string syntheticShutdownLine(const std::string& session_id,
        << ",\"signaled\":" << (context.signaled ? "true" : "false")
        << ",\"signal\":" << context.signal
        << ",\"window_stopped\":" << (context.window_stopped ? "true" : "false")
-       << ",\"crashed\":" << (crashed ? "true" : "false")
-       << "}";
+       << ",\"crashed\":" << (crashed ? "true" : "false");
+    if (context.init_watchdog_killed) os << ",\"init_watchdog_killed\":true";
+    os << "}";
     return os.str();
 }
 
@@ -778,11 +794,22 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
         return 2;
     }
 
+    // The injected library and this launcher ship together; the protocol
+    // variable tells the library which contract it was launched under.
+    if (!setEnvOrPrint(platform, env::kInjectProtocol, env::kInjectProtocolVersion)) {
+        return 2;
+    }
+
     // Warmup defers the in-child capture start so the window skips cold-start
-    // (autotune / JIT / allocator growth). Reuses the inject init-delay knob.
-    if (args.warmup_ms > 0 &&
-        !setEnvOrPrint(platform, env::kInjectInitDelayMs,
-                       std::to_string(args.warmup_ms))) {
+    // (autotune / JIT / allocator growth). Nothing waits for it, so a warmup
+    // run is reported as an unqualified Trace capture. Without --warmup the
+    // variable is removed, so a parent shell's value cannot leak in.
+    if (args.warmup_ms > 0) {
+        if (!setEnvOrPrint(platform, env::kInjectWarmupMs,
+                           std::to_string(args.warmup_ms))) {
+            return 2;
+        }
+    } else if (!unsetEnvOrPrint(platform, env::kInjectWarmupMs)) {
         return 2;
     }
 
@@ -928,16 +955,78 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
             }
         }
 
+        RunOptions pass_opts = run_opts;
+#if !defined(_WIN32)
+        // A fresh launcher-owned status directory per child: the injected
+        // library writes status-<pid>.json there, and the watchdog reads only
+        // this child's file. Hidden from the session scan by its dot name.
+        pass_opts.bootstrap_nonce = MakeBootstrapNonce();
+        pass_opts.bootstrap_dir = output_dir / ".gpufl-bootstrap" /
+                                  ("pass-" + std::to_string(i) + "-" +
+                                   pass_opts.bootstrap_nonce.substr(0, 8));
+        {
+            std::error_code dir_ec;
+            fs::create_directories(pass_opts.bootstrap_dir, dir_ec);
+            fs::permissions(pass_opts.bootstrap_dir, fs::perms::owner_all,
+                            fs::perm_options::replace, dir_ec);
+            if (dir_ec) {
+                std::fprintf(stderr, "gpufl: cannot create %s: %s\n",
+                             pass_opts.bootstrap_dir.string().c_str(),
+                             dir_ec.message().c_str());
+                return 2;
+            }
+        }
+        if (!setEnvOrPrint(platform, env::kInjectStatusDir,
+                           pass_opts.bootstrap_dir.string()) ||
+            !setEnvOrPrint(platform, env::kInjectStatusNonce,
+                           pass_opts.bootstrap_nonce)) {
+            return 2;
+        }
+        if (const char* grace = std::getenv(env::kInjectWatchdogGraceMs)) {
+            char* end = nullptr;
+            const long long parsed = std::strtoll(grace, &end, 10);
+            if (end && *end == '\0' && parsed >= 0 && parsed <= 3'600'000) {
+                pass_opts.watchdog_grace_ms = parsed;
+            }
+        }
+#endif
+
         const int64_t pass_start_ns = nowNs();
         const auto t_start = std::chrono::steady_clock::now();
-        const TraceProcessResult run = platform.runProcess(args.command, run_opts);
+        const TraceProcessResult run = platform.runProcess(args.command, pass_opts);
         const auto t_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - t_start).count();
+#if !defined(_WIN32)
+        {
+            std::error_code dir_ec;
+            fs::remove_all(pass_opts.bootstrap_dir, dir_ec);
+        }
+#endif
 
         if (run.launcher_error) {
             std::fprintf(stderr, "gpufl: %s\n", run.error.c_str());
             return run.rc;
         }
+
+#if !defined(_WIN32)
+        if (run.init_watchdog_killed) {
+            std::fprintf(stderr,
+                         "[gpufl] %s: capture initialization never finished; the "
+                         "watchdog killed the target (%s)\n",
+                         what.c_str(), describeRunBootstrap(run).c_str());
+        } else if (!run.signaled && run.rc == kInitWedgedExitCode &&
+                   run.bootstrap.valid &&
+                   run.bootstrap.coverage_notes.count("exit_while_initializing")) {
+            std::fprintf(stderr,
+                         "[gpufl] %s: exited while capture initialization was "
+                         "still running (rc=%d)\n",
+                         what.c_str(), run.rc);
+        }
+        if (!args.quiet) {
+            std::fprintf(stderr, "[gpufl] %s capture readiness: %s\n", what.c_str(),
+                         describeRunBootstrap(run).c_str());
+        }
+#endif
 
         if (!args.quiet) {
             if (run.window_stopped) {
@@ -973,6 +1062,7 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
         shutdown_context.signaled = run.signaled;
         shutdown_context.signal = run.signal;
         shutdown_context.window_stopped = run.window_stopped;
+        shutdown_context.init_watchdog_killed = run.init_watchdog_killed;
         const int synthesized = ensureTraceCompletionMarkers(
                 output_dir, pass_start_ns, shutdown_context);
         if (synthesized > 0) {

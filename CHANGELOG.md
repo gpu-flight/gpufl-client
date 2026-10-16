@@ -168,6 +168,43 @@ types are additive.
   `--agent-drain-ms`, `--agent-cursor` and `--all-sessions` control it, and the
   launcher sends upload-complete only after a clean agent drain. `--upload` is
   scoped to a per-run folder rather than the shared `--output` directory.
+- **Linux injection lifecycle (`gpufl trace`).**
+  - **Warmup.** `--warmup` now sets `GPUFL_INJECT_WARMUP_MS` instead of
+    `GPUFL_INJECT_INIT_DELAY_MS`. Nothing waits for a warmup, so a warmup run
+    is reported as an unqualified Trace capture. The initialization deadline
+    includes the warmup once, so a long healthy warmup is not killed. A
+    process that exits during the warmup stops the worker before CUPTI starts
+    (`exit_before_capture`), and normal teardown runs. A new library launched with
+    a long `GPUFL_INJECT_INIT_DELAY_MS` and without the launcher's
+    `GPUFL_INJECT_PROTOCOL` (an older launcher, or a direct injection) records
+    `legacy_launcher_delay`. The launcher and the library ship together in one
+    wheel. `GPUFL_INJECT_SYNC_WAIT_MS` is no longer read: one deadline covers
+    every wait.
+  - **Status file.** The launcher gives each child a status directory
+    (`GPUFL_INJECT_STATUS_DIR`, `GPUFL_INJECT_STATUS_NONCE`). The library
+    writes `status-<pid>.json` there without the logger, and the launcher
+    prints the result as `capture readiness: ...`. If the read after exit
+    does not confirm the last accepted record (missing, malformed, foreign or
+    older), the summary says so and shows that record as history. The status
+    is diagnostics, not qualification authority. Writing it can hold the gate
+    on a slow filesystem past the nominal deadline.
+  - **Watchdog.** In every mode, including a natural exit, the launcher kills
+    (SIGKILL) a child whose capture initialization outlives the published
+    deadline plus `GPUFL_INJECT_WATCHDOG_GRACE_MS` (default 5000). It does not
+    bound the application's own run time.
+  - **Watchdog limits.**
+    - It covers only a paired library after its first status record. It does
+      not cover an older library, a manual host's own `cuInit` before its
+      handshake, a failed status write, or a wedge before the first record.
+    - SIGKILL plus a blocking reap is not a bound on a process stuck in the
+      kernel.
+  - **Exit status 86.** If an initializer is still inside CUDA/CUPTI at exit
+    after the deadline, the process now ends with status 86. Without this, the
+    remaining exit handlers and destructors would run under that initializer.
+    Application exit handlers registered after the first CUDA call still run
+    before that check: that overlap is not controlled.
+  - **Driver API hosts.** A host that calls `cuInit` itself, without the
+    manual handshake, is reported as `unsupported_first_touch`.
 
 ### Deprecated
 
@@ -176,6 +213,45 @@ types are additive.
 
 ### Fixed
 
+- **Linux `gpufl trace` capture readiness.** The injected library started
+  CUPTI on a worker thread while the application went on into context and
+  module setup. On an L4, whole Trace sessions received every kernel and
+  memcpy record with zero timestamps. Nothing checked whether capture was
+  ready. Whether this race is the CUPTI-internal cause is not established,
+  and real-GPU requalification validates the fix.
+  - **The first call waits.** The application's first supported CUDA runtime
+    call now triggers driver initialization itself (through the real
+    `cudaGetDeviceCount`) and waits, within one deadline, until the driver,
+    the Trace subscription and every required activity kind are ready. A kind
+    counts only when its enable, and its re-enable after the engine starts,
+    returned success: a fallback result CUPTI logs as benign is not an enable.
+    A required kind lost after readiness adds `trace_facility_lost`.
+    `GPUFL_INJECT_LAUNCH_WAIT_MS` (1-600000, default 15000) sets that
+    deadline. The first-touch calls covered are:
+    - `cudaMalloc`, `cudaMallocManaged`, `cudaMallocHost`, `cudaHostAlloc`,
+      `cudaFree`;
+    - `cudaSetDevice`, `cudaGetDeviceCount`, `cudaGetDeviceProperties`,
+      `cudaMemGetInfo`;
+    - `cudaEventCreate*`, `cudaStreamCreate*`;
+    - the driver's `cuMemAlloc_v2` and `cuModuleLoadData*`;
+    - the existing launch, sync and copy wrappers.
+  - **New session rows.** Each session gets a `capture_readiness` row
+    (`ready`, `failed` or `pending`, with the reason) and a `capture_coverage`
+    row. Coverage is `no_known_loss` or `incomplete` with reasons, such as
+    `unsupported_first_touch` for driver init through an unwrapped route,
+    `manual_protocol_violation`, `warmup_unqualified` and
+    `kernel_timestamps_unavailable`. `no_known_loss` is not a completeness
+    proof: a kernel that produced no record cannot be counted.
+  - **Timeouts.** A timeout lets the application continue. The run then stays
+    `failed` even when initialization finishes later.
+  - **Manual handshake.** Hosts that use the manual handshake
+    (`GPUFL_INJECT_MANUAL_INIT=1`: Numba, and the backend's Rust and Python
+    hosts) get one synchronous initializer. `GpuFlightInitializeInjectionAfterCuda`
+    returns 1 only when capture is ready.
+- **Activity records without timing are reported as such.** Kernel and memcpy
+  records that arrive with `start == end == 0` are counted, and the capability
+  reason says `kernel_timestamps_unavailable` (or `_invalid`, or `_partial`),
+  with the counts, instead of "no kernel activity record arrived".
 - **PM/PC sample timestamps under `gpufl trace`.** The deferred engine start
   (the path Windows injection always takes, since gpufl initializes before
   the target creates a CUDA context) built its `EngineContext` without the

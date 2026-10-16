@@ -47,6 +47,10 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
         function_record_seen_.load(std::memory_order_relaxed);
     const uint64_t launch_count =
         kernel_launch_callback_count_.load(std::memory_order_acquire);
+    const ActivityTimestampCounts kernel_ts =
+        kernel_activity_timestamps_.Snapshot();
+    const ActivityTimestampCounts transfer_ts =
+        mem_transfer_activity_timestamps_.Snapshot();
 
     const EngineRequestSet requests =
         BuildEngineRequestSet(opts_.profiling_engine, combo_);
@@ -104,6 +108,18 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
         delta(function_rows, capability_function_rows_baseline_);
     input.counters.launch_count =
         delta(launch_count, capability_launch_count_baseline_);
+    const auto& kb = capability_kernel_timestamps_baseline_;
+    input.counters.kernel_records_eligible = delta(kernel_ts.eligible, kb.eligible);
+    input.counters.kernel_records_zero_ts = delta(kernel_ts.zero_ts, kb.zero_ts);
+    input.counters.kernel_records_invalid_ts =
+        delta(kernel_ts.invalid_ts, kb.invalid_ts);
+    const auto& tb = capability_mem_transfer_timestamps_baseline_;
+    input.counters.mem_transfer_records_eligible =
+        delta(transfer_ts.eligible, tb.eligible);
+    input.counters.mem_transfer_records_zero_ts =
+        delta(transfer_ts.zero_ts, tb.zero_ts);
+    input.counters.mem_transfer_records_invalid_ts =
+        delta(transfer_ts.invalid_ts, tb.invalid_ts);
     input.pc_insufficient_privileges =
         engine_ && engine_->hasInsufficientPrivileges();
     input.pc_stall_reasons_unavailable =
@@ -145,6 +161,7 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
         evt.capabilities.push_back(std::move(cap));
     }
 
+    Monitor::ContributeCaptureCapabilities(evt);
     segment->logger->write(model::CaptureCapabilitiesModel(evt));
     capability_kernel_rows_baseline_ = kernel_rows;
     capability_memory_rows_baseline_ = memory_rows;
@@ -159,6 +176,8 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
     capability_launch_count_baseline_ = launch_count;
     capability_scope_truncated_baseline_ = truncated_total;
     capability_pm_rows_baseline_ = pm_rows_total;
+    capability_kernel_timestamps_baseline_ = kernel_ts;
+    capability_mem_transfer_timestamps_baseline_ = transfer_ts;
     capture_capabilities_session_id_ = segment->session_id;
 }
 

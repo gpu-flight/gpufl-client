@@ -145,6 +145,7 @@ void CuptiBackend::initialize(const MonitorOptions& opts) {
         "  - Insufficient permissions\n"
         "  - CUDA driver issues");
     GFL_LOG_DEBUG("CUPTI subscription successful");
+    cupti_subscribed_.store(true, std::memory_order_release);
 
     std::set<CUpti_CallbackDomain> domains;
     std::set<std::pair<CUpti_CallbackDomain, CUpti_CallbackId>> callbacks;
@@ -504,7 +505,14 @@ void CuptiBackend::start() {
         std::set<CUpti_ActivityKind> kinds;
         for (const auto& h : handlers_)
             for (auto k : h->requiredActivityKinds()) kinds.insert(k);
-        for (auto k : kinds) CUPTI_CHECK(cuptiActivityEnable(k));
+        for (auto k : kinds) {
+            const CUptiResult res = cuptiActivityEnable(k);
+            CUPTI_CHECK(res);
+            // Capture readiness requires every required kind to be on; a
+            // "benign" result is a fallback for logging, not an enable.
+            required_activity_.Record(static_cast<int>(k), res == CUPTI_SUCCESS,
+                                      static_cast<int>(res));
+        }
     }
 
     // Initialize and start the engine (requires CUDA context)
@@ -535,7 +543,13 @@ void CuptiBackend::ReenableActivityAfterEngineStart_() {
         std::set<CUpti_ActivityKind> kinds;
         for (const auto& h : handlers_)
             for (auto k : h->requiredActivityKinds()) kinds.insert(k);
-        for (auto k : kinds) cuptiActivityEnable(k);
+        // The engine may have reset the subscription, so the re-enable result
+        // counts too: an earlier success does not stand for this one.
+        for (auto k : kinds) {
+            const CUptiResult res = cuptiActivityEnable(k);
+            required_activity_.Record(static_cast<int>(k), res == CUPTI_SUCCESS,
+                                      static_cast<int>(res));
+        }
     }
 
     // Re-resolve NVTX marker policy after engine start. This is primarily for
@@ -983,8 +997,11 @@ void CuptiBackend::stop() {
         kernel_activity_emitted_.load(std::memory_order_relaxed);
     const uint64_t throttled =
         kernel_activity_throttled_.load(std::memory_order_relaxed);
+    const ActivityTimestampCounts ts = kernel_activity_timestamps_.Snapshot();
     GFL_LOG_DEBUG("[KernelLaunchHandler] activity summary seen=", seen,
-                  " emitted=", emitted, " throttled=", throttled);
+                  " emitted=", emitted, " throttled=", throttled,
+                  " eligible=", ts.eligible, " zero_timestamps=", ts.zero_ts,
+                  " other_invalid=", ts.invalid_ts);
 }
 
 void CuptiBackend::RegisterHandler(

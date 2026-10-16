@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bootstrap_status.hpp"
 #include "cli_parse.hpp"
 
 #include <cstdint>
@@ -11,6 +12,10 @@ namespace gpufl::launcher {
 
 namespace fs = std::filesystem;
 
+// The injected library ends the process with this status when an initializer
+// is still inside CUDA/CUPTI at exit after its deadline (capture_gate).
+constexpr int kInitWedgedExitCode = 86;
+
 struct TraceProcessResult {
     int rc = 1;
     bool signaled = false;
@@ -19,6 +24,14 @@ struct TraceProcessResult {
     // The launcher stopped the target at the window deadline (intentional —
     // not a crash and not a failure). rc/signal reflect the kill, not health.
     bool window_stopped = false;
+    // The initialization watchdog killed the target: capture initialization
+    // never finished within the library's published deadline plus the grace.
+    bool init_watchdog_killed = false;
+    // The child's last bootstrap status (invalid when none was read).
+    BootstrapStatus bootstrap;
+    // Empty when the read after exit confirmed `bootstrap`; otherwise why it
+    // did not (the record above is then historical).
+    std::string bootstrap_final_error;
     std::string error;
 };
 
@@ -29,6 +42,11 @@ struct TraceProcessResult {
 struct RunOptions {
     int64_t run_ms = 0;            // stop the target after this wall-clock (0 = unbounded)
     int stop_grace_ms = 5000;     // after the stop signal, hard-kill if still alive
+    // Per-child bootstrap status directory and nonce (empty: no watchdog).
+    fs::path bootstrap_dir;
+    std::string bootstrap_nonce;
+    // Allowed past the library's initialization deadline before the kill.
+    int64_t watchdog_grace_ms = 5000;
 };
 
 class TracePlatform {

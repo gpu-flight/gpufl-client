@@ -116,10 +116,26 @@ constexpr const char* kFlushLogsAlways      = "GPUFL_FLUSH_LOGS_ALWAYS";
 
 // ── Inject-lib timing knobs (tuning / debugging the injection lifecycle) ────
 constexpr const char* kInjectShutdownDelayMs = "GPUFL_INJECT_SHUTDOWN_DELAY_MS";
-constexpr const char* kInjectSyncWaitMs      = "GPUFL_INJECT_SYNC_WAIT_MS";
 constexpr const char* kInjectLaunchWaitMs    = "GPUFL_INJECT_LAUNCH_WAIT_MS";
 constexpr const char* kInjectProcessScope    = "GPUFL_INJECT_PROCESS_SCOPE";
 constexpr const char* kInjectInitDelayMs     = "GPUFL_INJECT_INIT_DELAY_MS";
+// --warmup: a deliberate capture delay. Unlike the init delay above, the first
+// CUDA calls do not wait for it, so a warmup run is never a qualified Trace
+// capture (coverage note warmup_unqualified).
+constexpr const char* kInjectWarmupMs        = "GPUFL_INJECT_WARMUP_MS";
+// Launcher/library pairing. The launcher sets it; the library records what it
+// saw. Absent means an older launcher or a direct injection.
+constexpr const char* kInjectProtocol        = "GPUFL_INJECT_PROTOCOL";
+constexpr const char* kInjectProtocolVersion = "2";
+// Launcher-owned per-child bootstrap status directory and its nonce. Each
+// injected process writes status-<pid>.json there without needing the logger;
+// the launcher reads only its own child's file, so a grandchild that inherited
+// the environment cannot overwrite it.
+constexpr const char* kInjectStatusDir       = "GPUFL_INJECT_STATUS_DIR";
+constexpr const char* kInjectStatusNonce     = "GPUFL_INJECT_STATUS_NONCE";
+// Extra time the launcher allows past the library's published initialization
+// deadline before it kills a child whose initialization never finished.
+constexpr const char* kInjectWatchdogGraceMs = "GPUFL_INJECT_WATCHDOG_GRACE_MS";
 
 // ── Profiling engine selection ──────────────────────────────────────────────
 // Override the resolved ProfilingEngine; gpufl::init() is the single string→enum

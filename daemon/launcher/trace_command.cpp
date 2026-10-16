@@ -146,13 +146,35 @@ class PosixTracePlatform final : public TracePlatform {
             fillFromStatus(status);
         };
 
-        if (opts.run_ms <= 0) {
+        // Capture-initialization watchdog: the injected library publishes its
+        // deadline in a per-child status file. It bounds that initialization
+        // only, never the application's own run time.
+        const bool watch = !opts.bootstrap_dir.empty();
+        InitWatchdog watchdog(opts.watchdog_grace_ms * 1'000'000LL);
+        BootstrapStatus last_read;
+        auto watchdogFires = [&](const bool final_read = false) -> bool {
+            // Once initialization finished nothing can rearm it; a long run
+            // stops reading the file until the final read after exit.
+            if (!watch || (watchdog.disarmed() && !final_read)) return false;
+            last_read = ReadBootstrapStatus(opts.bootstrap_dir, pid, opts.bootstrap_nonce);
+            return watchdog.Observe(last_read, MonotonicNowNs());
+        };
+        auto finishBootstrap = [&]() {
+            if (!watch) return;
+            (void)watchdogFires(/*final_read=*/true);  // the record after exit
+            // The last accepted record, plus whether this final read confirmed it.
+            const FinalBootstrapObservation final_obs = CombineFinalBootstrap(watchdog, last_read);
+            out.bootstrap = final_obs.accepted;
+            out.bootstrap_final_error = final_obs.final_error;
+        };
+
+        if (opts.run_ms <= 0 && !watch) {
             reapBlocking();
             return out;
         }
 
-        // Bounded window: poll for a natural exit until the deadline, then
-        // stop the child (SIGTERM, escalating to SIGKILL after the grace).
+        // Poll for a natural exit (until the deadline, for a bounded window),
+        // then stop the child (SIGTERM, escalating to SIGKILL after the grace).
         constexpr auto poll = std::chrono::milliseconds(50);
         // reaped: -1 launcher error, 0 still running, 1 exited (out filled).
         auto pollReap = [&]() -> int {
@@ -166,29 +188,48 @@ class PosixTracePlatform final : public TracePlatform {
             out.error = std::string("waitpid failed: ") + std::strerror(errno);
             return -1;
         };
-        auto waitUntil = [&](std::chrono::steady_clock::time_point until) -> int {
+        // 1 exited, -1 error, 0 still running at `until`.
+        auto waitUntil = [&](const std::chrono::steady_clock::time_point until) -> int {
             while (std::chrono::steady_clock::now() < until) {
                 const int r = pollReap();
-                if (r != 0) return r;  // -1 error or 1 exited
+                if (r != 0) return r;
+                if (watchdogFires()) {
+                    // SIGKILL, never SIGTERM: the application may handle
+                    // SIGTERM, and the wedged initializer must not run on.
+                    out.init_watchdog_killed = true;
+                    ::kill(pid, SIGKILL);
+                    reapBlocking();
+                    return 1;
+                }
                 std::this_thread::sleep_for(poll);
             }
-            return 0;  // timed out, still running
+            return 0;
         };
 
+        const auto unbounded = std::chrono::steady_clock::time_point::max();
         const auto now = std::chrono::steady_clock::now();
-        const int r = waitUntil(now + std::chrono::milliseconds(opts.run_ms));
-        if (r != 0) return out;  // natural exit (or error) before the deadline
+        const int r = waitUntil(opts.run_ms <= 0
+                                    ? unbounded
+                                    : now + std::chrono::milliseconds(opts.run_ms));
+        if (r != 0) {  // natural exit, watchdog kill, or error
+            finishBootstrap();
+            return out;
+        }
 
         // Deadline reached → stop the target.
         out.window_stopped = true;
         ::kill(pid, SIGTERM);
         const auto grace = std::chrono::steady_clock::now() +
                            std::chrono::milliseconds(opts.stop_grace_ms);
-        if (waitUntil(grace) != 0) return out;  // exited within the grace
+        if (waitUntil(grace) != 0) {  // exited within the grace
+            finishBootstrap();
+            return out;
+        }
 
         // Still alive → hard kill and reap.
         ::kill(pid, SIGKILL);
         reapBlocking();
+        finishBootstrap();
         return out;
     }
 };
