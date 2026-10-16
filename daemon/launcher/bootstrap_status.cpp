@@ -46,15 +46,19 @@ BootstrapStatus ReadBootstrapStatus(const std::filesystem::path& dir,
     }
     if (doc.value<int64_t>("pid", 0) != pid) return Invalid("foreign_pid");
 
-    // Every field the library writes must be there with its type, and the
-    // values must name a state the library can be in.
+    // Every field of schema 1 must be there with its type, and the record
+    // must describe a state the gate can publish (the checks below). This is
+    // an operational diagnostic: a valid record is a consistent report, not
+    // evidence that capture worked.
     const auto has = [&doc](const char* key, const json::JsonValue::Type type) {
         return doc.contains(key) && doc[key].type() == type;
     };
     using Type = json::JsonValue::Type;
-    for (const char* key : {"seq", "deadline_monotonic_ns", "callbacks_seen"}) {
+    for (const char* key : {"seq", "deadline_monotonic_ns", "callbacks_seen",
+                            "handshake_reentries"}) {
         if (!has(key, Type::Int)) return Invalid("malformed");
     }
+    if (!has("wait_config_invalid", Type::Bool)) return Invalid("malformed");
     for (const char* key : {"lifecycle", "owner", "readiness", "reason", "protocol"}) {
         if (!has(key, Type::String)) return Invalid("malformed");
     }
@@ -98,6 +102,40 @@ BootstrapStatus ReadBootstrapStatus(const std::filesystem::path& dir,
         (status.readiness == "failed") == status.reason.empty()) {
         return Invalid("inconsistent");
     }
+
+    // Participants: returned needs expected, ok needs returned; the owner
+    // decides which may be expected; Finished needs every expected one
+    // returned, and Ready needs every expected one ok.
+    struct Participant { bool expected, returned, ok; };
+    const auto participant = [&doc](const char* key) {
+        const json::JsonValue& p = doc[key];
+        return Participant{p["expected"].get_bool(), p["returned"].get_bool(),
+                           p["ok"].get_bool()};
+    };
+    const Participant trigger = participant("trigger");
+    const Participant worker = participant("worker");
+    const Participant handshake = participant("handshake");
+    bool any_expected = false;
+    for (const Participant& p : {trigger, worker, handshake}) {
+        if ((p.returned && !p.expected) || (p.ok && !p.returned)) {
+            return Invalid("inconsistent");
+        }
+        any_expected = any_expected || p.expected;
+        if (status.lifecycle == "finished" && p.expected && !p.returned) {
+            return Invalid("inconsistent");
+        }
+        if (status.readiness == "ready" && p.expected && !p.ok) {
+            return Invalid("inconsistent");
+        }
+    }
+    const bool owner_fits =
+        status.owner == "none"     ? !any_expected
+        : status.owner == "gate"   ? trigger.expected && !handshake.expected
+        : status.owner == "callback" ? worker.expected && !trigger.expected &&
+                                         !handshake.expected
+                                   : handshake.expected && !trigger.expected &&
+                                         !worker.expected;
+    if (!owner_fits) return Invalid("inconsistent");
     status.valid = true;
     return status;
 }
