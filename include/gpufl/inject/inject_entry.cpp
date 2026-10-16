@@ -18,6 +18,7 @@
 // CMake gates this TU on UNIX AND NOT APPLE.
 
 #include "gpufl/inject/inject_entry.hpp"
+#include "gpufl/inject/capture_gate_linux.hpp"
 
 #include "gpufl/core/env_vars.hpp"
 
@@ -29,6 +30,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -88,19 +91,9 @@
 namespace {
 
 std::once_flag g_init_once;
-std::once_flag g_deferred_wait_atexit_once;
 std::once_flag g_shutdown_atexit_once;
 std::atomic<bool> g_init_ok{false};
-std::atomic<bool> g_deferred_init_started{false};
-std::atomic<bool> g_deferred_init_finished{false};
 std::atomic<bool> g_shutdown_started{false};
-std::mutex g_deferred_init_mutex;
-std::condition_variable g_deferred_init_cv;
-// A CUDA call made by gpufl's own deferred-init worker must never wait for
-// that worker to finish. Most CUPTI setup does not call the runtime copy
-// APIs, but the interpose layer must be safe if a driver/toolkit revision
-// does: waiting here would be a self-deadlock.
-thread_local bool g_is_deferred_init_worker = false;
 
 // Captured during init for the atexit upload path (--upload). g_log_path
 // mirrors InitOptions.log_path; both are read only in shutdownAndSignal,
@@ -174,8 +167,6 @@ void endProcessScope() {
     if (state.perf_scope) gpufl::Monitor::EndPerfScope(state.name.c_str());
     state.active = false;
 }
-
-void waitForDeferredInit();
 
 // Non-empty env value, or std::nullopt if unset / empty.
 const char* envOrNull(const char* name) {
@@ -253,50 +244,6 @@ void shutdownAndSignal() {
     }
     writeCompletionByteIfRequested();
 }
-
-void waitForDeferredInit() {
-    if (g_deferred_init_started.load(std::memory_order_acquire) &&
-        !g_deferred_init_finished.load(std::memory_order_acquire)) {
-        std::unique_lock lock(g_deferred_init_mutex);
-        g_deferred_init_cv.wait(lock, [] {
-            return g_deferred_init_finished.load(std::memory_order_acquire);
-        });
-    }
-}
-
-#ifndef _WIN32
-// Boundary waits exist only to back the launch/sync interpose wrappers,
-// which are LD_PRELOAD-only (Linux). On Windows there is no interpose, so
-// these are compiled out to avoid unused-function diagnostics.
-void waitForDeferredInitForMs(const int wait_ms) {
-    if (wait_ms <= 0) return;
-    if (g_is_deferred_init_worker) return;
-    if (g_deferred_init_started.load(std::memory_order_acquire) &&
-        !g_deferred_init_finished.load(std::memory_order_acquire)) {
-        std::unique_lock lock(g_deferred_init_mutex);
-        g_deferred_init_cv.wait_for(
-            lock, std::chrono::milliseconds(wait_ms), [] {
-                return g_deferred_init_finished.load(std::memory_order_acquire);
-            });
-    }
-}
-
-void waitAtCudaSyncBoundary() {
-    waitForDeferredInitForMs(envIntOrDefault(gpufl::env::kInjectSyncWaitMs, 15000));
-}
-
-void waitAtCudaLaunchBoundary() {
-    waitForDeferredInitForMs(envIntOrDefault(gpufl::env::kInjectLaunchWaitMs, 15000));
-}
-
-void waitAtCudaMemoryBoundary() {
-    // A memory transfer is an activity-capture boundary for the same reason a
-    // launch is: if it crosses the target before CUPTI subscription completes,
-    // it is gone permanently. Reuse the launch timeout rather than introduce a
-    // second knob with identical semantics.
-    waitForDeferredInitForMs(envIntOrDefault(gpufl::env::kInjectLaunchWaitMs, 15000));
-}
-#endif  // !_WIN32
 
 
 struct NvtxDomainStorage {
@@ -526,15 +473,6 @@ void NVTX_API CounterSampleNoValue(nvtxDomainHandle_t, const uint64_t id,
 }  // namespace nvtx_counters_impl
 #endif  // GPUFL_HAS_NVTX_COUNTERS
 
-void registerDeferredWaitAtexit() {
-    std::call_once(g_deferred_wait_atexit_once, [] {
-        // atexit handlers run in reverse registration order. Register this
-        // wait guard early, then register shutdown only after init succeeds,
-        // so shutdown runs first and this guard only covers failed/slow init.
-        std::atexit(waitForDeferredInit);
-    });
-}
-
 void registerShutdownAtexit() {
     std::call_once(g_shutdown_atexit_once, [] {
         std::atexit(shutdownAndSignal);
@@ -639,70 +577,48 @@ void doInjectInit() {
 }
 
 
-void markDeferredInitFinished() {
-    {
-        std::lock_guard lock(g_deferred_init_mutex);
-        g_deferred_init_finished.store(true, std::memory_order_release);
+#ifndef _WIN32
+// Capture readiness on Linux: capture_gate_linux.cpp owns the gate, its
+// driver-init triggers, status file and exit guard. This library binds the
+// real initializer to it (gpufl::init plus the Trace facility check).
+gpufl::inject::GateStep initializeCapture() {
+    try {
+        std::call_once(g_init_once, doInjectInit);
+    } catch (...) {
+        return {false, "init_exception"};
     }
-    g_deferred_init_cv.notify_all();
+    if (!g_init_ok.load(std::memory_order_acquire)) return {false, "init_failed"};
+    std::string why;
+    if (!gpufl::Monitor::CaptureFacilitiesReady(&why)) {
+        return {false, "trace_facility_unavailable:" + why};
+    }
+    return {true, ""};
 }
 
-// Blocks until the CUDA driver has finished its own initialization.
-//
-// cuInit is idempotent and thread-safe, so calling it here just waits on the
-// driver's init lock. Resolved at runtime rather than linked: this file
-// interposes CUDA symbols and cannot include cuda.h without colliding with
-// its own declarations.
-void waitForCudaDriverInit() {
-    using CuInitFn = int (*)(unsigned int);
-    CuInitFn fn = nullptr;
-#ifdef _WIN32
-    if (HMODULE cuda = GetModuleHandleA("nvcuda.dll")) {
-        fn = reinterpret_cast<CuInitFn>(GetProcAddress(cuda, "cuInit"));
-    }
-#else
-    // RTLD_DEFAULT, not RTLD_NEXT: libcuda loaded this library and may sit
-    // ahead of it in the search order.
-    fn = reinterpret_cast<CuInitFn>(dlsym(RTLD_DEFAULT, "cuInit"));
-#endif
-    if (fn) fn(0);
+void contributeGateCapabilities(gpufl::CaptureCapabilitiesEvent& evt) {
+    gpufl::inject::AppendGateCapabilities(gpufl::inject::LinuxCaptureGate().Snapshot(),
+                                          evt);
 }
 
-void startDeferredInjectInit() {
-    registerDeferredWaitAtexit();
-
-    bool expected = false;
-    if (!g_deferred_init_started.compare_exchange_strong(
-            expected, true, std::memory_order_acq_rel)) {
-        return;
-    }
-
-    std::thread([] {
-        g_is_deferred_init_worker = true;
-        // NVIDIA calls InitializeInjection from inside the CUDA driver's own
-        // initialization. cuptiSubscribe probes driver state, so reaching it
-        // while that initialization is still running faults inside libcuda.
-        //
-        // A sleep cannot fix this. Measured on an RTX 3090 / driver 610.43,
-        // `gpufl trace --passes Trace` crashed nondeterministically at every
-        // length tried - 3/10 at 5ms, 5/10 at 40ms, 0/10 at 0, 10, 20, 30 and
-        // 50ms - so the delay only moves the odds. cuInit is idempotent and
-        // thread-safe, and blocks on the driver's own init lock, which is the
-        // barrier the sleep was standing in for. Engines other than Trace hid
-        // this by doing slow PerfWorks setup before subscribing.
-        waitForCudaDriverInit();
-        // The delay knob stays: it is what --warmup uses to skip cold start,
-        // and it is now measured from a driver that is actually up.
-        sleepMs(envIntOrDefault(gpufl::env::kInjectInitDelayMs, 1));
-        try {
-            std::call_once(g_init_once, doInjectInit);
-        } catch (...) {
-            // Injection must never throw through libcuda's callback path.
-        }
-        markDeferredInitFinished();
-        g_is_deferred_init_worker = false;
-    }).detach();
+void registerGateCapabilityContributor() {
+    gpufl::Monitor::SetCaptureCapabilityContributor(contributeGateCapabilities);
 }
+
+void shutdownAfterInitialization() {
+    if (g_init_ok.load(std::memory_order_acquire)) shutdownAndSignal();
+}
+
+// Bound at this library's static initialization, before any CUDA call can
+// reach the gate.
+const bool g_capture_gate_bound = [] {
+    gpufl::inject::LinuxGateBindings bindings;
+    bindings.initialize = initializeCapture;
+    bindings.after_initialization_exit = shutdownAfterInitialization;
+    bindings.on_gate_created = registerGateCapabilityContributor;
+    gpufl::inject::BindLinuxCaptureGate(bindings);
+    return true;
+}();
+#endif  // !_WIN32
 
 }  // namespace
 
@@ -725,22 +641,9 @@ void initializeAmdInjection() noexcept {
 extern "C" {
 
 #ifndef _WIN32
-// Cross-TU boundary hooks used by the typed CUDA interpose translation unit.
-// They remain hidden inside libgpufl_inject; only CUDA ABI symbols are public.
-__attribute__((visibility("hidden")))
-void GpuFlightWaitAtCudaLaunchBoundary() {
-    waitAtCudaLaunchBoundary();
-}
-
-__attribute__((visibility("hidden")))
-void GpuFlightWaitAtCudaSyncBoundary() {
-    waitAtCudaSyncBoundary();
-}
-
-__attribute__((visibility("hidden")))
-void GpuFlightWaitAtCudaMemoryBoundary() {
-    waitAtCudaMemoryBoundary();
-}
+// Capture-gate hooks, one per route (capture_gate_linux.cpp). Hidden.
+void GpuFlightCaptureGateRuntime();
+void GpuFlightCaptureGateDriver();
 #endif
 
 GPUFL_INJECT_EXPORT int InitializeInjectionNvtx2(
@@ -880,35 +783,36 @@ int InitializeInjection(void* /*funcTable*/) {
     // injection pattern - so init fully completes before any kernel runs.
     std::call_once(g_init_once, doInjectInit);
 #else
-    // Numba loads the CUDA Driver API through cuda-python. Starting CUPTI on a
-    // detached thread while that first cuInit call is still on the stack races
-    // the driver's initialization and can segfault inside numba-cuda's
-    // safe_cuda_api_call. Its generated harness opts into a deterministic
-    // handshake: let cuInit return, then call the exported function below
-    // synchronously before any allocation or launch. Every other workload keeps
-    // the existing automatic deferred behavior.
-    const char* manual_init = envOrNull(gpufl::env::kInjectManualInit);
-    if (!manual_init || std::strcmp(manual_init, "1") != 0) {
-        startDeferredInjectInit();
-    }
+    // CUPTI never starts inside this callback: the driver's cuInit is still on
+    // the stack. The gate arranges the worker for the call that triggered
+    // driver init, records an unowned (unsupported) first touch, or, in manual
+    // mode (Numba, the Rust and Python hosts), only counts the callback and
+    // leaves initialization to GpuFlightInitializeInjectionAfterCuda.
+    gpufl::inject::LinuxInjectionCallback();
 #endif
     return 0;
 }
 
 // Deterministic post-cuInit handshake for Driver-API hosts such as Numba.
-// PRECONDITION: the caller has completed CUDA Driver initialization. The
-// function is idempotent with every other injection entry through g_init_once.
-// Returning 1 means capture is ready; 0 means initialization was disabled or
-// failed. Exported with a stable C name so Python can resolve it from the
-// already-LD_PRELOADed process image via ctypes.CDLL(None).
+// PRECONDITION: the caller has completed CUDA Driver initialization, and makes
+// no allocation, module or launch call before this returns. On Linux in manual
+// mode this is the one synchronous initializer; concurrent and repeated calls
+// get the same latched result. Returning 1 means capture is ready; 0 means it
+// was disabled, failed, timed out, or the host broke the protocol. Exported
+// with a stable C name so Python can resolve it from the already-LD_PRELOADed
+// process image via ctypes.CDLL(None).
 GPUFL_INJECT_EXPORT
 int GpuFlightInitializeInjectionAfterCuda() {
+#ifdef _WIN32
     try {
         std::call_once(g_init_once, doInjectInit);
     } catch (...) {
         return 0;
     }
     return g_init_ok.load(std::memory_order_acquire) ? 1 : 0;
+#else
+    return gpufl::inject::LinuxManualHandshake();
+#endif
 }
 
 #if !defined(_WIN32) && !defined(GPUFL_TYPED_CUDA_INTERPOSE)
@@ -941,7 +845,8 @@ using CuLaunchKernelFn = int (*)(void*, unsigned int, unsigned int, unsigned int
 __attribute__((visibility("default")))
 int __cudaLaunchKernel(const void* func, const GpuflDim3 gridDim, const GpuflDim3 blockDim,
                        void** args, const std::size_t sharedMem, void* stream) {
-    waitAtCudaLaunchBoundary();
+    gpufl::inject::WrapperScope scope;
+    GpuFlightCaptureGateRuntime();
     static auto* fn = reinterpret_cast<CudaLaunchKernelFn>(dlsym(RTLD_NEXT, "__cudaLaunchKernel"));
     return fn ? fn(func, gridDim, blockDim, args, sharedMem, stream) : 0;
 }
@@ -950,14 +855,16 @@ __attribute__((visibility("default")))
 int cudaLaunchKernel(const void* func, const GpuflDim3 gridDim, GpuflDim3 blockDim,
                      void** args,
     const std::size_t sharedMem, void* stream) {
-    waitAtCudaLaunchBoundary();
+    gpufl::inject::WrapperScope scope;
+    GpuFlightCaptureGateRuntime();
     static auto* fn = reinterpret_cast<CudaLaunchKernelFn>(dlsym(RTLD_NEXT, "cudaLaunchKernel"));
     return fn ? fn(func, gridDim, blockDim, args, sharedMem, stream) : 0;
 }
 
 __attribute__((visibility("default")))
 int cudaLaunchKernelExC(const void* config, const void* func, void** args) {
-    waitAtCudaLaunchBoundary();
+    gpufl::inject::WrapperScope scope;
+    GpuFlightCaptureGateRuntime();
     static auto* fn = reinterpret_cast<CudaLaunchKernelExCFn>(dlsym(RTLD_NEXT, "cudaLaunchKernelExC"));
     return fn ? fn(config, func, args) : 0;
 }
@@ -968,7 +875,8 @@ int cuLaunchKernel(void* f, const unsigned int gridDimX, const unsigned int grid
     const unsigned int blockDimY, const unsigned int blockDimZ,
     const unsigned int sharedMemBytes, void* hStream,
                    void** kernelParams, void** extra) {
-    waitAtCudaLaunchBoundary();
+    gpufl::inject::WrapperScope scope;
+    GpuFlightCaptureGateDriver();
     static auto* fn = reinterpret_cast<CuLaunchKernelFn>(dlsym(RTLD_NEXT, "cuLaunchKernel"));
     return fn ? fn(f, gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY,
                    blockDimZ, sharedMemBytes, hStream, kernelParams, extra)
@@ -977,21 +885,24 @@ int cuLaunchKernel(void* f, const unsigned int gridDimX, const unsigned int grid
 
 __attribute__((visibility("default")))
 int cudaDeviceSynchronize() {
-    waitAtCudaSyncBoundary();
+    gpufl::inject::WrapperScope scope;
+    GpuFlightCaptureGateRuntime();
     static auto* fn = reinterpret_cast<CudaSync0Fn>(dlsym(RTLD_NEXT, "cudaDeviceSynchronize"));
     return fn ? fn() : 0;
 }
 
 __attribute__((visibility("default")))
 int cuCtxSynchronize() {
-    waitAtCudaSyncBoundary();
+    gpufl::inject::WrapperScope scope;
+    GpuFlightCaptureGateDriver();
     static auto* fn = reinterpret_cast<CudaSync0Fn>(dlsym(RTLD_NEXT, "cuCtxSynchronize"));
     return fn ? fn() : 0;
 }
 
 __attribute__((visibility("default")))
 int cudaStreamSynchronize(void* stream) {
-    waitAtCudaSyncBoundary();
+    gpufl::inject::WrapperScope scope;
+    GpuFlightCaptureGateRuntime();
     static auto* fn = reinterpret_cast<CudaStreamSyncFn>(dlsym(RTLD_NEXT, "cudaStreamSynchronize"));
     return fn ? fn(stream) : 0;
 }

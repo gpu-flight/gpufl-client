@@ -60,6 +60,8 @@ set(GPUFL_TEST_SOURCES
     ${CMAKE_SOURCE_DIR}/daemon/launcher/segmentation_env.cpp
     ${CMAKE_SOURCE_DIR}/daemon/launcher/trace_run_plan.cpp
     ${CMAKE_SOURCE_DIR}/daemon/launcher/agent_launcher.cpp
+    launcher/test_bootstrap_status.cpp
+    ${CMAKE_SOURCE_DIR}/daemon/launcher/bootstrap_status.cpp
 )
 
 if(GPUFL_ENABLE_NVIDIA AND GPUFL_HAS_CUPTI)
@@ -99,6 +101,14 @@ endif()
 if(APPLE AND GPUFL_ENABLE_METAL AND GPUFL_HAS_METAL)
   list(APPEND GPUFL_TEST_SOURCES
     backends/metal/test_metal_collector.mm
+  )
+endif()
+
+# The Linux injection capture gate is a pure state machine (fake driver hooks).
+if(UNIX AND NOT APPLE)
+  list(APPEND GPUFL_TEST_SOURCES
+    inject/test_capture_gate.cpp
+    ${CMAKE_SOURCE_DIR}/include/gpufl/inject/capture_gate.cpp
   )
 endif()
 

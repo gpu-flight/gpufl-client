@@ -145,6 +145,7 @@ void CuptiBackend::initialize(const MonitorOptions& opts) {
         "  - Insufficient permissions\n"
         "  - CUDA driver issues");
     GFL_LOG_DEBUG("CUPTI subscription successful");
+    cupti_subscribed_.store(true, std::memory_order_release);
 
     std::set<CUpti_CallbackDomain> domains;
     std::set<std::pair<CUpti_CallbackDomain, CUpti_CallbackId>> callbacks;
@@ -504,7 +505,21 @@ void CuptiBackend::start() {
         std::set<CUpti_ActivityKind> kinds;
         for (const auto& h : handlers_)
             for (auto k : h->requiredActivityKinds()) kinds.insert(k);
-        for (auto k : kinds) CUPTI_CHECK(cuptiActivityEnable(k));
+        for (auto k : kinds) {
+            const CUptiResult res = cuptiActivityEnable(k);
+            CUPTI_CHECK(res);
+            // Capture readiness requires every required kind to be on; the
+            // injection gate reads this (captureFacilitiesReady).
+            if (res != CUPTI_SUCCESS && !IsBenignCuptiResult(res)) {
+                std::lock_guard lock(capture_facility_mu_);
+                if (capture_facility_failure_.empty()) {
+                    capture_facility_failure_ =
+                        "activity_enable_failed:" + std::to_string(static_cast<int>(k)) +
+                        ":" + std::to_string(static_cast<int>(res));
+                }
+            }
+        }
+        required_activity_enabled_.store(true, std::memory_order_release);
     }
 
     // Initialize and start the engine (requires CUDA context)

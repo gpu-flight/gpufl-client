@@ -161,6 +161,7 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
         evt.capabilities.push_back(std::move(cap));
     }
 
+    Monitor::ContributeCaptureCapabilities(evt);
     segment->logger->write(model::CaptureCapabilitiesModel(evt));
     capability_kernel_rows_baseline_ = kernel_rows;
     capability_memory_rows_baseline_ = memory_rows;

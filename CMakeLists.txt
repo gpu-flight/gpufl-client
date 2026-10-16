@@ -804,6 +804,12 @@ if(BUILD_GPUFL_INJECT AND ((UNIX AND NOT APPLE) OR WIN32))
     add_library(gpufl_inject SHARED
         include/gpufl/inject/inject_entry.cpp
     )
+    if(UNIX AND NOT APPLE)
+        target_sources(gpufl_inject PRIVATE
+            include/gpufl/inject/capture_gate.cpp
+            include/gpufl/inject/capture_gate_linux.cpp
+        )
+    endif()
     if(UNIX AND NOT APPLE AND GPUFL_HAS_CUDA)
         # Compile CUDA boundary wrappers against the toolkit's official ABI.
         # inject_entry.cpp keeps its header-free fallback for no-CUDA builds.

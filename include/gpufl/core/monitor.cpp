@@ -739,6 +739,27 @@ void Monitor::RequestSyntheticDrainAndWait() {
 }
 
 void Monitor::Start() { if (g_state.adapter) g_state.adapter->start(); }
+bool Monitor::CaptureFacilitiesReady(std::string* reason) {
+    IMonitorBackend* backend =
+        g_state.adapter ? g_state.adapter->backend() : nullptr;
+    if (!g_state.initialized.load()) {
+        if (reason) *reason = "monitor_not_started";
+        return false;
+    }
+    // A monitoring-only session has no capture backend and needs none.
+    return !backend || backend->captureFacilitiesReady(reason);
+}
+namespace {
+std::atomic<Monitor::CaptureCapabilityContributor> g_capability_contributor{nullptr};
+}  // namespace
+void Monitor::SetCaptureCapabilityContributor(CaptureCapabilityContributor fn) {
+    g_capability_contributor.store(fn, std::memory_order_release);
+}
+void Monitor::ContributeCaptureCapabilities(CaptureCapabilitiesEvent& evt) {
+    if (const auto fn = g_capability_contributor.load(std::memory_order_acquire)) {
+        fn(evt);
+    }
+}
 void Monitor::Stop() { if (g_state.adapter) g_state.adapter->stop(); }
 
 void Monitor::PushRange(const char* name) {

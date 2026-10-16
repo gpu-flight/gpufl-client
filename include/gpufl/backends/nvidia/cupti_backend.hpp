@@ -146,6 +146,23 @@ class CuptiBackend : public IMonitorBackend {
     ActivityTimestampCounts kernelActivityTimestamps() const override {
         return kernel_activity_timestamps_.Snapshot();
     }
+    bool captureFacilitiesReady(std::string* reason) const override {
+        const auto fail = [reason](std::string why) {
+            if (reason) *reason = std::move(why);
+            return false;
+        };
+        if (!cupti_subscribed_.load(std::memory_order_acquire)) {
+            return fail("cupti_subscribe_failed");
+        }
+        if (!required_activity_enabled_.load(std::memory_order_acquire)) {
+            return fail("activity_not_enabled");
+        }
+        std::lock_guard lock(capture_facility_mu_);
+        if (!capture_facility_failure_.empty()) {
+            return fail(capture_facility_failure_);
+        }
+        return true;
+    }
     void NoteMemTransferActivityEligible() {
         mem_transfer_activity_timestamps_.NoteEligible();
     }
@@ -415,6 +432,10 @@ class CuptiBackend : public IMonitorBackend {
     std::atomic<uint64_t> kernel_activity_emitted_{0};
     std::atomic<uint64_t> kernel_activity_throttled_{0};
     ActivityTimestampTally kernel_activity_timestamps_;
+    std::atomic<bool> cupti_subscribed_{false};
+    std::atomic<bool> required_activity_enabled_{false};
+    mutable std::mutex capture_facility_mu_;
+    std::string capture_facility_failure_;
     std::atomic<uint64_t> mem_transfer_activity_emitted_{0};
     ActivityTimestampTally mem_transfer_activity_timestamps_;
     std::atomic<uint64_t> sync_activity_emitted_{0};

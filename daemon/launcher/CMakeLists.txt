@@ -21,6 +21,7 @@ endif()
 add_executable(gpufl_launcher
     main.cpp
     agent_launcher.cpp
+    bootstrap_status.cpp
     cli_help.cpp
     cli_parse.cpp
     cli_parse_internal.cpp

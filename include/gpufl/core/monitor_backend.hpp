@@ -127,6 +127,17 @@ class IMonitorBackend {
      */
     virtual bool kernelActivityExpectedButMissing() const { return false; }
 
+    /**
+     * @brief True when every capture facility this session requires was set
+     *        up successfully (for CUPTI: the subscription and every required
+     *        activity kind). The Linux injection gate reports capture ready
+     *        only on true. On false, @p reason names the first failure.
+     */
+    virtual bool captureFacilitiesReady(std::string* reason) const {
+        (void)reason;
+        return true;
+    }
+
     /** Kernel activity records seen at the timestamp check, process-wide. */
     virtual ActivityTimestampCounts kernelActivityTimestamps() const {
         return {};
