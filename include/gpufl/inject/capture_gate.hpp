@@ -111,8 +111,9 @@ struct GateHooks {
     std::function<void(int ms)> sleep_ms;
     // gpufl::init plus the Trace facility check. Never throws out.
     std::function<GateStep()> initialize;
-    // Publishes a snapshot (the status file). Called without the gate mutex;
-    // snapshots carry a strictly increasing seq.
+    // Publishes the state (the status file), with the gate mutex held so a
+    // record is written before anyone acts on it. Must not call back into the
+    // gate or into CUDA; snapshots carry a strictly increasing seq.
     std::function<void(const GateSnapshot&)> publish;
 };
 
@@ -168,9 +169,8 @@ class CaptureGate {
     void ElectLocked(GateOwner owner);
     void LatchFailedLocked(const std::string& reason);
     void ResolveLocked();
-    GateSnapshot TakeSnapshotLocked();
+    void PublishLocked();
     bool WaitLocked(std::unique_lock<std::mutex>& lock, bool until_finished);
-    void Publish(const GateSnapshot& snapshot);
     void RunWorker();
     void StartWorkerLocked();
 
@@ -182,8 +182,6 @@ class CaptureGate {
     GateSnapshot state_;
     bool worker_started_ = false;
     std::atomic<bool> settled_{false};
-    std::mutex publish_mu_;
-    uint64_t last_published_seq_ = 0;
 };
 
 /**

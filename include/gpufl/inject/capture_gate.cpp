@@ -257,18 +257,12 @@ void CaptureGate::ResolveLocked() {
     settled_.store(true, std::memory_order_release);
 }
 
-GateSnapshot CaptureGate::TakeSnapshotLocked() {
+void CaptureGate::PublishLocked() {
+    // Under mu_: a state is on disk before any thread can act on it, a newer
+    // record can never be replaced by an older one, and nothing is published
+    // after the process saw Finished and went on into teardown.
     ++state_.seq;
-    return state_;
-}
-
-void CaptureGate::Publish(const GateSnapshot& snapshot) {
-    std::lock_guard lock(publish_mu_);
-    // Snapshots are taken under mu_ with increasing seq but published after
-    // it is released; an older one arriving late must not replace a newer one.
-    if (snapshot.seq <= last_published_seq_) return;
-    last_published_seq_ = snapshot.seq;
-    if (hooks_.publish) hooks_.publish(snapshot);
+    if (hooks_.publish) hooks_.publish(state_);
 }
 
 bool CaptureGate::WaitLocked(std::unique_lock<std::mutex>& lock,
@@ -282,11 +276,8 @@ bool CaptureGate::WaitLocked(std::unique_lock<std::mutex>& lock,
         if (now >= state_.deadline_ns) {
             if (state_.readiness == GateReadiness::Pending) {
                 LatchFailedLocked("capture_wait_timeout");
-                const GateSnapshot snapshot = TakeSnapshotLocked();
-                lock.unlock();
+                PublishLocked();
                 cv_.notify_all();
-                Publish(snapshot);
-                lock.lock();
             }
             return until_finished
                        ? state_.lifecycle == GateLifecycle::Finished
@@ -314,9 +305,8 @@ void CaptureGate::Enter(const std::function<GateStep()>& trigger) {
         // The host must finish the handshake before capture-relevant work.
         if (state_.readiness == GateReadiness::Pending &&
             state_.coverage_notes.insert("manual_protocol_violation").second) {
-            const GateSnapshot snapshot = TakeSnapshotLocked();
+            PublishLocked();
             lock.unlock();
-            Publish(snapshot);
         }
         return;
     }
@@ -324,9 +314,8 @@ void CaptureGate::Enter(const std::function<GateStep()>& trigger) {
     if (state_.lifecycle == GateLifecycle::NotRequested) {
         ElectLocked(GateOwner::Gate);
         state_.trigger.expected = true;
-        GateSnapshot snapshot = TakeSnapshotLocked();
+        PublishLocked();
         lock.unlock();
-        Publish(snapshot);
 
         GateStep step;
         {
@@ -344,11 +333,8 @@ void CaptureGate::Enter(const std::function<GateStep()>& trigger) {
             LatchFailedLocked("no_injection_callback");
         }
         ResolveLocked();
-        snapshot = TakeSnapshotLocked();
-        lock.unlock();
+        PublishLocked();
         cv_.notify_all();
-        Publish(snapshot);
-        lock.lock();
     }
     WaitLocked(lock, /*until_finished=*/false);
 }
@@ -374,19 +360,17 @@ void CaptureGate::OnInjectionCallback() {
             spawn = true;
         }
     }
-    const GateSnapshot snapshot = TakeSnapshotLocked();
+    PublishLocked();
     lock.unlock();
-    Publish(snapshot);
     if (spawn) {
         if (!hooks_.spawn || !hooks_.spawn([this] { RunWorker(); })) {
             std::unique_lock relock(mu_);
             state_.worker.returned = true;
             LatchFailedLocked("worker_spawn_unavailable");
             ResolveLocked();
-            const GateSnapshot failed = TakeSnapshotLocked();
-            relock.unlock();
+            PublishLocked();
             cv_.notify_all();
-            Publish(failed);
+            relock.unlock();
         }
     }
 }
@@ -404,18 +388,16 @@ void CaptureGate::RunWorker() {
             LatchFailedLocked(barrier.reason.empty() ? "cuinit_failed"
                                                      : barrier.reason);
             ResolveLocked();
-            const GateSnapshot snapshot = TakeSnapshotLocked();
-            lock.unlock();
+            PublishLocked();
             cv_.notify_all();
-            Publish(snapshot);
+            lock.unlock();
             return;
         }
         if (state_.lifecycle == GateLifecycle::DriverInitializing) {
             state_.lifecycle = GateLifecycle::DriverReady;
         }
-        const GateSnapshot snapshot = TakeSnapshotLocked();
+        PublishLocked();
         lock.unlock();
-        Publish(snapshot);
     }
     if (hooks_.sleep_ms) hooks_.sleep_ms(config_.delay_ms);
     {
@@ -423,9 +405,8 @@ void CaptureGate::RunWorker() {
         if (state_.lifecycle == GateLifecycle::DriverReady) {
             state_.lifecycle = GateLifecycle::CaptureInitializing;
         }
-        const GateSnapshot snapshot = TakeSnapshotLocked();
+        PublishLocked();
         lock.unlock();
-        Publish(snapshot);
     }
     const GateStep init =
         Call(hooks_.initialize, "initialize_missing", "init_exception");
@@ -436,10 +417,9 @@ void CaptureGate::RunWorker() {
         LatchFailedLocked(init.reason.empty() ? "init_failed" : init.reason);
     }
     ResolveLocked();
-    const GateSnapshot snapshot = TakeSnapshotLocked();
-    lock.unlock();
+    PublishLocked();
     cv_.notify_all();
-    Publish(snapshot);
+    lock.unlock();
 }
 
 int CaptureGate::ManualHandshake(const std::function<GateStep()>& driver_trigger) {
@@ -457,9 +437,8 @@ int CaptureGate::ManualHandshake(const std::function<GateStep()>& driver_trigger
     if (state_.lifecycle == GateLifecycle::NotRequested) {
         ElectLocked(GateOwner::Manual);
         state_.handshake.expected = true;
-        GateSnapshot snapshot = TakeSnapshotLocked();
+        PublishLocked();
         lock.unlock();
-        Publish(snapshot);
 
         GateStep result;
         {
@@ -469,9 +448,8 @@ int CaptureGate::ManualHandshake(const std::function<GateStep()>& driver_trigger
             if (result.ok) {
                 lock.lock();
                 state_.lifecycle = GateLifecycle::CaptureInitializing;
-                snapshot = TakeSnapshotLocked();
+                PublishLocked();
                 lock.unlock();
-                Publish(snapshot);
                 result = Call(hooks_.initialize, "initialize_missing",
                               "init_exception");
             }
@@ -484,11 +462,8 @@ int CaptureGate::ManualHandshake(const std::function<GateStep()>& driver_trigger
             LatchFailedLocked(result.reason.empty() ? "init_failed" : result.reason);
         }
         ResolveLocked();
-        snapshot = TakeSnapshotLocked();
-        lock.unlock();
+        PublishLocked();
         cv_.notify_all();
-        Publish(snapshot);
-        lock.lock();
     } else {
         WaitLocked(lock, /*until_finished=*/false);
     }
@@ -506,18 +481,16 @@ bool CaptureGate::AwaitAtExit() {
     }
     if (WaitLocked(lock, /*until_finished=*/true)) return true;
     state_.coverage_notes.insert("exit_while_initializing");
-    const GateSnapshot snapshot = TakeSnapshotLocked();
+    PublishLocked();
     lock.unlock();
-    Publish(snapshot);
     return false;
 }
 
 void CaptureGate::AddCoverageNote(const std::string& note) {
     std::unique_lock lock(mu_);
     if (!state_.coverage_notes.insert(note).second) return;
-    const GateSnapshot snapshot = TakeSnapshotLocked();
+    PublishLocked();
     lock.unlock();
-    Publish(snapshot);
 }
 
 WrapperScope::WrapperScope() { ++t_wrapper_depth; }
