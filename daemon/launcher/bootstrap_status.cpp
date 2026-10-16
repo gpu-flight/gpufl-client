@@ -46,23 +46,59 @@ BootstrapStatus ReadBootstrapStatus(const std::filesystem::path& dir,
     }
     if (doc.value<int64_t>("pid", 0) != pid) return Invalid("foreign_pid");
 
-    BootstrapStatus status;
-    status.valid = true;
-    status.seq = doc.value<int64_t>("seq", 0);
-    status.lifecycle = doc.value<std::string>("lifecycle", "");
-    status.owner = doc.value<std::string>("owner", "");
-    status.readiness = doc.value<std::string>("readiness", "");
-    status.reason = doc.value<std::string>("reason", "");
-    status.deadline_monotonic_ns = doc.value<int64_t>("deadline_monotonic_ns", 0);
-    status.protocol = doc.value<std::string>("protocol", "");
-    if (doc.contains("coverage_notes") && doc["coverage_notes"].is_array()) {
-        for (const json::JsonValue& note : doc["coverage_notes"].get_array()) {
-            if (note.is_string()) status.coverage_notes.insert(note.get_string());
+    // Every field the library writes must be there with its type, and the
+    // values must name a state the library can be in.
+    const auto has = [&doc](const char* key, const json::JsonValue::Type type) {
+        return doc.contains(key) && doc[key].type() == type;
+    };
+    using Type = json::JsonValue::Type;
+    for (const char* key : {"seq", "deadline_monotonic_ns", "callbacks_seen"}) {
+        if (!has(key, Type::Int)) return Invalid("malformed");
+    }
+    for (const char* key : {"lifecycle", "owner", "readiness", "reason", "protocol"}) {
+        if (!has(key, Type::String)) return Invalid("malformed");
+    }
+    for (const char* key : {"trigger", "worker", "handshake"}) {
+        if (!has(key, Type::Object)) return Invalid("malformed");
+        for (const char* field : {"expected", "returned", "ok"}) {
+            if (!doc[key].contains(field) || !doc[key][field].is_bool()) {
+                return Invalid("malformed");
+            }
         }
     }
-    if (status.lifecycle.empty() || status.readiness.empty()) {
-        return Invalid("malformed");
+    if (!has("coverage_notes", Type::Array)) return Invalid("malformed");
+
+    BootstrapStatus status;
+    status.seq = doc["seq"].get_int();
+    status.lifecycle = doc["lifecycle"].get_string();
+    status.owner = doc["owner"].get_string();
+    status.readiness = doc["readiness"].get_string();
+    status.reason = doc["reason"].get_string();
+    status.deadline_monotonic_ns = doc["deadline_monotonic_ns"].get_int();
+    status.protocol = doc["protocol"].get_string();
+    for (const json::JsonValue& note : doc["coverage_notes"].get_array()) {
+        if (!note.is_string()) return Invalid("malformed");
+        status.coverage_notes.insert(note.get_string());
     }
+
+    const std::set<std::string> lifecycles = {"not_requested", "driver_initializing",
+                                              "driver_ready", "capture_initializing",
+                                              "finished"};
+    const std::set<std::string> owners = {"none", "gate", "callback", "manual"};
+    const std::set<std::string> readiness = {"pending", "ready", "failed"};
+    if (status.seq < 1 || !lifecycles.count(status.lifecycle) ||
+        !owners.count(status.owner) || !readiness.count(status.readiness)) {
+        return Invalid("inconsistent");
+    }
+    const bool requested = status.lifecycle != "not_requested";
+    if (requested != (status.owner != "none") ||
+        requested != (status.deadline_monotonic_ns > 0) ||
+        (status.lifecycle == "finished" && status.readiness == "pending") ||
+        (status.readiness == "ready" && status.lifecycle != "finished") ||
+        (status.readiness == "failed") == status.reason.empty()) {
+        return Invalid("inconsistent");
+    }
+    status.valid = true;
     return status;
 }
 
@@ -96,6 +132,23 @@ bool InitWatchdog::Observe(const BootstrapStatus& status, const int64_t now_ns) 
     const int64_t max = std::numeric_limits<int64_t>::max();
     const int64_t limit = deadline_ns_ > max - grace_ns_ ? max : deadline_ns_ + grace_ns_;
     return now_ns > limit;
+}
+
+FinalBootstrapObservation CombineFinalBootstrap(const InitWatchdog& watchdog,
+                                                const BootstrapStatus& final_read) {
+    FinalBootstrapObservation out;
+    if (!watchdog.seen_valid()) {
+        out.accepted = final_read;  // invalid; its error says why
+        out.final_error = final_read.error;
+        return out;
+    }
+    out.accepted = watchdog.last();
+    if (!final_read.valid) {
+        out.final_error = final_read.error;
+    } else if (final_read.seq < watchdog.last().seq) {
+        out.final_error = "stale_final_seq";
+    }
+    return out;
 }
 
 std::string DescribeBootstrapStatus(const BootstrapStatus& status) {

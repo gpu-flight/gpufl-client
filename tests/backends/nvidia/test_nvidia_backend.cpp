@@ -11,6 +11,33 @@ class CuptiBackendTest : public ::testing::Test {
     void SetUp() override { SKIP_IF_NO_CUDA(); }
 };
 
+// Capture readiness needs every required activity kind enabled, at start and
+// after the engine re-enable. A "benign" CUPTI result (NOT_COMPATIBLE, a
+// fallback the logger keeps quiet about) is not an enable.
+TEST(RequiredActivityTally, ABenignResultOrALaterFailedReEnableIsNotReady) {
+    std::string reason;
+    gpufl::RequiredActivityTally none;
+    EXPECT_FALSE(none.Ready(&reason));
+    EXPECT_EQ(reason, "activity_not_enabled");
+
+    gpufl::RequiredActivityTally benign;
+    benign.Record(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL, true, CUPTI_SUCCESS);
+    benign.Record(CUPTI_ACTIVITY_KIND_MEMCPY, false, CUPTI_ERROR_NOT_COMPATIBLE);
+    ASSERT_TRUE(gpufl::IsBenignCuptiResult(CUPTI_ERROR_NOT_COMPATIBLE));
+    EXPECT_FALSE(benign.Ready(&reason));
+    EXPECT_EQ(reason, "activity_enable_failed:" +
+                          std::to_string(CUPTI_ACTIVITY_KIND_MEMCPY) + ":" +
+                          std::to_string(CUPTI_ERROR_NOT_COMPATIBLE));
+
+    gpufl::RequiredActivityTally reenable;
+    reenable.Record(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL, true, CUPTI_SUCCESS);
+    EXPECT_TRUE(reenable.Ready(&reason));
+    reenable.Record(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL, false,
+                    CUPTI_ERROR_NOT_INITIALIZED);
+    reenable.Record(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL, true, CUPTI_SUCCESS);
+    EXPECT_FALSE(reenable.Ready(&reason));  // the failure latches
+}
+
 // Pure decision for Monitor::Shutdown's orphan-synthesis suppression. No CUDA
 // needed. The case this exists for: a real-record session (kernel activity
 // enabled, not PC/SASS synthesize-by-design) where launches happened but zero

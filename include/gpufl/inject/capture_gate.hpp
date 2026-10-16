@@ -4,10 +4,17 @@
 //
 // The injected library starts CUPTI from a worker thread after the driver's
 // own initialization. Without a gate, the application thread continues into
-// context creation and module loading while that worker attaches, and on an L4
-// (2026-10-16) whole sessions lost every kernel timestamp that way. The gate
-// makes the application's first supported CUDA call wait until capture is
-// ready, within one bounded deadline, and records every other outcome.
+// context creation and module loading while that worker attaches. On an L4
+// (2026-10-16) whole Trace sessions received every kernel record with zero
+// timestamps; that is consistent with this overlap, but the CUPTI-internal
+// cause is not established. The gate makes the application's first supported
+// CUDA call wait until capture is ready, within one bounded deadline, and
+// records every other outcome.
+//
+// Limits: status publication runs under the gate mutex, so a slow filesystem
+// can hold waiters past the nominal deadline (the launcher watchdog bounds
+// that only after its first accepted record). Coverage is a weaker claim
+// than completeness, and nothing here is evidence about real driver locks.
 //
 // Three separate facts, see the design (agent_comm l4-qualification-20261015,
 // client-capture-gate-design-v3.md + v3.1):
@@ -108,7 +115,6 @@ struct GateHooks {
     std::function<bool(std::function<void()> body)> spawn;
     // The worker's checked post-driver barrier (cuInit).
     std::function<GateStep()> driver_barrier;
-    std::function<void(int ms)> sleep_ms;
     // gpufl::init plus the Trace facility check. Never throws out.
     std::function<GateStep()> initialize;
     // Publishes the state (the status file), with the gate mutex held so a
@@ -181,6 +187,7 @@ class CaptureGate {
     std::condition_variable cv_;
     GateSnapshot state_;
     bool worker_started_ = false;
+    bool exit_requested_ = false;
     std::atomic<bool> settled_{false};
 };
 

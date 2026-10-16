@@ -596,8 +596,15 @@ gpufl::inject::GateStep initializeCapture() {
 }
 
 void contributeGateCapabilities(gpufl::CaptureCapabilitiesEvent& evt) {
-    gpufl::inject::AppendGateCapabilities(gpufl::inject::LinuxCaptureGate().Snapshot(),
-                                          evt);
+    gpufl::inject::GateSnapshot snapshot = gpufl::inject::LinuxCaptureGate().Snapshot();
+    // A required kind that failed to re-enable after readiness (for example at
+    // a deferred engine start) still makes this session incomplete.
+    std::string why;
+    if (snapshot.readiness == gpufl::inject::GateReadiness::Ready &&
+        !gpufl::Monitor::CaptureFacilitiesReady(&why)) {
+        snapshot.coverage_notes.insert("trace_facility_lost");
+    }
+    gpufl::inject::AppendGateCapabilities(snapshot, evt);
 }
 
 void registerGateCapabilityContributor() {

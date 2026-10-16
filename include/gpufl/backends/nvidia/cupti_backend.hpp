@@ -71,6 +71,35 @@ struct ActivityTimestampTally {
     }
 };
 
+// Results of enabling the required activity kinds, at start and at every
+// re-enable. Ready only when at least one enable was recorded and none
+// failed: a failure latches, so a later success never hides it, and a
+// non-success the logger calls benign (a fallback) is still not an enable.
+class RequiredActivityTally {
+   public:
+    void Record(const int kind, const bool success, const int result) {
+        std::lock_guard lock(mu_);
+        recorded_ = true;
+        if (!success && failure_.empty()) {
+            failure_ = "activity_enable_failed:" + std::to_string(kind) + ":" +
+                       std::to_string(result);
+        }
+    }
+    bool Ready(std::string* reason) const {
+        std::lock_guard lock(mu_);
+        if (!failure_.empty() || !recorded_) {
+            if (reason) *reason = recorded_ ? failure_ : "activity_not_enabled";
+            return false;
+        }
+        return true;
+    }
+
+   private:
+    mutable std::mutex mu_;
+    bool recorded_ = false;
+    std::string failure_;
+};
+
 /**
  * @brief CUPTI-based monitoring backend for NVIDIA GPUs.
  *
@@ -154,14 +183,7 @@ class CuptiBackend : public IMonitorBackend {
         if (!cupti_subscribed_.load(std::memory_order_acquire)) {
             return fail("cupti_subscribe_failed");
         }
-        if (!required_activity_enabled_.load(std::memory_order_acquire)) {
-            return fail("activity_not_enabled");
-        }
-        std::lock_guard lock(capture_facility_mu_);
-        if (!capture_facility_failure_.empty()) {
-            return fail(capture_facility_failure_);
-        }
-        return true;
+        return required_activity_.Ready(reason);
     }
     void NoteMemTransferActivityEligible() {
         mem_transfer_activity_timestamps_.NoteEligible();
@@ -433,9 +455,7 @@ class CuptiBackend : public IMonitorBackend {
     std::atomic<uint64_t> kernel_activity_throttled_{0};
     ActivityTimestampTally kernel_activity_timestamps_;
     std::atomic<bool> cupti_subscribed_{false};
-    std::atomic<bool> required_activity_enabled_{false};
-    mutable std::mutex capture_facility_mu_;
-    std::string capture_facility_failure_;
+    RequiredActivityTally required_activity_;
     std::atomic<uint64_t> mem_transfer_activity_emitted_{0};
     ActivityTimestampTally mem_transfer_activity_timestamps_;
     std::atomic<uint64_t> sync_activity_emitted_{0};

@@ -68,6 +68,14 @@ int cuModuleLoadData(void** module, const void* image) {
     return 0;
 }
 
+int cuModuleLoadDataEx(void** module, const void* image, unsigned int count,
+                       void* options, void** values) {
+    (void)image; (void)count; (void)options; (void)values;
+    fake_log("cuModuleLoadDataEx");
+    *module = (void*)0x2000;
+    return 0;
+}
+
 int cuDevicePrimaryCtxRetain(void** context, int device) {
     (void)device;
     fake_log("cuDevicePrimaryCtxRetain");

@@ -96,7 +96,6 @@ struct Fakes {
             Event("barrier");
             return barrier();
         };
-        hooks.sleep_ms = [](int) {};
         hooks.initialize = [this] {
             ++initialized;
             Event("init");

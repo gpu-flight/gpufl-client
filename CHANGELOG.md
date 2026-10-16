@@ -171,7 +171,10 @@ types are additive.
 - **Linux injection lifecycle (`gpufl trace`).**
   - **Warmup.** `--warmup` now sets `GPUFL_INJECT_WARMUP_MS` instead of
     `GPUFL_INJECT_INIT_DELAY_MS`. Nothing waits for a warmup, so a warmup run
-    is reported as an unqualified Trace capture. A new library launched with
+    is reported as an unqualified Trace capture. The initialization deadline
+    includes the warmup once, so a long healthy warmup is not killed. A
+    process that exits during the warmup stops the worker before CUPTI starts
+    (`exit_before_capture`), and normal teardown runs. A new library launched with
     a long `GPUFL_INJECT_INIT_DELAY_MS` and without the launcher's
     `GPUFL_INJECT_PROTOCOL` (an older launcher, or a direct injection) records
     `legacy_launcher_delay`. The launcher and the library ship together in one
@@ -180,7 +183,11 @@ types are additive.
   - **Status file.** The launcher gives each child a status directory
     (`GPUFL_INJECT_STATUS_DIR`, `GPUFL_INJECT_STATUS_NONCE`). The library
     writes `status-<pid>.json` there without the logger, and the launcher
-    prints the result as `capture readiness: ...`.
+    prints the result as `capture readiness: ...`. If the read after exit
+    does not confirm the last accepted record (missing, malformed, foreign or
+    older), the summary says so and shows that record as history. The status
+    is diagnostics, not qualification authority. Writing it can hold the gate
+    on a slow filesystem past the nominal deadline.
   - **Watchdog.** In every mode, including a natural exit, the launcher kills
     (SIGKILL) a child whose capture initialization outlives the published
     deadline plus `GPUFL_INJECT_WATCHDOG_GRACE_MS` (default 5000). It does not
@@ -215,7 +222,10 @@ types are additive.
   - **The first call waits.** The application's first supported CUDA runtime
     call now triggers driver initialization itself (through the real
     `cudaGetDeviceCount`) and waits, within one deadline, until the driver,
-    the Trace subscription and every required activity kind are ready.
+    the Trace subscription and every required activity kind are ready. A kind
+    counts only when its enable, and its re-enable after the engine starts,
+    returned success: a fallback result CUPTI logs as benign is not an enable.
+    A required kind lost after readiness adds `trace_facility_lost`.
     `GPUFL_INJECT_LAUNCH_WAIT_MS` (1-600000, default 15000) sets that
     deadline. The first-touch calls covered are:
     - `cudaMalloc`, `cudaMallocManaged`, `cudaMallocHost`, `cudaHostAlloc`,

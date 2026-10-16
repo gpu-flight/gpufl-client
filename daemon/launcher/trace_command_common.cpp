@@ -208,6 +208,19 @@ bool decompressGzipToFile(const fs::path& gz_path, const fs::path& out_path) {
     return n == 0 && err == Z_OK && out.good();
 }
 
+#if !defined(_WIN32)
+// The bootstrap summary, saying so when the read after exit did not confirm
+// the last accepted record: that record is then history, not a current state.
+std::string describeRunBootstrap(const TraceProcessResult& run) {
+    std::string text = DescribeBootstrapStatus(run.bootstrap);
+    if (run.bootstrap.valid && !run.bootstrap_final_error.empty()) {
+        text += " [last accepted record; final status read: " +
+                run.bootstrap_final_error + "]";
+    }
+    return text;
+}
+#endif
+
 std::string syntheticShutdownLine(const std::string& session_id,
                                   const SessionLifecycleInfo& info,
                                   const SyntheticShutdownContext& context) {
@@ -1000,7 +1013,7 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
             std::fprintf(stderr,
                          "[gpufl] %s: capture initialization never finished; the "
                          "watchdog killed the target (%s)\n",
-                         what.c_str(), DescribeBootstrapStatus(run.bootstrap).c_str());
+                         what.c_str(), describeRunBootstrap(run).c_str());
         } else if (!run.signaled && run.rc == kInitWedgedExitCode &&
                    run.bootstrap.valid &&
                    run.bootstrap.coverage_notes.count("exit_while_initializing")) {
@@ -1011,7 +1024,7 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
         }
         if (!args.quiet) {
             std::fprintf(stderr, "[gpufl] %s capture readiness: %s\n", what.c_str(),
-                         DescribeBootstrapStatus(run.bootstrap).c_str());
+                         describeRunBootstrap(run).c_str());
         }
 #endif
 

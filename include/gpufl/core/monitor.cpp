@@ -742,7 +742,9 @@ void Monitor::Start() { if (g_state.adapter) g_state.adapter->start(); }
 bool Monitor::CaptureFacilitiesReady(std::string* reason) {
     IMonitorBackend* backend =
         g_state.adapter ? g_state.adapter->backend() : nullptr;
-    if (!g_state.initialized.load()) {
+    // The adapter, not `initialized`: Shutdown clears that flag before the
+    // final capability report, which asks this again.
+    if (!g_state.adapter) {
         if (reason) *reason = "monitor_not_started";
         return false;
     }

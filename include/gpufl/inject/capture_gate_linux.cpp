@@ -1,7 +1,8 @@
 // NVIDIA calls InitializeInjection from inside the driver's own cuInit, so
-// CUPTI cannot start there; a worker starts it after the driver is up. On an
-// L4 (2026-10-16) the application thread raced that worker into context and
-// module setup, and whole sessions lost every kernel timestamp. The gate makes
+// CUPTI cannot start there; a worker starts it after the driver is up, while
+// the application thread continues into context and module setup. The L4
+// sessions that lost every kernel timestamp (2026-10-16) are consistent with
+// that overlap; the CUPTI-internal cause is not established. The gate makes
 // the first supported CUDA call trigger driver init itself and wait, within
 // one deadline, until capture is ready, and it records every route and failure
 // it cannot cover.
@@ -202,9 +203,6 @@ CaptureGate& LinuxCaptureGate() {
             }
         };
         hooks.driver_barrier = CheckedCuInit;
-        hooks.sleep_ms = [](const int ms) {
-            if (ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(ms));
-        };
         hooks.initialize = BoundInitialize;
         hooks.publish = PublishStatus;
         auto* created = new CaptureGate(GateConfigFromEnv(nullptr), std::move(hooks));

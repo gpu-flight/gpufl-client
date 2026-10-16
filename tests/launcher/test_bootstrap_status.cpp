@@ -9,10 +9,30 @@
 
 namespace fs = std::filesystem;
 using gpufl::launcher::BootstrapStatus;
+using gpufl::launcher::CombineFinalBootstrap;
 using gpufl::launcher::InitWatchdog;
 using gpufl::launcher::ReadBootstrapStatus;
 
 namespace {
+
+// A record in the library's exact shape (capture_gate.cpp GateStatusJson).
+std::string Record(const std::string& nonce, long pid, int seq,
+                   const std::string& lifecycle, const std::string& readiness,
+                   const std::string& reason = "", int64_t deadline = 1000,
+                   const std::string& owner = "gate") {
+    const std::string participant =
+        "{\"expected\":true,\"returned\":false,\"ok\":false}";
+    return "{\"schema\":1,\"nonce\":\"" + nonce + "\",\"pid\":" + std::to_string(pid) +
+           ",\"seq\":" + std::to_string(seq) + ",\"lifecycle\":\"" + lifecycle +
+           "\",\"owner\":\"" + owner + "\",\"readiness\":\"" + readiness +
+           "\",\"reason\":\"" + reason + "\"," +
+           "\"coverage_notes\":[\"unsupported_first_touch\"]," +
+           "\"deadline_monotonic_ns\":" + std::to_string(deadline) +
+           ",\"trigger\":" + participant + ",\"worker\":" + participant +
+           ",\"handshake\":" + participant +
+           ",\"callbacks_seen\":1,\"handshake_reentries\":0," +
+           "\"wait_config_invalid\":false,\"protocol\":\"2\"}\n";
+}
 
 class BootstrapStatusTest : public ::testing::Test {
    protected:
@@ -27,14 +47,8 @@ class BootstrapStatusTest : public ::testing::Test {
     void Write(long pid, const std::string& text) {
         std::ofstream(gpufl::launcher::BootstrapStatusPath(dir_, pid)) << text;
     }
-
-    static std::string Record(const std::string& nonce, long pid, int seq,
-                              const std::string& lifecycle, int64_t deadline) {
-        return "{\"schema\":1,\"nonce\":\"" + nonce + "\",\"pid\":" + std::to_string(pid) +
-               ",\"seq\":" + std::to_string(seq) + ",\"lifecycle\":\"" + lifecycle +
-               "\",\"owner\":\"gate\",\"readiness\":\"pending\",\"reason\":\"\"," +
-               "\"coverage_notes\":[\"unsupported_first_touch\"]," +
-               "\"deadline_monotonic_ns\":" + std::to_string(deadline) + "}";
+    BootstrapStatus Read(long pid, const std::string& nonce = "n1") {
+        return ReadBootstrapStatus(dir_, pid, nonce);
     }
 
     fs::path dir_;
@@ -45,30 +59,48 @@ BootstrapStatus Status(int seq, const std::string& lifecycle, int64_t deadline) 
     s.valid = true;
     s.seq = seq;
     s.lifecycle = lifecycle;
-    s.readiness = "pending";
+    s.readiness = lifecycle == "finished" ? "ready" : "pending";
     s.deadline_monotonic_ns = deadline;
     return s;
 }
 
 }  // namespace
 
-TEST_F(BootstrapStatusTest, ReadsOnlyThisChildsOwnRecord) {
-    Write(42, Record("n1", 42, 3, "capture_initializing", 1000));
-    const BootstrapStatus s = ReadBootstrapStatus(dir_, 42, "n1");
+TEST_F(BootstrapStatusTest, ReadsOnlyThisChildsOwnConsistentRecord) {
+    Write(42, Record("n1", 42, 3, "capture_initializing", "pending"));
+    const BootstrapStatus s = Read(42);
     ASSERT_TRUE(s.valid) << s.error;
     EXPECT_EQ(s.seq, 3);
     EXPECT_EQ(s.lifecycle, "capture_initializing");
     EXPECT_EQ(s.deadline_monotonic_ns, 1000);
     EXPECT_EQ(s.coverage_notes.count("unsupported_first_touch"), 1u);
 
-    EXPECT_EQ(ReadBootstrapStatus(dir_, 42, "other").error, "foreign_nonce");
-    Write(43, Record("n1", 42, 3, "finished", 1000));
-    EXPECT_EQ(ReadBootstrapStatus(dir_, 43, "n1").error, "foreign_pid");
-    EXPECT_EQ(ReadBootstrapStatus(dir_, 44, "n1").error, "missing");
+    EXPECT_EQ(Read(42, "other").error, "foreign_nonce");
+    Write(43, Record("n1", 42, 3, "finished", "ready"));
+    EXPECT_EQ(Read(43).error, "foreign_pid");
+    EXPECT_EQ(Read(44).error, "missing");
     Write(45, "{not json");
-    EXPECT_EQ(ReadBootstrapStatus(dir_, 45, "n1").error, "malformed");
+    EXPECT_EQ(Read(45).error, "malformed");
     Write(46, std::string(5000, ' '));
-    EXPECT_EQ(ReadBootstrapStatus(dir_, 46, "n1").error, "oversized");
+    EXPECT_EQ(Read(46).error, "oversized");
+    Write(47, "{\"schema\":1,\"nonce\":\"n1\",\"pid\":47,\"lifecycle\":\"finished\","
+              "\"readiness\":\"ready\"}");
+    EXPECT_EQ(Read(47).error, "malformed");  // fields missing
+}
+
+TEST_F(BootstrapStatusTest, RefusesStatesTheLibraryCannotBeIn) {
+    Write(50, Record("n1", 50, 2, "finished", "pending"));
+    EXPECT_EQ(Read(50).error, "inconsistent");
+    Write(51, Record("n1", 51, 2, "capture_initializing", "ready"));
+    EXPECT_EQ(Read(51).error, "inconsistent");
+    Write(52, Record("n1", 52, 2, "finished", "failed"));  // failed without a reason
+    EXPECT_EQ(Read(52).error, "inconsistent");
+    Write(53, Record("n1", 53, 2, "driver_ready", "pending", "", 0));  // no deadline
+    EXPECT_EQ(Read(53).error, "inconsistent");
+    Write(54, Record("n1", 54, 2, "sleeping", "pending"));
+    EXPECT_EQ(Read(54).error, "inconsistent");
+    Write(55, Record("n1", 55, 2, "finished", "failed", "capture_wait_timeout"));
+    EXPECT_TRUE(Read(55).valid);
 }
 
 TEST(InitWatchdog, KeepsTheFirstDeadlineAndFiresAfterTheGrace) {
@@ -96,4 +128,29 @@ TEST(InitWatchdog, DisarmsWhenEveryParticipantReturnedAndIgnoresStaleRecords) {
     InitWatchdog unread(0);
     EXPECT_FALSE(unread.Observe(BootstrapStatus{}, 1'000'000));
     EXPECT_FALSE(unread.seen_valid());
+}
+
+TEST(CombineFinalBootstrap, AFinalReadThatDoesNotConfirmIsReportedNotHidden) {
+    InitWatchdog watchdog(0);
+    watchdog.Observe(Status(9, "finished", 1'000), 0);
+
+    auto confirmed = CombineFinalBootstrap(watchdog, Status(9, "finished", 1'000));
+    EXPECT_TRUE(confirmed.final_error.empty());
+
+    for (const char* error : {"missing", "malformed", "foreign_nonce"}) {
+        BootstrapStatus lost;
+        lost.error = error;
+        const auto observed = CombineFinalBootstrap(watchdog, lost);
+        EXPECT_EQ(observed.final_error, error);
+        EXPECT_EQ(observed.accepted.seq, 9);  // history, flagged as such
+    }
+    EXPECT_EQ(CombineFinalBootstrap(watchdog, Status(4, "driver_ready", 1'000)).final_error,
+              "stale_final_seq");
+
+    InitWatchdog never(0);
+    BootstrapStatus missing;
+    missing.error = "missing";
+    const auto none = CombineFinalBootstrap(never, missing);
+    EXPECT_FALSE(none.accepted.valid);
+    EXPECT_EQ(none.final_error, "missing");
 }

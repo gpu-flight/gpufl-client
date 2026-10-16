@@ -6,6 +6,11 @@
 // When the target exports TestOwnedTouch, the fake calls it after it returns
 // from the block, so a test can prove it never runs after the target's own
 // teardown.
+//
+// The fake does not register the real shutdownAndSignal atexit handler, so
+// these tests say nothing about production shutdown registration, and they
+// are not teardown-safety evidence for the timeout path (unsupported by
+// design: application handlers registered later still run before the guard).
 
 #include <dlfcn.h>
 #include <unistd.h>

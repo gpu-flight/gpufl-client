@@ -162,7 +162,10 @@ class PosixTracePlatform final : public TracePlatform {
         auto finishBootstrap = [&]() {
             if (!watch) return;
             (void)watchdogFires(/*final_read=*/true);  // the record after exit
-            out.bootstrap = watchdog.seen_valid() ? watchdog.last() : last_read;
+            // The last accepted record, plus whether this final read confirmed it.
+            const FinalBootstrapObservation final_obs = CombineFinalBootstrap(watchdog, last_read);
+            out.bootstrap = final_obs.accepted;
+            out.bootstrap_final_error = final_obs.final_error;
         };
 
         if (opts.run_ms <= 0 && !watch) {

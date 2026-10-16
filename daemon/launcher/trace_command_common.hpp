@@ -29,6 +29,9 @@ struct TraceProcessResult {
     bool init_watchdog_killed = false;
     // The child's last bootstrap status (invalid when none was read).
     BootstrapStatus bootstrap;
+    // Empty when the read after exit confirmed `bootstrap`; otherwise why it
+    // did not (the record above is then historical).
+    std::string bootstrap_final_error;
     std::string error;
 };
 

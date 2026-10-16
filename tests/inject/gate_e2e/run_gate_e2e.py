@@ -20,6 +20,18 @@ from pathlib import Path
 
 ARGS = None
 
+# Every first-touch runtime wrapper the gate supports, plus waiting copy and
+# sync wrappers (launches are covered by the unit tests: their by-value dim3
+# ABI is not faked here).
+RUNTIME_WRAPPERS = [
+    "cudaMalloc", "cudaMallocManaged", "cudaMallocHost", "cudaHostAlloc", "cudaFree",
+    "cudaSetDevice", "cudaGetDeviceCount", "cudaGetDeviceProperties_v2", "cudaMemGetInfo",
+    "cudaEventCreate", "cudaEventCreateWithFlags", "cudaStreamCreate",
+    "cudaStreamCreateWithFlags", "cudaDeviceSynchronize", "cudaStreamSynchronize",
+    "cudaMemcpy", "cudaMemcpyAsync",
+]
+DRIVER_WRAPPERS = ["cuMemAlloc_v2", "cuModuleLoadData", "cuModuleLoadDataEx", "cuCtxSynchronize"]
+
 
 def read_status(status_dir):
     files = sorted(Path(status_dir).glob("status-*.json"))
@@ -49,6 +61,10 @@ class GateEndToEnd(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(self.work, ignore_errors=True)
+
+    def work_reset(self):
+        shutil.rmtree(self.work, ignore_errors=True)
+        self.work.mkdir()
 
     def base_env(self, **extra):
         env = {k: v for k, v in os.environ.items()
@@ -160,6 +176,37 @@ class GateEndToEnd(unittest.TestCase):
         self.assertNotIn("touch:after_destroy", run.log)
         self.assertEqual(run.log.count("destroyed"), 1)
 
+    def test_every_first_touch_runtime_wrapper_waits_for_capture(self):
+        for name in RUNTIME_WRAPPERS:
+            with self.subTest(name):
+                self.work_reset()
+                run = self.direct("first:" + name)
+                self.assertEqual(run.rc, 0, run.stderr)
+                self.assert_status(run, "ready", "gate")
+                # The application's own call is the last one with that name
+                # (cudaGetDeviceCount is also the trigger).
+                last = len(run.log) - 1 - run.log[::-1].index(name)
+                self.assertLess(run.index("init:ok"), last, run.log)
+
+    def test_every_driver_wrapper_waits_after_an_unwrapped_cuinit(self):
+        for name in DRIVER_WRAPPERS:
+            with self.subTest(name):
+                self.work_reset()
+                run = self.direct("driver:" + name)
+                self.assertEqual(run.rc, 0, run.stderr)
+                self.assert_status(run, "ready", "callback",
+                                   notes=["unsupported_first_touch"])
+                self.assertTrue(run.before("init:ok", name), run.log)
+
+    def test_exit_during_the_warmup_stands_the_worker_down(self):
+        run = self.direct("exit_early", GPUFL_INJECT_WARMUP_MS=5000)
+        self.assertEqual(run.rc, 0, run.stderr)
+        self.assertLess(run.elapsed, 3)
+        self.assertNotIn("init:begin", run.log)
+        self.assertIn("destroyed", run.log)
+        self.assertEqual(run.status["reason"], "exit_before_capture")
+        self.assertIn("warmup_unqualified", run.status["coverage_notes"])
+
     def test_a_process_without_cuda_writes_nothing(self):
         run = self.direct("none")
         self.assertEqual(run.rc, 0)
@@ -209,6 +256,20 @@ class GateEndToEnd(unittest.TestCase):
         run = self.launch("runtime", "--window-timeout", "60s",
                           FAKE_CUINIT="block_first", GPUFL_INJECT_LAUNCH_WAIT_MS=300)
         self.assertLess(run.elapsed, 30)
+        self.assertIn("watchdog killed the target", run.stderr)
+
+    def test_launcher_keeps_a_healthy_warmup_longer_than_the_init_allowance(self):
+        run = self.launch("sleep:2500", "--warmup", "1s", GPUFL_INJECT_LAUNCH_WAIT_MS=300)
+        self.assertEqual(run.rc, 0, run.stderr)
+        self.assertNotIn("watchdog killed", run.stderr)
+        self.assertTrue(run.before("init:ok", "app:after_sleep"), run.log)
+        self.assertIn("coverage=warmup_unqualified", run.stderr)
+
+    def test_launcher_kills_an_initializer_that_wedges_after_the_warmup(self):
+        run = self.launch("sleep:20000", "--warmup", "1s", FAKE_INIT="block",
+                          GPUFL_INJECT_LAUNCH_WAIT_MS=300)
+        self.assertIn("init:begin", run.log)  # the warmup itself was allowed
+        self.assertLess(run.elapsed, 10)
         self.assertIn("watchdog killed the target", run.stderr)
 
     def test_launcher_watchdog_covers_a_blocked_trigger_after_worker_success(self):

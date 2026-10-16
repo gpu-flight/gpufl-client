@@ -508,18 +508,11 @@ void CuptiBackend::start() {
         for (auto k : kinds) {
             const CUptiResult res = cuptiActivityEnable(k);
             CUPTI_CHECK(res);
-            // Capture readiness requires every required kind to be on; the
-            // injection gate reads this (captureFacilitiesReady).
-            if (res != CUPTI_SUCCESS && !IsBenignCuptiResult(res)) {
-                std::lock_guard lock(capture_facility_mu_);
-                if (capture_facility_failure_.empty()) {
-                    capture_facility_failure_ =
-                        "activity_enable_failed:" + std::to_string(static_cast<int>(k)) +
-                        ":" + std::to_string(static_cast<int>(res));
-                }
-            }
+            // Capture readiness requires every required kind to be on; a
+            // "benign" result is a fallback for logging, not an enable.
+            required_activity_.Record(static_cast<int>(k), res == CUPTI_SUCCESS,
+                                      static_cast<int>(res));
         }
-        required_activity_enabled_.store(true, std::memory_order_release);
     }
 
     // Initialize and start the engine (requires CUDA context)
@@ -550,7 +543,13 @@ void CuptiBackend::ReenableActivityAfterEngineStart_() {
         std::set<CUpti_ActivityKind> kinds;
         for (const auto& h : handlers_)
             for (auto k : h->requiredActivityKinds()) kinds.insert(k);
-        for (auto k : kinds) cuptiActivityEnable(k);
+        // The engine may have reset the subscription, so the re-enable result
+        // counts too: an earlier success does not stand for this one.
+        for (auto k : kinds) {
+            const CUptiResult res = cuptiActivityEnable(k);
+            required_activity_.Record(static_cast<int>(k), res == CUPTI_SUCCESS,
+                                      static_cast<int>(res));
+        }
     }
 
     // Re-resolve NVTX marker policy after engine start. This is primarily for

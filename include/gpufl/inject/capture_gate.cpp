@@ -216,8 +216,13 @@ void CaptureGate::ElectLocked(const GateOwner owner) {
     state_.owner = owner;
     state_.lifecycle = GateLifecycle::DriverInitializing;
     const int64_t now = hooks_.now_ns ? hooks_.now_ns() : 0;
+    // One immutable budget: the worker's requested delay (the readiness delay,
+    // or a --warmup) once, plus the initialization allowance. Nothing renews it.
     const int64_t max = std::numeric_limits<int64_t>::max();
-    state_.deadline_ns = now > max - config_.wait_ns ? max : now + config_.wait_ns;
+    const int64_t delay_ns =
+        owner == GateOwner::Manual ? 0 : static_cast<int64_t>(config_.delay_ms) * 1'000'000LL;
+    const int64_t budget = delay_ns > max - config_.wait_ns ? max : delay_ns + config_.wait_ns;
+    state_.deadline_ns = now > max - budget ? max : now + budget;
 }
 
 void CaptureGate::LatchFailedLocked(const std::string& reason) {
@@ -399,14 +404,23 @@ void CaptureGate::RunWorker() {
         PublishLocked();
         lock.unlock();
     }
-    if (hooks_.sleep_ms) hooks_.sleep_ms(config_.delay_ms);
     {
+        // The delay is not CUDA work: an exit that starts during it stops the
+        // worker here, before CUPTI, so ordinary teardown stays safe.
         std::unique_lock lock(mu_);
-        if (state_.lifecycle == GateLifecycle::DriverReady) {
-            state_.lifecycle = GateLifecycle::CaptureInitializing;
+        cv_.wait_for(lock, std::chrono::milliseconds(config_.delay_ms),
+                     [this] { return exit_requested_; });
+        if (exit_requested_) {
+            state_.worker.returned = true;
+            state_.worker.ok = false;
+            LatchFailedLocked("exit_before_capture");
+            ResolveLocked();
+            PublishLocked();
+            cv_.notify_all();
+            return;
         }
+        state_.lifecycle = GateLifecycle::CaptureInitializing;
         PublishLocked();
-        lock.unlock();
     }
     const GateStep init =
         Call(hooks_.initialize, "initialize_missing", "init_exception");
@@ -479,6 +493,8 @@ bool CaptureGate::AwaitAtExit() {
         state_.lifecycle == GateLifecycle::Finished) {
         return true;
     }
+    exit_requested_ = true;  // a worker still in its delay stands down
+    cv_.notify_all();
     if (WaitLocked(lock, /*until_finished=*/true)) return true;
     state_.coverage_notes.insert("exit_while_initializing");
     PublishLocked();

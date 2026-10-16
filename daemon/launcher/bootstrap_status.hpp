@@ -68,6 +68,20 @@ class InitWatchdog {
     BootstrapStatus last_;
 };
 
+/**
+ * The last accepted record plus whether the read after exit confirmed it.
+ * `final_error` is empty only when that read was valid and current; otherwise
+ * it names what went wrong (missing, malformed, foreign_*, stale_final_seq),
+ * and the accepted record is historical, not a fresh observation.
+ */
+struct FinalBootstrapObservation {
+    BootstrapStatus accepted;
+    std::string final_error;
+};
+
+FinalBootstrapObservation CombineFinalBootstrap(const InitWatchdog& watchdog,
+                                                const BootstrapStatus& final_read);
+
 /** One line for the run summary, e.g. "ready owner=gate" or "unavailable (...)". */
 std::string DescribeBootstrapStatus(const BootstrapStatus& status);
 
