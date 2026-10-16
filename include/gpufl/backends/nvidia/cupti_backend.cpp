@@ -513,6 +513,8 @@ void CuptiBackend::start() {
             required_activity_.Record(static_cast<int>(k), res == CUPTI_SUCCESS,
                                       static_cast<int>(res));
         }
+        // Even when the set is empty (PC sampling, SASS safe mode).
+        required_activity_.Evaluated();
     }
 
     // Initialize and start the engine (requires CUDA context)

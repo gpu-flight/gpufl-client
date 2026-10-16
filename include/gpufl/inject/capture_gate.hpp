@@ -62,7 +62,7 @@ enum class GateMode : int {
 
 struct GateConfig {
     GateMode mode = GateMode::Automatic;
-    int64_t wait_ns = 15'000'000'000LL;
+    int64_t wait_ns = 60'000'000'000LL;
     bool wait_config_invalid = false;
     // Worker sleep between the driver barrier and CUPTI setup: the readiness
     // delay, or the warmup in Warmup mode.

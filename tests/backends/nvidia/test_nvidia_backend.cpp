@@ -31,11 +31,22 @@ TEST(RequiredActivityTally, ABenignResultOrALaterFailedReEnableIsNotReady) {
 
     gpufl::RequiredActivityTally reenable;
     reenable.Record(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL, true, CUPTI_SUCCESS);
+    EXPECT_FALSE(reenable.Ready(&reason));  // the required set is not done yet
+    reenable.Evaluated();
     EXPECT_TRUE(reenable.Ready(&reason));
     reenable.Record(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL, false,
                     CUPTI_ERROR_NOT_INITIALIZED);
     reenable.Record(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL, true, CUPTI_SUCCESS);
     EXPECT_FALSE(reenable.Ready(&reason));  // the failure latches
+}
+
+// PC sampling and SASS safe mode require no activity kind. Their handshake
+// must still report ready: the Rust and Python hosts abort on anything but 1.
+TEST(RequiredActivityTally, AnEmptyRequiredSetIsReadyOnceEvaluated) {
+    std::string reason;
+    gpufl::RequiredActivityTally empty;
+    empty.Evaluated();
+    EXPECT_TRUE(empty.Ready(&reason));
 }
 
 // Pure decision for Monitor::Shutdown's orphan-synthesis suppression. No CUDA
