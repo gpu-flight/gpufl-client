@@ -175,7 +175,8 @@ TEST(CombineFinalBootstrap, AFinalReadThatDoesNotConfirmIsReportedNotHidden) {
 
 #if defined(__linux__)
 // Round trip against the library's own writer: every snapshot a real gate
-// publishes, on success, failure, timeout and manual paths, parses as valid.
+// publishes on the success, trigger-failure, unowned-init-failure and manual
+// paths parses as valid. A timeout path is not induced here.
 namespace {
 
 struct Published {
