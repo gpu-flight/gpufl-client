@@ -116,7 +116,6 @@ constexpr const char* kFlushLogsAlways      = "GPUFL_FLUSH_LOGS_ALWAYS";
 
 // ── Inject-lib timing knobs (tuning / debugging the injection lifecycle) ────
 constexpr const char* kInjectShutdownDelayMs = "GPUFL_INJECT_SHUTDOWN_DELAY_MS";
-constexpr const char* kInjectSyncWaitMs      = "GPUFL_INJECT_SYNC_WAIT_MS";
 constexpr const char* kInjectLaunchWaitMs    = "GPUFL_INJECT_LAUNCH_WAIT_MS";
 constexpr const char* kInjectProcessScope    = "GPUFL_INJECT_PROCESS_SCOPE";
 constexpr const char* kInjectInitDelayMs     = "GPUFL_INJECT_INIT_DELAY_MS";

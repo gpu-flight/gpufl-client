@@ -152,14 +152,16 @@ class PosixTracePlatform final : public TracePlatform {
         const bool watch = !opts.bootstrap_dir.empty();
         InitWatchdog watchdog(opts.watchdog_grace_ms * 1'000'000LL);
         BootstrapStatus last_read;
-        auto watchdogFires = [&]() -> bool {
-            if (!watch) return false;
+        auto watchdogFires = [&](const bool final_read = false) -> bool {
+            // Once initialization finished nothing can rearm it; a long run
+            // stops reading the file until the final read after exit.
+            if (!watch || (watchdog.disarmed() && !final_read)) return false;
             last_read = ReadBootstrapStatus(opts.bootstrap_dir, pid, opts.bootstrap_nonce);
             return watchdog.Observe(last_read, MonotonicNowNs());
         };
         auto finishBootstrap = [&]() {
             if (!watch) return;
-            (void)watchdogFires();  // the final record after exit
+            (void)watchdogFires(/*final_read=*/true);  // the record after exit
             out.bootstrap = watchdog.seen_valid() ? watchdog.last() : last_read;
         };
 
