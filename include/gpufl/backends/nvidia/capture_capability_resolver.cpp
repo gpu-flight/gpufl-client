@@ -15,7 +15,69 @@ void AddCapability(CaptureCapabilitiesEvent& evt, std::string feature,
         std::move(reason), std::move(message)});
 }
 
+// Refines an activity capability whose records were rejected for their
+// timing. The status stays what the row count decided (the server classifies
+// statuses only); the reason and message say why rows are missing. Synthetic
+// and intentionally disabled capture keep their own reasons.
+void NoteRejectedTimestamps(CaptureCapability& cap, const std::string& kind,
+                            const char* what, const uint64_t eligible,
+                            const uint64_t emitted, const uint64_t zero_ts,
+                            const uint64_t invalid_ts) {
+    const std::string counts =
+        " (" + DescribeActivityTimestamps(eligible, zero_ts, invalid_ts) +
+        " emitted=" + std::to_string(emitted) + ")";
+    switch (ClassifyActivityTimestamps(eligible, emitted, zero_ts, invalid_ts)) {
+        case ActivityTimestampOutcome::Complete:
+            return;
+        case ActivityTimestampOutcome::Unavailable:
+            if (cap.status != "enabled_no_data") return;
+            cap.reason_code = kind + "_timestamps_unavailable";
+            cap.message = std::string("Every ") + what +
+                          " activity record arrived with start == end == 0, so "
+                          "CUPTI timing was unavailable this session and no row "
+                          "was emitted" + counts + ".";
+            return;
+        case ActivityTimestampOutcome::Invalid:
+            if (cap.status != "enabled_no_data") return;
+            cap.reason_code = kind + "_timestamps_invalid";
+            cap.message = std::string("Every ") + what +
+                          " activity record was dropped for invalid timestamps, "
+                          "so no row was emitted" + counts + ".";
+            return;
+        case ActivityTimestampOutcome::Partial:
+            if (cap.status != "collected" || !cap.reason_code.empty()) return;
+            cap.reason_code = kind + "_timestamps_partial";
+            cap.message = std::string("Some ") + what +
+                          " activity records were dropped for invalid "
+                          "timestamps; the timeline is incomplete" + counts + ".";
+            return;
+    }
+}
+
 }  // namespace
+
+ActivityTimestampOutcome ClassifyActivityTimestamps(const uint64_t eligible,
+                                                    const uint64_t emitted,
+                                                    const uint64_t zero_ts,
+                                                    const uint64_t invalid_ts) {
+    const uint64_t rejected = zero_ts + invalid_ts;
+    if (rejected == 0) return ActivityTimestampOutcome::Complete;
+    // Observed on an L4 (2026-10-16): a whole Trace session's kernel and
+    // memcpy records arrived with start == end == 0. That is not "no record
+    // arrived", and it must not read like it.
+    if (emitted > 0) return ActivityTimestampOutcome::Partial;
+    return invalid_ts == 0 && zero_ts == eligible
+               ? ActivityTimestampOutcome::Unavailable
+               : ActivityTimestampOutcome::Invalid;
+}
+
+std::string DescribeActivityTimestamps(const uint64_t eligible,
+                                       const uint64_t zero_ts,
+                                       const uint64_t invalid_ts) {
+    return "eligible=" + std::to_string(eligible) +
+           " zero_timestamps=" + std::to_string(zero_ts) +
+           " other_invalid=" + std::to_string(invalid_ts);
+}
 
 std::vector<std::string> BuildCaptureCapabilityWarnings(
     const CaptureCapabilityInput& input) {
@@ -130,6 +192,11 @@ CaptureCapabilitiesEvent BuildCaptureCapabilitiesEvent(
                    : input.sass_metrics_only
                          ? "Kernel activity was intentionally disabled because CUPTI SASS Metrics requires metrics-only mode on this GPU/driver to produce non-zero counters."
                          : "Kernel tracing was enabled but emitted no kernel rows this session.")));
+    NoteRejectedTimestamps(evt.capabilities.back(), "kernel", "kernel",
+                           input.counters.kernel_records_eligible,
+                           input.counters.kernel_rows,
+                           input.counters.kernel_records_zero_ts,
+                           input.counters.kernel_records_invalid_ts);
     AddCapability(
         evt, "kernel_names", input.kernel_activity,
         kernelHasData
@@ -216,6 +283,11 @@ CaptureCapabilitiesEvent BuildCaptureCapabilitiesEvent(
                    ? "Memcpy/memset activity records were collected."
                    : "Memcpy/memset activity was enabled but emitted no rows this session.")
             : "Memcpy/memset timeline activity was not requested by the selected engine domains.");
+    NoteRejectedTimestamps(evt.capabilities.back(), "memcpy", "memcpy/memset",
+                           input.counters.mem_transfer_records_eligible,
+                           input.counters.mem_transfer_rows,
+                           input.counters.mem_transfer_records_zero_ts,
+                           input.counters.mem_transfer_records_invalid_ts);
     const bool syncRequested = input.kernel_activity &&
         input.options.enable_synchronization &&
         input.allow_sass_sync_activity;

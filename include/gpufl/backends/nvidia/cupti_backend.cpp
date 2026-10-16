@@ -983,8 +983,11 @@ void CuptiBackend::stop() {
         kernel_activity_emitted_.load(std::memory_order_relaxed);
     const uint64_t throttled =
         kernel_activity_throttled_.load(std::memory_order_relaxed);
+    const ActivityTimestampCounts ts = kernel_activity_timestamps_.Snapshot();
     GFL_LOG_DEBUG("[KernelLaunchHandler] activity summary seen=", seen,
-                  " emitted=", emitted, " throttled=", throttled);
+                  " emitted=", emitted, " throttled=", throttled,
+                  " eligible=", ts.eligible, " zero_timestamps=", ts.zero_ts,
+                  " other_invalid=", ts.invalid_ts);
 }
 
 void CuptiBackend::RegisterHandler(

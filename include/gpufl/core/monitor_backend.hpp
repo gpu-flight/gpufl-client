@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -8,6 +9,14 @@
 #include "gpufl/core/monitor.hpp"
 
 namespace gpufl {
+
+/** Activity records that reached the timestamp check, and the ones rejected. */
+struct ActivityTimestampCounts {
+    uint64_t eligible = 0;
+    /** start == end == 0: CUPTI could not collect timing for the record. */
+    uint64_t zero_ts = 0;
+    uint64_t invalid_ts = 0;
+};
 
 /**
  * @brief Interface for backend-specific monitoring implementations.
@@ -117,6 +126,11 @@ class IMonitorBackend {
      *        as measured kernel time. Default: false (nothing to suppress).
      */
     virtual bool kernelActivityExpectedButMissing() const { return false; }
+
+    /** Kernel activity records seen at the timestamp check, process-wide. */
+    virtual ActivityTimestampCounts kernelActivityTimestamps() const {
+        return {};
+    }
 
     virtual void OnScopeStart(const char* name) {}
     virtual void OnScopeStop(const char* name) {}

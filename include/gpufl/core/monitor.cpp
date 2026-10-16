@@ -608,11 +608,25 @@ void Monitor::Shutdown() {
         // enabled_but_no_records, so the session stays self-describing.
         if (IMonitorBackend* b = g_state.adapter->backend();
             b && b->kernelActivityExpectedButMissing()) {
-            GFL_LOG_ERROR(
-                "[Monitor] Kernel activity was enabled and launches happened, "
-                "but no kernel activity record arrived this session. Kernel "
-                "rows are omitted (a synthetic fallback would carry host-gap "
-                "durations, not kernel time).");
+            // Records that arrived without timing are a different failure
+            // from records that never arrived; say which one this was.
+            const ActivityTimestampCounts ts = b->kernelActivityTimestamps();
+            if (ts.eligible == 0) {
+                GFL_LOG_ERROR(
+                    "[Monitor] Kernel activity was enabled and launches "
+                    "happened, but no kernel activity record arrived this "
+                    "session. Kernel rows are omitted (a synthetic fallback "
+                    "would carry host-gap durations, not kernel time).");
+            } else {
+                GFL_LOG_ERROR(
+                    "[Monitor] Kernel activity was enabled and launches "
+                    "happened, but no kernel activity record had valid timing "
+                    "this session (eligible=", ts.eligible,
+                    " zero_timestamps=", ts.zero_ts,
+                    " other_invalid=", ts.invalid_ts,
+                    "). Kernel rows are omitted (a synthetic fallback would "
+                    "carry host-gap durations, not kernel time).");
+            }
         }
         g_state.adapter->shutdown();
     }

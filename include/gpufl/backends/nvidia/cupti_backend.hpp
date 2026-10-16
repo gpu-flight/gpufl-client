@@ -51,6 +51,26 @@ inline bool ShouldSuppressOrphanKernelSynthesis(bool collects_kernel_events,
     return collects_kernel_events || !will_emit_synthetic;
 }
 
+// Activity records that reached a handler's timestamp check, and the ones it
+// rejected. Process-cumulative like the other activity counters; callers take
+// segment deltas from Snapshot().
+struct ActivityTimestampTally {
+    std::atomic<uint64_t> eligible{0};
+    std::atomic<uint64_t> zero_ts{0};
+    std::atomic<uint64_t> invalid_ts{0};
+
+    void NoteEligible() { eligible.fetch_add(1, std::memory_order_relaxed); }
+    void NoteRejected(const uint64_t start, const uint64_t end) {
+        (start == 0 && end == 0 ? zero_ts : invalid_ts)
+            .fetch_add(1, std::memory_order_relaxed);
+    }
+    ActivityTimestampCounts Snapshot() const {
+        return {eligible.load(std::memory_order_relaxed),
+                zero_ts.load(std::memory_order_relaxed),
+                invalid_ts.load(std::memory_order_relaxed)};
+    }
+};
+
 /**
  * @brief CUPTI-based monitoring backend for NVIDIA GPUs.
  *
@@ -122,6 +142,16 @@ class CuptiBackend : public IMonitorBackend {
             collectsKernelEvents(), WillEmitSyntheticKernels(),
             kernel_launch_callback_count_.load(std::memory_order_acquire),
             kernel_activity_emitted_.load(std::memory_order_relaxed));
+    }
+    ActivityTimestampCounts kernelActivityTimestamps() const override {
+        return kernel_activity_timestamps_.Snapshot();
+    }
+    void NoteMemTransferActivityEligible() {
+        mem_transfer_activity_timestamps_.NoteEligible();
+    }
+    void NoteMemTransferActivityRejected(const uint64_t start,
+                                         const uint64_t end) {
+        mem_transfer_activity_timestamps_.NoteRejected(start, end);
     }
     bool AllowSassMarkerActivity() const {
         return resolved_plan_.allow_sass_marker_activity;
@@ -384,7 +414,9 @@ class CuptiBackend : public IMonitorBackend {
     std::atomic<uint64_t> kernel_activity_seen_{0};
     std::atomic<uint64_t> kernel_activity_emitted_{0};
     std::atomic<uint64_t> kernel_activity_throttled_{0};
+    ActivityTimestampTally kernel_activity_timestamps_;
     std::atomic<uint64_t> mem_transfer_activity_emitted_{0};
+    ActivityTimestampTally mem_transfer_activity_timestamps_;
     std::atomic<uint64_t> sync_activity_emitted_{0};
     std::atomic<uint64_t> nvtx_marker_emitted_{0};
     std::atomic<uint64_t> graph_activity_emitted_{0};
@@ -426,6 +458,8 @@ class CuptiBackend : public IMonitorBackend {
     mutable uint64_t capability_launch_count_baseline_ = 0;
     mutable uint64_t capability_scope_truncated_baseline_ = 0;
     mutable uint64_t capability_pm_rows_baseline_ = 0;
+    mutable ActivityTimestampCounts capability_kernel_timestamps_baseline_;
+    mutable ActivityTimestampCounts capability_mem_transfer_timestamps_baseline_;
     uint32_t device_id_ = 0;
     std::string chip_name_;
 
