@@ -20,7 +20,9 @@
 namespace gpufl::inject {
 namespace {
 
-constexpr int64_t kDefaultWaitMs = 15'000;
+// Generous on purpose: a slow but healthy gpufl::init (PerfWorks setup on a
+// large GPU) must not fail a manual handshake or be killed by the launcher.
+constexpr int64_t kDefaultWaitMs = 60'000;
 constexpr int64_t kMaxWaitMs = 600'000;
 constexpr int kDefaultDelayMs = 1;
 constexpr std::size_t kMaxReasonBytes = 200;

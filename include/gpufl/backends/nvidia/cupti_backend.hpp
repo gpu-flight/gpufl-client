@@ -72,23 +72,33 @@ struct ActivityTimestampTally {
 };
 
 // Results of enabling the required activity kinds, at start and at every
-// re-enable. Ready only when at least one enable was recorded and none
-// failed: a failure latches, so a later success never hides it, and a
+// re-enable. Ready only once the required set was enabled (Evaluated) and no
+// enable failed: a failure latches, so a later success never hides it, and a
 // non-success the logger calls benign (a fallback) is still not an enable.
+// An empty required set is ready: PC sampling and SASS passes take no kernel
+// activity, and their handshake must still succeed.
 class RequiredActivityTally {
    public:
     void Record(const int kind, const bool success, const int result) {
         std::lock_guard lock(mu_);
-        recorded_ = true;
         if (!success && failure_.empty()) {
             failure_ = "activity_enable_failed:" + std::to_string(kind) + ":" +
                        std::to_string(result);
         }
     }
+    // After the loop over the required set, even when it was empty.
+    void Evaluated() {
+        std::lock_guard lock(mu_);
+        evaluated_ = true;
+    }
     bool Ready(std::string* reason) const {
         std::lock_guard lock(mu_);
-        if (!failure_.empty() || !recorded_) {
-            if (reason) *reason = recorded_ ? failure_ : "activity_not_enabled";
+        if (!failure_.empty()) {
+            if (reason) *reason = failure_;
+            return false;
+        }
+        if (!evaluated_) {
+            if (reason) *reason = "activity_not_enabled";
             return false;
         }
         return true;
@@ -96,7 +106,7 @@ class RequiredActivityTally {
 
    private:
     mutable std::mutex mu_;
-    bool recorded_ = false;
+    bool evaluated_ = false;
     std::string failure_;
 };
 

@@ -226,7 +226,7 @@ types are additive.
     counts only when its enable, and its re-enable after the engine starts,
     returned success: a fallback result CUPTI logs as benign is not an enable.
     A required kind lost after readiness adds `trace_facility_lost`.
-    `GPUFL_INJECT_LAUNCH_WAIT_MS` (1-600000, default 15000) sets that
+    `GPUFL_INJECT_LAUNCH_WAIT_MS` (1-600000, default 60000) sets that
     deadline. The first-touch calls covered are:
     - `cudaMalloc`, `cudaMallocManaged`, `cudaMallocHost`, `cudaHostAlloc`,
       `cudaFree`;

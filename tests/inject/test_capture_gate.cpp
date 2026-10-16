@@ -435,7 +435,7 @@ TEST(CaptureGateConfig, ReadsModesDelaysAndRejectsBadWaits) {
     EXPECT_EQ(c.mode, GateMode::Automatic);
     EXPECT_EQ(c.delay_ms, 100);
     EXPECT_FALSE(c.legacy_launcher_delay);
-    EXPECT_EQ(c.wait_ns, 15'000'000'000LL);
+    EXPECT_EQ(c.wait_ns, 60'000'000'000LL);
 
     c = config({{"GPUFL_INJECT_INIT_DELAY_MS", "5000"}});
     EXPECT_TRUE(c.legacy_launcher_delay);
@@ -451,7 +451,7 @@ TEST(CaptureGateConfig, ReadsModesDelaysAndRejectsBadWaits) {
     for (const char* bad : {"0", "-5", "abc", "600001", "99999999999999999999"}) {
         c = config({{"GPUFL_INJECT_LAUNCH_WAIT_MS", bad}});
         EXPECT_TRUE(c.wait_config_invalid) << bad;
-        EXPECT_EQ(c.wait_ns, 15'000'000'000LL) << bad;
+        EXPECT_EQ(c.wait_ns, 60'000'000'000LL) << bad;
     }
     c = config({{"GPUFL_INJECT_LAUNCH_WAIT_MS", "250"}});
     EXPECT_FALSE(c.wait_config_invalid);
