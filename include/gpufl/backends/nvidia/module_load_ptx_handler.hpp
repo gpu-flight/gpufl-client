@@ -10,7 +10,12 @@ namespace gpufl {
 // Rust kernels, NVRTC, a JIT linker) is seen only here, at the load call.
 // Loads that name a file instead of passing the image (cuModuleLoad,
 // cuLinkAddFile, cuLibraryLoadFromFile) are not captured; cuda-oxide passes
-// the image.
+// the image. cuLibraryLoadData is not captured either: it returns success
+// before the driver compiles PTX (an unsupported .version fails only at
+// cuLibraryGetKernel or cuLibraryGetModule, eager loading included), and it
+// mostly carries the CUDA runtime's own fatbins. cuda-oxide, NVRTC users and
+// Numba hand PTX to cuModuleLoadData(Ex) or cuLinkAddData, which reject PTX
+// the driver cannot compile.
 class ModuleLoadPtxHandler : public ICuptiHandler {
    public:
     explicit ModuleLoadPtxHandler(CuptiBackend* backend) : backend_(backend) {}

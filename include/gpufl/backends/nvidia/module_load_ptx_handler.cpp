@@ -7,9 +7,8 @@
 namespace gpufl {
 namespace {
 
-// cuModuleLoadData and cuLibraryLoadData take a NUL-terminated PTX string or a
-// binary with no size; DictionaryManager stops at the NUL, at the first
-// non-PTX byte, or here.
+// cuModuleLoadData(Ex) take a NUL-terminated PTX string or a binary with no
+// size; DictionaryManager stops at the NUL, at the first non-PTX byte, or here.
 constexpr size_t kUnsizedImageLimit = 64u << 20;
 
 }  // namespace
@@ -19,7 +18,6 @@ ModuleLoadPtxHandler::requiredCallbacks() const {
     return {
         {CUPTI_CB_DOMAIN_DRIVER_API, CUPTI_DRIVER_TRACE_CBID_cuModuleLoadData},
         {CUPTI_CB_DOMAIN_DRIVER_API, CUPTI_DRIVER_TRACE_CBID_cuModuleLoadDataEx},
-        {CUPTI_CB_DOMAIN_DRIVER_API, CUPTI_DRIVER_TRACE_CBID_cuLibraryLoadData},
         {CUPTI_CB_DOMAIN_DRIVER_API, CUPTI_DRIVER_TRACE_CBID_cuLinkAddData_v2},
     };
 }
@@ -40,8 +38,9 @@ void ModuleLoadPtxHandler::handle(CUpti_CallbackDomain domain,
 
     // Keep only a module the driver accepted: a program may retry a rejected
     // PTX (an unsupported .version, say) with a fallback that has the same
-    // kernel names, and the first PTX kept for a name is the one emitted. The
-    // caller's image is still valid at API exit.
+    // kernel names, and the first PTX kept for a name is the one emitted.
+    // These calls compile PTX before they return, lazy loading included, so
+    // their result is final. The caller's image is still valid at API exit.
     auto* cbInfo = static_cast<const CUpti_CallbackData*>(cbdata);
     if (!cbInfo || cbInfo->callbackSite != CUPTI_API_EXIT ||
         !cbInfo->functionParams || !cbInfo->functionReturnValue)
@@ -61,12 +60,6 @@ void ModuleLoadPtxHandler::handle(CUpti_CallbackDomain domain,
             const auto* p = static_cast<const cuModuleLoadDataEx_params*>(
                 cbInfo->functionParams);
             Monitor::EnqueueLoadedPtx(p->image, kUnsizedImageLimit);
-            break;
-        }
-        case CUPTI_DRIVER_TRACE_CBID_cuLibraryLoadData: {
-            const auto* p = static_cast<const cuLibraryLoadData_params*>(
-                cbInfo->functionParams);
-            Monitor::EnqueueLoadedPtx(p->code, kUnsizedImageLimit);
             break;
         }
         case CUPTI_DRIVER_TRACE_CBID_cuLinkAddData_v2: {
