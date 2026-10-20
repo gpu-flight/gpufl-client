@@ -38,9 +38,15 @@ void ModuleLoadPtxHandler::handle(CUpti_CallbackDomain domain,
     // PTX is shown beside SASS, so it is kept only where cubins are.
     if (!backend_->NeedsCubinCapture()) return;
 
+    // Keep only a module the driver accepted: a program may retry a rejected
+    // PTX (an unsupported .version, say) with a fallback that has the same
+    // kernel names, and the first PTX kept for a name is the one emitted. The
+    // caller's image is still valid at API exit.
     auto* cbInfo = static_cast<const CUpti_CallbackData*>(cbdata);
-    if (!cbInfo || cbInfo->callbackSite != CUPTI_API_ENTER ||
-        !cbInfo->functionParams)
+    if (!cbInfo || cbInfo->callbackSite != CUPTI_API_EXIT ||
+        !cbInfo->functionParams || !cbInfo->functionReturnValue)
+        return;
+    if (*static_cast<const CUresult*>(cbInfo->functionReturnValue) != CUDA_SUCCESS)
         return;
 
     // Only the bytes are copied here; parsing waits for the PTX flush.

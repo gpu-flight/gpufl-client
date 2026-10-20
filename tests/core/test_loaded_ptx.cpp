@@ -72,7 +72,26 @@ TEST(LoadedPtxTest, EmitsEachKernelOfALoadedModuleOnce) {
     EXPECT_EQ(lines->size(), 2u);
 }
 
-TEST(LoadedPtxTest, IgnoresBinaryImages) {
+TEST(LoadedPtxTest, ANewSessionEmitsTheModuleAgain) {
+    gpufl::DictionaryManager registry;
+    gpufl::Logger logger;
+    auto lines = std::make_shared<std::vector<std::string>>();
+    logger.addSink(std::make_unique<RecordingSink>(lines));
+
+    ASSERT_TRUE(registry.enqueueLoadedPtx(kRustPtx, 1u << 20));
+    registry.flushLoadedPtx(logger, "s0");
+    ASSERT_EQ(lines->size(), 2u);
+
+    // Session start resets the registry; the module loaded again in the new
+    // session gets its PTX again.
+    registry.reset();
+    ASSERT_TRUE(registry.enqueueLoadedPtx(kRustPtx, 1u << 20));
+    registry.flushLoadedPtx(logger, "s1");
+    ASSERT_EQ(lines->size(), 4u);
+    EXPECT_NE((*lines)[2].find("\"session_id\":\"s1\""), std::string::npos);
+}
+
+TEST(LoadedPtxTest, RecognizesOnlyPtxText) {
     gpufl::DictionaryManager registry;
     // An ELF cubin and a fatbin header: neither is PTX text.
     const unsigned char cubin[] = {0x7f, 'E', 'L', 'F', 2, 1, 1, 0x33};
@@ -81,6 +100,13 @@ TEST(LoadedPtxTest, IgnoresBinaryImages) {
     EXPECT_FALSE(registry.enqueueLoadedPtx(fatbin, sizeof(fatbin)));
     // A PTX image cut off by its size limit before .version is complete.
     EXPECT_EQ(gpufl::DictionaryManager::loadedPtxLength(kRustPtx, 40), 0u);
+
+    // A block comment may open the module; one never closed is not PTX.
+    constexpr char kBlockComment[] = "/* generated */\n.version 8.7\n";
+    EXPECT_EQ(gpufl::DictionaryManager::loadedPtxLength(kBlockComment, 1u << 20),
+              sizeof(kBlockComment) - 1);
+    EXPECT_EQ(gpufl::DictionaryManager::loadedPtxLength("/* open .version 8.7\n", 1u << 20),
+              0u);
 }
 
 }  // namespace

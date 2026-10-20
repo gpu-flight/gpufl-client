@@ -130,7 +130,9 @@ class DictionaryManager {
     // Runs cuobjdump -ptx on the running executable and emits one
     // ptx_disassembly JSON line per kernel (joined to kernels/SASS by the same
     // mangled function name). PTX lives in the fatbin, not the SASS cubins we
-    // capture, so this reads the executable directly. Runs once per session.
+    // capture, so this reads the executable directly; that dump runs once per
+    // session. Every call then emits the PTX modules loaded at run time (see
+    // enqueueLoadedPtx).
     void flushPtx(Logger& logger, const std::string& session_id);
 
     // Keeps a copy of a PTX module handed to the driver at run time
@@ -147,11 +149,14 @@ class DictionaryManager {
 
     // Length of the PTX text at `image` (up to its NUL or `limit`), or 0 when
     // the bytes are not PTX: a module that starts with `.version` after
-    // optional whitespace and `//` comment lines.
+    // optional whitespace, `//` comment lines and `/* */` comments.
     static size_t loadedPtxLength(const void* image, size_t limit);
 
     void reset() {
-        std::lock_guard lk(mu_);
+        // The PTX state belongs to the session too: a new session dumps the
+        // executable again and keeps the PTX of every module it loads, seen
+        // in an earlier session or not. Same lock order as the PTX flushes.
+        std::scoped_lock lk(ptx_flush_mu_, mu_);
         kernel_dict_.clear();
         dirty_kernels_.clear();
         next_kernel_id_ = 1;
@@ -175,6 +180,9 @@ class DictionaryManager {
         pending_disasm_cubins_.clear();
         pending_loaded_ptx_.clear();
         pending_loaded_ptx_bytes_ = 0;
+        seen_loaded_ptx_.clear();
+        emitted_ptx_names_.clear();
+        ptx_emitted_ = false;
     }
 
    private:
@@ -185,11 +193,11 @@ class DictionaryManager {
     void drainLoadedPtx(Logger& logger, const std::string& session_id);
 
     // Splits PTX text into kernels and emits one ptx_disassembly line per
-    // kernel, recording each name in emitted_ptx_names_. With skipEmitted, a
-    // kernel already recorded is not emitted again (cuobjdump's output keeps
-    // every copy, as before). Returns the number emitted.
+    // kernel whose name is not in `skip`, recording each emitted name in
+    // emitted_ptx_names_ (`skip` may be that set). Returns the number emitted.
     int emitPtxText(Logger& logger, const std::string& session_id,
-                    const std::string& ptx, bool skipEmitted);
+                    const std::string& ptx,
+                    const std::unordered_set<std::string>& skip);
 
     // Serializes the PTX flushes, which run from more than one flush path.
     std::mutex ptx_flush_mu_;

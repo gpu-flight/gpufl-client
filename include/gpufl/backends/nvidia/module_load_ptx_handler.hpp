@@ -8,6 +8,9 @@ namespace gpufl {
 // Keeps the PTX of modules loaded at run time. cuobjdump finds PTX only in an
 // executable's fatbin; code that hands PTX text to the driver itself (cuda-oxide
 // Rust kernels, NVRTC, a JIT linker) is seen only here, at the load call.
+// Loads that name a file instead of passing the image (cuModuleLoad,
+// cuLinkAddFile, cuLibraryLoadFromFile) are not captured; cuda-oxide passes
+// the image.
 class ModuleLoadPtxHandler : public ICuptiHandler {
    public:
     explicit ModuleLoadPtxHandler(CuptiBackend* backend) : backend_(backend) {}
