@@ -822,6 +822,7 @@ void Monitor::EndPerfScope(const char* name) { if (auto* b = GetBackend()) b->On
 IMonitorBackend* Monitor::GetBackend() { return g_state.adapter ? g_state.adapter->backend() : nullptr; }
 uint32_t Monitor::InternScopeName(const std::string& name) { return g_state.batches.internScopeName(name); }
 void Monitor::EnqueueCubinForDisassembly(uint64_t crc, const uint8_t* data, size_t size) { g_state.batches.enqueueDisassembly(crc, data, size); }
+void Monitor::EnqueueLoadedPtx(const void* image, size_t limit) { g_state.batches.enqueueLoadedPtx(image, limit); }
 void Monitor::FlushDisassemblyNow() {
     g_state.batches.flushDisassembly();
 }

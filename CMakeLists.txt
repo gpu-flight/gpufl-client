@@ -402,6 +402,7 @@ if(GPUFL_ENABLE_NVIDIA)
                 include/gpufl/backends/nvidia/cupti_engine_selection.cpp
                 include/gpufl/backends/nvidia/cupti_runtime_support.cpp
                 include/gpufl/backends/nvidia/cuda_cleanup_handler.cpp
+                include/gpufl/backends/nvidia/module_load_ptx_handler.cpp
                 include/gpufl/backends/nvidia/resource_handler.cpp
                 include/gpufl/backends/nvidia/kernel_launch_handler.cpp
                 include/gpufl/backends/nvidia/graph_structure_handler.cpp

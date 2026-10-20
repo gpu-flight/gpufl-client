@@ -410,6 +410,13 @@ class Monitor {
                                            size_t size);
 
     /**
+     * @brief Keep a PTX module handed to the driver at run time for the
+     * next PTX flush. Called from the CUPTI module-load callbacks; binaries
+     * and non-PTX images are ignored. Reads at most `limit` bytes.
+     */
+    static void EnqueueLoadedPtx(const void* image, size_t limit);
+
+    /**
      * Disassemble and emit any enqueued cubins now, instead of waiting for the
      * shutdown flush. Used by the cubin worker under Windows-injection PC
      * sampling to keep nvdisasm off the fragile process-exit teardown.

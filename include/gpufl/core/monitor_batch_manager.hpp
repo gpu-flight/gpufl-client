@@ -46,6 +46,7 @@ public:
     std::string sourceFileName(uint32_t source_file_id);
 
     void enqueueDisassembly(uint64_t crc, const uint8_t* data, size_t size);
+    bool enqueueLoadedPtx(const void* image, size_t limit);
     void flushDisassembly();
 
     uint64_t allocateScopeInstanceId();

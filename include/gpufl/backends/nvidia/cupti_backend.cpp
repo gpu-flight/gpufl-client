@@ -1,5 +1,6 @@
 #include "gpufl/backends/nvidia/cupti_backend.hpp"
 #include "gpufl/backends/nvidia/cuda_cleanup_handler.hpp"
+#include "gpufl/backends/nvidia/module_load_ptx_handler.hpp"
 
 #include <cupti_profiler_target.h>
 
@@ -130,6 +131,7 @@ void CuptiBackend::initialize(const MonitorOptions& opts) {
     // Internal handler registration
     RegisterHandler(std::make_shared<ResourceHandler>(this));
     RegisterHandler(std::make_shared<CudaCleanupHandler>(this));
+    RegisterHandler(std::make_shared<ModuleLoadPtxHandler>(this));
     RegisterHandler(std::make_shared<KernelLaunchHandler>(this));
     RegisterHandler(std::make_shared<GraphStructureHandler>(this));
     RegisterHandler(std::make_shared<MemTransferHandler>(this));

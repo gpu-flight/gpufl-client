@@ -212,6 +212,10 @@ void MonitorBatchManager::enqueueDisassembly(uint64_t crc, const uint8_t* data, 
     dictManager_.enqueueDisassembly(crc, data, size);
 }
 
+bool MonitorBatchManager::enqueueLoadedPtx(const void* image, size_t limit) {
+    return dictManager_.enqueueLoadedPtx(image, limit);
+}
+
 void MonitorBatchManager::flushDisassembly() {
     if (!flushSink_.available()) return;
     const auto context =

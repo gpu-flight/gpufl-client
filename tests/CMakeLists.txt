@@ -35,6 +35,7 @@ set(GPUFL_TEST_SOURCES
     core/test_sampler.cpp
     core/test_segment_context.cpp
     core/test_segment_coordinator.cpp
+    core/test_loaded_ptx.cpp
     core/test_session_bootstrap.cpp
     core/test_source_capture_policy.cpp
     core/test_startup_configuration.cpp
