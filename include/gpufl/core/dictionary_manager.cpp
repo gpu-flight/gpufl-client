@@ -245,9 +245,16 @@ void DictionaryManager::enqueueDisassembly(uint64_t crc, const uint8_t* data,
 }
 
 void DictionaryManager::flushPtx(Logger& logger, const std::string& session_id) {
-    if (ptx_emitted_) return;
-    ptx_emitted_ = true;
+    std::lock_guard flush_lk(ptx_flush_mu_);
+    if (!ptx_emitted_) {
+        ptx_emitted_ = true;
+        dumpExecutablePtx(logger, session_id);
+    }
+    drainLoadedPtx(logger, session_id);
+}
 
+void DictionaryManager::dumpExecutablePtx(Logger& logger,
+                                          const std::string& session_id) {
     // Resolve the running executable. PTX (the virtual ISA) is embedded in the
     // binary's fatbin, NOT in the SASS cubins CUPTI delivers, so cuobjdump reads
     // the executable directly. Covers the target's own kernels; precompiled
@@ -310,17 +317,30 @@ void DictionaryManager::flushPtx(Logger& logger, const std::string& session_id) 
     GFL_LOG_DEBUG("[flushPtx] cuobjdump produced ", out.size(), " bytes; head: ",
                   out.substr(0, out.size() < 200 ? out.size() : 200).c_str());
 
-    // cuobjdump -ptx output is one or more PTX modules: a
-    // .version/.target/.address_size header, then ".visible .entry <mangled>("
-    // kernels with a "{ ... }" body. Split into per-kernel blocks, prepend the
-    // module header so each is self-contained, and emit one ptx_disassembly per
-    // kernel keyed by the mangled name (joins to kernels/SASS by md5 of it).
+    // A flush with no cubins may have emitted run-time PTX before this dump:
+    // those kernels are not repeated. cuobjdump's own copies of a kernel (one
+    // per PTX arch) are all kept, as before.
+    const std::unordered_set<std::string> emittedBefore = emitted_ptx_names_;
+    const int emitted = emitPtxText(logger, session_id, out, emittedBefore);
+    GFL_LOG_DEBUG("[flushPtx] emitted ", emitted, " ptx_disassembly records");
+}
+
+int DictionaryManager::emitPtxText(Logger& logger, const std::string& session_id,
+                                   const std::string& ptx,
+                                   const std::unordered_set<std::string>& skip) {
+    // The text (cuobjdump -ptx output, or a module loaded at run time) is one
+    // or more PTX modules: a .version/.target/.address_size header, then
+    // ".visible .entry <mangled>(" kernels with a "{ ... }" body. Split into
+    // per-kernel blocks, prepend the module header so each is self-contained,
+    // and emit one ptx_disassembly per kernel keyed by the mangled name (joins
+    // to kernels/SASS by md5 of it).
     std::string header, arch, curName, curBody;
     bool inFunc = false, bodyStarted = false;
     int braceDepth = 0, emitted = 0;
 
     auto emitFunc = [&]() {
-        if (curName.empty() || curBody.empty()) return;
+        if (curName.empty() || curBody.empty() || skip.count(curName)) return;
+        emitted_ptx_names_.insert(curName);
         std::ostringstream oss;
         oss << "{\"version\":1,\"type\":\"ptx_disassembly\",\"session_id\":\""
             << model::jsonEscape(session_id) << "\",\"function_name\":\""
@@ -337,7 +357,7 @@ void DictionaryManager::flushPtx(Logger& logger, const std::string& session_id) 
         }
     };
 
-    std::istringstream iss(out);
+    std::istringstream iss(ptx);
     std::string line;
     while (std::getline(iss, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
@@ -386,7 +406,92 @@ void DictionaryManager::flushPtx(Logger& logger, const std::string& session_id) 
         }
     }
 
-    GFL_LOG_DEBUG("[flushPtx] emitted ", emitted, " ptx_disassembly records");
+    return emitted;
+}
+
+size_t DictionaryManager::loadedPtxLength(const void* image, size_t limit) {
+    if (!image || limit == 0) return 0;
+    const auto* p = static_cast<const char*>(image);
+    // Walk the preamble one byte at a time, so a binary image is rejected at
+    // its first non-text byte and never read past its end: whitespace, "//"
+    // comment lines and "/* */" comments may precede the first directive,
+    // which must be .version.
+    size_t i = 0;
+    while (i < limit) {
+        const char c = p[i];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { ++i; continue; }
+        if (c == '/' && i + 1 < limit && p[i + 1] == '/') {
+            while (i < limit && p[i] != '\n' && p[i] != '\0') ++i;
+            continue;
+        }
+        if (c == '/' && i + 1 < limit && p[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < limit && p[i] != '\0' &&
+                   !(p[i] == '*' && p[i + 1] == '/'))
+                ++i;
+            if (i + 1 >= limit || p[i] == '\0') return 0;  // never closed
+            i += 2;
+            continue;
+        }
+        break;
+    }
+    static constexpr char kVersion[] = ".version";
+    const size_t versionLen = sizeof(kVersion) - 1;
+    for (size_t k = 0; k < versionLen; ++k) {
+        if (i + k >= limit || p[i + k] != kVersion[k]) return 0;
+    }
+    size_t len = i + versionLen;
+    while (len < limit && p[len] != '\0') ++len;
+    return len;
+}
+
+bool DictionaryManager::enqueueLoadedPtx(const void* image, size_t limit) {
+    // A module bigger than this, or past this total, is skipped rather than
+    // held in memory for the rest of the run.
+    static constexpr size_t kMaxModuleBytes = 64u << 20;
+    static constexpr size_t kMaxPendingBytes = 256u << 20;
+    const size_t len = loadedPtxLength(
+        image, limit < kMaxModuleBytes ? limit : kMaxModuleBytes);
+    if (len == 0) return false;
+    std::string ptx(static_cast<const char*>(image), len);
+    const size_t hash = std::hash<std::string>{}(ptx);
+    std::lock_guard lk(mu_);
+    if (seen_loaded_ptx_.count(hash)) return true;
+    if (pending_loaded_ptx_bytes_ + len > kMaxPendingBytes) {
+        GFL_LOG_DEBUG("[enqueueLoadedPtx] pending PTX over ", kMaxPendingBytes,
+                      " bytes - skipping a ", len, "-byte module");
+        return false;
+    }
+    seen_loaded_ptx_.insert(hash);
+    pending_loaded_ptx_bytes_ += len;
+    pending_loaded_ptx_.push_back(std::move(ptx));
+    return true;
+}
+
+void DictionaryManager::flushLoadedPtx(Logger& logger,
+                                       const std::string& session_id) {
+    std::lock_guard flush_lk(ptx_flush_mu_);
+    drainLoadedPtx(logger, session_id);
+}
+
+void DictionaryManager::drainLoadedPtx(Logger& logger,
+                                       const std::string& session_id) {
+    std::vector<std::string> modules;
+    {
+        std::lock_guard lk(mu_);
+        if (pending_loaded_ptx_.empty()) return;
+        modules = std::move(pending_loaded_ptx_);
+        pending_loaded_ptx_.clear();
+        pending_loaded_ptx_bytes_ = 0;
+    }
+    // Checked against the live set, so a kernel is emitted once across every
+    // module and the executable dump.
+    int emitted = 0;
+    for (const auto& ptx : modules)
+        emitted += emitPtxText(logger, session_id, ptx, emitted_ptx_names_);
+    GFL_LOG_DEBUG("[flushLoadedPtx] emitted ", emitted,
+                  " ptx_disassembly records from ", modules.size(),
+                  " loaded modules");
 }
 
 void DictionaryManager::flushDisassembly(Logger& logger,
@@ -394,8 +499,13 @@ void DictionaryManager::flushDisassembly(Logger& logger,
     std::unordered_map<uint64_t, std::vector<uint8_t>> pending;
     {
         std::lock_guard lk(mu_);
-        if (pending_disasm_cubins_.empty()) return;
         pending = std::move(pending_disasm_cubins_);
+        pending_disasm_cubins_.clear();
+    }
+    if (pending.empty()) {
+        // A module loaded after the last flush may still carry PTX.
+        flushLoadedPtx(logger, session_id);
+        return;
     }
 
     // Cubins are present => CUDA kernels exist; dump the executable's PTX once
