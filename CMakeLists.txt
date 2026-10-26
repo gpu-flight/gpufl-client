@@ -183,6 +183,7 @@ target_sources(gpufl PRIVATE
     include/gpufl/core/logger/file_log_sink.cpp
     include/gpufl/upload/upload_logs.cpp
     include/gpufl/core/host_info.cpp
+    include/gpufl/core/process_identity.cpp
     include/gpufl/core/remote_config.cpp
     include/gpufl/core/model/batch_models.cpp
     include/gpufl/core/model/lifecycle_model.cpp

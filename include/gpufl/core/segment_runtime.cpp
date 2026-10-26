@@ -10,6 +10,7 @@
 #include "gpufl/core/dictionary_manager.hpp"
 #include "gpufl/core/model/lifecycle_model.hpp"
 #include "gpufl/core/monitor.hpp"
+#include "gpufl/core/process_identity.hpp"
 #include "gpufl/core/runtime.hpp"
 
 namespace gpufl {
@@ -384,6 +385,8 @@ void SegmentRuntime::writeShutdown_(
     shutdown.app = options_.init_template.app;
     shutdown.session_id = context->session_id;
     shutdown.ts_ns = ts_ns;
+    shutdown.process_name = getProcessName();
+    shutdown.argv0 = getProcessArgv0();
     context->logger->write(model::ShutdownEventModel(shutdown));
 }
 

@@ -37,6 +37,7 @@
 #include "gpufl/core/model/system_event_model.hpp"
 #include "gpufl/core/monitor.hpp"
 #include "gpufl/core/monitor_backend.hpp"
+#include "gpufl/core/process_identity.hpp"
 #include "gpufl/core/runtime.hpp"
 #include "gpufl/core/segment_runtime.hpp"
 #include "gpufl/core/session_bootstrap.hpp"
@@ -371,6 +372,8 @@ void shutdown() {
         se.app = rt->app_name;
         se.session_id = final_segment->session_id;
         se.ts_ns = ended_ns;
+        se.process_name = getProcessName();
+        se.argv0 = getProcessArgv0();
         final_segment->logger->write(model::ShutdownEventModel(se));
 
         GFL_LOG_DEBUG("Shutdown: writing events done -> logger->close()");

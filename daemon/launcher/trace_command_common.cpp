@@ -26,6 +26,7 @@
 #include "gpufl/core/logger/file_compressor.hpp"
 #include "gpufl/core/logger/log_salvage.hpp"
 #include "gpufl/core/logger/window_metadata.hpp"
+#include "gpufl/core/process_identity.hpp"
 #include "gpufl/inject/inject_entry.hpp"
 #include "gpufl/upload/upload_logs.hpp"
 
@@ -695,6 +696,23 @@ int repairUncompressedLogs(const fs::path& root) {
 
 }  // namespace
 
+bool applyLaunchIdEnv(const char* inherited, const TracePlatform& platform) {
+    // Empty counts as unset, like the launcher's other variables.
+    if (!inherited || !*inherited) {
+        // generateRunId() is the launcher's UUIDv4 generator.
+        return setEnvOrPrint(platform, env::kLaunchId, generateRunId());
+    }
+    if (!isValidLaunchId(inherited)) {
+        std::fprintf(stderr,
+                     "gpufl: %s='%s' is invalid (expected 1-%zu characters "
+                     "from A-Z, a-z, 0-9, '_' and '-'); fix or unset it "
+                     "before launching the target\n",
+                     env::kLaunchId, inherited, kMaxLaunchIdLength);
+        return false;
+    }
+    return setEnvOrPrint(platform, env::kLaunchId, inherited);
+}
+
 int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
     // Re-checked here, not only in the parser. The two modes are enforced by
     // the CLI, but TraceArgs is a plain struct: anything constructing one
@@ -729,6 +747,11 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
             "gpufl: this build does not include executable session segmentation\n");
         return 2;
     }
+
+    // One launch id for every process this trace starts, so the sessions of a
+    // multi-process target can be grouped. Settled before anything is created
+    // or started, since an invalid inherited value refuses the launch.
+    if (!applyLaunchIdEnv(std::getenv(env::kLaunchId), platform)) return 2;
 
     const fs::path exe = platform.selfExe();
     if (exe.empty()) {
