@@ -13,6 +13,10 @@
 
 #include <zlib.h>
 
+#if defined(__linux__)
+#include <sys/stat.h>
+#endif
+
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -1110,6 +1114,22 @@ TEST_F(FileLogSinkRotationTest, SessionOwnershipIsExclusiveAndCrashReleased) {
         gpufl::SessionOwnershipLock::tryAcquire(sessionDir(), &second_error);
     EXPECT_NE(after_release, nullptr) << second_error;
 }
+
+#if defined(__linux__)
+// An uploader running as another user probes the lock through its group bits,
+// so the umask decides group access and others never get any.
+TEST_F(FileLogSinkRotationTest, SessionLockModeLeavesGroupAccessToTheUmask) {
+    constexpr mode_t kUmask = 002;
+    const mode_t previous = ::umask(kUmask);
+    auto owner = gpufl::SessionOwnershipLock::tryAcquire(sessionDir());
+    ::umask(previous);
+    ASSERT_NE(owner, nullptr);
+
+    struct stat st {};
+    ASSERT_EQ(::stat(owner->path().c_str(), &st), 0);
+    EXPECT_EQ(st.st_mode & 0777, static_cast<mode_t>(0660 & ~kUmask));
+}
+#endif
 
 TEST_F(FileLogSinkRotationTest, SalvageNeverTouchesALiveOwnedSession) {
     fs::create_directories(sessionDir() / ".tmp");

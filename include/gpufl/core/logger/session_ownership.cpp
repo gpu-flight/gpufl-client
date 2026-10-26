@@ -98,8 +98,11 @@ std::unique_ptr<SessionOwnershipLock> SessionOwnershipLock::tryAcquire(
     }
     lock->handle_ = handle;
 #else
+    // Base mode 0660: the umask decides group access (022 -> 0640, 002 ->
+    // 0660), so an uploader running as another user in the session
+    // directory's group can probe liveness. Others never get access.
     const int fd =
-        ::open(lock->path_.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+        ::open(lock->path_.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0660);
     if (fd < 0) {
         if (error) *error = std::strerror(errno);
         lock->release();
