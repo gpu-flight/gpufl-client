@@ -54,6 +54,34 @@ void NoteRejectedTimestamps(CaptureCapability& cap, const std::string& kind,
     }
 }
 
+// A failed decode or an overflow lost samples, whatever the other decodes kept.
+bool PmLostSamples(const CaptureCapabilityCounters& c) {
+    return c.pm_decode_errors > 0 || c.pm_overflows > 0;
+}
+
+std::string CountOf(const uint64_t n, const char* noun) {
+    return std::to_string(n) + " " + noun + (n == 1 ? "" : "s");
+}
+
+// "2 PM decode errors, 1 overflow; 980 samples kept."
+std::string DescribePmLoss(const CaptureCapabilityCounters& c) {
+    return CountOf(c.pm_decode_errors, "PM decode error") + ", " +
+           CountOf(c.pm_overflows, "overflow") + "; " +
+           CountOf(c.pm_rows, "sample") + " kept.";
+}
+
+// Overrides a pm_sampling verdict that lost samples make untrue. In an H100
+// run, decodes of 3 s windows returned CUPTI_ERROR_UNKNOWN while the rows
+// other decodes kept still made the session read `collected`. The errors
+// prove the engine ran, so this applies whatever the armed state says.
+void NotePmSampleLoss(CaptureCapability& cap, const CaptureCapabilityCounters& c) {
+    if (!PmLostSamples(c)) return;
+    cap.status = c.pm_rows > 0 ? "partial" : "enabled_no_data";
+    cap.mode = "cupti_pm_sampling";
+    cap.reason_code = "decode_errors";
+    cap.message = DescribePmLoss(c);
+}
+
 }  // namespace
 
 ActivityTimestampOutcome ClassifyActivityTimestamps(const uint64_t eligible,
@@ -100,8 +128,13 @@ std::vector<std::string> BuildCaptureCapabilityWarnings(
             "profiled kernels were too short. Run more iterations / a "
             "longer-running kernel to collect instruction-level data.");
     }
-    if (input.requests.pm && input.engine_state.pm.active &&
-        !input.engine_state.pm.has_data) {
+    if (input.requests.pm && PmLostSamples(input.counters)) {
+        // Not "too short": the samples existed and were lost in the decode.
+        warnings.push_back("PM sampling lost samples: " +
+                           DescribePmLoss(input.counters) +
+                           " The deep_window events show which windows.");
+    } else if (input.requests.pm && input.engine_state.pm.active &&
+               !input.engine_state.pm.has_data) {
         warnings.push_back(
             "PM sampling collected 0 hardware samples - the profiled "
             "workload was too short for the sampling interval.");
@@ -121,7 +154,8 @@ CaptureCapabilitiesEvent BuildCaptureCapabilitiesEvent(
     const bool memoryHasData = input.counters.memory_rows > 0;
     const bool memTransferHasData = input.counters.mem_transfer_rows > 0;
     const bool syncHasData = input.counters.sync_rows > 0;
-    const bool nvtxHasData = input.counters.nvtx_rows > 0;
+    const bool injectedNvtx = input.counters.injected_nvtx_rows > 0;
+    const bool nvtxHasData = input.counters.nvtx_rows > 0 || injectedNvtx;
     const bool graphHasData = input.counters.graph_rows > 0;
     const bool graphTimingPartial = input.counters.graph_rows_dropped > 0;
     const bool externalHasData = input.counters.external_rows > 0;
@@ -305,18 +339,24 @@ CaptureCapabilitiesEvent BuildCaptureCapabilitiesEvent(
                    ? "CUDA synchronization activity records were collected."
                    : "CUDA synchronization activity was enabled but emitted no rows this session.")
             : "CUDA synchronization timeline activity was not collected.");
+    // The injection library hooks NVTX whatever the engine domains say, so its
+    // rows count as requested and collected even without kernel activity.
+    const bool nvtxRequested = input.kernel_activity || injectedNvtx;
     AddCapability(
-        evt, "nvtx_markers", input.kernel_activity,
-        input.kernel_activity
+        evt, "nvtx_markers", nvtxRequested,
+        nvtxRequested
             ? (nvtxHasData ? "collected" : "enabled_no_data")
             : "not_requested",
-        input.kernel_activity ? "cupti_marker_activity" : "disabled",
-        input.kernel_activity
+        injectedNvtx ? "nvtx_injection"
+                     : (input.kernel_activity ? "cupti_marker_activity" : "disabled"),
+        nvtxRequested
             ? (nvtxHasData ? "" : "enabled_but_no_records")
             : "not_selected",
-        input.kernel_activity
+        nvtxRequested
             ? (nvtxHasData
-                   ? "NVTX marker activity records were collected."
+                   ? (injectedNvtx
+                          ? "NVTX ranges were collected through the NVTX injection hooks."
+                          : "NVTX marker activity records were collected.")
                    : "NVTX marker activity was enabled but emitted no completed ranges this session.")
             : "NVTX timeline activity was not requested by the selected engine domains.");
     const bool graphRequested = input.kernel_activity &&
@@ -433,6 +473,7 @@ CaptureCapabilitiesEvent BuildCaptureCapabilitiesEvent(
                    ? "PM sampling hardware metric samples were collected for this session."
                    : "PM sampling was enabled but produced no hardware samples this session.")
             : "PM sampling was not collected for this session.");
+    NotePmSampleLoss(evt.capabilities.back(), input.counters);
     AddCapability(
         evt, "range_counters", input.requests.range,
         input.engine_state.range.active

@@ -112,6 +112,8 @@ class PcSamplingWithSassEngine final : public IProfilingEngine {
     bool pcProducedData() const { return pc_ && pc_->producedData(); }
     bool pmSamplingActive() const { return pm_ && pm_->isOperational(); }
     bool pmProducedData() const { return pm_ && pm_->producedData(); }
+    /** The PM leg, for its window and session counts. Null when Deep has none. */
+    const PmSamplingEngine* pmEngine() const { return pm_.get(); }
 
    private:
     std::unique_ptr<PcSamplingEngine>  pc_;

@@ -270,4 +270,19 @@ EngineRuntimeState InspectEngineRuntimeState(const IProfilingEngine* engine,
     return out;
 }
 
+const PmSamplingEngine* FindPmSamplingEngine(const IProfilingEngine* engine) {
+    if (const auto* pm = dynamic_cast<const PmSamplingEngine*>(engine)) return pm;
+    if (const auto* deep = dynamic_cast<const PcSamplingWithSassEngine*>(engine)) {
+        return deep->pmEngine();
+    }
+    if (const auto* comp = dynamic_cast<const CompositeEngine*>(engine)) {
+        for (const auto& sub : comp->engines()) {
+            if (const auto* pm = dynamic_cast<const PmSamplingEngine*>(sub.get())) {
+                return pm;
+            }
+        }
+    }
+    return nullptr;
+}
+
 }  // namespace gpufl

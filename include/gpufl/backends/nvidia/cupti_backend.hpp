@@ -335,6 +335,10 @@ class CuptiBackend : public IMonitorBackend {
         }
         return armed;
     }
+    // PM reports its own counts; every other engine reads `unreported` until
+    // it keeps per-window accounting too.
+    std::vector<DeepWindowEngineResult> DeepWindowEngineResults(
+        const std::vector<std::string>& armed) const override;
     void OnPerfScopeStart(const char* name) override {
         if (!ScopeArmsEngines_()) return;
         OnDeepWindowPerfStart(name);
@@ -509,6 +513,8 @@ class CuptiBackend : public IMonitorBackend {
     mutable uint64_t capability_launch_count_baseline_ = 0;
     mutable uint64_t capability_scope_truncated_baseline_ = 0;
     mutable uint64_t capability_pm_rows_baseline_ = 0;
+    mutable uint64_t capability_injected_nvtx_rows_baseline_ = 0;
+    mutable EngineCaptureCounts capability_pm_counts_baseline_;
     mutable ActivityTimestampCounts capability_kernel_timestamps_baseline_;
     mutable ActivityTimestampCounts capability_mem_transfer_timestamps_baseline_;
     uint32_t device_id_ = 0;

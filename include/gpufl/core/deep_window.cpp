@@ -147,6 +147,27 @@ const char* DeepWindowCloseName(const DeepWindowClose reason) {
     return "unknown";
 }
 
+DeepWindowEngineResult MakeDeepWindowEngineResult(
+    std::string engine, const std::optional<EngineCaptureCounts>& counts) {
+    DeepWindowEngineResult r;
+    r.engine = std::move(engine);
+    if (!counts) {
+        r.status = "unreported";
+        return r;
+    }
+    r.samples       = counts->samples;
+    r.decode_errors = counts->decode_errors;
+    r.overflows     = counts->overflows;
+    r.first_error   = counts->first_error;
+    const bool errors = r.decode_errors > 0 || r.overflows > 0;
+    if (r.samples > 0) {
+        r.status = errors ? "partial" : "collected";
+    } else {
+        r.status = errors ? "failed" : "empty";
+    }
+    return r;
+}
+
 namespace detail {
 
 bool PerfScopeEnabled() {
@@ -330,6 +351,11 @@ void DeepWindow::Close(const DeepWindowClose reason) {
             ev.engines = Monitor::EndDeepWindowScope(name.c_str());
             detail::EndPerfScopeIfEnabled(name.c_str(), ev.pid, start_ns, end_ns,
                                           /*is_deep_window=*/true);
+            // Read after both disarms, so each engine's final drain is in the
+            // count. Armed is not collected: a window whose every decode
+            // failed still names its engine above.
+            ev.engine_results = Monitor::DeepWindowEngineResults(ev.engines);
+            ev.has_engine_results = true;
         } else {
             // Teardown skipped the disarm, so nothing observed the armed set.
             // Name the resolved request instead - less trustworthy than a real

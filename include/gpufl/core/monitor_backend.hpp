@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "gpufl/core/deep_window.hpp"
 #include "gpufl/core/events.hpp"
 #include "gpufl/core/monitor.hpp"
 
@@ -189,6 +190,24 @@ class IMonitorBackend {
     virtual std::vector<std::string> OnDeepWindowStop(const char* name) {
         OnScopeStop(name);
         return {};
+    }
+
+    /**
+     * @brief What each engine in `armed` collected during the window just
+     * disarmed, one entry per name, in the same order.
+     *
+     * Called after OnDeepWindowStop, so the final drain is counted. The
+     * default reports every engine `unreported`: a backend without per-window
+     * accounting must not let an armed engine read as one that collected.
+     */
+    virtual std::vector<DeepWindowEngineResult> DeepWindowEngineResults(
+        const std::vector<std::string>& armed) const {
+        std::vector<DeepWindowEngineResult> out;
+        out.reserve(armed.size());
+        for (const auto& engine : armed) {
+            out.push_back(MakeDeepWindowEngineResult(engine, std::nullopt));
+        }
+        return out;
     }
 
     /** @brief Periodically drain buffered profiling data. Thread-safe. */

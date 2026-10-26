@@ -18,6 +18,7 @@
 #include "gpufl/core/counter_provider.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
+#include "gpufl/core/deep_window.hpp"
 #include "gpufl/core/logger/logger.hpp"
 #include "gpufl/core/model/batch_models.hpp"
 #include "gpufl/core/model/memcpy_event_model.hpp"
@@ -159,6 +160,9 @@ struct MonitorState {
     // the (synthetic) kernels are written before the Windows-injection exit race.
     std::atomic<uint64_t> drainRequest{0};
     std::atomic<uint64_t> drainAck{0};
+    // Process total, never reset: the capability report turns it into a
+    // per-segment delta, as it does the backend's own row counters.
+    std::atomic<uint64_t> injectedNvtxMarkers{0};
 
     detail::MonitorBatchManager batches;
     MetadataManager metadata;
@@ -814,6 +818,16 @@ std::vector<std::string> Monitor::EndDeepWindowScope(const char* name) {
     if (auto* b = GetBackend()) return b->OnDeepWindowStop(name);
     return {};
 }
+std::vector<DeepWindowEngineResult> Monitor::DeepWindowEngineResults(
+    const std::vector<std::string>& armed) {
+    if (const auto* b = GetBackend()) return b->DeepWindowEngineResults(armed);
+    std::vector<DeepWindowEngineResult> out;
+    out.reserve(armed.size());
+    for (const auto& engine : armed) {
+        out.push_back(MakeDeepWindowEngineResult(engine, std::nullopt));
+    }
+    return out;
+}
 void Monitor::BeginDeepWindowPerfScope(const char* name) { if (auto* b = GetBackend()) b->OnDeepWindowPerfStart(name); }
 void Monitor::EndDeepWindowPerfScope(const char* name) { if (auto* b = GetBackend()) b->OnDeepWindowPerfStop(name); }
 void Monitor::BeginPerfScope(const char* name) { if (auto* b = GetBackend()) b->OnPerfScopeStart(name); }
@@ -828,6 +842,12 @@ void Monitor::FlushDisassemblyNow() {
 }
 bool Monitor::PushActivityRecord(const ActivityRecord& rec) {
     return g_monitorBuffer.Push(rec);
+}
+void Monitor::NoteInjectedNvtxMarker() {
+    g_state.injectedNvtxMarkers.fetch_add(1, std::memory_order_relaxed);
+}
+uint64_t Monitor::InjectedNvtxMarkersSeen() {
+    return g_state.injectedNvtxMarkers.load(std::memory_order_relaxed);
 }
 
 void Monitor::PushScopeRow(const ScopeBatchRow& row) {

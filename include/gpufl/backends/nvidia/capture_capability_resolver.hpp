@@ -15,7 +15,18 @@ struct CaptureCapabilityCounters {
     uint64_t memory_rows = 0;
     uint64_t mem_transfer_rows = 0;
     uint64_t sync_rows = 0;
+    /** NVTX ranges delivered by CUPTI marker activity. */
     uint64_t nvtx_rows = 0;
+    /**
+     * NVTX ranges from the injection library's own NVTX hooks. Under
+     * `gpufl trace` that library IS the NVTX injection, so CUPTI never sees
+     * these.
+     */
+    uint64_t injected_nvtx_rows = 0;
+    /** PM rows emitted, and the failed decodes and overflows that lost the rest. */
+    uint64_t pm_rows = 0;
+    uint64_t pm_decode_errors = 0;
+    uint64_t pm_overflows = 0;
     uint64_t graph_rows = 0;
     /** GRAPH_TRACE records discarded because their timing was unusable. */
     uint64_t graph_rows_dropped = 0;
