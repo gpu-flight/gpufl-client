@@ -19,6 +19,7 @@
 #include "gpufl/core/model/system_event_model.hpp"
 #include "gpufl/core/monitor.hpp"
 #include "gpufl/core/monitor_configuration.hpp"
+#include "gpufl/core/process_identity.hpp"
 #include "gpufl/core/remote_config.hpp"
 #include "gpufl/core/runtime.hpp"
 #include "gpufl/core/segment_runtime.hpp"
@@ -267,6 +268,13 @@ void ClientStartup::emitInitialEvent(Runtime& active_runtime,
         GFL_LOG_DEBUG("Multi-pass: analysis_id=", event.analysis_id,
                       " pass ", event.pass_index, "/", event.pass_count);
     }
+
+    // Every process of one `gpufl trace` inherits the same launch id; the
+    // process identity tells the backend which role this session played.
+    event.launch_id = launchIdFromEnvironment();
+    event.ppid = getParentPid();
+    event.process_name = getProcessName();
+    event.argv0 = getProcessArgv0();
 
     segment.logger->write(model::InitEventModel(event));
     state_->initial_event = std::move(event);

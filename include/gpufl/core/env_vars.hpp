@@ -172,6 +172,15 @@ constexpr const char* kSegmentMaxRows = "GPUFL_SEGMENT_MAX_ROWS";
 constexpr auto kRunRollEveryMs = "GPUFL_RUN_ROLL_EVERY_MS";
 constexpr auto kRunRollMaxBytes = "GPUFL_RUN_ROLL_MAX_BYTES";
 
+// ── Launch grouping (launcher-owned; a harness may supply it) ───────────────
+// One id per `gpufl trace` invocation, inherited by every descendant, so the
+// sessions of a multi-process target (an API server and its engine workers)
+// can be grouped. Format ^[A-Za-z0-9_-]{1,64}$. The launcher keeps a valid
+// value already in its environment, refuses an invalid one, and otherwise
+// generates a UUIDv4. init() copies a valid value into job_start.launch_id and
+// drops an invalid one with a warning.
+constexpr const char* kLaunchId = "GPUFL_LAUNCH_ID";
+
 // PC sampling knobs ───────────────────────────────────────────────────────
 // Kernel-timeline collection strategy for the standalone PcSampling pass:
 //   "none" - PC samples only; PC/SASS kernel rows come from launch callbacks

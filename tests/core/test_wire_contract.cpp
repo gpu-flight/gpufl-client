@@ -339,6 +339,34 @@ TEST(WireContract, JobStartOmitsRollChainWhenUnset) {
     EXPECT_EQ(json.find("\"previous_run_id\""), std::string::npos);
 }
 
+// Launch grouping and process identity are additive optional fields, each
+// emitted only when known, so the backend can group the sessions of one
+// `gpufl trace` and tell an API server from its engine worker.
+TEST(WireContract, JobStartCarriesLaunchIdentityOnlyWhenKnown) {
+    gpufl::InitEvent e;
+    e.session_kind = "trace";
+    e.launch_id = "8d7c2c4e-1f0a-4b7e-9c55-0f6f2a1d3b9e";
+    e.ppid = 4100;
+    e.process_name = "VLLM::EngineCor";
+    e.argv0 = "VLLM::EngineCore";
+
+    const std::string json = gpufl::model::InitEventModel(e).buildJson();
+
+    EXPECT_TRUE(JsonContains(
+        json, "\"launch_id\":\"8d7c2c4e-1f0a-4b7e-9c55-0f6f2a1d3b9e\""));
+    EXPECT_TRUE(JsonContains(json, "\"ppid\":4100"));
+    EXPECT_TRUE(JsonContains(json, "\"process_name\":\"VLLM::EngineCor\""));
+    EXPECT_TRUE(JsonContains(json, "\"argv0\":\"VLLM::EngineCore\""));
+
+    gpufl::InitEvent unset;
+    unset.session_kind = "trace";
+    const std::string bare = gpufl::model::InitEventModel(unset).buildJson();
+    EXPECT_EQ(bare.find("\"launch_id\""), std::string::npos) << bare;
+    EXPECT_EQ(bare.find("\"ppid\""), std::string::npos) << bare;
+    EXPECT_EQ(bare.find("\"process_name\""), std::string::npos) << bare;
+    EXPECT_EQ(bare.find("\"argv0\""), std::string::npos) << bare;
+}
+
 TEST(WireContract, RunEndEmitsRolloverBlockWhenRolled) {
     gpufl::RunEndEvent e;
     e.session_id = "run-1-seg-2";
@@ -396,6 +424,23 @@ TEST(WireContract, ShutdownShape) {
     EXPECT_TRUE(JsonContains(json, "\"ts_ns\":1700000000000000500"));
     EXPECT_EQ(json.find("\"shutdown_reason\""), std::string::npos);
     EXPECT_EQ(json.find("\"process_continues\""), std::string::npos);
+    EXPECT_EQ(json.find("\"process_name\""), std::string::npos);
+    EXPECT_EQ(json.find("\"argv0\""), std::string::npos);
+}
+
+// Shutdown re-reads the process identity, because a process may retitle
+// itself after job_start was written.
+TEST(WireContract, ShutdownCarriesRereadProcessIdentity) {
+    gpufl::ShutdownEvent e;
+    e.pid = 4242;
+    e.session_id = "sess-1";
+    e.process_name = "VLLM::EngineCor";
+    e.argv0 = "VLLM::EngineCore";
+
+    const std::string json = gpufl::model::ShutdownEventModel(e).buildJson();
+
+    EXPECT_TRUE(JsonContains(json, "\"process_name\":\"VLLM::EngineCor\""));
+    EXPECT_TRUE(JsonContains(json, "\"argv0\":\"VLLM::EngineCore\""));
 }
 
 // ── segmented-run lifecycle ───────────────────────────────────────────────

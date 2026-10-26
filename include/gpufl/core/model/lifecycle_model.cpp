@@ -72,6 +72,21 @@ std::string InitEventModel::buildJson() const {
         }
     }
 
+    // Launch grouping and process identity. Each field is independent and
+    // emitted only when known; ppid 0 means it could not be read.
+    if (!e_.launch_id.empty()) {
+        oss << ",\"launch_id\":\"" << jsonEscape(e_.launch_id) << "\"";
+    }
+    if (e_.ppid > 0) {
+        oss << ",\"ppid\":" << e_.ppid;
+    }
+    if (!e_.process_name.empty()) {
+        oss << ",\"process_name\":\"" << jsonEscape(e_.process_name) << "\"";
+    }
+    if (!e_.argv0.empty()) {
+        oss << ",\"argv0\":\"" << jsonEscape(e_.argv0) << "\"";
+    }
+
     oss << "}";
     return oss.str();
 }
@@ -82,7 +97,14 @@ std::string ShutdownEventModel::buildJson() const {
         << ",\"pid\":"          << e_.pid
         << ",\"app\":\""        << jsonEscape(e_.app)        << "\""
         << ",\"session_id\":\"" << jsonEscape(e_.session_id) << "\""
-        << ",\"ts_ns\":"        << e_.ts_ns << "}";
+        << ",\"ts_ns\":"        << e_.ts_ns;
+    if (!e_.process_name.empty()) {
+        oss << ",\"process_name\":\"" << jsonEscape(e_.process_name) << "\"";
+    }
+    if (!e_.argv0.empty()) {
+        oss << ",\"argv0\":\"" << jsonEscape(e_.argv0) << "\"";
+    }
+    oss << "}";
     return oss.str();
 }
 

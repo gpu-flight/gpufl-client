@@ -71,6 +71,20 @@ struct InitEvent {
     std::string roll_chain_id;
     std::string previous_run_id;
     uint32_t part_index = 0;
+
+    // Launch grouping and process identity. One `gpufl trace` can start
+    // several CUDA processes (an API server and its engine workers), each with
+    // its own session; these let the backend group them and tell their roles
+    // apart. Each field is independent and emitted only when known:
+    //   launch_id    : GPUFL_LAUNCH_ID, shared by every process of one launch.
+    //   ppid         : parent process id (0 = unknown).
+    //   process_name : short OS process name (Linux comm), <= 64 bytes.
+    //   argv0        : base name of the first argument, <= 128 bytes. Never
+    //                  the command line: arguments can hold secrets.
+    std::string launch_id;
+    int ppid = 0;
+    std::string process_name;
+    std::string argv0;
 };
 
 struct ShutdownEvent {
@@ -78,6 +92,10 @@ struct ShutdownEvent {
     std::string app;
     std::string session_id;
     int64_t ts_ns = 0;
+    // Re-read at shutdown, because a process may retitle itself after init
+    // (vLLM names its engine process VLLM::EngineCore). Omitted when empty.
+    std::string process_name;
+    std::string argv0;
 };
 
 // Segment lifecycle records are defined now, but runtime segmentation remains

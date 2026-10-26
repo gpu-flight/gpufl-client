@@ -36,6 +36,7 @@ set(GPUFL_TEST_SOURCES
     core/test_segment_context.cpp
     core/test_segment_coordinator.cpp
     core/test_loaded_ptx.cpp
+    core/test_process_identity.cpp
     core/test_session_bootstrap.cpp
     core/test_source_capture_policy.cpp
     core/test_startup_configuration.cpp
@@ -48,6 +49,7 @@ set(GPUFL_TEST_SOURCES
     launcher/test_info_command.cpp
     launcher/test_deep_window_env.cpp
     launcher/test_segmentation_env.cpp
+    launcher/test_launch_id_env.cpp
     launcher/test_trace_run_plan.cpp
     launcher/test_agent_launcher.cpp
     ${CMAKE_SOURCE_DIR}/daemon/launcher/cli_parse.cpp

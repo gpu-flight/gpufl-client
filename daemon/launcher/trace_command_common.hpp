@@ -109,6 +109,19 @@ bool applyDeepWindowEnv(const TraceArgs& args, const TracePlatform& platform);
 bool applySegmentationEnv(const TraceArgs& args, const std::string& run_id,
                           const TracePlatform& platform);
 
+/**
+ * @brief Publish the launch id every process of this trace inherits.
+ *
+ * `inherited` is GPUFL_LAUNCH_ID from the launcher's own environment (null
+ * when unset). A valid value - a harness joining its records to these
+ * sessions - is kept; an invalid one is refused, because replacing it would
+ * silently break that join; an absent or empty one is generated as a UUIDv4.
+ *
+ * @return false when the inherited value is invalid or the platform refused
+ *         the change; the reason is already on stderr.
+ */
+bool applyLaunchIdEnv(const char* inherited, const TracePlatform& platform);
+
 int runTraceCommon(const TraceArgs& args, const TracePlatform& platform);
 
 }  // namespace gpufl::launcher
