@@ -2,10 +2,12 @@
 
 #include <atomic>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "gpufl/backends/nvidia/engine/profiling_engine.hpp"
+#include "gpufl/core/deep_window.hpp"
 
 #if GPUFL_HAS_PERFWORKS
 #include <cupti_pmsampling.h>
@@ -46,6 +48,14 @@ class PmSamplingEngine final : public IProfilingEngine {
         return produced_data_.load(std::memory_order_relaxed);
     }
 
+    // What the deep window now closing collected: rows emitted, failed decode
+    // or drain calls and overflows, the disarm's final drain included. Reset
+    // when sampling arms. nullopt when sampling is not scope-gated: it then
+    // runs for the whole session, and no count belongs to one window.
+    std::optional<EngineCaptureCounts> windowCounts() const;
+    // The same counts since this engine was created, for capture_capabilities.
+    EngineCaptureCounts sessionCounts() const;
+
    private:
     // True when sampling arms on scope start rather than at session start.
     // A deep window IS a scope, so WindowOnly reduces to the same gate the
@@ -72,11 +82,18 @@ class PmSamplingEngine final : public IProfilingEngine {
     void LogSinglePassSets_();
     bool CreateCounterDataImage_();
     void DecodeAndEmit_();
+    // Adds one decode's outcome to the window's and the session's counts.
+    // Caller holds pm_mu_.
+    void Account_(uint64_t samples, bool overflowed, const std::string& error);
     void DisablePmSampling_();
     void StartPmSampling_();
     void StopPmSampling_();
 
     mutable std::mutex pm_mu_;
+    // Both guarded by pm_mu_, which every decode already holds. Nothing here
+    // is touched on the launch path.
+    EngineCaptureCounts window_counts_;
+    EngineCaptureCounts session_counts_;
     CUpti_PmSampling_Object* pm_object_ = nullptr;
     CUpti_Profiler_Host_Object* host_object_ = nullptr;
     std::vector<const char*> metric_name_ptrs_;

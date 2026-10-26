@@ -88,6 +88,48 @@ TEST(CaptureCapabilityResolver, HostOnlyTraceReportsExpectedEmptyKernelTimeline)
     EXPECT_EQ(markers->status, "collected");
 }
 
+// Demo session 85d889a6: 273 NVTX rows under `gpufl trace`, reported as
+// enabled_no_data because only CUPTI-delivered markers were counted.
+TEST(CaptureCapabilityResolver, InjectedNvtxRowsReportCollected) {
+    auto input = BaseInput(gpufl::ProfilingEngine::Trace);
+    input.kernel_activity = true;
+    input.counters.injected_nvtx_rows = 273;
+
+    const auto evt = gpufl::BuildCaptureCapabilitiesEvent(input);
+
+    const auto* markers = FindCapability(evt, "nvtx_markers");
+    ASSERT_NE(markers, nullptr);
+    EXPECT_TRUE(markers->requested);
+    EXPECT_EQ(markers->status, "collected");
+    EXPECT_EQ(markers->mode, "nvtx_injection");
+    EXPECT_EQ(markers->reason_code, "");
+}
+
+// The H100 3 s windows: decodes failed with CUPTI_ERROR_UNKNOWN while other
+// decodes kept rows, and the session still read `collected`.
+TEST(CaptureCapabilityResolver, PmDecodeErrorsAreNotReportedAsCollected) {
+    auto input = BaseInput(gpufl::ProfilingEngine::PmSampling);
+    input.engine_state.pm.observe(/*armed=*/true, /*produced=*/true);
+    input.counters.pm_rows = 980;
+    input.counters.pm_decode_errors = 2;
+    input.counters.pm_overflows = 1;
+
+    auto evt = gpufl::BuildCaptureCapabilitiesEvent(input);
+    const auto* pm = FindCapability(evt, "pm_sampling");
+    ASSERT_NE(pm, nullptr);
+    EXPECT_EQ(pm->status, "partial");
+    EXPECT_EQ(pm->reason_code, "decode_errors");
+    EXPECT_EQ(pm->message, "2 PM decode errors, 1 overflow; 980 samples kept.");
+
+    // Every decode failed: nothing was kept.
+    input.counters.pm_rows = 0;
+    evt = gpufl::BuildCaptureCapabilitiesEvent(input);
+    pm = FindCapability(evt, "pm_sampling");
+    ASSERT_NE(pm, nullptr);
+    EXPECT_EQ(pm->status, "enabled_no_data");
+    EXPECT_EQ(pm->reason_code, "decode_errors");
+}
+
 TEST(CaptureCapabilityResolver,
      GraphTimingReportsPartialWhenInvalidRecordsWereDropped) {
     auto input = BaseInput(gpufl::ProfilingEngine::Trace);

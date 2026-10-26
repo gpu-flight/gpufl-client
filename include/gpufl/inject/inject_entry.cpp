@@ -316,7 +316,11 @@ int nvtxPopRange() {
     rec.duration_ns = std::max<int64_t>(0, end_ns - open.start_ns);
     rec.corr_id = open.marker_id;
     std::snprintf(rec.user_scope, sizeof(rec.user_scope), "%s", open.domain.c_str());
-    gpufl::Monitor::PushActivityRecord(rec);
+    // Counted for the nvtx_markers capability, which otherwise sees only
+    // CUPTI-delivered markers and reported enabled_no_data beside real rows.
+    if (gpufl::Monitor::PushActivityRecord(rec)) {
+        gpufl::Monitor::NoteInjectedNvtxMarker();
+    }
     return static_cast<int>(g_nvtx_stack.size());
 }
 

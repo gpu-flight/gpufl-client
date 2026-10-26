@@ -382,6 +382,13 @@ class Monitor {
      * disarm rather than from a separate query.
      */
     static std::vector<std::string> EndDeepWindowScope(const char* name);
+    /**
+     * @brief What each engine in `armed` collected during the window just
+     * disarmed; see IMonitorBackend::DeepWindowEngineResults. Every engine
+     * reads `unreported` when there is no backend.
+     */
+    static std::vector<DeepWindowEngineResult> DeepWindowEngineResults(
+        const std::vector<std::string>& armed);
     static void BeginDeepWindowPerfScope(const char* name);
     static void EndDeepWindowPerfScope(const char* name);
 
@@ -441,6 +448,17 @@ class Monitor {
      * ActivityRecord and should use the normal collector serialization path.
      */
     static bool PushActivityRecord(const ActivityRecord& rec);
+    /**
+     * @brief Count one NVTX range the injection library's own NVTX hooks
+     * handed to the collector.
+     *
+     * CUPTI-delivered markers are counted by the backend that pairs them. A
+     * range never arrives both ways: when the injection library is loaded it
+     * IS the NVTX injection, so CUPTI's marker activity sees nothing.
+     */
+    static void NoteInjectedNvtxMarker();
+    /** @brief Process total of NoteInjectedNvtxMarker() calls. */
+    static uint64_t InjectedNvtxMarkersSeen();
 
     /**
      * @brief Bulk-push profile samples (SASS metric rows, etc.) directly

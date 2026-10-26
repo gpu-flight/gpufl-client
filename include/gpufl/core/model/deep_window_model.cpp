@@ -15,6 +15,26 @@ std::string DeepWindowModel::buildJson() const {
     }
     engines << ']';
 
+    // Omitted entirely on a teardown close, where nothing observed the engines.
+    std::ostringstream results;
+    if (e_.has_engine_results) {
+        results << ",\"engine_results\":[";
+        for (size_t i = 0; i < e_.engine_results.size(); ++i) {
+            const auto& r = e_.engine_results[i];
+            if (i) results << ',';
+            results << "{\"engine\":\""      << jsonEscape(r.engine) << "\""
+                    << ",\"status\":\""      << jsonEscape(r.status) << "\""
+                    << ",\"samples\":"       << r.samples
+                    << ",\"decode_errors\":" << r.decode_errors
+                    << ",\"overflows\":"     << r.overflows;
+            if (!r.first_error.empty()) {
+                results << ",\"first_error\":\"" << jsonEscape(r.first_error) << "\"";
+            }
+            results << '}';
+        }
+        results << ']';
+    }
+
     // Omitted entirely when nothing triggered the window, so a manual window
     // does not carry an all-zero rule that reads like a real one.
     std::ostringstream trigger;
@@ -41,6 +61,7 @@ std::string DeepWindowModel::buildJson() const {
         << ",\"name\":\""                  << jsonEscape(e_.name)         << "\""
         << ",\"close_reason\":\""          << jsonEscape(e_.close_reason) << "\""
         << ",\"engines\":"                 << engines.str()
+        << results.str()
         << ",\"start_ns\":"                << e_.start_ns
         << ",\"end_ns\":"                  << e_.end_ns
         << ",\"duration_ns\":"             << e_.duration_ns

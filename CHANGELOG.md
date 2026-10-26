@@ -149,6 +149,16 @@ types are additive.
   `GPUFL_LOG_MAX_SPOOL_BYTES` and `GPUFL_LOG_MIN_FREE_BYTES` bound it.
 - **`deepWindowClose()`, `deepWindowActive()`** for closing and inspecting a
   window from the host program.
+- **Per-engine results on every deep window.** `engines` lists what a window
+  armed, not what it collected. The `deep_window_event` now also carries
+  `engine_results`, one entry per armed engine:
+  `{engine, status, samples, decode_errors, overflows, first_error}`. The
+  status is `collected`, `partial` (samples and errors), `failed` (errors,
+  no samples), `empty` or `unreported`. PM sampling counts its own rows, failed
+  decode or drain calls and hardware-buffer overflows for each window. PC
+  sampling, SASS and the Range profiler report `unreported` for now. A window
+  closed by process-exit teardown has no `engine_results`, because nothing
+  observed its engines.
 
 ### Changed
 
@@ -285,6 +295,15 @@ types are additive.
 - **Kernel-replay perf events are emitted before logger close** on process
   exit, so a range-profiler run does not lose its last events.
 - **httplib install export dependency** is enforced at build time.
+- **`pm_sampling` no longer reads `collected` after failed decodes.** A failed
+  PM decode was logged to stderr only, and the capability said `collected` if
+  any other decode kept rows. A session with decode errors or overflows now
+  reports `partial` (rows kept) or `enabled_no_data` (none), with reason
+  `decode_errors` and the counts.
+- **`nvtx_markers` counts NVTX ranges captured under `gpufl trace`.** Only
+  CUPTI-delivered markers were counted, so a trace with NVTX rows reported
+  `enabled_no_data`. Ranges from the injection library's own NVTX hooks now
+  count too (mode `nvtx_injection`).
 
 ## [1.2.1] - 2026-06-23
 

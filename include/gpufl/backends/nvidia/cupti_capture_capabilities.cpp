@@ -7,6 +7,7 @@
 
 #include "gpufl/backends/nvidia/capture_capability_resolver.hpp"
 #include "gpufl/backends/nvidia/cupti_engine_selection.hpp"
+#include "gpufl/backends/nvidia/engine/pm_sampling_engine.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/env_vars.hpp"
 #include "gpufl/core/logger/logger.hpp"
@@ -35,6 +36,10 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
         sync_activity_emitted_.load(std::memory_order_relaxed);
     const uint64_t nvtx_rows =
         nvtx_marker_emitted_.load(std::memory_order_relaxed);
+    const uint64_t injected_nvtx_rows = Monitor::InjectedNvtxMarkersSeen();
+    const PmSamplingEngine* pm = FindPmSamplingEngine(engine_.get());
+    const EngineCaptureCounts pm_counts =
+        pm ? pm->sessionCounts() : EngineCaptureCounts{};
     const uint64_t graph_rows =
         graph_activity_emitted_.load(std::memory_order_relaxed);
     const uint64_t graph_rows_dropped =
@@ -96,6 +101,13 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
         delta(sync_rows, capability_sync_rows_baseline_);
     input.counters.nvtx_rows =
         delta(nvtx_rows, capability_nvtx_rows_baseline_);
+    input.counters.injected_nvtx_rows =
+        delta(injected_nvtx_rows, capability_injected_nvtx_rows_baseline_);
+    const auto& pmb = capability_pm_counts_baseline_;
+    input.counters.pm_rows = delta(pm_counts.samples, pmb.samples);
+    input.counters.pm_decode_errors =
+        delta(pm_counts.decode_errors, pmb.decode_errors);
+    input.counters.pm_overflows = delta(pm_counts.overflows, pmb.overflows);
     input.counters.graph_rows =
         delta(graph_rows, capability_graph_rows_baseline_);
     input.counters.graph_rows_dropped =
@@ -168,6 +180,8 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
     capability_mem_transfer_rows_baseline_ = transfer_rows;
     capability_sync_rows_baseline_ = sync_rows;
     capability_nvtx_rows_baseline_ = nvtx_rows;
+    capability_injected_nvtx_rows_baseline_ = injected_nvtx_rows;
+    capability_pm_counts_baseline_ = pm_counts;
     capability_graph_rows_baseline_ = graph_rows;
     capability_graph_rows_dropped_baseline_ = graph_rows_dropped;
     capability_external_rows_baseline_ = external_rows;

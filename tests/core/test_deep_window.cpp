@@ -15,6 +15,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -452,3 +453,104 @@ TEST(DeepWindowModelTest, SingleEngineSerializesAsAOneElementArray) {
     EXPECT_NE(json.find("\"engines\":[\"nvidia.pm_sampling\"]"),
               std::string::npos);
 }
+
+TEST(DeepWindowModelTest, EngineResultsSayWhatEachArmedEngineCollected) {
+    // Armed is not collected. The demo's failed 3 s windows listed PM in
+    // `engines`; this is the field that says the decode lost the samples.
+    gpufl::DeepWindowEvent e;
+    e.name = "deep_window";
+    e.close_reason = "deadline";
+    e.engines = {"nvidia.pm_sampling", "nvidia.pc_sampling"};
+    e.has_engine_results = true;
+    gpufl::DeepWindowEngineResult pm;
+    pm.engine = "nvidia.pm_sampling";
+    pm.status = "partial";
+    pm.samples = 980;
+    pm.decode_errors = 1;
+    pm.first_error = "cuptiPmSamplingDecodeData: CUPTI_ERROR_UNKNOWN (999)";
+    gpufl::DeepWindowEngineResult pc;
+    pc.engine = "nvidia.pc_sampling";
+    pc.status = "unreported";
+    e.engine_results = {pm, pc};
+
+    const std::string json = gpufl::model::DeepWindowModel(e).buildJson();
+    EXPECT_NE(json.find(
+                  "\"engine_results\":["
+                  "{\"engine\":\"nvidia.pm_sampling\",\"status\":\"partial\","
+                  "\"samples\":980,\"decode_errors\":1,\"overflows\":0,"
+                  "\"first_error\":\"cuptiPmSamplingDecodeData: "
+                  "CUPTI_ERROR_UNKNOWN (999)\"},"
+                  // No first_error key at all when there was none.
+                  "{\"engine\":\"nvidia.pc_sampling\",\"status\":\"unreported\","
+                  "\"samples\":0,\"decode_errors\":0,\"overflows\":0}]"),
+              std::string::npos)
+        << json;
+}
+
+TEST(DeepWindowModelTest, TeardownCloseOmitsEngineResults) {
+    // The process-exit close skips the disarm, so nothing observed the
+    // engines. Absent, not an empty list that would read as "armed nothing".
+    gpufl::DeepWindowEvent e;
+    e.name = "deep_window";
+    e.close_reason = "session_stop";
+    e.engines = {"nvidia.pm_sampling"};
+
+    const std::string json = gpufl::model::DeepWindowModel(e).buildJson();
+    EXPECT_EQ(json.find("engine_results"), std::string::npos) << json;
+}
+
+// ── per-engine window status ────────────────────────────────────────────────
+
+namespace {
+
+struct EngineStatusCase {
+    const char* label;
+    std::optional<gpufl::EngineCaptureCounts> counts;
+    const char* status;
+};
+
+gpufl::EngineCaptureCounts Counts(const uint64_t samples,
+                                  const uint64_t decode_errors,
+                                  const uint64_t overflows) {
+    gpufl::EngineCaptureCounts c;
+    c.samples = samples;
+    for (uint64_t i = 0; i < decode_errors; ++i) {
+        c.NoteDecodeError("decode " + std::to_string(i));
+    }
+    c.overflows = overflows;
+    return c;
+}
+
+class DeepWindowEngineStatusTest
+    : public ::testing::TestWithParam<EngineStatusCase> {};
+
+}  // namespace
+
+TEST_P(DeepWindowEngineStatusTest, StatusFollowsTheCounts) {
+    const EngineStatusCase& c = GetParam();
+    const gpufl::DeepWindowEngineResult r =
+        gpufl::MakeDeepWindowEngineResult("nvidia.pm_sampling", c.counts);
+    EXPECT_EQ(r.engine, "nvidia.pm_sampling");
+    EXPECT_EQ(r.status, c.status);
+    const gpufl::EngineCaptureCounts expected =
+        c.counts.value_or(gpufl::EngineCaptureCounts{});
+    EXPECT_EQ(r.samples, expected.samples);
+    EXPECT_EQ(r.decode_errors, expected.decode_errors);
+    EXPECT_EQ(r.overflows, expected.overflows);
+    // The first error is kept, not the last.
+    EXPECT_EQ(r.first_error, expected.decode_errors ? "decode 0" : "");
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    AllStatuses, DeepWindowEngineStatusTest,
+    ::testing::Values(
+        EngineStatusCase{"collected", Counts(980, 0, 0), "collected"},
+        EngineStatusCase{"partial", Counts(980, 2, 0), "partial"},
+        // An overflow loses samples just as a failed decode does.
+        EngineStatusCase{"partial_overflow", Counts(980, 0, 1), "partial"},
+        EngineStatusCase{"failed", Counts(0, 2, 0), "failed"},
+        EngineStatusCase{"empty", Counts(0, 0, 0), "empty"},
+        EngineStatusCase{"unreported", std::nullopt, "unreported"}),
+    [](const ::testing::TestParamInfo<EngineStatusCase>& info) {
+        return std::string(info.param.label);
+    });

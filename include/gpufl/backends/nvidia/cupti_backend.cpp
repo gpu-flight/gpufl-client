@@ -17,6 +17,7 @@
 #include "gpufl/backends/nvidia/cupti_runtime_support.hpp"
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
 #include "gpufl/backends/nvidia/engine/pc_sampling_with_sass_engine.hpp"
+#include "gpufl/backends/nvidia/engine/pm_sampling_engine.hpp"
 #include "gpufl/backends/nvidia/kernel_launch_handler.hpp"
 #include "gpufl/backends/nvidia/graph_structure_handler.hpp"
 #include "gpufl/backends/nvidia/mem_transfer_handler.hpp"
@@ -275,6 +276,8 @@ void CuptiBackend::start() {
         capability_launch_count_baseline_ = 0;
         capability_scope_truncated_baseline_ = 0;
         capability_pm_rows_baseline_ = 0;
+        capability_injected_nvtx_rows_baseline_ = 0;
+        capability_pm_counts_baseline_ = {};
     }
 
     // Reset the BufferCompleted companion maps for a clean per-session slate
@@ -824,6 +827,19 @@ std::vector<std::string> CuptiBackend::ArmedEngineWireNames_() const {
     if (state.pm.active)           out.emplace_back("nvidia.pm_sampling");
     if (state.range.active)        out.emplace_back("nvidia.range_profiler");
     if (state.range_kernel.active) out.emplace_back("nvidia.range_profiler_kernel_replay");
+    return out;
+}
+
+std::vector<DeepWindowEngineResult> CuptiBackend::DeepWindowEngineResults(
+    const std::vector<std::string>& armed) const {
+    const PmSamplingEngine* pm = FindPmSamplingEngine(engine_.get());
+    std::vector<DeepWindowEngineResult> out;
+    out.reserve(armed.size());
+    for (const auto& engine : armed) {
+        std::optional<EngineCaptureCounts> counts;
+        if (pm && engine == "nvidia.pm_sampling") counts = pm->windowCounts();
+        out.push_back(MakeDeepWindowEngineResult(engine, counts));
+    }
     return out;
 }
 

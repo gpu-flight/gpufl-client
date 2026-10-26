@@ -9,6 +9,8 @@
 
 namespace gpufl {
 
+class PmSamplingEngine;
+
 struct EngineRequestSet {
     bool trace = false;
     bool pc = false;
@@ -51,5 +53,8 @@ std::unique_ptr<IProfilingEngine> CreateProfilingEngine(
 EngineRuntimeState InspectEngineRuntimeState(const IProfilingEngine* engine,
                                              ProfilingEngine selected,
                                              bool comboActive);
+// The PM sampling engine wherever selection put it: the engine itself, a combo
+// member, or Deep's PM leg. Null when the run has none.
+const PmSamplingEngine* FindPmSamplingEngine(const IProfilingEngine* engine);
 
 }  // namespace gpufl

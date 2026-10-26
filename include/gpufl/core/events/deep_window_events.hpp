@@ -40,6 +40,25 @@ struct DeepWindowTrigger {
     int64_t     fired_ns = 0;
 };
 
+/**
+ * What one armed engine delivered while one window was open.
+ *
+ * `engines` says what was armed, which is not what was collected: an H100 PM
+ * window whose decodes failed with CUPTI_ERROR_UNKNOWN still listed the engine
+ * and still closed on its deadline. This is the half that says whether arming
+ * paid off.
+ */
+struct DeepWindowEngineResult {
+    std::string engine;          // same wire name as in DeepWindowEvent::engines
+    // "collected" | "partial" | "failed" | "empty" | "unreported". Derived in
+    // one place only, MakeDeepWindowEngineResult().
+    std::string status;
+    uint64_t    samples = 0;         // records emitted for this window
+    uint64_t    decode_errors = 0;   // failed decode or drain calls
+    uint64_t    overflows = 0;       // hardware-buffer overflows reported
+    std::string first_error;         // empty = none, and omitted from the wire
+};
+
 struct DeepWindowEvent {
     DeepWindowTrigger trigger;
     int pid = 0;
@@ -52,6 +71,12 @@ struct DeepWindowEvent {
     // recording. Trace never appears here: it runs session-wide rather than
     // arming with the window.
     std::vector<std::string> engines;
+    // One entry per name in `engines`. Absent (has_engine_results = false) on
+    // the process-exit teardown close, where the disarm was skipped and nothing
+    // observed the engines: an empty list would read as "armed nothing", and
+    // any status as a measurement.
+    bool has_engine_results = false;
+    std::vector<DeepWindowEngineResult> engine_results;
     int64_t start_ns = 0;
     int64_t end_ns = 0;
     int64_t duration_ns = 0;

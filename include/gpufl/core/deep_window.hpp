@@ -1,11 +1,45 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <utility>
 
 #include "gpufl/core/events.hpp"
 
 namespace gpufl {
+
+/**
+ * @brief What a deep engine collected over one interval: a window, or the
+ * session for the capability report.
+ *
+ * The engine only counts. MakeDeepWindowEngineResult() turns the counts into
+ * a status, so the rule lives in one place and is testable without a GPU.
+ * Not synchronized: the engine that owns one guards it with its own lock.
+ */
+struct EngineCaptureCounts {
+    uint64_t    samples = 0;         // records emitted, final drain included
+    uint64_t    decode_errors = 0;   // failed decode or drain calls
+    uint64_t    overflows = 0;       // hardware-buffer overflows reported
+    std::string first_error;         // empty = none
+
+    void NoteDecodeError(std::string what) {
+        ++decode_errors;
+        if (first_error.empty()) first_error = std::move(what);
+    }
+};
+
+/**
+ * @brief One armed engine's entry for the deep_window event.
+ *
+ * `counts` is nullopt for an engine that keeps no per-window accounting; it
+ * reports `unreported` rather than a status nobody measured. Otherwise:
+ * `collected` (samples, no errors), `partial` (samples and errors),
+ * `failed` (errors, no samples) or `empty` (neither). Errors are decode
+ * errors and overflows alike: both lose samples.
+ */
+DeepWindowEngineResult MakeDeepWindowEngineResult(
+    std::string engine, const std::optional<EngineCaptureCounts>& counts);
 
 /**
  * @brief Why a deep window closed.

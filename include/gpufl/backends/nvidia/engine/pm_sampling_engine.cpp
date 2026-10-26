@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <initializer_list>
+#include <string>
 
 #include "gpufl/backends/nvidia/cupti_utils.hpp"
 #include "gpufl/core/common.hpp"  // detail::GetTimestampNs
@@ -28,6 +30,15 @@ std::vector<std::string> OverviewMetrics() {
 #if GPUFL_HAS_PERFWORKS
 bool IsPrivilegeError(CUptiResult res) {
     return res == CUPTI_ERROR_INSUFFICIENT_PRIVILEGES;
+}
+
+// "cuptiPmSamplingDecodeData: CUPTI_ERROR_UNKNOWN (999)" - the form a window's
+// first_error takes, so the event log carries what stderr used to hold alone.
+std::string DescribeCuptiFailure(const char* op, const CUptiResult res) {
+    const char* result_name = nullptr;
+    cuptiGetResultString(res, &result_name);
+    return std::string(op) + ": " + (result_name ? result_name : "unknown") +
+           " (" + std::to_string(static_cast<int>(res)) + ")";
 }
 #endif
 }  // namespace
@@ -124,6 +135,27 @@ void PmSamplingEngine::drainData() {
     if (!running_) return;
     last_drain_ns_ = now;
     DecodeAndEmit_();
+#endif
+}
+
+// Outside the GPUFL_HAS_PERFWORKS block for the same reason as drainData. A
+// build without PerfWorks never arms PM, so it never reaches a window's list.
+std::optional<EngineCaptureCounts> PmSamplingEngine::windowCounts() const {
+#if GPUFL_HAS_PERFWORKS
+    if (!ScopeGated_()) return std::nullopt;
+    std::lock_guard<std::mutex> lk(pm_mu_);
+    return window_counts_;
+#else
+    return std::nullopt;
+#endif
+}
+
+EngineCaptureCounts PmSamplingEngine::sessionCounts() const {
+#if GPUFL_HAS_PERFWORKS
+    std::lock_guard<std::mutex> lk(pm_mu_);
+    return session_counts_;
+#else
+    return {};
 #endif
 }
 
@@ -451,6 +483,9 @@ void PmSamplingEngine::DecodeAndEmit_() {
     CUptiResult res = cuptiPmSamplingDecodeData(&decode);
     if (res != CUPTI_SUCCESS && res != CUPTI_ERROR_OUT_OF_MEMORY) {
         LogCuptiErrorIfFailed(this->name(), "cuptiPmSamplingDecodeData", res);
+        // This decode's samples are gone. Counted, so the window and the
+        // capability report say so instead of only stderr.
+        Account_(0, false, DescribeCuptiFailure("cuptiPmSamplingDecodeData", res));
         return;
     }
     const bool overflowed = decode.overflow || res == CUPTI_ERROR_OUT_OF_MEMORY;
@@ -470,9 +505,16 @@ void PmSamplingEngine::DecodeAndEmit_() {
     info.pCounterDataImage = counter_data_image_.data();
     info.counterDataImageSize = counter_data_image_.size();
     res = cuptiPmSamplingGetCounterDataInfo(&info);
-    if (LogCuptiErrorIfFailed(this->name(), "cuptiPmSamplingGetCounterDataInfo", res)) return;
+    if (LogCuptiErrorIfFailed(this->name(), "cuptiPmSamplingGetCounterDataInfo", res)) {
+        Account_(0, overflowed,
+                 DescribeCuptiFailure("cuptiPmSamplingGetCounterDataInfo", res));
+        return;
+    }
 
     std::vector<PmSampleInput> rows;
+    // First per-sample failure of this decode. One failed decode counts once,
+    // however many of its samples were lost.
+    std::string sample_error;
     const size_t completed = std::min<size_t>(info.numCompletedSamples,
                                               opts_.pm_sampling_max_samples);
     rows.reserve(completed * metrics_.size());
@@ -486,7 +528,13 @@ void PmSamplingEngine::DecodeAndEmit_() {
         sampleInfo.counterDataImageSize = counter_data_image_.size();
         sampleInfo.sampleIndex = sample;
         res = cuptiPmSamplingCounterDataGetSampleInfo(&sampleInfo);
-        if (LogCuptiErrorIfFailed(this->name(), "cuptiPmSamplingCounterDataGetSampleInfo", res)) continue;
+        if (LogCuptiErrorIfFailed(this->name(), "cuptiPmSamplingCounterDataGetSampleInfo", res)) {
+            if (sample_error.empty()) {
+                sample_error = DescribeCuptiFailure(
+                    "cuptiPmSamplingCounterDataGetSampleInfo", res);
+            }
+            continue;
+        }
 
         CUpti_Profiler_Host_EvaluateToGpuValues_Params eval = {
             CUpti_Profiler_Host_EvaluateToGpuValues_Params_STRUCT_SIZE};
@@ -498,7 +546,13 @@ void PmSamplingEngine::DecodeAndEmit_() {
         eval.numMetrics = metric_name_ptrs_.size();
         eval.pMetricValues = values.data();
         res = cuptiProfilerHostEvaluateToGpuValues(&eval);
-        if (LogCuptiErrorIfFailed(this->name(), "cuptiProfilerHostEvaluateToGpuValues", res)) continue;
+        if (LogCuptiErrorIfFailed(this->name(), "cuptiProfilerHostEvaluateToGpuValues", res)) {
+            if (sample_error.empty()) {
+                sample_error = DescribeCuptiFailure(
+                    "cuptiProfilerHostEvaluateToGpuValues", res);
+            }
+            continue;
+        }
 
         const uint64_t mid = sampleInfo.startTimestamp +
             (sampleInfo.endTimestamp - sampleInfo.startTimestamp) / 2ull;
@@ -544,6 +598,7 @@ void PmSamplingEngine::DecodeAndEmit_() {
             Monitor::PublishScopeRetentionWatermark(newest_ns);
         }
     }
+    Account_(rows.size(), overflowed, sample_error);
 
     // Hand the image back empty so the next decode starts from a clean slate
     // instead of re-emitting what we just pushed.
@@ -551,6 +606,15 @@ void PmSamplingEngine::DecodeAndEmit_() {
     GFL_LOG_DEBUG("[PmSamplingEngine] decoded PM samples completed=", completed,
                   " populated=", info.numPopulatedSamples,
                   " rows=", rows.size());
+}
+
+void PmSamplingEngine::Account_(const uint64_t samples, const bool overflowed,
+                                const std::string& error) {
+    for (EngineCaptureCounts* counts : {&window_counts_, &session_counts_}) {
+        counts->samples += samples;
+        if (overflowed) ++counts->overflows;
+        if (!error.empty()) counts->NoteDecodeError(error);
+    }
 }
 
 void PmSamplingEngine::DisablePmSampling_() {
@@ -588,6 +652,9 @@ void PmSamplingEngine::DisablePmSampling_() {
 void PmSamplingEngine::StartPmSampling_() {
     std::lock_guard<std::mutex> lk(pm_mu_);
     if (running_) return;
+    // A new window starts counting from zero, including when this arm fails:
+    // the window then reports nothing collected, not the last window's rows.
+    window_counts_ = {};
     if (!PreparePmSamplingLocked_()) {
         operational_.store(false, std::memory_order_relaxed);
         return;
@@ -629,6 +696,9 @@ void PmSamplingEngine::StopPmSampling_() {
     if (!LogCuptiErrorIfFailed(this->name(), "cuptiPmSamplingStop", res)) {
         GFL_LOG_DEBUG("[PmSamplingEngine] <<< COLLECTING (Scope End) >>>");
         DecodeAndEmit_();
+    } else {
+        // The final drain never ran, so everything since the last beat is lost.
+        Account_(0, false, DescribeCuptiFailure("cuptiPmSamplingStop", res));
     }
     Monitor::EndPmScopeAttribution();
     running_ = false;
