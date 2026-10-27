@@ -98,6 +98,7 @@ void autoTuneKernelSampleRate(const InitOptions& init_options,
 class ClientStartup::State {
 public:
     StartupSegmentationOptions segmentation;
+    StartupSettingSources setting_sources;
     InitialSessionLoggingState logging;
     MonitorOptions monitor_options;
     InitEvent initial_event;
@@ -118,7 +119,7 @@ bool ClientStartup::start() {
 }
 
 bool ClientStartup::resolveConfiguration() {
-    resolveStartupOptions(options_);
+    state_->setting_sources = resolveStartupOptions(options_);
     DebugLogger::setEnabled(options_.enable_debug_output);
     GFL_LOG_DEBUG("Initializing...");
 
@@ -172,6 +173,8 @@ void ClientStartup::launchVersionProbe() const {
 bool ClientStartup::startMonitor() {
     GFL_LOG_DEBUG("Initializing Monitor (CUPTI)...");
     state_->monitor_options = buildMonitorOptions(options_);
+    state_->monitor_options.stack_trace_source =
+        state_->setting_sources.stack_trace;
     configureEagerModuleLoading(state_->monitor_options);
     autoTuneKernelSampleRate(options_, state_->monitor_options);
     Monitor::Initialize(state_->monitor_options);

@@ -45,7 +45,7 @@ TEST(CaptureCapabilityResolver, TraceWithRowsReportsCollectedTimeline) {
     EXPECT_EQ(evt.ts_ns, 1234);
     EXPECT_EQ(evt.requested_engine, "nvidia.trace");
     EXPECT_EQ(evt.selected_engine, "nvidia.trace");
-    EXPECT_EQ(evt.capabilities.size(), 16u);
+    EXPECT_EQ(evt.capabilities.size(), 17u);
 
     const auto* kernel = FindCapability(evt, "kernel_events");
     ASSERT_NE(kernel, nullptr);
@@ -103,6 +103,30 @@ TEST(CaptureCapabilityResolver, InjectedNvtxRowsReportCollected) {
     EXPECT_EQ(markers->status, "collected");
     EXPECT_EQ(markers->mode, "nvtx_injection");
     EXPECT_EQ(markers->reason_code, "");
+}
+
+TEST(CaptureCapabilityResolver, StackTracesReportTheEffectiveSettingAndItsSource) {
+    auto input = BaseInput(gpufl::ProfilingEngine::Trace);
+    input.kernel_activity = true;
+    input.counters.launch_count = 4;
+    input.options.enable_stack_trace = false;
+    input.options.stack_trace_source = gpufl::SettingSource::TraceFlag;
+
+    auto evt = gpufl::BuildCaptureCapabilitiesEvent(input);
+    const auto* stacks = FindCapability(evt, "stack_traces");
+    ASSERT_NE(stacks, nullptr);
+    EXPECT_FALSE(stacks->requested);
+    EXPECT_EQ(stacks->status, "not_requested");
+    EXPECT_EQ(stacks->mode, "trace_flag");
+
+    input.options.enable_stack_trace = true;
+    input.options.stack_trace_source = gpufl::SettingSource::Preset;
+    evt = gpufl::BuildCaptureCapabilitiesEvent(input);
+    stacks = FindCapability(evt, "stack_traces");
+    ASSERT_NE(stacks, nullptr);
+    EXPECT_TRUE(stacks->requested);
+    EXPECT_EQ(stacks->status, "collected");
+    EXPECT_EQ(stacks->mode, "preset_default");
 }
 
 // The H100 3 s windows: decodes failed with CUPTI_ERROR_UNKNOWN while other

@@ -54,15 +54,23 @@ bool isUuidV4(const char* value) {
 
 }  // namespace
 
-void resolveStartupOptions(InitOptions& options) {
+StartupSettingSources resolveStartupOptions(InitOptions& options) {
+    StartupSettingSources sources;
+    // An injected process received the `gpufl trace` preset as its InitOptions.
+    if (const char* injected = std::getenv(env::kInject);
+        injected && std::strcmp(injected, "1") == 0) {
+        sources.stack_trace = SettingSource::Preset;
+    }
+
     std::string config_path = options.config_file;
     if (config_path.empty()) {
         if (const char* value = std::getenv(env::kConfigFile)) {
             config_path = value;
         }
     }
-    if (!config_path.empty()) {
-        ConfigFileLoader::apply(options, config_path);
+    if (!config_path.empty() &&
+        ConfigFileLoader::apply(options, config_path).stack_trace) {
+        sources.stack_trace = SettingSource::ConfigFile;
     }
 
     // The trace launcher owns this explicit source-capture decision and always
@@ -71,6 +79,12 @@ void resolveStartupOptions(InitOptions& options) {
     // do not set the variable retain their InitOptions behavior.
     if (const char* value = std::getenv(env::kIncludeSource)) {
         options.enable_source_collection = std::strcmp(value, "1") == 0;
+    }
+    // Host call stacks follow the same rule, except that the launcher sets the
+    // variable only for --stacks; without it the preset or config file decides.
+    if (const char* value = std::getenv(env::kStackTrace)) {
+        options.enable_stack_trace = std::strcmp(value, "1") == 0;
+        sources.stack_trace = SettingSource::TraceFlag;
     }
     if (const char* value = std::getenv(env::kSourceRoot); value && *value) {
         options.source_capture.approved_roots = {value};
@@ -92,6 +106,7 @@ void resolveStartupOptions(InitOptions& options) {
         }
     }
     options.api_path = normalizeApiPath(api_path);
+    return sources;
 }
 
 bool readStartupSegmentationOptions(StartupSegmentationOptions& options,

@@ -35,6 +35,7 @@ protected:
         saveAndUnset_(gpufl::env::kApiPath, api_path_);
         saveAndUnset_(gpufl::env::kIncludeSource, include_source_);
         saveAndUnset_(gpufl::env::kSourceRoot, source_root_);
+        saveAndUnset_(gpufl::env::kStackTrace, stack_trace_);
         saveAndUnset_(gpufl::env::kRunId, run_id_);
         saveAndUnset_(gpufl::env::kSegmentEveryMs, segment_every_ms_);
         saveAndUnset_(gpufl::env::kSegmentMaxRows, segment_max_rows_);
@@ -47,6 +48,7 @@ protected:
         restore_(gpufl::env::kApiPath, api_path_);
         restore_(gpufl::env::kIncludeSource, include_source_);
         restore_(gpufl::env::kSourceRoot, source_root_);
+        restore_(gpufl::env::kStackTrace, stack_trace_);
         restore_(gpufl::env::kRunId, run_id_);
         restore_(gpufl::env::kSegmentEveryMs, segment_every_ms_);
         restore_(gpufl::env::kSegmentMaxRows, segment_max_rows_);
@@ -70,6 +72,7 @@ private:
     std::optional<std::string> api_path_;
     std::optional<std::string> include_source_;
     std::optional<std::string> source_root_;
+    std::optional<std::string> stack_trace_;
     std::optional<std::string> run_id_;
     std::optional<std::string> segment_every_ms_;
     std::optional<std::string> segment_max_rows_;
@@ -156,6 +159,37 @@ TEST_F(StartupConfigurationTest, IncludeSourceEnvironmentOverridesConfigFile) {
     gpufl::detail::resolveStartupOptions(options);
 
     EXPECT_FALSE(options.enable_source_collection);
+    std::filesystem::remove_all(temp_root, ec);
+}
+
+TEST_F(StartupConfigurationTest, StackTraceFlagOverridesConfigFileAndIsAttributed) {
+    const auto temp_root =
+        std::filesystem::temp_directory_path() /
+        ("gpufl_stack_trace_config_" + std::to_string(gpufl::detail::GetPid()));
+    const auto config_path = temp_root / "config.json";
+    std::error_code ec;
+    std::filesystem::remove_all(temp_root, ec);
+    std::filesystem::create_directories(temp_root, ec);
+    ASSERT_FALSE(ec) << ec.message();
+    {
+        std::ofstream config(config_path);
+        ASSERT_TRUE(config);
+        config << R"({"enable_stack_trace":true})";
+    }
+
+    gpufl::InitOptions options;
+    options.config_file = config_path.string();
+    EXPECT_EQ(gpufl::detail::resolveStartupOptions(options).stack_trace,
+              gpufl::SettingSource::ConfigFile);
+    EXPECT_TRUE(options.enable_stack_trace);
+
+    setEnv(gpufl::env::kStackTrace, "0");
+    options = gpufl::InitOptions{};
+    options.config_file = config_path.string();
+    EXPECT_EQ(gpufl::detail::resolveStartupOptions(options).stack_trace,
+              gpufl::SettingSource::TraceFlag);
+    EXPECT_FALSE(options.enable_stack_trace);
+
     std::filesystem::remove_all(temp_root, ec);
 }
 

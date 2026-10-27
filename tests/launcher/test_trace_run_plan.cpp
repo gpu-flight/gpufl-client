@@ -164,6 +164,8 @@ TEST(TraceRunPlanTest, TraceCommonExecutesThePlannedSinglePass) {
     { std::ofstream inject(root / "gpufl_inject.so"); ASSERT_TRUE(inject); }
 
     ExecutingPlanningPlatform platform(root);
+    // Inherited from the parent shell; without --stacks it must not survive.
+    platform.env[gpufl::env::kStackTrace] = "0";
     TraceArgs args;
     args.command = {"target", "--work"};
     args.name = "trace-plan-test";
@@ -179,13 +181,14 @@ TEST(TraceRunPlanTest, TraceCommonExecutesThePlannedSinglePass) {
     EXPECT_EQ(platform.env[gpufl::env::kLogDir], args.output_dir);
     EXPECT_EQ(platform.env[gpufl::env::kProfilingEngine], "Trace");
     EXPECT_EQ(platform.env[gpufl::env::kIncludeSource], "1");
+    EXPECT_EQ(platform.env.count(gpufl::env::kStackTrace), 0u);
     EXPECT_EQ(fs::weakly_canonical(platform.env[gpufl::env::kSourceRoot]),
               fs::weakly_canonical(root));
 
     fs::remove_all(root, ec);
 }
 
-TEST(TraceRunPlanTest, TraceCommonHonorsExplicitSourceCaptureOptOut) {
+TEST(TraceRunPlanTest, TraceCommonHonorsExplicitCaptureOptOuts) {
     namespace fs = std::filesystem;
     const fs::path root = fs::temp_directory_path() /
         ("gpufl_trace_source_privacy_" +
@@ -203,9 +206,11 @@ TEST(TraceRunPlanTest, TraceCommonHonorsExplicitSourceCaptureOptOut) {
     args.output_dir = (root / "capture").string();
     args.source_root = root.string();
     args.no_source = true;
+    args.stack_traces = false;
 
     EXPECT_EQ(gpufl::launcher::runTraceCommon(args, platform), 0);
     EXPECT_EQ(platform.env[gpufl::env::kIncludeSource], "0");
+    EXPECT_EQ(platform.env[gpufl::env::kStackTrace], "0");
     EXPECT_EQ(fs::weakly_canonical(platform.env[gpufl::env::kSourceRoot]),
               fs::weakly_canonical(root));
 

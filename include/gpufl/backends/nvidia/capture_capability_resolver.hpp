@@ -72,6 +72,8 @@ struct CaptureCapabilityOptions {
     bool enable_external_correlation = true;
     bool enable_synchronization = true;
     bool enable_cuda_graphs_tracking = false;
+    bool enable_stack_trace = false;
+    SettingSource stack_trace_source = SettingSource::Options;
 };
 
 struct CaptureCapabilityInput {

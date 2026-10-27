@@ -159,6 +159,16 @@ types are additive.
   sampling, SASS and the Range profiler report `unreported` for now. A window
   closed by process-exit teardown has no `engine_results`, because nothing
   observed its engines.
+- **`gpufl trace --stacks=on|off`** decides whether every kernel launch,
+  memcpy/memset and synchronization call captures the host call stack
+  (`kernel_detail.stack_trace`). Under `gpufl trace` the only switch used to be
+  the `enable_stack_trace` key of a `GPUFL_CONFIG_FILE`. The launcher publishes
+  the choice as `GPUFL_STACK_TRACE` (`1` or `0`), which the target applies after
+  its config file, so the flag wins. Without the flag the variable is removed
+  and the injection preset (on) or the config file decides. Any other value is
+  refused. `capture_capabilities` gains a `stack_traces` row whose `mode` names
+  the layer that decided: `trace_flag`, `config_file`, `preset_default` or, for
+  an embedded `init()`, `init_options`.
 
 ### Changed
 

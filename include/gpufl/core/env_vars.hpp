@@ -90,6 +90,11 @@ constexpr const char* kIncludeSource        = "GPUFL_INCLUDE_SOURCE";
 // This is local process configuration only; it must not be serialized into
 // product events or broad logs.
 constexpr const char* kSourceRoot           = "GPUFL_SOURCE_ROOT";
+// Launcher-owned host call-stack contract. `gpufl trace --stacks=on|off`
+// publishes "1" or "0", applied after file configuration like kIncludeSource
+// so the command-line choice wins. Without the flag the launcher removes it,
+// leaving the injection preset (or a config file) to decide.
+constexpr const char* kStackTrace           = "GPUFL_STACK_TRACE";
 
 // Override the per-file log rotation threshold in bytes (default:
 // Logger::kDefaultRotateBytes = 64 MiB). Mainly for tests - a tiny value

@@ -823,6 +823,18 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
         return 2;
     }
 
+    // --stacks is applied in the target after its config file. Without the
+    // flag the variable is removed, so a parent shell's value cannot override
+    // the preset or the config file.
+    if (args.stack_traces) {
+        if (!setEnvOrPrint(platform, env::kStackTrace,
+                           *args.stack_traces ? "1" : "0")) {
+            return 2;
+        }
+    } else if (!unsetEnvOrPrint(platform, env::kStackTrace)) {
+        return 2;
+    }
+
     // Warmup defers the in-child capture start so the window skips cold-start
     // (autotune / JIT / allocator growth). Nothing waits for it, so a warmup
     // run is reported as an unqualified Trace capture. Without --warmup the

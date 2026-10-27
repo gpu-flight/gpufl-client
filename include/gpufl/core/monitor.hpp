@@ -163,9 +163,35 @@ inline const char* ProfilingEngineSessionKind(const ProfilingEngine engine) {
  */
 enum class DeepArmMode { Always, WindowOnly };
 
+/**
+ * @brief The configuration layer that decided a setting.
+ *
+ * capture_capabilities reports it so a session without, say, call stacks
+ * shows whether someone turned them off or nobody turned them on.
+ *
+ *   Options    - the InitOptions passed to gpufl::init()
+ *   Preset     - the injection preset `gpufl trace` passes as InitOptions
+ *   ConfigFile - the local JSON config file
+ *   TraceFlag  - a `gpufl trace` flag, published through the environment
+ */
+enum class SettingSource { Options, Preset, ConfigFile, TraceFlag };
+
+inline const char* SettingSourceWireName(const SettingSource source) {
+    switch (source) {
+        case SettingSource::Options:    return "init_options";
+        case SettingSource::Preset:     return "preset_default";
+        case SettingSource::ConfigFile: return "config_file";
+        case SettingSource::TraceFlag:  return "trace_flag";
+    }
+    return "init_options";
+}
+
 struct MonitorOptions {
     bool enable_debug_output = false;
     bool enable_stack_trace = false;
+    // Which layer decided enable_stack_trace. Reported only; it changes
+    // nothing about what is captured.
+    SettingSource stack_trace_source = SettingSource::Options;
     bool enable_source_collection = true;
     SourceCaptureSettings source_capture;
     // Gate for CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION. Mirror of
