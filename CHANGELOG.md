@@ -172,6 +172,11 @@ types are additive.
 
 ### Changed
 
+- **The agent that `gpufl trace --upload` and `gpufl upload` start also tails
+  the `serving` channel** (default log types `device,scope,system,sass,serving`).
+  It carries the records the Python serving writer emits into its own session
+  directories; without it those sessions were never uploaded by a
+  launcher-started agent. A channel with no windows is a no-op.
 - **`--passes` and `--deep-*` are separate execution modes and cannot be
   combined.** The reason is a hardware constraint rather than a style choice:
   `cuptiProfilerInitialize` has to run before any CUDA context exists, so the

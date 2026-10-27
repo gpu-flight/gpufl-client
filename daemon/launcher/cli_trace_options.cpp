@@ -516,7 +516,7 @@ const CliOptionManager<TraceArgs>& traceOptions() {
                  kSection(TraceHelpSection::Runtime),
                  &parseNonEmptyStringOption<&TraceArgs::agent_cursor>)
             .add({"--log-types"}, "<LIST>",
-                 "Agent channels to upload (default: device,scope,system,sass)",
+                 "Agent channels to upload (default: device,scope,system,sass,serving)",
                  kSection(TraceHelpSection::Runtime),
                  &parseNonEmptyStringOption<&TraceArgs::log_types>)
             .add({"--agent-drain-ms"}, "<MS>",
