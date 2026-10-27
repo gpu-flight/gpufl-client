@@ -7,6 +7,8 @@ namespace gpufl::launcher {
 
 struct AgentOptions {
     std::string source_folders;
+    // Channel filter (GPUFL_LOG_TYPES). Empty: no filter, the agent uploads every
+    // channel it finds.
     std::string log_types;
     std::string cursor_file;
     std::string backend_url;

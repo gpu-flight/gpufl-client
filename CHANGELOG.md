@@ -188,6 +188,15 @@ types are additive.
   `--agent-drain-ms`, `--agent-cursor` and `--all-sessions` control it, and the
   launcher sends upload-complete only after a clean agent drain. `--upload` is
   scoped to a per-run folder rather than the shared `--output` directory.
+- **The launcher no longer picks the agent's channels.** `gpufl trace --upload`
+  and `gpufl upload` used to pass `device,scope,system,sass` to the agent they
+  start. They now pass no list, so the agent uploads every channel it finds in
+  the session directory, and `gpufl trace --log-types` only narrows that. A
+  `GPUFL_LOG_TYPES` inherited from the shell is removed from the agent's
+  environment rather than passed on. `gpufl monitor` still passes `system`.
+  Uploads do not change: a native session holds only those four channels, an
+  older agent with no list uses its own default (the same four), and an older
+  launcher's list acts as a filter on a newer agent.
 - **Linux injection lifecycle (`gpufl trace`).**
   - **Warmup.** `--warmup` now sets `GPUFL_INJECT_WARMUP_MS` instead of
     `GPUFL_INJECT_INIT_DELAY_MS`. Nothing waits for a warmup, so a warmup run

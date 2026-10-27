@@ -91,7 +91,7 @@ int runUpload(const UploadArgs& args) {
 
     AgentOptions agent_opts;
     agent_opts.source_folders = args.log_path;
-    agent_opts.log_types      = "device,scope,system,sass";
+    // log_types stays empty: the agent uploads every channel it finds.
     agent_opts.backend_url    = backend_url;
     agent_opts.api_key        = api_key;
     agent_opts.api_version    = apiVersionFrom(resolve(args.api_path, gpufl::env::kApiPath));
