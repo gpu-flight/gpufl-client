@@ -104,6 +104,13 @@ std::string ShutdownEventModel::buildJson() const {
     if (!e_.argv0.empty()) {
         oss << ",\"argv0\":\"" << jsonEscape(e_.argv0) << "\"";
     }
+    if (e_.stop_signal > 0) {
+        // Same fields as the launcher's synthetic shutdown. Stopped by a
+        // signal but flushed in order, so not a crash; `crashed` is explicit
+        // because a reader otherwise derives a crash from `signaled`.
+        oss << ",\"signaled\":true,\"signal\":" << e_.stop_signal
+            << ",\"crashed\":false";
+    }
     oss << "}";
     return oss.str();
 }

@@ -8,8 +8,11 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -32,6 +35,79 @@ std::string makeTimestamp() {
     char buf[32];
     std::strftime(buf, sizeof(buf), "%Y%m%d-%H%M%S", &tm);
     return buf;
+}
+
+// The bounded target's process group while signals are forwarded to it
+// (0: none). Read by a signal handler, so it must be lock-free.
+std::atomic<pid_t> g_forward_group{0};
+static_assert(std::atomic<pid_t>::is_always_lock_free);
+
+void forwardToTargetGroup(const int sig) {
+    const int saved_errno = errno;
+    const pid_t group = g_forward_group.load(std::memory_order_relaxed);
+    if (group > 0) {
+        (void)::kill(-group, sig);
+        // A member stopped on a terminal read acts on it once continued.
+        (void)::kill(-group, SIGCONT);
+    }
+    errno = saved_errno;
+}
+
+// While a bounded target runs in its own process group, the terminal's SIGINT
+// and SIGHUP, and a supervisor's SIGTERM, reach only the launcher's group, so
+// pass them on. The launcher keeps waiting and reports how the target ended.
+// A signal the launcher was started ignoring (nohup) stays ignored.
+class TargetGroupForwarder {
+   public:
+    explicit TargetGroupForwarder(const pid_t group) {
+        if (group <= 0) return;
+        g_forward_group.store(group, std::memory_order_relaxed);
+        for (std::size_t i = 0; i < kSignals.size(); ++i) {
+            struct sigaction current {};
+            if (::sigaction(kSignals[i], nullptr, &current) != 0) continue;
+            if (!(current.sa_flags & SA_SIGINFO) &&
+                current.sa_handler == SIG_IGN) {
+                continue;
+            }
+            struct sigaction forward {};
+            forward.sa_handler = forwardToTargetGroup;
+            sigemptyset(&forward.sa_mask);
+            forward.sa_flags = SA_RESTART;
+            installed_[i] =
+                ::sigaction(kSignals[i], &forward, &previous_[i]) == 0;
+        }
+    }
+
+    ~TargetGroupForwarder() {
+        for (std::size_t i = 0; i < kSignals.size(); ++i) {
+            if (installed_[i]) {
+                (void)::sigaction(kSignals[i], &previous_[i], nullptr);
+            }
+        }
+        g_forward_group.store(0, std::memory_order_relaxed);
+    }
+
+    TargetGroupForwarder(const TargetGroupForwarder&) = delete;
+    TargetGroupForwarder& operator=(const TargetGroupForwarder&) = delete;
+
+   private:
+    static constexpr std::array<int, 3> kSignals{SIGINT, SIGTERM, SIGHUP};
+    std::array<struct sigaction, 3> previous_{};
+    std::array<bool, 3> installed_{};
+};
+
+// After the direct child exited within the stop grace, the rest of its group
+// (workers it started, possibly still flushing their own capture) gets what is
+// left of the grace, then SIGKILL.
+void stopGroupRemainder(const pid_t group,
+                        const std::chrono::steady_clock::time_point grace_end) {
+    while (::kill(-group, 0) == 0) {
+        if (std::chrono::steady_clock::now() >= grace_end) {
+            (void)::kill(-group, SIGKILL);
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
 }
 
 class PosixTracePlatform final : public TracePlatform {
@@ -100,6 +176,10 @@ class PosixTracePlatform final : public TracePlatform {
             const std::vector<std::string>& command,
             const RunOptions& opts) const override {
         TraceProcessResult out;
+        // A bounded run gets its own process group, so the deadline stop
+        // reaches every process the target started, not only the direct
+        // child. An unbounded run stays in the launcher's group.
+        const bool bounded = opts.run_ms > 0;
         pid_t pid = ::fork();
         if (pid < 0) {
             out.launcher_error = true;
@@ -108,6 +188,7 @@ class PosixTracePlatform final : public TracePlatform {
             return out;
         }
         if (pid == 0) {
+            if (bounded) (void)::setpgid(0, 0);
             std::vector<char*> argv;
             argv.reserve(command.size() + 1);
             for (const auto& s : command) {
@@ -119,6 +200,19 @@ class PosixTracePlatform final : public TracePlatform {
                          command.front().c_str(), std::strerror(errno));
             std::_Exit(127);
         }
+
+        // Set from both sides, as shells do, so the group exists before the
+        // exec and before any stop signal. EACCES (the child already exec'd,
+        // having set it itself) and ESRCH are expected races; only a group
+        // that really exists is signalled as one.
+        bool own_group = false;
+        if (bounded) {
+            (void)::setpgid(pid, pid);
+            own_group = ::getpgid(pid) == pid;
+        }
+        TargetGroupForwarder forwarder(own_group ? pid : 0);
+        // Every stop signal reaches the whole group when there is one.
+        const pid_t stop_target = own_group ? -pid : pid;
 
         auto fillFromStatus = [&out](int status) {
             if (WIFEXITED(status)) {
@@ -197,7 +291,7 @@ class PosixTracePlatform final : public TracePlatform {
                     // SIGKILL, never SIGTERM: the application may handle
                     // SIGTERM, and the wedged initializer must not run on.
                     out.init_watchdog_killed = true;
-                    ::kill(pid, SIGKILL);
+                    ::kill(stop_target, SIGKILL);
                     reapBlocking();
                     return 1;
                 }
@@ -216,25 +310,33 @@ class PosixTracePlatform final : public TracePlatform {
             return out;
         }
 
-        // Deadline reached → stop the target.
+        // Deadline reached → stop the target and everything in its group.
+        // SIGCONT after it, as GNU timeout does: a process stopped on a
+        // terminal read acts on the SIGTERM only once continued.
         out.window_stopped = true;
-        ::kill(pid, SIGTERM);
+        ::kill(stop_target, SIGTERM);
+        ::kill(stop_target, SIGCONT);
         const auto grace = std::chrono::steady_clock::now() +
                            std::chrono::milliseconds(opts.stop_grace_ms);
-        if (waitUntil(grace) != 0) {  // exited within the grace
-            finishBootstrap();
-            return out;
+        const int stopped = waitUntil(grace);
+        if (stopped == 0) {
+            // Still alive → hard kill and reap.
+            ::kill(stop_target, SIGKILL);
+            reapBlocking();
+        } else if (stopped > 0 && own_group) {
+            stopGroupRemainder(pid, grace);
         }
-
-        // Still alive → hard kill and reap.
-        ::kill(pid, SIGKILL);
-        reapBlocking();
         finishBootstrap();
         return out;
     }
 };
 
 }  // namespace
+
+TraceProcessResult runPosixTraceProcess(const std::vector<std::string>& command,
+                                        const RunOptions& opts) {
+    return PosixTracePlatform{}.runProcess(command, opts);
+}
 
 int runTrace(const TraceArgs& args) {
     return runTraceCommon(args, PosixTracePlatform{});

@@ -12,6 +12,7 @@
 #include "gpufl/core/monitor.hpp"
 #include "gpufl/core/process_identity.hpp"
 #include "gpufl/core/runtime.hpp"
+#include "gpufl/core/stop_signal.hpp"
 
 namespace gpufl {
 namespace {
@@ -379,7 +380,7 @@ bool SegmentRuntime::retire_(RetiredSegment retired) {
 
 void SegmentRuntime::writeShutdown_(
     const std::shared_ptr<const SegmentContext>& context,
-    const int64_t ts_ns) const {
+    const int64_t ts_ns, const int stop_signal) const {
     ShutdownEvent shutdown;
     shutdown.pid = options_.init_template.pid;
     shutdown.app = options_.init_template.app;
@@ -387,6 +388,7 @@ void SegmentRuntime::writeShutdown_(
     shutdown.ts_ns = ts_ns;
     shutdown.process_name = getProcessName();
     shutdown.argv0 = getProcessArgv0();
+    shutdown.stop_signal = stop_signal;
     context->logger->write(model::ShutdownEventModel(shutdown));
 }
 
@@ -424,7 +426,7 @@ void SegmentRuntime::finish(const int64_t ended_ns) {
         run_end.ts_ns = ended_ns;
         run_end.ended_ns = ended_ns;
         context->logger->write(model::RunEndEventModel(run_end));
-        writeShutdown_(context, ended_ns);
+        writeShutdown_(context, ended_ns, detail::stopSignal());
         context->logger->close();
     }
 }

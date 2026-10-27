@@ -810,6 +810,7 @@ if(BUILD_GPUFL_INJECT AND ((UNIX AND NOT APPLE) OR WIN32))
         target_sources(gpufl_inject PRIVATE
             include/gpufl/inject/capture_gate.cpp
             include/gpufl/inject/capture_gate_linux.cpp
+            include/gpufl/inject/sigterm_flush_linux.cpp
         )
     endif()
     if(UNIX AND NOT APPLE AND GPUFL_HAS_CUDA)

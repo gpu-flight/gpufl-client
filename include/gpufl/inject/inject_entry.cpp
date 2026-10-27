@@ -19,6 +19,7 @@
 
 #include "gpufl/inject/inject_entry.hpp"
 #include "gpufl/inject/capture_gate_linux.hpp"
+#include "gpufl/inject/sigterm_flush_linux.hpp"
 
 #include "gpufl/core/env_vars.hpp"
 
@@ -49,6 +50,8 @@
 #  define GPUFL_INJECT_EXPORT __declspec(dllexport)
 #else
 #  include <dlfcn.h>
+#  include <signal.h>
+#  include <sys/types.h>
 #  include <unistd.h>
 #  define GPUFL_INJECT_EXPORT __attribute__((visibility("default")))
 #endif
@@ -85,6 +88,7 @@
 #include "gpufl/core/debug_logger.hpp"  // GFL_LOG_DEBUG (teardown tracing)
 #include "gpufl/core/monitor.hpp"
 #include "gpufl/core/nvtx_counters.hpp"
+#include "gpufl/core/stop_signal.hpp"  // setStopSignal (Linux SIGTERM flush)
 #include "gpufl/core/teardown_flag.hpp"  // setProcessExitTeardown (Windows)
 #include "gpufl/upload/upload_logs.hpp"  // gpufl::uploadLogs for --upload
 
@@ -93,7 +97,15 @@ namespace {
 std::once_flag g_init_once;
 std::once_flag g_shutdown_atexit_once;
 std::atomic<bool> g_init_ok{false};
+#ifdef _WIN32
 std::atomic<bool> g_shutdown_started{false};
+#else
+// The pid whose thread runs the shutdown (0: not started). A child forked
+// without exec inherits it, which is how it knows that thread is not its own.
+std::atomic<pid_t> g_shutdown_owner{0};
+std::atomic<bool> g_shutdown_finished{false};
+thread_local bool t_running_shutdown = false;
+#endif
 
 // Captured during init for the atexit upload path (--upload). g_log_path
 // mirrors InitOptions.log_path; both are read only in shutdownAndSignal,
@@ -203,12 +215,32 @@ void writeCompletionByteIfRequested() {
     // Windows: the launcher does not wire a completion fd (Phase 2 stub).
 }
 
-void shutdownAndSignal() {
+// True for the one caller that runs the shutdown.
+bool claimShutdown() {
+#ifdef _WIN32
     bool expected = false;
-    if (!g_shutdown_started.compare_exchange_strong(
-            expected, true, std::memory_order_acq_rel)) {
-        return;
+    return g_shutdown_started.compare_exchange_strong(
+        expected, true, std::memory_order_acq_rel);
+#else
+    pid_t owner = 0;
+    if (g_shutdown_owner.compare_exchange_strong(
+            owner, ::getpid(), std::memory_order_acq_rel)) {
+        t_running_shutdown = true;
+        return true;
     }
+    // The SIGTERM flush runs on its own thread while the application keeps
+    // running. An application exiting meanwhile must not return from its
+    // atexit call at once and let exit() destroy what the flush still uses.
+    while (!t_running_shutdown && owner == ::getpid() &&
+           !g_shutdown_finished.load(std::memory_order_acquire)) {
+        sleepMs(1);
+    }
+    return false;
+#endif
+}
+
+void shutdownAndSignal() {
+    if (!claimShutdown()) return;
 
     GFL_LOG_DEBUG("inject: shutdownAndSignal begin");
 #ifdef _WIN32
@@ -243,7 +275,21 @@ void shutdownAndSignal() {
         }
     }
     writeCompletionByteIfRequested();
+#ifndef _WIN32
+    g_shutdown_finished.store(true, std::memory_order_release);
+#endif
 }
+
+#ifndef _WIN32
+// SIGTERM's default action skips atexit, so a stopped target ended without its
+// capture_capabilities and shutdown rows. Runs on sigterm_flush's own thread;
+// the process then still ends by SIGTERM.
+void flushOnSigterm() {
+    GFL_LOG_DEBUG("inject: SIGTERM -> shutdownAndSignal()");
+    gpufl::detail::setStopSignal(SIGTERM);
+    shutdownAndSignal();
+}
+#endif
 
 
 struct NvtxDomainStorage {
@@ -572,6 +618,10 @@ void doInjectInit() {
         registerShutdownAtexit();
 #ifdef _WIN32
         startStopEventListener();
+#else
+        // Injection mode only: an application embedding gpufl owns its
+        // signals. Skipped when the target already handles or ignores SIGTERM.
+        (void)gpufl::inject::InstallSigtermFlush(flushOnSigterm);
 #endif
     } else {
         // init() already logs the failure via its own debug logger.

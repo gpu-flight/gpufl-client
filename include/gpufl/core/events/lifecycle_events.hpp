@@ -96,6 +96,9 @@ struct ShutdownEvent {
     // (vLLM names its engine process VLLM::EngineCore). Omitted when empty.
     std::string process_name;
     std::string argv0;
+    // The signal that requested this shutdown (Linux injection: SIGTERM), 0
+    // for an ordinary exit. Serialized as signaled/signal; omitted when 0.
+    int stop_signal = 0;
 };
 
 // Segment lifecycle records are defined now, but runtime segmentation remains

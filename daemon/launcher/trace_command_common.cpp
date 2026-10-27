@@ -25,6 +25,7 @@
 #include "gpufl/core/json/json.hpp"
 #include "gpufl/core/logger/file_compressor.hpp"
 #include "gpufl/core/logger/log_salvage.hpp"
+#include "gpufl/core/logger/session_ownership.hpp"
 #include "gpufl/core/logger/window_metadata.hpp"
 #include "gpufl/core/process_identity.hpp"
 #include "gpufl/inject/inject_entry.hpp"
@@ -148,15 +149,6 @@ bool isSessionDirectory(const fs::directory_entry& entry) {
     const std::string name = entry.path().filename().string();
     return !name.empty() && name.front() != '.';
 }
-
-struct SyntheticShutdownContext {
-    int exit_code = 0;
-    bool signaled = false;
-    int signal = 0;
-    bool window_stopped = false;  // intentional window-end stop, not a crash
-    // Capture initialization never finished; the launcher killed the target.
-    bool init_watchdog_killed = false;
-};
 
 void inspectLifecycleLine(const std::string& line, SessionLifecycleInfo& info) {
     if (line.find("\"type\":\"segment_end\"") != std::string::npos) {
@@ -409,11 +401,14 @@ void inspectLifecycleFiles(const std::vector<fs::path>& paths,
     }
 }
 
-int ensureTraceCompletionMarkers(const fs::path& output_dir,
-                                 const int64_t min_job_start_ts_ns,
-                                 const SyntheticShutdownContext& context) {
+}  // namespace
+
+TraceCompletionRepair ensureTraceCompletionMarkers(
+    const fs::path& output_dir, const int64_t min_job_start_ts_ns,
+    const SyntheticShutdownContext& context) {
+    TraceCompletionRepair repair;
     std::error_code ec;
-    if (output_dir.empty() || !fs::exists(output_dir, ec)) return 0;
+    if (output_dir.empty() || !fs::exists(output_dir, ec)) return repair;
 
     struct SessionCandidate {
         fs::path session_dir;
@@ -474,7 +469,6 @@ int ensureTraceCompletionMarkers(const fs::path& output_dir,
         }
     }
 
-    int synthesized = 0;
     for (const auto& candidate : candidates) {
         const auto& info = candidate.info;
         const auto highest = highest_segment_by_run.find(info.run_id);
@@ -486,15 +480,28 @@ int ensureTraceCompletionMarkers(const fs::path& output_dir,
             !context.window_stopped && !info.run_id.empty() &&
             (!info.saw_segment_end ||
              (may_synthesize_run_end && !info.saw_run_end));
-        if ((!info.saw_shutdown || needs_normal_finality) &&
-            appendSyntheticCompletion(
+        if (info.saw_shutdown && !needs_normal_finality) continue;
+
+        // The writer holds this lock for the session's whole life, so a held
+        // lock is a process that outlived the direct child (a worker the
+        // target started) and is still writing. Held here too until the
+        // markers are written, as salvage does.
+        const auto ownership =
+            SessionOwnershipLock::tryAcquire(candidate.session_dir);
+        if (!ownership) {
+            repair.live_sessions.push_back(candidate.session_id);
+            continue;
+        }
+        if (appendSyntheticCompletion(
                 candidate.session_dir, candidate.session_id, info, context,
                 may_synthesize_run_end)) {
-            ++synthesized;
+            ++repair.synthesized;
         }
     }
-    return synthesized;
+    return repair;
 }
+
+namespace {
 
 // Out-of-process upload-complete signal. After the agent has drained and exited
 // cleanly, POST /events/session-complete for each session under output_dir so the
@@ -527,6 +534,18 @@ void signalSessionsComplete(const fs::path& output_dir,
                     "gpufl trace --upload: NOT signalling session-complete "
                     "for %s: %zu transport window(s) are known lost\n",
                     session_id.c_str(), lost_windows);
+            }
+            continue;
+        }
+        // A process that outlived the target still writes this session; its
+        // own shutdown and a later upload complete it.
+        if (!SessionOwnershipLock::tryAcquire(entry.path())) {
+            if (!quiet) {
+                std::fprintf(
+                    stderr,
+                    "gpufl trace --upload: NOT signalling session-complete "
+                    "for %s: a running process still owns it\n",
+                    session_id.c_str());
             }
             continue;
         }
@@ -1086,10 +1105,21 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
         shutdown_context.signal = run.signal;
         shutdown_context.window_stopped = run.window_stopped;
         shutdown_context.init_watchdog_killed = run.init_watchdog_killed;
-        const int synthesized = ensureTraceCompletionMarkers(
+        const TraceCompletionRepair repair = ensureTraceCompletionMarkers(
                 output_dir, pass_start_ns, shutdown_context);
-        if (synthesized > 0) {
-            GFL_LOG_DEBUG("wrote ", synthesized, " synthetic shutdown marker(s)");
+        if (repair.synthesized > 0) {
+            GFL_LOG_DEBUG("wrote ", repair.synthesized,
+                          " synthetic shutdown marker(s)");
+        }
+        if (!args.quiet) {
+            for (const std::string& session_id : repair.live_sessions) {
+                std::fprintf(stderr,
+                             "[gpufl] %s: session %s is still being written "
+                             "by a process that outlived the target; it "
+                             "finishes itself and is uploaded once its lock "
+                             "is released\n",
+                             what.c_str(), session_id.c_str());
+            }
         }
     }
 
