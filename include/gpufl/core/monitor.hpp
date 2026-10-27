@@ -31,6 +31,10 @@ class SegmentDictionaryEmitter;
 /// spin/yield on overrun as defense in depth.
 inline constexpr size_t kMonitorBufferSize = 65536;
 
+/// Period of the collector's flush beat, which is also when the profiling
+/// engines drain their hardware buffers. No drain runs more often than this.
+inline constexpr int64_t kCollectorBeatMs = 250;
+
 /// Global ring buffer shared between profiling engines (producers) and
 /// the monitor collector thread (consumer).  Declared here so all
 /// translation units use the same template instantiation.

@@ -520,7 +520,8 @@ void CollectorLoop() {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
-        if (std::chrono::steady_clock::now() - lastFlush > std::chrono::milliseconds(250)) {
+        if (std::chrono::steady_clock::now() - lastFlush >
+            std::chrono::milliseconds(kCollectorBeatMs)) {
             if (Runtime* rt = runtime(); rt && rt->hasSegmentContext()) {
                 if (g_state.drainSyntheticMidRun) {
                     constexpr int64_t kMidRunSyntheticGraceNs = 100'000'000;

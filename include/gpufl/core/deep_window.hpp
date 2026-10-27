@@ -206,6 +206,14 @@ class DeepWindow {
     static bool Active();
 
     /**
+     * @brief Wall-time bound of the open window, in ms.
+     *
+     * 0 when no window is open or the open one is bounded only by a launch
+     * count. Lock-free, so an engine may read it while arming inside Open().
+     */
+    static int64_t OpenDurationMs();
+
+    /**
      * @brief Per-launch bound accounting, driven from the CUPTI launch
      * callback.
      *

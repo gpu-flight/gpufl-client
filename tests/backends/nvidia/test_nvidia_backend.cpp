@@ -4,6 +4,7 @@
 
 #if GPUFL_ENABLE_NVIDIA && GPUFL_HAS_CUPTI
 #include "gpufl/backends/nvidia/cupti_backend.hpp"
+#include "gpufl/backends/nvidia/engine/pm_sampling_engine.hpp"
 #include "gpufl/backends/nvidia/kernel_launch_handler.hpp"
 
 class CuptiBackendTest : public ::testing::Test {
@@ -93,6 +94,44 @@ TEST(OrphanKernelSynthesisPolicy, RealRecordModesAlwaysSuppressOrphans) {
     EXPECT_TRUE(ShouldSuppressOrphanKernelSynthesis(false, false));
     // PC sampling / other synthesize-by-design modes.
     EXPECT_FALSE(ShouldSuppressOrphanKernelSynthesis(false, true));
+}
+
+// The demo config (1000us x 10000) gates its drain at 5s, so a 3s deep window
+// got one early decode and a final one covering ~2.8s, and those windows
+// failed on an H100. A timed window drains every third of its length instead.
+TEST(PmDrainPeriod, ATimedWindowDrainsEveryThirdOfItsLength) {
+    using gpufl::PmDrainPeriodNs;
+    constexpr int64_t kMs = 1'000'000;
+
+    EXPECT_EQ(PmDrainPeriodNs(1000, 10000, 3000), 1000 * kMs);
+    // No window, or one bounded only by launches: the fill gate as before.
+    EXPECT_EQ(PmDrainPeriodNs(1000, 10000, 0), 5000 * kMs);
+    // Never below the beat, and never above the fill gate (204.8ms here).
+    EXPECT_EQ(PmDrainPeriodNs(1000, 10000, 600), gpufl::kCollectorBeatMs * kMs);
+    EXPECT_EQ(PmDrainPeriodNs(100, 4096, 3000), 4096 * 100 * 1000 / 2);
+}
+
+// The beat as the collector runs it: PmDrainDue once more than
+// kCollectorBeatMs has passed. Worst case for the count: the last decode
+// landed just as the window opened, so the first early one never happens.
+TEST(PmDrainPeriod, AThreeSecondWindowGetsAtLeastThreeDecodes) {
+    constexpr int64_t kMs = 1'000'000;
+    constexpr int64_t kWindowMs = 3000;
+    const int64_t beat_ns = (gpufl::kCollectorBeatMs + 1) * kMs;
+    const int64_t period_ns = gpufl::PmDrainPeriodNs(1000, 10000, kWindowMs);
+    const int64_t open_ns = 60'000 * kMs;
+    const int64_t close_ns = open_ns + kWindowMs * kMs;
+
+    int64_t last_drain_ns = open_ns;
+    int decodes = 0;
+    for (int64_t now = open_ns + beat_ns; now < close_ns; now += beat_ns) {
+        if (gpufl::PmDrainDue(now, last_drain_ns, period_ns)) {
+            ++decodes;
+            last_drain_ns = now;
+        }
+    }
+    ++decodes;  // the final decode at window close
+    EXPECT_GE(decodes, 3);
 }
 
 TEST_F(CuptiBackendTest, Lifecycle) {
