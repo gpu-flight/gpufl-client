@@ -528,11 +528,14 @@ const CliOptionManager<TraceArgs>& traceOptions() {
             .add({"--window"}, "<DUR>",
                  "Bounded window: capture this long after warmup, then STOP "
                  "the target. For servers that never exit. Omit to run to the "
-                 "target's own exit.",
+                 "target's own exit. On Linux a bounded target runs in its own "
+                 "process group, so the stop reaches every process it started; "
+                 "as with `timeout`, it cannot read from the terminal.",
                  kSection(TraceHelpSection::Window),
                  &parseDurationOption<&TraceArgs::window_ms>)
             .add({"--window-timeout"}, "<DUR>",
-                 "Hard cap on total target runtime (safety).",
+                 "Hard cap on total target runtime (safety). Bounds the target "
+                 "like --window, own process group included.",
                  kSection(TraceHelpSection::Window),
                  &parseDurationOption<&TraceArgs::window_timeout_ms>)
             .add({"--after-window"}, "<WHAT>",

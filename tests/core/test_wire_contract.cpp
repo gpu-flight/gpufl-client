@@ -426,6 +426,22 @@ TEST(WireContract, ShutdownShape) {
     EXPECT_EQ(json.find("\"process_continues\""), std::string::npos);
     EXPECT_EQ(json.find("\"process_name\""), std::string::npos);
     EXPECT_EQ(json.find("\"argv0\""), std::string::npos);
+    EXPECT_EQ(json.find("\"signaled\""), std::string::npos);
+}
+
+// A SIGTERM'd injected process that still flushed in order: stopped by a
+// signal, not crashed (the backend derives a crash from `signaled` alone).
+TEST(WireContract, ShutdownAfterStopSignalIsSignaledNotCrashed) {
+    gpufl::ShutdownEvent e;
+    e.pid = 4242;
+    e.session_id = "sess-1";
+    e.stop_signal = 15;
+
+    const std::string json = gpufl::model::ShutdownEventModel(e).buildJson();
+
+    EXPECT_TRUE(JsonContains(json, "\"signaled\":true"));
+    EXPECT_TRUE(JsonContains(json, "\"signal\":15"));
+    EXPECT_TRUE(JsonContains(json, "\"crashed\":false"));
 }
 
 // Shutdown re-reads the process identity, because a process may retitle

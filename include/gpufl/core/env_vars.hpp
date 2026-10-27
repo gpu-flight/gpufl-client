@@ -60,7 +60,10 @@ constexpr const char* kInjectCompletionFd   = "GPUFL_INJECT_COMPLETION_FD";
 // auto-reset event and passes its HANDLE value (decimal) here; the inject lib
 // waits on it and, when the launcher signals window-end, runs a clean shutdown
 // (flush + close + optional upload) then exits - so the launcher reaps without
-// a hard TerminateProcess. (Linux drives the same flush via SIGTERM.)
+// a hard TerminateProcess. Linux has no such variable: the launcher sends
+// SIGTERM to the target's process group, and the inject lib, unless the target
+// handles or ignores SIGTERM itself, runs the same shutdown on its own thread
+// and then still ends by SIGTERM (inject/sigterm_flush_linux.hpp).
 constexpr const char* kStopEvent            = "GPUFL_STOP_EVENT";
 // Opt-in ("1"): run gpufl::init() from the inject lib's ld.so constructor
 // (before main / cuInit). Off by default - pre-cuInit CUPTI subscribe segfaults

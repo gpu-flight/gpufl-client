@@ -109,6 +109,39 @@ bool applyDeepWindowEnv(const TraceArgs& args, const TracePlatform& platform);
 bool applySegmentationEnv(const TraceArgs& args, const std::string& run_id,
                           const TracePlatform& platform);
 
+// How the direct child ended, for the synthetic shutdown the launcher writes
+// into a session that has none.
+struct SyntheticShutdownContext {
+    int exit_code = 0;
+    bool signaled = false;
+    int signal = 0;
+    bool window_stopped = false;  // intentional window-end stop, not a crash
+    // Capture initialization never finished; the launcher killed the target.
+    bool init_watchdog_killed = false;
+};
+
+struct TraceCompletionRepair {
+    // Sessions that received synthetic completion markers.
+    int synthesized = 0;
+    // Sessions left alone because a live process still owns their lock.
+    std::vector<std::string> live_sessions;
+};
+
+/**
+ * @brief After the direct child exits, append the completion markers missing
+ *        from each session under `output_dir` that started at or after
+ *        `min_job_start_ts_ns`.
+ *
+ * A session whose ownership lock is still held is skipped and listed: its
+ * writer is a process of this trace that outlived the direct child (a worker
+ * the target started), and a synthetic shutdown would mark it finished while
+ * it still writes. It finishes itself; an uploader takes it once the lock is
+ * released.
+ */
+TraceCompletionRepair ensureTraceCompletionMarkers(
+    const fs::path& output_dir, int64_t min_job_start_ts_ns,
+    const SyntheticShutdownContext& context);
+
 /**
  * @brief Publish the launch id every process of this trace inherits.
  *

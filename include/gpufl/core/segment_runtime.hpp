@@ -73,8 +73,9 @@ class SegmentRuntime {
         const std::shared_ptr<const SegmentContext>& context,
         const char* phase);
     void stopRetirementWorker_();
+    // stop_signal: only the final shutdown of a run carries it.
     void writeShutdown_(const std::shared_ptr<const SegmentContext>& context,
-                        int64_t ts_ns) const;
+                        int64_t ts_ns, int stop_signal = 0) const;
 
     Options options_;
     SegmentCoordinator coordinator_;

@@ -19,6 +19,7 @@
 #include "gpufl/backends/host_collector.hpp"
 #include "gpufl/core/client_startup.hpp"
 #include "gpufl/core/common.hpp"
+#include "gpufl/core/stop_signal.hpp"  // detail::stopSignal
 #include "gpufl/core/teardown_flag.hpp"  // detail::isProcessExitTeardown
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/deep_window.hpp"
@@ -374,6 +375,7 @@ void shutdown() {
         se.ts_ns = ended_ns;
         se.process_name = getProcessName();
         se.argv0 = getProcessArgv0();
+        se.stop_signal = detail::stopSignal();
         final_segment->logger->write(model::ShutdownEventModel(se));
 
         GFL_LOG_DEBUG("Shutdown: writing events done -> logger->close()");
