@@ -304,6 +304,14 @@ types are additive.
   CUPTI-delivered markers were counted, so a trace with NVTX rows reported
   `enabled_no_data`. Ranges from the injection library's own NVTX hooks now
   count too (mode `nvtx_injection`).
+- **PM sampling drains a timed deep window at least three times.** PM samples
+  were decoded every half buffer span (`pm_sampling_max_samples` x
+  `pm_sampling_interval_us`), 5 s at 1000 us x 10000, so a 3 s window got one
+  early decode and a final one covering ~2.8 s. On an H100 those windows failed
+  with `CUPTI_ERROR_UNKNOWN` while 1 s windows decoded. While a window with a
+  duration is open, the drain period is now at most a third of it, but never
+  shorter than the 250 ms collector beat. Outside windows, and for windows
+  bounded only by a launch count, the cadence is unchanged.
 
 ## [1.2.1] - 2026-06-23
 

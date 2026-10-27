@@ -43,6 +43,39 @@ std::string DescribeCuptiFailure(const char* op, const CUptiResult res) {
 #endif
 }  // namespace
 
+// The counter-data image holds pm_sampling_max_samples; at
+// pm_sampling_interval_us that is a fixed span of wall time (4096 x 100us =
+// ~410ms by default). Past it the hardware buffer overflows and this driver
+// reports the overflow from DecodeData as CUPTI_ERROR_UNKNOWN rather than
+// CUPTI_ERROR_OUT_OF_MEMORY, which loses the whole scope's samples. So drain
+// on the collector beat instead of only at scope end. Verified on an RTX
+// 3090: scopes up to 350ms decoded, 500ms and longer returned 999.
+//
+// Half the span alone is too long for a long interval: 1000us x 10000 gates
+// at 5s, so a 3s deep window got one early decode and a final one covering
+// ~2.8s. On an H100 those windows returned 999 while 1s windows decoded. A
+// window with a wall-time bound therefore also drains every third of its
+// length.
+int64_t PmDrainPeriodNs(const uint32_t interval_us, const uint32_t max_samples,
+                        const int64_t window_ms) {
+    const int64_t samples = max_samples > 0 ? max_samples : 4096;
+    const int64_t interval = interval_us > 0 ? interval_us : 100;
+    // Half the buffer span: enough headroom that a late collector tick still
+    // lands before the hardware wraps.
+    const int64_t fill_period_ns = samples * interval * 1000 / 2;
+    if (window_ms <= 0) return fill_period_ns;
+    // Floored at the beat, which is the soonest the collector looks again.
+    // Never raises the fill period, which may already sit below the beat.
+    const int64_t window_period_ns =
+        std::max(window_ms * 1000000 / 3, kCollectorBeatMs * 1000000);
+    return std::min(fill_period_ns, window_period_ns);
+}
+
+bool PmDrainDue(const int64_t now_ns, const int64_t last_drain_ns,
+                const int64_t period_ns) {
+    return last_drain_ns == 0 || now_ns >= last_drain_ns + period_ns;
+}
+
 bool PmSamplingEngine::initialize(const MonitorOptions& opts,
                                   const EngineContext& ctx) {
     opts_ = opts;
@@ -125,11 +158,13 @@ void PmSamplingEngine::onScopeStop(const char*) {
 void PmSamplingEngine::drainData() {
 #if GPUFL_HAS_PERFWORKS
     if (!running_) return;
-    // Half the buffer span: enough headroom that a late collector tick still
-    // lands before the hardware wraps.
+    // Read every beat rather than at arm: a user scope may have armed
+    // sampling before the window opened.
     const int64_t now = detail::GetTimestampNs();
-    const int64_t due = last_drain_ns_ + BufferSpanNs_() / 2;
-    if (last_drain_ns_ != 0 && now < due) return;
+    const int64_t period = PmDrainPeriodNs(opts_.pm_sampling_interval_us,
+                                           opts_.pm_sampling_max_samples,
+                                           DeepWindow::OpenDurationMs());
+    if (!PmDrainDue(now, last_drain_ns_, period)) return;
 
     std::lock_guard<std::mutex> lk(pm_mu_);
     if (!running_) return;
@@ -455,23 +490,6 @@ bool PmSamplingEngine::ResetCounterDataImage_() {
         this->name(), "cuptiPmSamplingCounterDataImageInitialize", res);
 }
 
-// The counter-data image holds pm_sampling_max_samples; at
-// pm_sampling_interval_us that is a fixed span of wall time (4096 x 100us =
-// ~410ms by default). Past it the hardware buffer overflows and this driver
-// reports the overflow from DecodeData as CUPTI_ERROR_UNKNOWN rather than
-// CUPTI_ERROR_OUT_OF_MEMORY, which loses the whole scope's samples. So drain
-// on the collector beat instead of only at scope end. Verified on an RTX
-// 3090: scopes up to 350ms decoded, 500ms and longer returned 999.
-int64_t PmSamplingEngine::BufferSpanNs_() const {
-    const int64_t samples = opts_.pm_sampling_max_samples > 0
-                                ? opts_.pm_sampling_max_samples
-                                : 4096;
-    const int64_t interval_us = opts_.pm_sampling_interval_us > 0
-                                    ? opts_.pm_sampling_interval_us
-                                    : 100;
-    return samples * interval_us * 1000;
-}
-
 void PmSamplingEngine::DecodeAndEmit_() {
     if (!pm_object_ || !host_object_ || counter_data_image_.empty()) return;
 
@@ -683,7 +701,10 @@ void PmSamplingEngine::StartPmSampling_() {
     if (opts_.deep_arm_mode == DeepArmMode::WindowOnly) {
         GFL_LOG_INFO("deep window armed: nvidia.pm_sampling");
     }
-    GFL_LOG_DEBUG("[PmSamplingEngine] >>> STARTED (Scope Begin) <<<");
+    GFL_LOG_DEBUG("[PmSamplingEngine] >>> STARTED (Scope Begin) <<< drain_period_ms=",
+                  PmDrainPeriodNs(opts_.pm_sampling_interval_us,
+                                  opts_.pm_sampling_max_samples,
+                                  DeepWindow::OpenDurationMs()) / 1000000);
 }
 
 void PmSamplingEngine::StopPmSampling_() {

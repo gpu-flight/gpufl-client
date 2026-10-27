@@ -16,6 +16,24 @@
 
 namespace gpufl {
 
+/**
+ * @brief How long PM samples may accumulate before a collector beat decodes
+ * them, in ns.
+ *
+ * Half the buffer span (max_samples x interval_us) by default. While a deep
+ * window with a wall-time bound is open, also no more than a third of the
+ * window, so it gets at least three decodes, but never less than the
+ * collector beat. Pure, so the cadence is testable without a GPU.
+ *
+ * @param window_ms Duration of the open deep window; 0 when none is open or
+ *        it is bounded only by a launch count.
+ */
+int64_t PmDrainPeriodNs(uint32_t interval_us, uint32_t max_samples,
+                        int64_t window_ms);
+
+/** @brief Whether a beat at `now_ns` decodes; last_drain_ns 0 = never. */
+bool PmDrainDue(int64_t now_ns, int64_t last_drain_ns, int64_t period_ns);
+
 class PmSamplingEngine final : public IProfilingEngine {
    public:
     PmSamplingEngine() = default;
@@ -31,7 +49,7 @@ class PmSamplingEngine final : public IProfilingEngine {
 
     void onScopeStart(const char* name) override;
     void onScopeStop(const char* name) override;
-    // Drains the hardware buffer mid-scope; see the definition for why a
+    // Drains the hardware buffer mid-scope; see PmDrainPeriodNs for why a
     // scope longer than the buffer span otherwise loses everything.
     void drainData() override;
 
@@ -73,7 +91,6 @@ class PmSamplingEngine final : public IProfilingEngine {
     bool InitializePmSampling_();
     bool BuildConfigImage_();
     bool ResetCounterDataImage_();
-    int64_t BufferSpanNs_() const;
     int64_t last_drain_ns_ = 0;
     // Log the chip's single-pass metric sets (the metric bundles collectible
     // in one pass) and their metrics. The set names are chip-specific, so

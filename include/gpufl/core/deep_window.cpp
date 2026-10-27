@@ -85,7 +85,9 @@ thread_local uint64_t g_claimed_token = 0;
 
 DeepWindowTrigger g_trigger;   // guarded by g_mu
 int64_t     g_opened_ns = 0;
-int64_t     g_requested_duration_ms = 0;
+// Atomic, unlike its neighbours: OpenDurationMs() reads it without g_mu,
+// because the engines it serves arm while Open() holds that lock.
+std::atomic<int64_t> g_requested_duration_ms{0};
 uint64_t    g_requested_max_launches = 0;
 std::string g_name;
 // Pairs the window's scope begin/end rows. 0 = no scope row was pushed, which
@@ -221,6 +223,13 @@ bool DeepWindow::Active() {
     return g_active.load(std::memory_order_acquire);
 }
 
+int64_t DeepWindow::OpenDurationMs() {
+    // Open() stores the duration before it publishes g_active, so a window
+    // seen as active is never read with the previous window's bound.
+    if (!g_active.load(std::memory_order_acquire)) return 0;
+    return g_requested_duration_ms.load(std::memory_order_relaxed);
+}
+
 bool DeepWindow::Open(const DeepWindowSpec& spec) {
     const Runtime* rt = runtime();
     if (!rt || !rt->hasSegmentContext()) return false;
@@ -259,7 +268,8 @@ bool DeepWindow::Open(const DeepWindowSpec& spec) {
         g_opened_ns = detail::GetTimestampNs();
         g_trigger = spec.trigger;
         g_name = spec.name.empty() ? "deep_window" : spec.name;
-        g_requested_duration_ms = spec.max_duration_ms;
+        g_requested_duration_ms.store(spec.max_duration_ms,
+                                      std::memory_order_relaxed);
         g_requested_max_launches = spec.max_launches;
         g_deadline_ns.store(spec.max_duration_ms > 0
                                 ? g_opened_ns + spec.max_duration_ms * 1000000
@@ -335,7 +345,8 @@ void DeepWindow::Close(const DeepWindowClose reason) {
         ev.end_ns                 = end_ns;
         ev.duration_ns            = end_ns - start_ns;
         ev.launches_covered       = g_launches_covered.load(std::memory_order_relaxed);
-        ev.requested_duration_ms  = g_requested_duration_ms;
+        ev.requested_duration_ms  =
+            g_requested_duration_ms.load(std::memory_order_relaxed);
         ev.requested_max_launches = g_requested_max_launches;
 
         // Disarms the deep engines and drains whatever they collected.
@@ -634,7 +645,7 @@ void DeepWindow::ResetForTesting() {
     g_pending = PendingOpen{};
     g_last_close_ns.store(0, std::memory_order_relaxed);
     g_opened_ns = 0;
-    g_requested_duration_ms = 0;
+    g_requested_duration_ms.store(0, std::memory_order_relaxed);
     g_requested_max_launches = 0;
     g_name.clear();
     g_scope_instance_id = 0;

@@ -166,6 +166,17 @@ TEST_F(DeepWindowTest, ReopensAfterClosing) {
     EXPECT_TRUE(gpufl::DeepWindow::Active());
 }
 
+// PM sampling paces its drain on this, so a closed window must read 0.
+TEST_F(DeepWindowTest, OpenDurationIsTheOpenWindowsTimeBound) {
+    ASSERT_TRUE(gpufl::DeepWindow::Open(Spec(/*ms=*/3000, 0)));
+    EXPECT_EQ(gpufl::DeepWindow::OpenDurationMs(), 3000);
+    gpufl::DeepWindow::Close(gpufl::DeepWindowClose::Manual);
+    EXPECT_EQ(gpufl::DeepWindow::OpenDurationMs(), 0);
+
+    ASSERT_TRUE(gpufl::DeepWindow::Open(Spec(0, /*launches=*/5)));
+    EXPECT_EQ(gpufl::DeepWindow::OpenDurationMs(), 0);
+}
+
 // ── bounds ──────────────────────────────────────────────────────────────────
 
 TEST_F(DeepWindowTest, LaunchBudgetClosesOnTheNthLaunch) {
