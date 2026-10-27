@@ -565,6 +565,26 @@ CaptureCapabilitiesEvent BuildCaptureCapabilitiesEvent(
                    ? "Framework external correlation records were collected."
                    : "Framework external correlation was enabled but emitted no records this session.")
             : "Framework external correlation was not collected.");
+    // While the setting is on, every launch, memcpy/memset and synchronization
+    // callback captures the host call stack, so any of them firing means stacks
+    // were collected. The mode names the layer that decided the setting rather
+    // than a mechanism: for a session without stacks, whether someone chose
+    // that is the question this row answers.
+    const bool stacksRequested = input.options.enable_stack_trace;
+    const bool stacksHaveData = input.counters.launch_count > 0 ||
+        input.counters.mem_transfer_rows > 0 || input.counters.sync_rows > 0;
+    AddCapability(
+        evt, "stack_traces", stacksRequested,
+        stacksRequested ? (stacksHaveData ? "collected" : "enabled_no_data")
+                        : "not_requested",
+        SettingSourceWireName(input.options.stack_trace_source),
+        stacksRequested ? (stacksHaveData ? "" : "enabled_but_no_records")
+                        : "disabled_by_option",
+        stacksRequested
+            ? (stacksHaveData
+                   ? "Host call stacks were captured for kernel launches, memcpy/memset and synchronization calls."
+                   : "Host call stack capture was enabled but no kernel launch, memcpy/memset or synchronization call was seen this session.")
+            : "Host call stacks were not captured for this session.");
 
     return evt;
 }

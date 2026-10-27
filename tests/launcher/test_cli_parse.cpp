@@ -302,6 +302,24 @@ TEST(CliParseTrace, SourceCaptureDefaultsOnAndCanBeDisabled) {
     EXPECT_EQ(rooted.args->source_root, "./cuda-project");
 }
 
+TEST(CliParseTrace, StacksAcceptsOnAndOffAndRefusesAnythingElse) {
+    auto absent = parseTraceArgs(argsFor({"--", "./bin"}));
+    ASSERT_TRUE(absent.args.has_value()) << absent.error;
+    EXPECT_FALSE(absent.args->stack_traces.has_value());
+
+    auto on = parseTraceArgs(argsFor({"--stacks=on", "--", "./bin"}));
+    ASSERT_TRUE(on.args.has_value()) << on.error;
+    EXPECT_EQ(on.args->stack_traces, std::optional<bool>(true));
+
+    auto off = parseTraceArgs(argsFor({"--stacks", "off", "--", "./bin"}));
+    ASSERT_TRUE(off.args.has_value()) << off.error;
+    EXPECT_EQ(off.args->stack_traces, std::optional<bool>(false));
+
+    auto invalid = parseTraceArgs(argsFor({"--stacks=true", "--", "./bin"}));
+    ASSERT_FALSE(invalid.args.has_value());
+    EXPECT_EQ(invalid.error, "invalid --stacks value: true (expected: on | off)");
+}
+
 TEST(CliParseTrace, BooleanFlagsRejectInlineValues) {
     const auto r = parseTraceArgs(
         argsFor({"--verbose=true", "--", "./bin"}));

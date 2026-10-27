@@ -91,6 +91,8 @@ void CuptiBackend::EmitCaptureCapabilities_() const {
     input.options.enable_external_correlation = opts_.enable_external_correlation;
     input.options.enable_synchronization = opts_.enable_synchronization;
     input.options.enable_cuda_graphs_tracking = opts_.enable_cuda_graphs_tracking;
+    input.options.enable_stack_trace = opts_.enable_stack_trace;
+    input.options.stack_trace_source = opts_.stack_trace_source;
     input.counters.kernel_rows =
         delta(kernel_rows, capability_kernel_rows_baseline_);
     input.counters.memory_rows =

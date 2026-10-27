@@ -22,9 +22,15 @@ struct StartupSegmentationOptions {
     }
 };
 
-// Applies the configuration-file fallback and resolves a canonical API path.
-// Call before any component observes InitOptions.
-void resolveStartupOptions(InitOptions& options);
+// Which layer decided each setting that capture_capabilities attributes.
+struct StartupSettingSources {
+    SettingSource stack_trace = SettingSource::Options;
+};
+
+// Applies the configuration-file fallback and the launcher's capture choices,
+// and resolves a canonical API path. Call before any component observes
+// InitOptions.
+StartupSettingSources resolveStartupOptions(InitOptions& options);
 
 // Reads and validates segmentation/rollover environment state without
 // allocating a Runtime. On failure, `error` contains the user-facing reason.

@@ -5,13 +5,15 @@
 
 namespace gpufl {
 
-void ConfigFileLoader::apply(InitOptions& opts, const std::string& path) {
+ConfigFileLoader::Applied ConfigFileLoader::apply(InitOptions& opts,
+                                                  const std::string& path) {
+    Applied applied;
     auto cfg = json::loadFile(path);
     if (cfg.is_null()) {
         GFL_LOG_ERROR("Config file not found or invalid JSON: ", path);
-        return;
+        return applied;
     }
-    if (!cfg.is_object() || cfg.empty()) return;
+    if (!cfg.is_object() || cfg.empty()) return applied;
 
     GFL_LOG_DEBUG("Config file loaded: ", path, " (", cfg.size(), " keys)");
 
@@ -48,8 +50,11 @@ void ConfigFileLoader::apply(InitOptions& opts, const std::string& path) {
         opts.pm_sampling_preset = cfg["pm_sampling_preset"].get_string();
 
     // Boolean fields
-    if (cfg.contains("enable_stack_trace"))
-        opts.enable_stack_trace = cfg.value<bool>("enable_stack_trace", opts.enable_stack_trace);
+    // A non-boolean value is ignored, so it does not count as the file's choice.
+    if (cfg.contains("enable_stack_trace") && cfg["enable_stack_trace"].is_bool()) {
+        opts.enable_stack_trace = cfg["enable_stack_trace"].get_bool();
+        applied.stack_trace = true;
+    }
     // Backward compat: silently ignore "enable_kernel_details" if a
     // legacy config file still sets it. Kernel details are now always
     // captured - see gpufl.hpp. Old configs continue to load cleanly
@@ -62,6 +67,7 @@ void ConfigFileLoader::apply(InitOptions& opts, const std::string& path) {
         opts.enable_external_correlation = cfg.value<bool>("enable_external_correlation", opts.enable_external_correlation);
     if (cfg.contains("pm_sampling_scope_only"))
         opts.pm_sampling_scope_only = cfg.value<bool>("pm_sampling_scope_only", opts.pm_sampling_scope_only);
+    return applied;
 }
 
 }  // namespace gpufl

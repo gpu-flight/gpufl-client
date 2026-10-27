@@ -265,6 +265,30 @@ std::string parsePasses(const FlagBreak& flag,
     return {};
 }
 
+// ── --stacks ──────────────────────────────────────────────────────────────
+
+// on|off rather than a --no-stacks switch: `on` must be able to override a
+// config file that turns stacks off, while absent leaves that file in charge.
+std::string parseStacks(const FlagBreak& flag,
+                        const std::vector<std::string>& argv,
+                        std::size_t& index,
+                        TraceArgs& args) {
+    std::string value;
+    if (const std::string error =
+            detail::takeFlagValue(flag, argv, index, value);
+        !error.empty()) {
+        return error;
+    }
+    if (value == "on") {
+        args.stack_traces = true;
+    } else if (value == "off") {
+        args.stack_traces = false;
+    } else {
+        return "invalid --stacks value: " + value + " (expected: on | off)";
+    }
+    return {};
+}
+
 // ── Segmentation, window, deep, sampling ──────────────────────────────────
 
 std::string parseSegmentEvery(const FlagBreak& flag,
@@ -453,6 +477,12 @@ const CliOptionManager<TraceArgs>& traceOptions() {
                  "directory (default: current working directory)",
                  kSection(TraceHelpSection::Capture),
                  &parseNonEmptyStringOption<&TraceArgs::source_root>)
+            .add({"--stacks"}, "on|off",
+                 "Capture the host call stack at every kernel launch, "
+                 "memcpy/memset and synchronization call. Default: on, unless "
+                 "a GPUFL_CONFIG_FILE sets enable_stack_trace. off removes "
+                 "the per-call backtrace cost",
+                 kSection(TraceHelpSection::Capture), &parseStacks)
 
             // Runtime
             .add({"-q", "--quiet"}, "",
