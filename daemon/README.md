@@ -216,7 +216,7 @@ The named volume persists the agent's read cursor so it resumes from where it le
 |---|---|---|
 | `GPUFL_SOURCE_FOLDER` | same as `GPUFL_MONITOR_LOG_DIR` | Directory the agent watches for log files |
 | `GPUFL_SOURCE_PREFIX` | `session` | Filename prefix of the log files (e.g. `session.device.log`) |
-| `GPUFL_LOG_TYPES` | `device,scope,system` | Comma-separated log channels to tail |
+| `GPUFL_LOG_TYPES` | unset: every channel the agent finds (agents before gpufl-agent#31 default to `device,scope,system,sass`) | Comma-separated log channels to tail; only narrows the set |
 | `GPUFL_CURSOR_FILE` | `/var/gpufl/monitor/cursor.json` | Path to the cursor file for resume-on-restart |
 
 ### Agent - HTTP publisher
