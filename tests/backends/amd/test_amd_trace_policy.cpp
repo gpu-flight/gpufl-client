@@ -14,6 +14,35 @@ gpufl::amd::AmdTraceEndpoint Gpu(const uint32_t device_id) {
 
 }  // namespace
 
+TEST(AmdTracePolicy, DynamicOnlyTileUsesRuntimeMinusStaticLds) {
+    const auto lds = gpufl::amd::ResolveAmdLdsAllocation(2048, 0);
+    ASSERT_TRUE(lds.has_value());
+    EXPECT_EQ(lds->static_bytes, 0u);
+    EXPECT_EQ(lds->dynamic_bytes, 2048u);
+}
+
+TEST(AmdTracePolicy, StaticAndDynamicLdsSumToExecutedAllocation) {
+    const auto lds = gpufl::amd::ResolveAmdLdsAllocation(3072, 1024);
+    ASSERT_TRUE(lds.has_value());
+    EXPECT_EQ(lds->static_bytes, 1024u);
+    EXPECT_EQ(lds->dynamic_bytes, 2048u);
+    EXPECT_EQ(lds->static_bytes + lds->dynamic_bytes, 3072u);
+}
+
+TEST(AmdTracePolicy, ZeroDynamicLdsRemainsARealZero) {
+    for (const uint32_t bytes : {0u, 2048u}) {
+        const auto lds = gpufl::amd::ResolveAmdLdsAllocation(bytes, bytes);
+        ASSERT_TRUE(lds.has_value());
+        EXPECT_EQ(lds->static_bytes, bytes);
+        EXPECT_EQ(lds->dynamic_bytes, 0u);
+    }
+}
+
+TEST(AmdTracePolicy, MissingOrInconsistentMetadataDoesNotInventALdsSplit) {
+    EXPECT_FALSE(gpufl::amd::ResolveAmdLdsAllocation(2048, std::nullopt));
+    EXPECT_FALSE(gpufl::amd::ResolveAmdLdsAllocation(2048, 4096));
+}
+
 TEST(AmdTracePolicy, KernelUsesItsGpuAgentDevice) {
     EXPECT_EQ(gpufl::amd::ResolveAmdKernelDeviceId(Gpu(3)), 3u);
     EXPECT_FALSE(gpufl::amd::ResolveAmdKernelDeviceId(Cpu()).has_value());

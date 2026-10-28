@@ -5,6 +5,16 @@
 
 namespace gpufl::amd {
 
+struct AmdLdsAllocation {
+    uint32_t static_bytes;
+    uint32_t dynamic_bytes;
+};
+
+// Dispatch group_segment_size is total LDS; code-object metadata supplies
+// its static portion. Without consistent metadata the split is unknown.
+std::optional<AmdLdsAllocation> ResolveAmdLdsAllocation(
+    uint32_t executed_bytes, std::optional<uint32_t> static_bytes);
+
 enum class AmdTraceAgentKind {
     Unknown,
     Cpu,

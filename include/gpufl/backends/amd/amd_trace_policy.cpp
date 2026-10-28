@@ -2,6 +2,14 @@
 
 namespace gpufl::amd {
 
+std::optional<AmdLdsAllocation> ResolveAmdLdsAllocation(
+    const uint32_t executed_bytes, const std::optional<uint32_t> static_bytes) {
+    if (!static_bytes.has_value() || *static_bytes > executed_bytes) {
+        return std::nullopt;
+    }
+    return AmdLdsAllocation{*static_bytes, executed_bytes - *static_bytes};
+}
+
 std::optional<uint32_t> ResolveAmdKernelDeviceId(
     const AmdTraceEndpoint& agent) {
     if (agent.kind != AmdTraceAgentKind::Gpu) return std::nullopt;
