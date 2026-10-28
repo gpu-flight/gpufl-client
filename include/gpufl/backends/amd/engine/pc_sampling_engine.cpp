@@ -46,6 +46,44 @@ rocprofiler_status_t CollectConfigurations(
     return ROCPROFILER_STATUS_SUCCESS;
 }
 
+// "stochastic cycles 256..2147483648, host_trap us 1..1000000": what the
+// agent lists, for the run's log. The qualification records it.
+std::string DescribeConfigurations(
+    const std::vector<rocprofiler_pc_sampling_configuration_t>& configs) {
+    std::string out;
+    for (const auto& config : configs) {
+        if (!out.empty()) out += ", ";
+        switch (config.method) {
+            case ROCPROFILER_PC_SAMPLING_METHOD_STOCHASTIC:
+                out += "stochastic";
+                break;
+            case ROCPROFILER_PC_SAMPLING_METHOD_HOST_TRAP:
+                out += "host_trap";
+                break;
+            default:
+                out += "method_" + std::to_string(config.method);
+                break;
+        }
+        switch (config.unit) {
+            case ROCPROFILER_PC_SAMPLING_UNIT_CYCLES:
+                out += " cycles ";
+                break;
+            case ROCPROFILER_PC_SAMPLING_UNIT_TIME:
+                out += " us ";
+                break;
+            case ROCPROFILER_PC_SAMPLING_UNIT_INSTRUCTIONS:
+                out += " instructions ";
+                break;
+            default:
+                out += " unit_" + std::to_string(config.unit) + " ";
+                break;
+        }
+        out += std::to_string(config.min_interval) + ".." +
+               std::to_string(config.max_interval);
+    }
+    return out.empty() ? std::string("nothing") : out;
+}
+
 // Whether flushDisassembly has parsed this code object's ISA.
 bool IsaParsed(const uint64_t crc) {
     return Monitor::LookupAmdIsaSource(crc, std::string(), 0, nullptr) !=
@@ -89,6 +127,9 @@ bool PcSamplingEngine::initialize(const rocprofiler_context_id_t context,
                                                   StatusName(status)),
                       StatusName(status));
     }
+    // Only an opted-in run gets here, so the listing always prints.
+    GFL_LOG_INFO("[PcSamplingEngine] the GPU lists PC sampling: ",
+                 DescribeConfigurations(configs));
     const rocprofiler_pc_sampling_configuration_t* stochastic = nullptr;
     for (const auto& config : configs) {
         if (config.method == ROCPROFILER_PC_SAMPLING_METHOD_STOCHASTIC &&
@@ -146,9 +187,8 @@ bool PcSamplingEngine::initialize(const rocprofiler_context_id_t context,
         g_live_engine = this;
     }
     configured_.store(true, std::memory_order_release);
-    GFL_LOG_DEBUG("[PcSamplingEngine] stochastic PC sampling every ",
-                  interval_, " cycles (agent lists ", stochastic->min_interval,
-                  "..", stochastic->max_interval, ")");
+    GFL_LOG_INFO("[PcSamplingEngine] stochastic PC sampling every ",
+                 interval_, " cycles (rocprofiler-sdk beta)");
     return true;
 }
 
