@@ -17,6 +17,9 @@ struct AmdCaptureCapabilityInput {
     bool memory_activity_requested = false;
     bool memory_activity_configured = false;
     uint64_t kernel_rows = 0;
+    // Kernel rows with and without a target model's occupancy estimate.
+    uint64_t occupancy_estimated_rows = 0;
+    uint64_t occupancy_unestimated_rows = 0;
     uint64_t memcpy_rows = 0;
     uint64_t synchronization_rows = 0;
     uint64_t memory_activity_rows = 0;
