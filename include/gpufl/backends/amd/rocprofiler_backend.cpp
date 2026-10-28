@@ -1135,7 +1135,14 @@ void RocprofilerBackend::handleKernelDispatch(
             out.num_regs = static_cast<int>(
                 meta.sgpr_count + meta.arch_vgpr_count + meta.accum_vgpr_count);
             out.arch_vgpr_count = static_cast<int>(meta.arch_vgpr_count);
-            if (out.static_shared == 0) out.static_shared = static_cast<int>(meta.group_segment_size);
+            // Runtime dispatch LDS includes dynamic storage, while the symbol
+            // registration records only the static requirement. Keeping the
+            // whole dispatch size in static_shared mislabeled dynamic tiles.
+            if (const auto lds = ResolveAmdLdsAllocation(
+                    info.group_segment_size, meta.group_segment_size)) {
+                out.static_shared = static_cast<int>(lds->static_bytes);
+                out.dyn_shared = static_cast<int>(lds->dynamic_bytes);
+            }
             if (out.local_bytes == 0) out.local_bytes = static_cast<int>(meta.private_segment_size);
         }
     }
