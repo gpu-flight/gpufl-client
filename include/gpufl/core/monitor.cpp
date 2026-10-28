@@ -841,6 +841,15 @@ void Monitor::EnqueueLoadedPtx(const void* image, size_t limit) { g_state.batche
 void Monitor::FlushDisassemblyNow() {
     g_state.batches.flushDisassembly();
 }
+
+void Monitor::RetainAmdIsaLines() { g_state.batches.retainAmdIsaLines(); }
+
+DictionaryManager::IsaSourceLookup Monitor::LookupAmdIsaSource(
+    const uint64_t crc, const std::string& function, const uint32_t pc_offset,
+    DictionaryManager::IsaSourceLine* out) {
+    return g_state.batches.lookupAmdIsaSource(crc, function, pc_offset, out);
+}
+
 bool Monitor::PushActivityRecord(const ActivityRecord& rec) {
     return g_monitorBuffer.Push(rec);
 }
@@ -888,8 +897,12 @@ void Monitor::PushProfileSamples(const std::vector<ProfileSampleInput>& samples)
             s.function_key.substr(0, s.function_key.find('@'));
         row.source_file_id =
             g_state.batches.internSourceFile(s.source_file);
+        const uint32_t function_source_id =
+            s.function_source_file.empty()
+                ? row.source_file_id
+                : g_state.batches.internSourceFile(s.function_source_file);
         const std::string normalizedFunctionKey = funcSymbol + "@" +
-            g_state.batches.sourceFileName(row.source_file_id);
+            g_state.batches.sourceFileName(function_source_id);
         row.function_id = g_state.batches.internFunction(
             demangledKey(normalizedFunctionKey), funcSymbol);
         row.pc_offset = s.pc_offset;

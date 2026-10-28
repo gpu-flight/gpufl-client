@@ -3,8 +3,10 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include "gpufl/backends/amd/amd_pc_sampling_policy.hpp"
 #include "gpufl/core/monitor.hpp"
 
 namespace gpufl::amd {
@@ -20,8 +22,13 @@ enum class AmdProfilingPath {
 struct AmdProfilingSupport {
     bool buffer_tracing = true;
     bool dispatch_counting = false;
+    // True only when the run opted in and the agent configured a stochastic
+    // sampler; never inferred from the architecture's name.
     bool pc_sampling = false;
     bool device_counting = false;
+    // Why pc_sampling is false.
+    AmdPcSamplingRefusal pc_sampling_refusal =
+        AmdPcSamplingRefusal::NotOptedIn;
 };
 
 struct AmdResolvedProfilingPlan {
@@ -39,6 +46,13 @@ const char* AmdSelectedPathWireName(AmdProfilingPath path);
 AmdResolvedProfilingPlan ResolveAmdProfilingPlan(
     ProfilingEngine requested,
     const AmdProfilingSupport& support);
+
+// GPUFL_ENGINE_COMBO lists a '+' pass's engines, while the AMD backend runs
+// one service beside tracing. Every AMD session traces, so Trace+PcSampling
+// is PC sampling. Any other group keeps its first engine: PC sampling can't
+// share a context with counters.
+ProfilingEngine ResolveAmdRequestedEngine(ProfilingEngine selected,
+                                          std::string_view combo);
 
 bool AmdRequestNeedsDispatchCounting(ProfilingEngine engine);
 bool AmdRequestNeedsPcSampling(ProfilingEngine engine);

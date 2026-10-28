@@ -11,6 +11,7 @@ FetchContent_MakeAvailable(googletest)
 # 2. Create the test executable
 set(GPUFL_TEST_SOURCES
     main_test_runner.cpp
+    backends/amd/test_amd_pc_sampling.cpp
     backends/amd/test_amd_trace_policy.cpp
     backends/amd/test_amd_profiling_policy.cpp
     core/test_analyzer.cpp
@@ -102,6 +103,13 @@ if(GPUFL_ENABLE_AMD AND (GPUFL_HAS_ROCM_SMI OR GPUFL_HAS_HIP))
   )
 endif()
 
+# rocprofiler-sdk's own PC sampling names; pure lookups, no GPU.
+if(GPUFL_ENABLE_AMD AND GPUFL_HAS_ROCPROFILER_SDK)
+  list(APPEND GPUFL_TEST_SOURCES
+    backends/amd/test_amd_pc_sampling_sdk.cpp
+  )
+endif()
+
 if(APPLE AND GPUFL_ENABLE_METAL AND GPUFL_HAS_METAL)
   list(APPEND GPUFL_TEST_SOURCES
     backends/metal/test_metal_collector.mm
@@ -122,6 +130,8 @@ if(UNIX AND NOT APPLE)
 endif()
 
 add_executable(gpufl_tests ${GPUFL_TEST_SOURCES})
+target_compile_definitions(gpufl_tests PRIVATE
+    GPUFL_AMD_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/backends/amd/data")
 
 # Standalone target for the Linux injection readiness regression. It
 # intentionally performs its H2D copy immediately after two allocations, before
@@ -175,6 +185,10 @@ target_link_libraries(gpufl_tests PRIVATE
     gtest_main
     gpufl
 )
+
+if(GPUFL_ENABLE_AMD AND GPUFL_HAS_ROCPROFILER_SDK)
+    target_link_libraries(gpufl_tests PRIVATE rocprofiler-sdk::rocprofiler-sdk)
+endif()
 
 # Upload-path tests spin up an embedded httplib::Server to verify
 # end-to-end POST routing; link the test binary against the same

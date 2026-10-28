@@ -140,6 +140,7 @@ public:
         const gpufl::launcher::RunOptions& options) const override {
         seen_command = command;
         seen_options = options;
+        env_per_run.push_back(env);
         gpufl::launcher::TraceProcessResult result;
         result.rc = 0;
         return result;
@@ -148,6 +149,8 @@ public:
     mutable std::map<std::string, std::string> env;
     mutable std::vector<std::string> seen_command;
     mutable gpufl::launcher::RunOptions seen_options;
+    // The environment each child started with, in pass order.
+    mutable std::vector<std::map<std::string, std::string>> env_per_run;
 
 private:
     gpufl::launcher::fs::path root_;
@@ -213,6 +216,73 @@ TEST(TraceRunPlanTest, TraceCommonHonorsExplicitCaptureOptOuts) {
     EXPECT_EQ(platform.env[gpufl::env::kStackTrace], "0");
     EXPECT_EQ(fs::weakly_canonical(platform.env[gpufl::env::kSourceRoot]),
               fs::weakly_canonical(root));
+
+    fs::remove_all(root, ec);
+}
+
+TEST(TraceRunPlanTest, PassRunsPcSamplingOnlyForItsOwnEngine) {
+    using gpufl::launcher::passRunsPcSampling;
+    EXPECT_TRUE(passRunsPcSampling("PcSampling"));
+    EXPECT_TRUE(passRunsPcSampling("Trace+PcSampling"));
+    EXPECT_TRUE(passRunsPcSampling("PcSampling+Trace"));
+    EXPECT_FALSE(passRunsPcSampling("Trace"));
+    EXPECT_FALSE(passRunsPcSampling("Deep"));
+    EXPECT_FALSE(passRunsPcSampling("SassMetrics"));
+    EXPECT_FALSE(passRunsPcSampling("PcSamplingX"));
+}
+
+// The beta switch reaches the PcSampling children only, and only with
+// --amd-pc-sampling=stochastic; every other child loses an inherited one.
+TEST(TraceRunPlanTest, AmdPcSamplingOptInReachesOnlyPcSamplingChildren) {
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() /
+        ("gpufl_trace_amd_pcs_" + std::to_string(gpufl::detail::GetPid()));
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    fs::create_directories(root, ec);
+    ASSERT_FALSE(ec) << ec.message();
+    { std::ofstream inject(root / "gpufl_inject.so"); ASSERT_TRUE(inject); }
+
+    const auto run = [&](const bool opted_in) {
+        ExecutingPlanningPlatform platform(root);
+        platform.env[gpufl::env::kRocprofilerPcSamplingBetaEnabled] = "1";
+        platform.env[gpufl::env::kAmdPcSampling] = "stochastic";
+        TraceArgs args;
+        args.command = {"target"};
+        args.quiet = true;
+        args.output_dir = (root / (opted_in ? "in" : "out")).string();
+        args.source_root = root.string();
+        args.passes = {"Trace", "PcSampling", "Trace+PcSampling", "Deep",
+                       "SassMetrics"};
+        args.amd_pc_sampling = opted_in;
+        EXPECT_EQ(gpufl::launcher::runTraceCommon(args, platform), 0);
+        return platform.env_per_run;
+    };
+
+    const auto beta = [](const std::map<std::string, std::string>& env) {
+        const auto it = env.find(gpufl::env::kRocprofilerPcSamplingBetaEnabled);
+        return it == env.end() ? std::string("unset") : it->second;
+    };
+    const auto opt_in = [](const std::map<std::string, std::string>& env) {
+        const auto it = env.find(gpufl::env::kAmdPcSampling);
+        return it == env.end() ? std::string("unset") : it->second;
+    };
+
+    const auto opted = run(true);
+    ASSERT_EQ(opted.size(), 5u);
+    const std::vector<std::string> expected_beta = {"unset", "ON", "ON",
+                                                    "unset", "unset"};
+    const std::vector<std::string> expected_opt_in = {
+        "unset", "stochastic", "stochastic", "unset", "unset"};
+    for (size_t pass = 0; pass < opted.size(); ++pass) {
+        EXPECT_EQ(beta(opted[pass]), expected_beta[pass]) << pass;
+        EXPECT_EQ(opt_in(opted[pass]), expected_opt_in[pass]) << pass;
+    }
+
+    for (const auto& env : run(false)) {
+        EXPECT_EQ(beta(env), "unset");
+        EXPECT_EQ(opt_in(env), "unset");
+    }
 
     fs::remove_all(root, ec);
 }

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <optional>
 #include <string>
@@ -28,10 +29,12 @@
 
 #include "gpufl/backends/amd/engine/dispatch_counter_engine.hpp"
 #include "gpufl/backends/amd/engine/device_counter_engine.hpp"
+#include "gpufl/backends/amd/engine/pc_sampling_engine.hpp"
 #include "gpufl/backends/amd/amd_capture_capabilities.hpp"
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/deep_window.hpp"
+#include "gpufl/core/env_vars.hpp"
 #include "gpufl/core/monitor.hpp"
 #include "gpufl/core/logger/logger.hpp"
 #include "gpufl/core/model/lifecycle_model.hpp"
@@ -147,6 +150,11 @@ void RocprofilerBackend::setResolvedPlan(AmdResolvedProfilingPlan plan) {
     resolved_plan_ = std::move(plan);
 }
 
+std::shared_ptr<AmdProfilingEngine> RocprofilerBackend::currentEngine() const {
+    std::lock_guard lock(engine_mutex_);
+    return engine_;
+}
+
 std::string RocprofilerBackend::SelectedEngineWireName() const {
     return AmdSelectedPathWireName(resolvedPlan().selected_path);
 }
@@ -155,6 +163,10 @@ void RocprofilerBackend::initialize(const MonitorOptions& opts) {
     if (initialized_.exchange(true)) return;
 
     opts_ = opts;
+    const char* combo = std::getenv(env::kEngineCombo);
+    requested_engine_ =
+        ResolveAmdRequestedEngine(opts.profiling_engine, combo ? combo : "");
+    pc_sampling_detail_.clear();
     kernel_rows_emitted_.store(0, std::memory_order_relaxed);
     memcpy_rows_emitted_.store(0, std::memory_order_relaxed);
     synchronization_rows_emitted_.store(0, std::memory_order_relaxed);
@@ -173,6 +185,10 @@ void RocprofilerBackend::initialize(const MonitorOptions& opts) {
         capability_synchronization_rows_baseline_ = 0;
         capability_memory_activity_rows_baseline_ = 0;
         capability_pm_sample_rows_baseline_ = 0;
+        capability_pc_samples_baseline_ = 0;
+        capability_pc_samples_issued_baseline_ = 0;
+        capability_pc_samples_not_issued_baseline_ = 0;
+        capability_pc_samples_lost_baseline_ = 0;
         capability_dropped_records_baseline_ = 0;
         capability_queue_dropped_records_baseline_ = 0;
         capability_buffer_flush_failures_baseline_ = 0;
@@ -181,11 +197,11 @@ void RocprofilerBackend::initialize(const MonitorOptions& opts) {
     }
 
     AmdProfilingSupport support;
-    setResolvedPlan(ResolveAmdProfilingPlan(opts.profiling_engine, support));
+    setResolvedPlan(ResolveAmdProfilingPlan(requested_engine_, support));
     std::string reason;
     if (!configureRocprofiler(opts, &reason)) {
         support.buffer_tracing = false;
-        setResolvedPlan(ResolveAmdProfilingPlan(opts.profiling_engine, support));
+        setResolvedPlan(ResolveAmdProfilingPlan(requested_engine_, support));
         initialized_.store(false);
         GFL_LOG_ERROR("[ROCProfilerBackend] initialization failed: ", reason);
         return;
@@ -437,7 +453,35 @@ int RocprofilerBackend::toolInitialize() {
                                 primary_device_id.has_value();
     support.device_counting = primary_gpu_agent_.handle != 0 &&
                               primary_device_id.has_value();
-    auto plan = ResolveAmdProfilingPlan(opts_.profiling_engine, support);
+
+    // PC sampling is supported only when the run opted in and the agent
+    // configures a stochastic sampler; nothing is inferred from the
+    // architecture's name. It must be configured here, during tool
+    // initialization, and shares this context with tracing but never with
+    // counters, so it is its own engine.
+    std::unique_ptr<PcSamplingEngine> pc_engine;
+    if (AmdRequestNeedsPcSampling(requested_engine_)) {
+        if (opts_.amd_pc_sampling != AmdPcSamplingMethod::Stochastic) {
+            support.pc_sampling_refusal = AmdPcSamplingRefusal::NotOptedIn;
+        } else if (primary_gpu_agent_.handle == 0 ||
+                   !primary_device_id.has_value()) {
+            support.pc_sampling_refusal =
+                AmdPcSamplingRefusal::ConfigurationFailed;
+            pc_sampling_detail_ = "no GPU agent to sample";
+        } else {
+            pc_engine = std::make_unique<PcSamplingEngine>();
+            if (pc_engine->initialize(context_, primary_gpu_agent_,
+                                      *primary_device_id, opts_)) {
+                support.pc_sampling = true;
+            } else {
+                support.pc_sampling_refusal = pc_engine->refusal();
+                pc_sampling_detail_ = pc_engine->refusalDetail();
+                pc_engine.reset();
+            }
+        }
+    }
+
+    auto plan = ResolveAmdProfilingPlan(requested_engine_, support);
     setResolvedPlan(plan);
 
     if (plan.degraded) {
@@ -447,7 +491,10 @@ int RocprofilerBackend::toolInitialize() {
                      " (", plan.reason_code, ")");
     }
 
-    if (plan.selected_path == AmdProfilingPath::DispatchCounting) {
+    if (plan.selected_path == AmdProfilingPath::PcSampling) {
+        pc_engine_ = pc_engine.get();
+        engine_ = std::move(pc_engine);
+    } else if (plan.selected_path == AmdProfilingPath::DispatchCounting) {
         engine_ = std::make_unique<DispatchCounterEngine>();
         if (!engine_->initialize(context_, primary_gpu_agent_,
                                  *primary_device_id, opts_)) {
@@ -457,7 +504,7 @@ int RocprofilerBackend::toolInitialize() {
             engine_.reset();
             support.dispatch_counting = false;
             setResolvedPlan(
-                ResolveAmdProfilingPlan(opts_.profiling_engine, support));
+                ResolveAmdProfilingPlan(requested_engine_, support));
         }
     } else if (plan.selected_path == AmdProfilingPath::DeviceCounting) {
         engine_ = std::make_unique<DeviceCounterEngine>();
@@ -469,7 +516,7 @@ int RocprofilerBackend::toolInitialize() {
             engine_.reset();
             support.device_counting = false;
             setResolvedPlan(
-                ResolveAmdProfilingPlan(opts_.profiling_engine, support));
+                ResolveAmdProfilingPlan(requested_engine_, support));
         }
     }
 
@@ -478,6 +525,9 @@ int RocprofilerBackend::toolInitialize() {
 }
 
 void RocprofilerBackend::toolFinalize() {
+    // rocprofiler-sdk can finalize the tool before gpufl::shutdown runs;
+    // deliver what the engine holds while the monitor still records.
+    if (const auto engine = currentEngine()) engine->finish();
     if (buffer_.handle != 0) {
         flushBuffers();
         (void) CheckStatus(rocprofiler_destroy_buffer(buffer_),
@@ -552,6 +602,8 @@ void RocprofilerBackend::stop() {
     (void) CheckStatus(rocprofiler_stop_context(context_),
                        "rocprofiler_stop_context");
     flushBuffers();
+    // PC samples still in flight are delivered once the context stops.
+    if (engine_) engine_->finish();
 }
 
 void RocprofilerBackend::DrainProfilingData() {
@@ -562,7 +614,7 @@ void RocprofilerBackend::DrainProfilingData() {
     // segment. Without this flush, a quiet workload can retain activity below
     // the ROCprofiler watermark until a later segment or shutdown.
     if (active_.load(std::memory_order_acquire)) flushBuffers();
-    if (engine_) engine_->drain();
+    if (const auto engine = currentEngine()) engine->drain();
 }
 
 void RocprofilerBackend::ServiceDeepWindow() {
@@ -570,7 +622,7 @@ void RocprofilerBackend::ServiceDeepWindow() {
     if (!active_.load(std::memory_order_acquire) &&
         !tryStartContext(false)) return;
     if (DeepWindow::HasPendingWork()) DeepWindow::ServicePending();
-    if (engine_) engine_->service();
+    if (const auto engine = currentEngine()) engine->service();
 }
 
 bool RocprofilerBackend::DeepEnginesPrepared() const {
@@ -642,6 +694,16 @@ void RocprofilerBackend::emitCapabilities() {
     const uint64_t scope_correlation_failures =
         scope_correlation_failures_.load(std::memory_order_relaxed);
     const uint64_t pm_sample_rows = Monitor::PmSampleRowsSeen();
+    std::shared_ptr<AmdProfilingEngine> engine;
+    PcSamplingEngine* pc_engine = nullptr;
+    {
+        std::lock_guard engine_lock(engine_mutex_);
+        engine = engine_;
+        pc_engine = pc_engine_;  // owned by engine
+    }
+    const bool profiling_data = engine && engine->hasData();
+    const PcSamplingEngine::Stats pc_stats =
+        pc_engine ? pc_engine->stats() : PcSamplingEngine::Stats{};
 
     AmdCaptureCapabilityInput input;
     input.session_id = segment->session_id;
@@ -663,8 +725,18 @@ void RocprofilerBackend::emitCapabilities() {
         synchronization_rows, capability_synchronization_rows_baseline_);
     input.memory_activity_rows = delta(
         memory_activity_rows, capability_memory_activity_rows_baseline_);
-    input.profiling_sample_rows =
-        engine_ && engine_->hasData() ? 1 : 0;
+    input.profiling_sample_rows = profiling_data ? 1 : 0;
+    input.pc_sampling_interval = pc_stats.interval;
+    input.pc_samples =
+        delta(pc_stats.totals.samples, capability_pc_samples_baseline_);
+    input.pc_samples_issued = delta(pc_stats.totals.issued,
+                                    capability_pc_samples_issued_baseline_);
+    input.pc_samples_not_issued =
+        delta(pc_stats.totals.not_issued,
+              capability_pc_samples_not_issued_baseline_);
+    input.pc_samples_lost =
+        delta(pc_stats.lost, capability_pc_samples_lost_baseline_);
+    input.pc_sampling_detail = pc_sampling_detail_;
     input.pm_sample_rows =
         delta(pm_sample_rows, capability_pm_sample_rows_baseline_);
     input.dropped_trace_records =
@@ -687,6 +759,10 @@ void RocprofilerBackend::emitCapabilities() {
     capability_synchronization_rows_baseline_ = synchronization_rows;
     capability_memory_activity_rows_baseline_ = memory_activity_rows;
     capability_pm_sample_rows_baseline_ = pm_sample_rows;
+    capability_pc_samples_baseline_ = pc_stats.totals.samples;
+    capability_pc_samples_issued_baseline_ = pc_stats.totals.issued;
+    capability_pc_samples_not_issued_baseline_ = pc_stats.totals.not_issued;
+    capability_pc_samples_lost_baseline_ = pc_stats.lost;
     capability_dropped_records_baseline_ = dropped_records;
     capability_queue_dropped_records_baseline_ = queue_dropped_records;
     capability_buffer_flush_failures_baseline_ = buffer_flush_failures;
@@ -702,10 +778,13 @@ void RocprofilerBackend::shutdown() {
     stop();
     emitCapabilities();
 
-    if (engine_) {
-        engine_->shutdown();
-        engine_.reset();
+    std::shared_ptr<AmdProfilingEngine> engine;
+    {
+        std::lock_guard lock(engine_mutex_);
+        engine = std::move(engine_);
+        pc_engine_ = nullptr;
     }
+    if (engine) engine->shutdown();
 
     if (client_finalize_) {
         rocprofiler_client_id_t client_id = {
@@ -1066,6 +1145,13 @@ void RocprofilerBackend::handleCodeObjectLoad(
 
     uint64_t crc = ::crc32(0L, elf_bytes.data(),
                            static_cast<uInt>(elf_bytes.size()));
+
+    // Every loaded instance, before the disassembly dedup below: PC samples
+    // name the instance by its code object id.
+    if (const auto engine = currentEngine()) {
+        engine->onCodeObjectLoaded(data.code_object_id, crc, elf_bytes.data(),
+                                   elf_bytes.size());
+    }
 
     {
         std::lock_guard<std::mutex> lock(code_object_mutex_);

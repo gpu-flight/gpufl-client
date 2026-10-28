@@ -169,6 +169,16 @@ types are additive.
   refused. `capture_capabilities` gains a `stack_traces` row whose `mode` names
   the layer that decided: `trace_flag`, `config_file`, `preset_default` or, for
   an embedded `init()`, `init_options`.
+- **AMD stochastic PC sampling (beta), opt-in.** `gpufl trace
+  --passes=PcSampling --amd-pc-sampling=stochastic` (or `Trace+PcSampling`)
+  samples with rocprofiler-sdk's stochastic method on MI300- and MI350-series
+  GPUs, every 2^20 cycles within the range the GPU lists. Only that pass's
+  process gets rocprofiler-sdk's `ROCPROFILER_PC_SAMPLING_BETA_ENABLED=ON`, and
+  host-trap is never configured. Samples become `profile_sample_batch` rows
+  (`sample_kind` 0, `stall_reason` 0) named `amd_pcs_not_issued_<reason>` or
+  `amd_pcs_issued_<type>`, at offsets from the function's first instruction and
+  with the ISA rows' source lines. Without the flag an AMD PcSampling pass only
+  traces, and the `pc_sampling` capability row says why sampling didn't run.
 
 ### Changed
 

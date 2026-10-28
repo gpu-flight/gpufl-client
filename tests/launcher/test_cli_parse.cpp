@@ -320,6 +320,30 @@ TEST(CliParseTrace, StacksAcceptsOnAndOffAndRefusesAnythingElse) {
     EXPECT_EQ(invalid.error, "invalid --stacks value: true (expected: on | off)");
 }
 
+TEST(CliParseTrace, AmdPcSamplingAcceptsOnlyStochastic) {
+    auto absent = parseTraceArgs(argsFor({"--", "./bin"}));
+    ASSERT_TRUE(absent.args.has_value()) << absent.error;
+    EXPECT_FALSE(absent.args->amd_pc_sampling);
+
+    auto inline_value = parseTraceArgs(
+        argsFor({"--passes=PcSampling", "--amd-pc-sampling=stochastic", "--",
+                 "./bin"}));
+    ASSERT_TRUE(inline_value.args.has_value()) << inline_value.error;
+    EXPECT_TRUE(inline_value.args->amd_pc_sampling);
+
+    auto separate = parseTraceArgs(
+        argsFor({"--amd-pc-sampling", "stochastic", "--", "./bin"}));
+    ASSERT_TRUE(separate.args.has_value()) << separate.error;
+    EXPECT_TRUE(separate.args->amd_pc_sampling);
+
+    auto host_trap = parseTraceArgs(
+        argsFor({"--amd-pc-sampling=host_trap", "--", "./bin"}));
+    ASSERT_FALSE(host_trap.args.has_value());
+    EXPECT_EQ(host_trap.error,
+              "invalid --amd-pc-sampling value: host_trap (expected: "
+              "stochastic)");
+}
+
 TEST(CliParseTrace, BooleanFlagsRejectInlineValues) {
     const auto r = parseTraceArgs(
         argsFor({"--verbose=true", "--", "./bin"}));

@@ -84,6 +84,19 @@ void applyPcSamplingPeriodOverride(MonitorOptions& monitor_options) {
                   monitor_options.pc_sampling_period, ".");
 }
 
+void applyAmdPcSamplingOptIn(MonitorOptions& monitor_options) {
+    const char* raw = std::getenv(env::kAmdPcSampling);
+    if (!raw || raw[0] == '\0') return;
+
+    if (std::string(raw) == "stochastic") {
+        monitor_options.amd_pc_sampling = AmdPcSamplingMethod::Stochastic;
+        GFL_LOG_DEBUG("GPUFL_AMD_PC_SAMPLING: stochastic");
+        return;
+    }
+    GFL_LOG_ERROR("GPUFL_AMD_PC_SAMPLING='", raw, "' is not recognized "
+                  "(expected stochastic). AMD PC sampling stays off.");
+}
+
 void applyDeepArmOverride(MonitorOptions& monitor_options) {
     const char* raw = std::getenv(env::kDeepArm);
     if (!raw) return;
@@ -108,6 +121,7 @@ MonitorOptions buildMonitorOptions(const InitOptions& options) {
     monitor_options.profiling_engine = options.profiling_engine;
     applyProfilingEngineOverride(monitor_options);
     applyPcSamplingPeriodOverride(monitor_options);
+    applyAmdPcSamplingOptIn(monitor_options);
 
     monitor_options.kernel_sample_rate_ms = options.kernel_sample_rate_ms;
     monitor_options.enable_stack_trace = options.enable_stack_trace;

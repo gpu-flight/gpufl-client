@@ -48,6 +48,10 @@ public:
     void enqueueDisassembly(uint64_t crc, const uint8_t* data, size_t size);
     bool enqueueLoadedPtx(const void* image, size_t limit);
     void flushDisassembly();
+    void retainAmdIsaLines();
+    DictionaryManager::IsaSourceLookup lookupAmdIsaSource(
+        uint64_t crc, const std::string& function, uint32_t pc_offset,
+        DictionaryManager::IsaSourceLine* out);
 
     uint64_t allocateScopeInstanceId();
     uint32_t activeScopeNameId() const;

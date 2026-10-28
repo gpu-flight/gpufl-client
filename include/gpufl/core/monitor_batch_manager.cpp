@@ -224,6 +224,16 @@ void MonitorBatchManager::flushDisassembly() {
     dictManager_.flushDisassembly(*context->logger, context->session_id);
 }
 
+void MonitorBatchManager::retainAmdIsaLines() {
+    dictManager_.retainAmdIsaLines();
+}
+
+DictionaryManager::IsaSourceLookup MonitorBatchManager::lookupAmdIsaSource(
+    const uint64_t crc, const std::string& function, const uint32_t pc_offset,
+    DictionaryManager::IsaSourceLine* out) {
+    return dictManager_.lookupAmdIsaSource(crc, function, pc_offset, out);
+}
+
 uint64_t MonitorBatchManager::allocateScopeInstanceId() {
     return nextScopeInstanceId_.fetch_add(1, std::memory_order_relaxed);
 }

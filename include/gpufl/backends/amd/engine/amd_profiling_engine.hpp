@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
+
 #include <rocprofiler-sdk/fwd.h>
 
 namespace gpufl {
@@ -31,6 +34,17 @@ class AmdProfilingEngine {
 
     /// Periodically drain buffered profiling data into the monitor ring buffer.
     virtual void drain() = 0;
+
+    /// After the context has stopped, or when the SDK finalizes the tool
+    /// first: deliver what the engine still holds. Called more than once.
+    virtual void finish() {}
+
+    /// A code object was loaded. crc is the key its disassembly was queued
+    /// under; the ELF bytes are only valid during the call.
+    virtual void onCodeObjectLoaded(uint64_t /*code_object_id*/,
+                                    uint64_t /*crc*/,
+                                    const uint8_t* /*data*/,
+                                    size_t /*size*/) {}
 
     /// Cheap collector-loop service tick. Pull-based engines use this to
     /// honor their sampling cadence; callback/buffer engines leave it idle.

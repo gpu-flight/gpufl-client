@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <string>
+#include <utility>
 
 #include "gpufl/backends/amd/amd_capture_capabilities.hpp"
 #include "gpufl/backends/amd/amd_dispatch_collection_gate.hpp"
@@ -112,13 +113,91 @@ TEST(AmdProfilingPolicy, TraceSelectsBufferTracingService) {
                  "amd.buffer_tracing");
 }
 
-TEST(AmdProfilingPolicy, PcSamplingFallsBackTruthfullyWhenUnavailable) {
+TEST(AmdProfilingPolicy, PcSamplingWithoutTheOptInKeepsTracing) {
     const auto plan = gpufl::amd::ResolveAmdProfilingPlan(
         gpufl::ProfilingEngine::PcSampling, {});
 
     EXPECT_EQ(plan.selected_path, gpufl::amd::AmdProfilingPath::BufferTracing);
     EXPECT_TRUE(plan.degraded);
-    EXPECT_EQ(plan.reason_code, "amd_pc_sampling_unavailable_baseline_tracing_retained");
+    EXPECT_EQ(plan.reason_code, "amd_pc_sampling_not_opted_in");
+}
+
+TEST(AmdProfilingPolicy, PcSamplingRefusalsKeepTracingWithTheirReason) {
+    using gpufl::amd::AmdPcSamplingRefusal;
+    const std::pair<AmdPcSamplingRefusal, const char*> cases[] = {
+        {AmdPcSamplingRefusal::NotOptedIn, "amd_pc_sampling_not_opted_in"},
+        {AmdPcSamplingRefusal::MethodUnavailable,
+         "amd_pc_sampling_method_unavailable"},
+        {AmdPcSamplingRefusal::DriverUnsupported,
+         "amd_pc_sampling_driver_unsupported"},
+        {AmdPcSamplingRefusal::Unavailable, "amd_pc_sampling_unavailable"},
+        {AmdPcSamplingRefusal::ConfigurationFailed,
+         "amd_pc_sampling_configuration_failed"},
+    };
+    for (const auto& [refusal, reason] : cases) {
+        gpufl::amd::AmdProfilingSupport support;
+        support.dispatch_counting = true;
+        support.device_counting = true;
+        support.pc_sampling_refusal = refusal;
+        const auto plan = gpufl::amd::ResolveAmdProfilingPlan(
+            gpufl::ProfilingEngine::PcSampling, support);
+
+        EXPECT_EQ(plan.selected_path,
+                  gpufl::amd::AmdProfilingPath::BufferTracing);
+        EXPECT_TRUE(plan.degraded);
+        EXPECT_EQ(plan.reason_code, reason);
+    }
+}
+
+TEST(AmdProfilingPolicy, PcSamplingRunsWhenTheAgentConfiguredIt) {
+    gpufl::amd::AmdProfilingSupport support;
+    support.pc_sampling = true;
+    const auto plan = gpufl::amd::ResolveAmdProfilingPlan(
+        gpufl::ProfilingEngine::PcSampling, support);
+
+    EXPECT_EQ(plan.selected_path, gpufl::amd::AmdProfilingPath::PcSampling);
+    EXPECT_FALSE(plan.degraded);
+    EXPECT_TRUE(plan.reason_code.empty());
+    EXPECT_STREQ(gpufl::amd::AmdSelectedPathWireName(plan.selected_path),
+                 "amd.pc_sampling");
+}
+
+TEST(AmdProfilingPolicy, PcSamplingJoinsNoCounterGroup) {
+    gpufl::amd::AmdProfilingSupport support;
+    support.pc_sampling = true;
+    support.dispatch_counting = true;
+    for (const auto engine :
+         {gpufl::ProfilingEngine::Deep, gpufl::ProfilingEngine::SassMetrics,
+          gpufl::ProfilingEngine::RangeProfiler,
+          gpufl::ProfilingEngine::RangeProfilerKernelReplay}) {
+        const auto plan = gpufl::amd::ResolveAmdProfilingPlan(engine, support);
+        EXPECT_EQ(plan.selected_path,
+                  gpufl::amd::AmdProfilingPath::DispatchCounting);
+        EXPECT_FALSE(gpufl::amd::AmdRequestNeedsPcSampling(engine));
+    }
+}
+
+TEST(AmdProfilingPolicy, TracePlusPcSamplingRequestsPcSampling) {
+    using gpufl::ProfilingEngine;
+    using gpufl::amd::ResolveAmdRequestedEngine;
+    // `--passes=Trace+PcSampling` publishes the first engine and the combo.
+    EXPECT_EQ(ResolveAmdRequestedEngine(ProfilingEngine::Trace,
+                                        "Trace,PcSampling"),
+              ProfilingEngine::PcSampling);
+    EXPECT_EQ(ResolveAmdRequestedEngine(ProfilingEngine::PcSampling,
+                                        "PcSampling, Trace"),
+              ProfilingEngine::PcSampling);
+    EXPECT_EQ(ResolveAmdRequestedEngine(ProfilingEngine::Trace, ""),
+              ProfilingEngine::Trace);
+    EXPECT_EQ(ResolveAmdRequestedEngine(ProfilingEngine::PcSampling, ""),
+              ProfilingEngine::PcSampling);
+    // With a counter engine in the group, its first engine runs alone.
+    EXPECT_EQ(ResolveAmdRequestedEngine(ProfilingEngine::PmSampling,
+                                        "PmSampling,PcSampling"),
+              ProfilingEngine::PmSampling);
+    EXPECT_EQ(ResolveAmdRequestedEngine(ProfilingEngine::Trace,
+                                        "Trace,PmSampling"),
+              ProfilingEngine::Trace);
 }
 
 TEST(AmdProfilingPolicy, SassIntentFallsBackToDispatchCounting) {
@@ -179,12 +258,13 @@ TEST(AmdCaptureCapabilities, PcFallbackNamesRequestAndSelectionSeparately) {
     const auto* selection = FindCapability(event, "engine_selection");
     ASSERT_NE(selection, nullptr);
     EXPECT_EQ(selection->status, "fallback");
-    EXPECT_EQ(selection->reason_code, "amd_pc_sampling_unavailable_baseline_tracing_retained");
+    EXPECT_EQ(selection->reason_code, "amd_pc_sampling_not_opted_in");
 
     const auto* pc = FindCapability(event, "pc_sampling");
     ASSERT_NE(pc, nullptr);
     EXPECT_TRUE(pc->requested);
     EXPECT_EQ(pc->status, "skipped");
+    EXPECT_EQ(pc->reason_code, "amd_pc_sampling_not_opted_in");
 }
 
 TEST(AmdCaptureCapabilities, DispatchSamplesAndDroppedTraceAreVisible) {

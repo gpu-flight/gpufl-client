@@ -289,6 +289,28 @@ std::string parseStacks(const FlagBreak& flag,
     return {};
 }
 
+// ── --amd-pc-sampling ─────────────────────────────────────────────────────
+
+// A method name rather than a switch: stochastic is the only method GPUFlight
+// configures, and naming it leaves no spelling that reaches host-trap.
+std::string parseAmdPcSampling(const FlagBreak& flag,
+                               const std::vector<std::string>& argv,
+                               std::size_t& index,
+                               TraceArgs& args) {
+    std::string value;
+    if (const std::string error =
+            detail::takeFlagValue(flag, argv, index, value);
+        !error.empty()) {
+        return error;
+    }
+    if (value != "stochastic") {
+        return "invalid --amd-pc-sampling value: " + value +
+               " (expected: stochastic)";
+    }
+    args.amd_pc_sampling = true;
+    return {};
+}
+
 // ── Segmentation, window, deep, sampling ──────────────────────────────────
 
 std::string parseSegmentEvery(const FlagBreak& flag,
@@ -602,8 +624,16 @@ const CliOptionManager<TraceArgs>& traceOptions() {
             .add({"--pc-sample-period"}, "<N>",
                  "PC sampling period: log2 of GPU cycles per sample (5..31; "
                  "default 10). Lower = more samples per kernel, at higher "
-                 "overhead.",
+                 "overhead. NVIDIA only; AMD samples every 2^20 cycles.",
                  kSection(TraceHelpSection::Sampling), &parsePcSamplePeriod)
+            .add({"--amd-pc-sampling"}, "stochastic",
+                 "Opt in to rocprofiler-sdk's beta stochastic PC sampling "
+                 "(MI300 and MI350 series) for the PcSampling and "
+                 "Trace+PcSampling passes. Sets "
+                 "ROCPROFILER_PC_SAMPLING_BETA_ENABLED in those passes' "
+                 "processes only; AMD warns the beta can hang the GPU. "
+                 "Without it an AMD PcSampling pass only traces.",
+                 kSection(TraceHelpSection::Sampling), &parseAmdPcSampling)
 
             // Removed flags: dispatched so the migration hint prints, but
             // deliberately undocumented (no description => absent from help).

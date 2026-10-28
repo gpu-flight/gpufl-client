@@ -314,6 +314,94 @@ TEST_F(SourceCapturePolicyTest, DisassemblerDoesNotInheritInjectionSentinel) {
     EXPECT_EQ(value, "unset");
     EXPECT_STREQ(std::getenv("GPUFL_INJECT"), "1");
 }
+
+// AMD PC samples take their source line from the line table the ISA rows
+// were built from, and key their function by the same primary file.
+TEST_F(SourceCapturePolicyTest, AmdIsaLineTableAnswersPcSampleLookups) {
+    struct SavedEnvironment {
+        const char* key;
+        bool present;
+        std::string value;
+        explicit SavedEnvironment(const char* name) : key(name),
+            present(std::getenv(name) != nullptr),
+            value(present ? std::getenv(name) : "") {}
+        ~SavedEnvironment() {
+            if (present) setenv(key, value.c_str(), 1);
+            else unsetenv(key);
+        }
+    } rocm("ROCM_PATH");
+    const fs::path kernel = write("src/kernel.hip", "a\nb\nc\nd\ne\nf\n");
+    const std::string header =
+        "/opt/rocm/include/hip/amd_detail/amd_device_functions.h";
+    // llvm-objdump -d -l output for one kernel; the last two instructions
+    // come from an inlined HIP header.
+    const std::string listing =
+        "\nkernel.co:\tfile format elf64-amdgpu\n\n"
+        "Disassembly of section .text:\n\n"
+        "0000000000001700 <_Z6kernelPf>:\n"
+        "; " + kernel.string() + ":5\n"
+        "\ts_load_dwordx2 s[0:1], s[0:1], 0x0 // 000000001700: C0060000\n"
+        "; " + kernel.string() + ":6\n"
+        "\tv_mov_b32_e32 v0, 1.0 // 000000001708: 7E0002F2\n"
+        "; " + header + ":10\n"
+        "\tglobal_store_dword v1, v0, s[0:1] // 00000000170C: DC708000\n"
+        "\ts_endpgm // 000000001714: BF810000\n";
+    const auto tool = write("llvm/bin/llvm-objdump",
+                            "#!/bin/sh\ncat <<'LISTING'\n" + listing +
+                                "LISTING\n");
+    fs::permissions(tool, fs::perms::owner_all);
+    ASSERT_EQ(setenv("ROCM_PATH", root_.c_str(), 1), 0);
+    std::vector<uint8_t> elf(20, 0);
+    elf[0] = 0x7f; elf[1] = 'E'; elf[2] = 'L'; elf[3] = 'F'; elf[18] = 0xe0;
+
+    using Lookup = gpufl::DictionaryManager::IsaSourceLookup;
+    gpufl::DictionaryManager dictionary;
+    dictionary.configureSourceCapture(true, settings());
+    dictionary.retainAmdIsaLines();
+    gpufl::DictionaryManager::IsaSourceLine line;
+    EXPECT_EQ(dictionary.lookupAmdIsaSource(42, "_Z6kernelPf", 8, &line),
+              Lookup::NotParsed);
+
+    dictionary.enqueueDisassembly(42, elf.data(), elf.size());
+    gpufl::Logger logger;
+    dictionary.flushDisassembly(logger, "amd-isa-lines");
+
+    ASSERT_EQ(dictionary.lookupAmdIsaSource(42, "_Z6kernelPf", 0x8, &line),
+              Lookup::Found);
+    EXPECT_EQ(line.function_source, kernel.string());
+    EXPECT_EQ(line.source_file, kernel.string());
+    EXPECT_EQ(line.source_line, 6u);
+
+    // An inlined header line belongs to the function keyed by its own file.
+    ASSERT_EQ(dictionary.lookupAmdIsaSource(42, "_Z6kernelPf", 0xc, &line),
+              Lookup::Found);
+    EXPECT_EQ(line.function_source, kernel.string());
+    EXPECT_EQ(line.source_file, header);
+    EXPECT_EQ(line.source_line, 10u);
+
+    // Not an instruction: the function's file, but no line.
+    ASSERT_EQ(dictionary.lookupAmdIsaSource(42, "_Z6kernelPf", 0x4, &line),
+              Lookup::Found);
+    EXPECT_EQ(line.function_source, kernel.string());
+    EXPECT_TRUE(line.source_file.empty());
+    EXPECT_EQ(line.source_line, 0u);
+
+    EXPECT_EQ(dictionary.lookupAmdIsaSource(42, "_Z5otherv", 0, &line),
+              Lookup::NoLine);
+
+    // The ISA rows interned the kernel's file under this logical name.
+    EXPECT_EQ(dictionary.sourceFileName(
+                  dictionary.internSourceFile(kernel.string())),
+              "src/kernel.hip");
+
+    // Only PC sampling asks for the tables; a trace keeps none.
+    gpufl::DictionaryManager tracing;
+    tracing.configureSourceCapture(true, settings());
+    tracing.enqueueDisassembly(42, elf.data(), elf.size());
+    tracing.flushDisassembly(logger, "amd-isa-lines-trace");
+    EXPECT_EQ(tracing.lookupAmdIsaSource(42, "_Z6kernelPf", 8, &line),
+              Lookup::NotParsed);
+}
 #endif
 
 }  // namespace
