@@ -3,6 +3,8 @@
 #include <string>
 #include <utility>
 
+#include "gpufl/backends/amd/amd_occupancy.hpp"
+
 namespace gpufl::amd {
 namespace {
 
@@ -70,6 +72,40 @@ CaptureCapabilitiesEvent BuildAmdCaptureCapabilitiesEvent(
             : (input.trace_configured
                    ? "Kernel dispatch tracing was enabled but emitted no rows this session."
                    : "Kernel dispatch tracing was not active."));
+
+    // The backend publishes a gfx942 session's estimate only with this row
+    // collected under amd_target_model_v1: rc6 used RDNA's register file there.
+    {
+        std::string status = "not_requested";
+        std::string reason = "not_selected";
+        std::string message = "Kernel occupancy was not estimated.";
+        if (tracing_requested && !input.trace_configured) {
+            status = "skipped";
+            reason = "rocprofiler_buffer_tracing_unavailable";
+        } else if (tracing_requested && input.occupancy_unestimated_rows > 0) {
+            status = input.occupancy_estimated_rows > 0 ? "partial" : "skipped";
+            reason = "amd_occupancy_target_unmodeled";
+            message = std::to_string(input.occupancy_unestimated_rows) +
+                      " kernel row(s) ran on a GPU target without an "
+                      "occupancy model and carry no estimate.";
+        } else if (tracing_requested && input.occupancy_estimated_rows > 0) {
+            status = "collected";
+            reason.clear();
+            message =
+                "Each kernel row's occupancy estimate uses the register "
+                "file, wave slots and LDS of its GPU target.";
+        } else if (tracing_requested) {
+            status = "enabled_no_data";
+            reason = "enabled_but_no_records";
+            message = "No kernel rows needed an occupancy estimate this "
+                      "session.";
+        }
+        AddCapability(event, "occupancy_estimate", tracing_requested,
+                      std::move(status),
+                      input.trace_configured ? kAmdOccupancyModelWireName
+                                             : "disabled",
+                      std::move(reason), std::move(message));
+    }
 
     AddCapability(
         event, "memcpy_activity", tracing_requested,

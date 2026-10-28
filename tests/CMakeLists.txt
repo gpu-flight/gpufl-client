@@ -13,6 +13,7 @@ set(GPUFL_TEST_SOURCES
     main_test_runner.cpp
     backends/amd/test_amd_trace_policy.cpp
     backends/amd/test_amd_profiling_policy.cpp
+    backends/amd/test_amd_occupancy.cpp
     core/test_analyzer.cpp
     core/test_api_path_routing.cpp
     core/test_batch_models.cpp

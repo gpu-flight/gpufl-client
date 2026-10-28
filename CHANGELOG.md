@@ -322,6 +322,15 @@ types are additive.
   duration is open, the drain period is now at most a third of it, but never
   shorter than the 250 ms collector beat. Outside windows, and for windows
   bounded only by a launch count, the cadence is unchanged.
+- **AMD occupancy estimates use the GPU's own target.** Every AMD kernel was
+  estimated with RDNA's register file: 1,536 VGPRs per SIMD, counting the
+  architectural VGPRs only. On `gfx942` (MI300X, MI325X) waves are wave64 and
+  VGPRs and AGPRs share one 512-entry file per SIMD, so the occupancy, its
+  limiter and blocks per CU were wrong there: lab 0027's kernel read 100% where
+  the compiler gives 50%. CDNA 3 now uses its documented limits (8 waves and
+  512 registers per SIMD, granules of 8, 64 KiB of LDS per CU). RDNA keeps its
+  previous result, and other AMD targets get no estimate. `capture_capabilities`
+  gains an `occupancy_estimate` row with mode `amd_target_model_v1`.
 
 ## [1.2.1] - 2026-06-23
 

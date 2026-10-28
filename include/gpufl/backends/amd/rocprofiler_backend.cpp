@@ -156,6 +156,8 @@ void RocprofilerBackend::initialize(const MonitorOptions& opts) {
 
     opts_ = opts;
     kernel_rows_emitted_.store(0, std::memory_order_relaxed);
+    occupancy_estimated_rows_.store(0, std::memory_order_relaxed);
+    occupancy_unestimated_rows_.store(0, std::memory_order_relaxed);
     memcpy_rows_emitted_.store(0, std::memory_order_relaxed);
     synchronization_rows_emitted_.store(0, std::memory_order_relaxed);
     memory_activity_rows_emitted_.store(0, std::memory_order_relaxed);
@@ -169,6 +171,8 @@ void RocprofilerBackend::initialize(const MonitorOptions& opts) {
         std::lock_guard lock(capture_capabilities_mutex_);
         capture_capabilities_session_id_.clear();
         capability_kernel_rows_baseline_ = 0;
+        capability_occupancy_estimated_baseline_ = 0;
+        capability_occupancy_unestimated_baseline_ = 0;
         capability_memcpy_rows_baseline_ = 0;
         capability_synchronization_rows_baseline_ = 0;
         capability_memory_activity_rows_baseline_ = 0;
@@ -625,6 +629,10 @@ void RocprofilerBackend::emitCapabilities() {
     };
     const uint64_t kernel_rows =
         kernel_rows_emitted_.load(std::memory_order_relaxed);
+    const uint64_t occupancy_estimated_rows =
+        occupancy_estimated_rows_.load(std::memory_order_relaxed);
+    const uint64_t occupancy_unestimated_rows =
+        occupancy_unestimated_rows_.load(std::memory_order_relaxed);
     const uint64_t memcpy_rows =
         memcpy_rows_emitted_.load(std::memory_order_relaxed);
     const uint64_t synchronization_rows =
@@ -657,6 +665,11 @@ void RocprofilerBackend::emitCapabilities() {
         synchronization_configured_.load(std::memory_order_acquire);
     input.kernel_rows =
         delta(kernel_rows, capability_kernel_rows_baseline_);
+    input.occupancy_estimated_rows = delta(
+        occupancy_estimated_rows, capability_occupancy_estimated_baseline_);
+    input.occupancy_unestimated_rows =
+        delta(occupancy_unestimated_rows,
+              capability_occupancy_unestimated_baseline_);
     input.memcpy_rows =
         delta(memcpy_rows, capability_memcpy_rows_baseline_);
     input.synchronization_rows = delta(
@@ -683,6 +696,8 @@ void RocprofilerBackend::emitCapabilities() {
         BuildAmdCaptureCapabilitiesEvent(input)));
 
     capability_kernel_rows_baseline_ = kernel_rows;
+    capability_occupancy_estimated_baseline_ = occupancy_estimated_rows;
+    capability_occupancy_unestimated_baseline_ = occupancy_unestimated_rows;
     capability_memcpy_rows_baseline_ = memcpy_rows;
     capability_synchronization_rows_baseline_ = synchronization_rows;
     capability_memory_activity_rows_baseline_ = memory_activity_rows;
@@ -967,6 +982,8 @@ rocprofiler_status_t RocprofilerBackend::queryAgentsShim(
             }
 
             GpuArchProps props{};
+            props.occupancy_model =
+                ResolveAmdOccupancyModel(agent->name ? agent->name : "");
             props.wave_front_size =
                 agent->wave_front_size > 0 ? agent->wave_front_size : 64;
             props.max_waves_per_cu = agent->max_waves_per_cu;
@@ -1127,6 +1144,7 @@ void RocprofilerBackend::handleKernelDispatch(
     const auto name = resolveKernelName(info.kernel_id);
     std::snprintf(out.name, sizeof(out.name), "%s", name.c_str());
 
+    uint32_t accum_vgpr_count = 0;
     {
         std::lock_guard<std::mutex> lock(kernel_meta_mutex_);
         if (auto itr = kernel_metadata_.find(info.kernel_id);
@@ -1135,6 +1153,7 @@ void RocprofilerBackend::handleKernelDispatch(
             out.num_regs = static_cast<int>(
                 meta.sgpr_count + meta.arch_vgpr_count + meta.accum_vgpr_count);
             out.arch_vgpr_count = static_cast<int>(meta.arch_vgpr_count);
+            accum_vgpr_count = meta.accum_vgpr_count;
             // Runtime dispatch LDS includes dynamic storage, while the symbol
             // registration records only the static requirement. Keeping the
             // whole dispatch size in static_shared mislabeled dynamic tiles.
@@ -1147,77 +1166,36 @@ void RocprofilerBackend::handleKernelDispatch(
         }
     }
 
-    // Compute occupancy from architecture properties
-    {
-        int dev_id = static_cast<int>(out.device_id);
-        auto pit = gpu_arch_props_.find(dev_id);
-        if (pit != gpu_arch_props_.end()) {
-            const auto& props = pit->second;
-            int threadsPerBlock = out.block_x * out.block_y * out.block_z;
-            if (threadsPerBlock > 0 && props.max_waves_per_cu > 0 && props.wave_front_size > 0) {
-                int wavesPerBlock = (threadsPerBlock + static_cast<int>(props.wave_front_size) - 1)
-                                    / static_cast<int>(props.wave_front_size);
-                int maxWavesPerCU = static_cast<int>(props.max_waves_per_cu);
-
-                // Wave/workgroup limit
-                int waveBlocks = (wavesPerBlock > 0) ? (maxWavesPerCU / wavesPerBlock) : 0;
-
-                // LDS (shared memory) limit
-                int smemPerBlock = out.static_shared + out.dyn_shared;
-                int ldsBytes = static_cast<int>(props.lds_size_bytes);
-                int smemBlocks = (smemPerBlock > 0 && ldsBytes > 0) ? (ldsBytes / smemPerBlock) : waveBlocks;
-
-                // VGPR register limit
-                // Use arch_vgpr_count (not combined num_regs which includes SGPRs).
-                // RDNA architectures have 1536 VGPRs per SIMD unit, allocated per-wave
-                // in granularity of 16 VGPRs (RDNA 1/2) or 24 VGPRs (RDNA 3/4).
-                // We use the max_waves_per_cu / simd_per_cu to derive VGPRs per SIMD:
-                //   total_vgprs_per_simd = max_waves_per_simd * max_vgprs_per_wave
-                // For RDNA 3/4: 1536 VGPRs per SIMD, 2 SIMDs per CU = 3072 VGPRs/CU.
-                constexpr int kVgprAllocGranularity = 8;
-                constexpr int kVgprsPerSimd = 1536;  // RDNA standard
-                int vgprsPerThread = out.arch_vgpr_count;
-                int vgprsAligned = (vgprsPerThread > 0)
-                    ? (((vgprsPerThread + kVgprAllocGranularity - 1) / kVgprAllocGranularity)
-                       * kVgprAllocGranularity)
-                    : 0;
-                int regBlocks = waveBlocks;  // default: not limited by registers
-                if (vgprsAligned > 0 && props.simd_per_cu > 0) {
-                    int totalVgprsPerCU = kVgprsPerSimd * static_cast<int>(props.simd_per_cu);
-                    int regWavesPerCU = totalVgprsPerCU / vgprsAligned;
-                    regBlocks = (wavesPerBlock > 0) ? (regWavesPerCU / wavesPerBlock) : waveBlocks;
-                }
-
-                // Overall occupancy = minimum of all limits
-                int activeBlocks = (std::min)({waveBlocks, smemBlocks, regBlocks});
-                activeBlocks = (std::max)(activeBlocks, 0);
-
-                auto toOcc = [&](int blocks) -> float {
-                    return (maxWavesPerCU > 0 && wavesPerBlock > 0)
-                        ? (std::min)(1.0f, static_cast<float>(blocks * wavesPerBlock) / maxWavesPerCU)
-                        : 0.0f;
-                };
-
-                out.occupancy = toOcc(activeBlocks);
-                out.warp_occupancy = toOcc(waveBlocks);
-                out.smem_occupancy = toOcc(smemBlocks);
-                out.reg_occupancy = toOcc(regBlocks);
-                out.block_occupancy = 1.0f;  // AMD doesn't have a hard block-per-CU limit like NVIDIA
-                out.max_active_blocks = activeBlocks;
-
-                struct { float occ; const char* name; } limiters[] = {
-                    {out.warp_occupancy, "waves"},
-                    {out.reg_occupancy, "registers"},
-                    {out.smem_occupancy, "shared_mem"},
-                };
-                const char* limiting = "waves";
-                float minOcc = out.warp_occupancy;
-                for (auto& l : limiters) {
-                    if (l.occ < minOcc) { minOcc = l.occ; limiting = l.name; }
-                }
-                std::snprintf(out.limiting_resource, sizeof(out.limiting_resource), "%s", limiting);
-            }
-        }
+    // Estimate occupancy with the model of the GPU's own target. A row whose
+    // target has no model, or whose device was never queried, carries none.
+    std::optional<AmdOccupancyEstimate> occupancy;
+    if (const auto pit = gpu_arch_props_.find(static_cast<int>(out.device_id));
+        pit != gpu_arch_props_.end()) {
+        const auto& props = pit->second;
+        AmdOccupancyDevice device;
+        device.wave_front_size = props.wave_front_size;
+        device.simd_per_cu = props.simd_per_cu;
+        device.max_waves_per_cu = props.max_waves_per_cu;
+        device.lds_size_bytes = props.lds_size_bytes;
+        AmdOccupancyKernel kernel;
+        kernel.threads_per_block =
+            static_cast<uint32_t>(out.block_x * out.block_y * out.block_z);
+        kernel.lds_bytes =
+            static_cast<uint32_t>(out.static_shared + out.dyn_shared);
+        kernel.arch_vgpr_count = static_cast<uint32_t>(out.arch_vgpr_count);
+        kernel.accum_vgpr_count = accum_vgpr_count;
+        occupancy =
+            EstimateAmdOccupancy(props.occupancy_model, device, kernel);
+    }
+    if (occupancy) {
+        out.occupancy = occupancy->occupancy;
+        out.warp_occupancy = occupancy->warp_occupancy;
+        out.smem_occupancy = occupancy->smem_occupancy;
+        out.reg_occupancy = occupancy->reg_occupancy;
+        out.block_occupancy = occupancy->block_occupancy;
+        out.max_active_blocks = occupancy->max_active_blocks;
+        std::snprintf(out.limiting_resource, sizeof(out.limiting_resource),
+                      "%s", occupancy->limiting_resource);
     }
 
     if (correlation_id.external.value != 0) {
@@ -1232,6 +1210,8 @@ void RocprofilerBackend::handleKernelDispatch(
 
     if (g_monitorBuffer.Push(out)) {
         kernel_rows_emitted_.fetch_add(1, std::memory_order_relaxed);
+        (occupancy ? occupancy_estimated_rows_ : occupancy_unestimated_rows_)
+            .fetch_add(1, std::memory_order_relaxed);
     } else {
         trace_records_queue_dropped_.fetch_add(1, std::memory_order_relaxed);
     }

@@ -16,6 +16,7 @@
 #include <rocprofiler-sdk/registration.h>
 
 #include "gpufl/backends/amd/engine/amd_profiling_engine.hpp"
+#include "gpufl/backends/amd/amd_occupancy.hpp"
 #include "gpufl/backends/amd/amd_profiling_policy.hpp"
 #include "gpufl/backends/amd/amd_trace_policy.hpp"
 #include "gpufl/core/activity_record.hpp"
@@ -147,6 +148,7 @@ class RocprofilerBackend final : public IMonitorBackend {
 
     // GPU architecture properties for occupancy calculation
     struct GpuArchProps {
+        AmdOccupancyModel occupancy_model = AmdOccupancyModel::None;
         uint32_t wave_front_size = 64;
         uint32_t max_waves_per_cu = 0;
         uint32_t simd_per_cu = 0;
@@ -173,6 +175,9 @@ class RocprofilerBackend final : public IMonitorBackend {
     AmdResolvedProfilingPlan resolved_plan_{};
 
     std::atomic<uint64_t> kernel_rows_emitted_{0};
+    // Kernel rows with and without a target model's occupancy estimate.
+    std::atomic<uint64_t> occupancy_estimated_rows_{0};
+    std::atomic<uint64_t> occupancy_unestimated_rows_{0};
     std::atomic<uint64_t> memcpy_rows_emitted_{0};
     std::atomic<uint64_t> synchronization_rows_emitted_{0};
     std::atomic<uint64_t> memory_activity_rows_emitted_{0};
@@ -185,6 +190,8 @@ class RocprofilerBackend final : public IMonitorBackend {
     mutable std::mutex capture_capabilities_mutex_;
     mutable std::string capture_capabilities_session_id_;
     mutable uint64_t capability_kernel_rows_baseline_ = 0;
+    mutable uint64_t capability_occupancy_estimated_baseline_ = 0;
+    mutable uint64_t capability_occupancy_unestimated_baseline_ = 0;
     mutable uint64_t capability_memcpy_rows_baseline_ = 0;
     mutable uint64_t capability_synchronization_rows_baseline_ = 0;
     mutable uint64_t capability_memory_activity_rows_baseline_ = 0;
