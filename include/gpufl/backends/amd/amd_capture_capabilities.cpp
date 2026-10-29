@@ -8,6 +8,60 @@
 namespace gpufl::amd {
 namespace {
 
+std::string WithThousands(const uint64_t value) {
+    std::string digits = std::to_string(value);
+    for (size_t at = digits.size(); at > 3; at -= 3) {
+        digits.insert(at - 3, ",");
+    }
+    return digits;
+}
+
+std::string PcSamplingRefusalMessage(const std::string& reason,
+                                     const std::string& detail) {
+    if (reason == AmdPcSamplingRefusalReason(
+                      AmdPcSamplingRefusal::NotOptedIn)) {
+        return "AMD PC sampling is a beta feature of rocprofiler-sdk, and "
+               "this run didn't enable it (gpufl trace "
+               "--amd-pc-sampling=stochastic).";
+    }
+    if (reason == AmdPcSamplingRefusalReason(
+                      AmdPcSamplingRefusal::MethodUnavailable)) {
+        return "This GPU has no stochastic PC sampling. rocprofiler-sdk "
+               "offers it on MI300- and MI350-series GPUs.";
+    }
+    if (reason == AmdPcSamplingRefusalReason(
+                      AmdPcSamplingRefusal::DriverUnsupported)) {
+        return "The amdgpu driver doesn't offer PC sampling. AMD's "
+               "amdgpu-dkms driver does.";
+    }
+    if (reason ==
+        AmdPcSamplingRefusalReason(AmdPcSamplingRefusal::Unavailable)) {
+        return "AMD PC sampling is unavailable on this GPU: another process "
+               "may be sampling it with a different configuration, or the "
+               "process runs under ROCgdb.";
+    }
+    if (reason == AmdPcSamplingRefusalReason(
+                      AmdPcSamplingRefusal::ConfigurationFailed)) {
+        return "rocprofiler-sdk refused PC sampling: " +
+               (detail.empty() ? std::string("no reason given") : detail) +
+               ".";
+    }
+    if (reason ==
+        AmdPcSamplingRefusalReason(AmdPcSamplingRefusal::WindowOnly)) {
+        return "AMD PC sampling can't be limited to deep windows: "
+               "rocprofiler-sdk samples for as long as the profiling context "
+               "runs. This window-only run (GPUFL_DEEP_ARM=window) only "
+               "traced.";
+    }
+    if (reason ==
+        AmdPcSamplingRefusalReason(AmdPcSamplingRefusal::GroupUnsupported)) {
+        return "On AMD GPUs, PC sampling runs alone or beside Trace, so this "
+               "pass's group ran " +
+               detail + " instead.";
+    }
+    return "AMD PC sampling did not run.";
+}
+
 void AddCapability(CaptureCapabilitiesEvent& event, std::string feature,
                    const bool requested, std::string status,
                    std::string mode, std::string reason,
@@ -26,14 +80,15 @@ CaptureCapabilitiesEvent BuildAmdCaptureCapabilitiesEvent(
     event.ts_ns = input.ts_ns;
     event.requested_engine =
         AmdRequestIntentWireName(input.plan.requested_engine);
-    event.selected_engine = AmdSelectedPathWireName(input.plan.selected_path);
+    event.selected_engine = AmdSessionEngineWireName(input.plan);
 
     const bool tracing_requested =
         input.plan.requested_engine != ProfilingEngine::Monitor;
     const bool dispatch_requested =
         AmdRequestNeedsDispatchCounting(input.plan.requested_engine);
     const bool pc_requested =
-        AmdRequestNeedsPcSampling(input.plan.requested_engine);
+        AmdRequestNeedsPcSampling(input.plan.requested_engine) ||
+        input.plan.pc_sampling_dropped;
     const bool device_counting_requested =
         AmdRequestNeedsDeviceCounting(input.plan.requested_engine);
     const bool dispatch_selected =
@@ -191,21 +246,62 @@ CaptureCapabilitiesEvent BuildAmdCaptureCapabilitiesEvent(
                    : "AMD dispatch counting was selected but emitted no samples this session.")
             : "AMD dispatch counting was not selected.");
 
-    AddCapability(
-        event, "pc_sampling", pc_requested,
-        !pc_requested
-            ? "not_requested"
-            : (pc_selected
-                   ? (input.profiling_sample_rows > 0 ? "collected"
-                                                      : "enabled_no_data")
-                   : "skipped"),
-        pc_selected ? "rocprofiler_pc_sampling" : "disabled",
-        pc_selected
-            ? (input.profiling_sample_rows > 0 ? "" : "enabled_but_no_records")
-            : (pc_requested ? input.plan.reason_code : "not_selected"),
-        pc_selected
-            ? "AMD PC sampling was selected."
-            : "AMD PC sampling is not available in the current implementation.");
+    {
+        std::string status = "not_requested";
+        std::string reason = "not_selected";
+        std::string message = "AMD PC sampling was not requested.";
+        if (input.plan.pc_sampling_dropped) {
+            status = "skipped";
+            reason = AmdPcSamplingRefusalReason(
+                AmdPcSamplingRefusal::GroupUnsupported);
+            message = PcSamplingRefusalMessage(
+                reason, AmdRequestIntentWireName(input.plan.requested_engine));
+        } else if (pc_requested && !pc_selected) {
+            status = "skipped";
+            reason = input.plan.reason_code;
+            message =
+                PcSamplingRefusalMessage(reason, input.pc_sampling_detail);
+        } else if (pc_selected) {
+            const std::string every =
+                "Stochastic PC sampling every " +
+                WithThousands(input.pc_sampling_interval) + " cycles";
+            const std::string lost = WithThousands(input.pc_samples_lost);
+            // Lost samples make the data partial even when none survived:
+            // a quiet run and one that lost everything must not look alike.
+            if (input.pc_samples_lost > 0) {
+                status = "partial";
+                reason = "amd_pc_sampling_samples_dropped";
+            } else if (input.pc_samples > 0) {
+                status = "collected";
+                reason = "";
+            } else {
+                status = "enabled_no_data";
+                reason = "enabled_but_no_records";
+            }
+            if (input.pc_samples > 0) {
+                message = every + ": " + WithThousands(input.pc_samples) +
+                          " samples, " +
+                          WithThousands(input.pc_samples_issued) +
+                          " issued, " +
+                          WithThousands(input.pc_samples_not_issued) +
+                          " waiting.";
+                if (input.pc_samples_lost > 0) {
+                    message += " " + lost +
+                               " samples were dropped or matched no kernel.";
+                }
+            } else if (input.pc_samples_lost > 0) {
+                message = every + " kept no samples: " + lost +
+                          " were dropped or matched no kernel.";
+            } else {
+                message =
+                    "AMD PC sampling was enabled but recorded no samples "
+                    "this session.";
+            }
+        }
+        AddCapability(event, "pc_sampling", pc_requested, std::move(status),
+                      pc_selected ? kAmdPcSamplingModeWireName : "disabled",
+                      std::move(reason), std::move(message));
+    }
 
     AddCapability(
         event, "device_counting", device_counting_requested,

@@ -3,6 +3,7 @@
 #include "gpufl/core/env_vars.hpp"
 #include "gpufl/core/stack_trace.hpp"  // DemangleFunctionKey
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cstdio>
@@ -501,6 +502,7 @@ void DictionaryManager::flushDisassembly(Logger& logger,
         std::lock_guard lk(mu_);
         pending = std::move(pending_disasm_cubins_);
         pending_disasm_cubins_.clear();
+        for (const auto& entry : pending) amd_isa_requests_.erase(entry.first);
     }
     if (pending.empty()) {
         // A module loaded after the last flush may still carry PTX.
@@ -512,7 +514,41 @@ void DictionaryManager::flushDisassembly(Logger& logger,
     // (it lives in the fatbin, not these SASS cubins). Same worker thread, also
     // a subprocess, so it's injection-teardown-safe like nvdisasm.
     flushPtx(logger, session_id);
+    disassemble(logger, session_id, pending);
+}
 
+void DictionaryManager::requestAmdIsaLines(const uint64_t crc) {
+    std::lock_guard lk(mu_);
+    if (retain_amd_isa_lines_ && !amd_isa_lines_.count(crc)) {
+        amd_isa_requests_.insert(crc);
+    }
+}
+
+void DictionaryManager::flushRequestedAmdDisassembly(
+    Logger& logger, const std::string& session_id) {
+    std::unordered_map<uint64_t, std::vector<uint8_t>> pending;
+    {
+        std::lock_guard lk(mu_);
+        // A request can come before its code object is enqueued; it stays
+        // until then.
+        for (auto it = amd_isa_requests_.begin();
+             it != amd_isa_requests_.end();) {
+            const auto entry = pending_disasm_cubins_.find(*it);
+            if (entry == pending_disasm_cubins_.end()) {
+                ++it;
+                continue;
+            }
+            pending.emplace(entry->first, std::move(entry->second));
+            pending_disasm_cubins_.erase(entry);
+            it = amd_isa_requests_.erase(it);
+        }
+    }
+    if (!pending.empty()) disassemble(logger, session_id, pending);
+}
+
+void DictionaryManager::disassemble(
+    Logger& logger, const std::string& session_id,
+    std::unordered_map<uint64_t, std::vector<uint8_t>>& pending) {
     for (auto& [crc, bytes] : pending) {
         // Write cubin to a temp file
         std::string tmpPathStr;
@@ -857,6 +893,15 @@ void DictionaryManager::flushDisassembly(Logger& logger,
             }
             if (anySourceLine) break;
         }
+        // Filled below for AMD code objects; published once complete.
+        AmdIsaCodeObject amdIsaLines;
+        std::unordered_map<std::string, uint32_t> amdIsaFiles;
+        const auto amdIsaFile = [&](const std::string& path) {
+            const auto [it, inserted] = amdIsaFiles.try_emplace(
+                path, static_cast<uint32_t>(amdIsaLines.files.size()));
+            if (inserted) amdIsaLines.files.push_back(path);
+            return it->second;
+        };
         if (isAmd || anySourceLine) {
             // Collect unique source files and intern them
             std::unordered_map<std::string, uint32_t> sourceFileIds;
@@ -965,6 +1010,23 @@ void DictionaryManager::flushDisassembly(Logger& logger,
                     const std::string funcKey =
                         core::DemangleFunctionKey(funcName + "@" + source_name);
                     const uint32_t functionId = internFunction(funcKey, funcName);
+                    if (isAmd) {
+                        AmdIsaFunctionLines& lines =
+                            amdIsaLines.functions[funcName];
+                        lines.primary_file = amdIsaFile(primarySourceFile);
+                        for (const auto& e : entries) {
+                            if (e.source_file.empty() || e.source_line == 0) {
+                                continue;
+                            }
+                            lines.lines.push_back(
+                                {e.pc, amdIsaFile(e.source_file),
+                                 e.source_line});
+                        }
+                        std::sort(lines.lines.begin(), lines.lines.end(),
+                                  [](const AmdIsaLine& a, const AmdIsaLine& b) {
+                                      return a.pc < b.pc;
+                                  });
+                    }
 
                     // Build profile_sample_batch JSON
                     std::ostringstream poss;
@@ -1000,7 +1062,47 @@ void DictionaryManager::flushDisassembly(Logger& logger,
                 }
             }
         }
+        if (isAmd) {
+            std::lock_guard lk(mu_);
+            if (retain_amd_isa_lines_) {
+                amd_isa_lines_[crc] = std::move(amdIsaLines);
+            }
+        }
     }
+}
+
+void DictionaryManager::retainAmdIsaLines() {
+    std::lock_guard lk(mu_);
+    retain_amd_isa_lines_ = true;
+}
+
+DictionaryManager::IsaSourceLookup DictionaryManager::lookupAmdIsaSource(
+    const uint64_t crc, const std::string& function, const uint32_t pc_offset,
+    IsaSourceLine* out) {
+    std::lock_guard lk(mu_);
+    const auto code_object = amd_isa_lines_.find(crc);
+    if (code_object == amd_isa_lines_.end()) return IsaSourceLookup::NotParsed;
+    const AmdIsaCodeObject& lines = code_object->second;
+    const auto function_lines = lines.functions.find(function);
+    if (function_lines == lines.functions.end()) {
+        return IsaSourceLookup::NoLine;
+    }
+    const auto& entries = function_lines->second.lines;
+    const auto line = std::lower_bound(
+        entries.begin(), entries.end(), pc_offset,
+        [](const AmdIsaLine& entry, const uint32_t pc) {
+            return entry.pc < pc;
+        });
+    if (out) {
+        out->function_source = lines.files[function_lines->second.primary_file];
+        out->source_file.clear();
+        out->source_line = 0;
+        if (line != entries.end() && line->pc == pc_offset) {
+            out->source_file = lines.files[line->file];
+            out->source_line = line->line;
+        }
+    }
+    return IsaSourceLookup::Found;
 }
 
 void DictionaryManager::flushDictionary(Logger& logger,

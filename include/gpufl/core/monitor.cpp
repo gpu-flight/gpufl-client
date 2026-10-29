@@ -841,6 +841,39 @@ void Monitor::EnqueueLoadedPtx(const void* image, size_t limit) { g_state.batche
 void Monitor::FlushDisassemblyNow() {
     g_state.batches.flushDisassembly();
 }
+
+void Monitor::RetainAmdIsaLines() { g_state.batches.retainAmdIsaLines(); }
+
+void Monitor::RequestAmdIsaLines(const uint64_t crc) {
+    g_state.batches.requestAmdIsaLines(crc);
+}
+
+bool Monitor::WaitForAmdIsaLines(const std::vector<uint64_t>& crcs,
+                                 const std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (true) {
+        const bool parsed = std::all_of(
+            crcs.begin(), crcs.end(), [](const uint64_t crc) {
+                return g_state.batches.lookupAmdIsaSource(
+                           crc, std::string(), 0, nullptr) !=
+                       DictionaryManager::IsaSourceLookup::NotParsed;
+            });
+        if (parsed) return true;
+        // Only the collector disassembles while a run goes on.
+        if (!g_state.collectorRunning.load(std::memory_order_acquire) ||
+            std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+}
+
+DictionaryManager::IsaSourceLookup Monitor::LookupAmdIsaSource(
+    const uint64_t crc, const std::string& function, const uint32_t pc_offset,
+    DictionaryManager::IsaSourceLine* out) {
+    return g_state.batches.lookupAmdIsaSource(crc, function, pc_offset, out);
+}
+
 bool Monitor::PushActivityRecord(const ActivityRecord& rec) {
     return g_monitorBuffer.Push(rec);
 }
@@ -888,8 +921,12 @@ void Monitor::PushProfileSamples(const std::vector<ProfileSampleInput>& samples)
             s.function_key.substr(0, s.function_key.find('@'));
         row.source_file_id =
             g_state.batches.internSourceFile(s.source_file);
+        const uint32_t function_source_id =
+            s.function_source_file.empty()
+                ? row.source_file_id
+                : g_state.batches.internSourceFile(s.function_source_file);
         const std::string normalizedFunctionKey = funcSymbol + "@" +
-            g_state.batches.sourceFileName(row.source_file_id);
+            g_state.batches.sourceFileName(function_source_id);
         row.function_id = g_state.batches.internFunction(
             demangledKey(normalizedFunctionKey), funcSymbol);
         row.pc_offset = s.pc_offset;

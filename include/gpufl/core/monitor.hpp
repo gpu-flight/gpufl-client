@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -7,6 +8,7 @@
 #include <vector>
 
 #include "gpufl/core/activity_record.hpp"
+#include "gpufl/core/dictionary_manager.hpp"
 #include "gpufl/core/events.hpp"
 #include "gpufl/core/ring_buffer.hpp"
 #include "gpufl/core/source_capture_policy.hpp"
@@ -168,6 +170,12 @@ inline const char* ProfilingEngineSessionKind(const ProfilingEngine engine) {
 enum class DeepArmMode { Always, WindowOnly };
 
 /**
+ * @brief The AMD PC sampling method a run opted into. Stochastic is the only
+ *        one GPUFlight configures; host-trap is never used.
+ */
+enum class AmdPcSamplingMethod { None, Stochastic };
+
+/**
  * @brief The configuration layer that decided a setting.
  *
  * capture_capabilities reports it so a session without, say, call stacks
@@ -225,6 +233,9 @@ struct MonitorOptions {
     // samples per hot range, not 10⁶. Users doing fine-grained stall
     // attribution can lower this back via InitOptions.
     uint32_t pc_sampling_period = 10;
+    // AMD PC sampling is opt-in (GPUFL_AMD_PC_SAMPLING=stochastic). Its
+    // interval is fixed by the engine; pc_sampling_period is NVIDIA's.
+    AmdPcSamplingMethod amd_pc_sampling = AmdPcSamplingMethod::None;
     // PM sampling interval in microseconds when using the GPU time trigger.
     // PM Sampling is a hardware time-series engine, so this controls timeline
     // density rather than per-kernel attribution. Default 100us catches short scopes better.
@@ -265,6 +276,11 @@ struct ProfileSampleInput {
     uint8_t  sample_kind   = 0;  // 0 = pc_sampling, 1 = sass_metric
     std::string source_file;
     uint32_t source_line   = 0;
+    // The file the function is keyed by, when it differs from the sample's
+    // own source_file: AMD ISA rows key a function by its primary file, and
+    // a sample on an inlined header line belongs to that same function.
+    // Empty keys the function by source_file, as NVIDIA's rows do.
+    std::string function_source_file;
 };
 
 struct PmSampleInput {
@@ -459,6 +475,37 @@ class Monitor {
      * sampling to keep nvdisasm off the fragile process-exit teardown.
      */
     static void FlushDisassemblyNow();
+
+    /**
+     * AMD PC sampling asks for the line tables of the code objects
+     * disassembled from now on; LookupAmdIsaSource answers from them.
+     */
+    static void RetainAmdIsaLines();
+
+    /**
+     * AMD PC sampling needs this code object's line table while the run
+     * goes on: the collector disassembles it at its next flush once it is
+     * enqueued, rather than at the last one. Ignored unless retained.
+     */
+    static void RequestAmdIsaLines(uint64_t crc);
+
+    /**
+     * Waits at most `timeout` for the collector to disassemble each code
+     * object (LookupAmdIsaSource past NotParsed). False on timeout, and at
+     * once when the collector isn't running.
+     */
+    static bool WaitForAmdIsaLines(const std::vector<uint64_t>& crcs,
+                                   std::chrono::milliseconds timeout);
+
+    /**
+     * The source line an AMD ISA row shows for an instruction of a code
+     * object (by the crc it was enqueued with): NotParsed until that code
+     * object's disassembly has run. AMD PC sampling attaches it to its rows
+     * so samples and ISA rows share one function and line.
+     */
+    static DictionaryManager::IsaSourceLookup LookupAmdIsaSource(
+        uint64_t crc, const std::string& function, uint32_t pc_offset,
+        DictionaryManager::IsaSourceLine* out);
 
     /**
      * @brief Push a pre-built ScopeBatchRow into the scope batch buffer.

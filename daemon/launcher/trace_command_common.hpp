@@ -109,6 +109,29 @@ bool applyDeepWindowEnv(const TraceArgs& args, const TracePlatform& platform);
 bool applySegmentationEnv(const TraceArgs& args, const std::string& run_id,
                           const TracePlatform& platform);
 
+/**
+ * @brief True when a --passes token samples PCs on an AMD GPU: "PcSampling"
+ *        or a '+' group that the AMD backend resolves to it, such as
+ *        "Trace+PcSampling" (amd::ClassifyAmdPcSamplingGroup, which the
+ *        backend reads too). Deep is not one.
+ */
+bool passRunsPcSampling(const std::string& pass);
+
+/**
+ * @brief Publish or remove the AMD PC sampling opt-in for one pass's child.
+ *
+ * Only with --amd-pc-sampling=stochastic, and only for a pass that runs
+ * PcSampling, does the child get GPUFL_AMD_PC_SAMPLING=stochastic and
+ * rocprofiler-sdk's ROCPROFILER_PC_SAMPLING_BETA_ENABLED=ON. Every other
+ * child has both removed, an inherited value included: the beta switch is
+ * consent to an experimental feature AMD warns can hang the GPU.
+ *
+ * @return false when the platform refused a change; the reason is already on
+ *         stderr.
+ */
+bool applyAmdPcSamplingEnv(const TraceArgs& args, const std::string& pass,
+                           const TracePlatform& platform);
+
 // How the direct child ended, for the synthetic shutdown the launcher writes
 // into a session that has none.
 struct SyntheticShutdownContext {

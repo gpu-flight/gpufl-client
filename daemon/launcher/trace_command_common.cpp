@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "agent_launcher.hpp"
+#include "gpufl/backends/amd/amd_pc_sampling_policy.hpp"
 #include "gpufl/core/env_vars.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/json/json.hpp"
@@ -732,6 +733,22 @@ bool applyLaunchIdEnv(const char* inherited, const TracePlatform& platform) {
     return setEnvOrPrint(platform, env::kLaunchId, inherited);
 }
 
+bool passRunsPcSampling(const std::string& pass) {
+    return amd::ClassifyAmdPcSamplingGroup(pass, '+') ==
+           amd::AmdPcSamplingGroup::Samples;
+}
+
+bool applyAmdPcSamplingEnv(const TraceArgs& args, const std::string& pass,
+                           const TracePlatform& platform) {
+    if (args.amd_pc_sampling && passRunsPcSampling(pass)) {
+        return setEnvOrPrint(platform, env::kAmdPcSampling, "stochastic") &&
+               setEnvOrPrint(platform, env::kRocprofilerPcSamplingBetaEnabled,
+                             "ON");
+    }
+    return unsetEnvOrPrint(platform, env::kAmdPcSampling) &&
+           unsetEnvOrPrint(platform, env::kRocprofilerPcSamplingBetaEnabled);
+}
+
 int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
     // Re-checked here, not only in the parser. The two modes are enforced by
     // the CLI, but TraceArgs is a plain struct: anything constructing one
@@ -881,6 +898,25 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
 
     const RunOptions& run_opts = trace_plan.run_options;
 
+    if (args.amd_pc_sampling && !args.quiet) {
+        for (const std::string& pass : plan) {
+            if (amd::ClassifyAmdPcSamplingGroup(pass, '+') ==
+                amd::AmdPcSamplingGroup::Dropped) {
+                std::fprintf(stderr,
+                             "[gpufl] warning: AMD GPUs sample PCs alone or "
+                             "beside Trace only, so pass %s runs its first "
+                             "engine there without PC sampling\n",
+                             pass.c_str());
+            }
+        }
+        if (std::none_of(plan.begin(), plan.end(), passRunsPcSampling)) {
+            std::fprintf(stderr,
+                         "[gpufl] warning: --amd-pc-sampling applies to no "
+                         "pass; add PcSampling or Trace+PcSampling to "
+                         "--passes\n");
+        }
+    }
+
     AgentProcess agent;
     if (args.upload) {
         const fs::path cursor = args.agent_cursor.empty()
@@ -993,6 +1029,8 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
             !setEnvOrPrint(platform, env::kPassIndex, std::to_string(i))) {
             return 2;
         }
+        // Per pass, so the beta switch reaches only a PcSampling child.
+        if (!applyAmdPcSamplingEnv(args, engine, platform)) return 2;
 
         const std::string what =
             multipass ? "pass " + std::to_string(i + 1) + "/" +
@@ -1006,6 +1044,12 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
                     "[gpufl] note: PcSampling needs admin / NVIDIA CP \"allow GPU "
                     "performance counters to all users\"; this pass reports \"needs "
                     "admin\" and yields no PC data if unprivileged.\n");
+            }
+            if (args.amd_pc_sampling && passRunsPcSampling(engine)) {
+                std::fprintf(stderr,
+                    "[gpufl] note: this pass enables rocprofiler-sdk's beta "
+                    "stochastic PC sampling on AMD GPUs "
+                    "(ROCPROFILER_PC_SAMPLING_BETA_ENABLED=ON).\n");
             }
         }
 

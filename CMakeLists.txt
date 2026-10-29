@@ -168,6 +168,7 @@ set_target_properties(gpufl PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(gpufl PUBLIC gpufl_counters)
 
 target_sources(gpufl PRIVATE
+    include/gpufl/backends/amd/amd_pc_sampling_policy.cpp
     include/gpufl/backends/amd/amd_profiling_policy.cpp
     include/gpufl/backends/amd/amd_capture_capabilities.cpp
     include/gpufl/backends/amd/amd_occupancy.cpp
@@ -734,6 +735,7 @@ if(GPUFL_ENABLE_AMD)
                 include/gpufl/backends/amd/rocprofiler_backend.cpp
                 include/gpufl/backends/amd/engine/device_counter_engine.cpp
                 include/gpufl/backends/amd/engine/dispatch_counter_engine.cpp
+                include/gpufl/backends/amd/engine/pc_sampling_engine.cpp
             )
             message(STATUS "Found ROCprofiler-SDK support")
         else()

@@ -127,6 +127,38 @@ class DictionaryManager {
     // JSON line per function.  No-op if nothing is pending.
     void flushDisassembly(Logger& logger, const std::string& session_id);
 
+    // Keep the line tables of AMD code objects disassembled from now on, for
+    // lookupAmdIsaSource. Only AMD PC sampling needs them; reset() drops
+    // them and turns retention off.
+    void retainAmdIsaLines();
+
+    // AMD PC sampling needs this code object's line table while the run
+    // goes on: flushRequestedAmdDisassembly disassembles it once enqueued,
+    // rather than the next full flush. Ignored unless retained.
+    void requestAmdIsaLines(uint64_t crc);
+
+    // flushDisassembly for the enqueued code objects requestAmdIsaLines
+    // asked for. The collector calls it at every flush; with nothing asked
+    // it takes one lock.
+    void flushRequestedAmdDisassembly(Logger& logger,
+                                      const std::string& session_id);
+
+    // The source line an AMD ISA row shows for an instruction, from the
+    // llvm-objdump line table flushDisassembly parsed. NotParsed until the
+    // code object's disassembly has run; Found or NoLine afterwards. On
+    // Found, function_source is the file the function's ISA rows are keyed
+    // by, and source_file/source_line the instruction's own line.
+    enum class IsaSourceLookup { NotParsed, NoLine, Found };
+    struct IsaSourceLine {
+        std::string function_source;
+        std::string source_file;
+        uint32_t source_line = 0;
+    };
+    IsaSourceLookup lookupAmdIsaSource(uint64_t crc,
+                                       const std::string& function,
+                                       uint32_t pc_offset,
+                                       IsaSourceLine* out);
+
     // Runs cuobjdump -ptx on the running executable and emits one
     // ptx_disassembly JSON line per kernel (joined to kernels/SASS by the same
     // mangled function name). PTX lives in the fatbin, not the SASS cubins we
@@ -183,9 +215,18 @@ class DictionaryManager {
         seen_loaded_ptx_.clear();
         emitted_ptx_names_.clear();
         ptx_emitted_ = false;
+        retain_amd_isa_lines_ = false;
+        amd_isa_lines_.clear();
+        amd_isa_requests_.clear();
     }
 
    private:
+    // Disassembles and emits the code objects taken from
+    // pending_disasm_cubins_.
+    void disassemble(
+        Logger& logger, const std::string& session_id,
+        std::unordered_map<uint64_t, std::vector<uint8_t>>& pending);
+
     // Runs cuobjdump -ptx on the running executable and emits its kernels.
     void dumpExecutablePtx(Logger& logger, const std::string& session_id);
 
@@ -236,6 +277,26 @@ class DictionaryManager {
 
     // cubin_crc → raw bytes (populated once per cubin, flushed via flushDisassembly)
     std::unordered_map<uint64_t, std::vector<uint8_t>> pending_disasm_cubins_;
+
+    // AMD code object crc -> its ISA rows' source lines, while retained.
+    // A crc is present once its disassembly ran.
+    struct AmdIsaLine {
+        uint32_t pc = 0;
+        uint32_t file = 0;  // index into AmdIsaCodeObject::files
+        uint32_t line = 0;
+    };
+    struct AmdIsaFunctionLines {
+        uint32_t primary_file = 0;
+        std::vector<AmdIsaLine> lines;  // by pc
+    };
+    struct AmdIsaCodeObject {
+        std::vector<std::string> files;
+        std::unordered_map<std::string, AmdIsaFunctionLines> functions;
+    };
+    bool retain_amd_isa_lines_ = false;
+    std::unordered_map<uint64_t, AmdIsaCodeObject> amd_isa_lines_;
+    // Code objects requestAmdIsaLines asked for that aren't disassembled.
+    std::unordered_set<uint64_t> amd_isa_requests_;
 
     // PTX is dumped from the executable once per session (see flushPtx).
     bool ptx_emitted_ = false;

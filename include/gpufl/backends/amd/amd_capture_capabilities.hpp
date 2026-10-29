@@ -24,6 +24,15 @@ struct AmdCaptureCapabilityInput {
     uint64_t synchronization_rows = 0;
     uint64_t memory_activity_rows = 0;
     uint64_t profiling_sample_rows = 0;
+    // Stochastic PC sampling, when the plan selected it.
+    uint64_t pc_sampling_interval = 0;  // cycles
+    uint64_t pc_samples = 0;            // attributed: issued plus waiting
+    uint64_t pc_samples_issued = 0;
+    uint64_t pc_samples_not_issued = 0;
+    // Invalid, dropped by rocprofiler-sdk, or matched no function.
+    uint64_t pc_samples_lost = 0;
+    // What rocprofiler-sdk answered when it refused PC sampling.
+    std::string pc_sampling_detail;
     uint64_t pm_sample_rows = 0;
     uint64_t dropped_trace_records = 0;
     uint64_t dropped_client_records = 0;

@@ -203,6 +203,16 @@ constexpr const char* kPcKernelCollect = "GPUFL_PC_KERNEL_COLLECT";
 // `gpufl trace --pc-sample-period` tune the injection path (which otherwise has
 // no way to set it).
 constexpr const char* kPcSamplingPeriod = "GPUFL_PC_SAMPLING_PERIOD";
+// AMD PC sampling opt-in, "stochastic". `gpufl trace --amd-pc-sampling=
+// stochastic` publishes it, with rocprofiler-sdk's own beta switch below, to
+// the PcSampling pass's process only. Without it an AMD PcSampling request
+// keeps tracing (amd_pc_sampling_not_opted_in) and calls no PC sampling API.
+constexpr const char* kAmdPcSampling = "GPUFL_AMD_PC_SAMPLING";
+// rocprofiler-sdk's consent switch for its experimental PC sampling, checked
+// by the SDK library on every PC sampling call. Only the launcher sets it,
+// and only beside kAmdPcSampling; the library never does.
+constexpr const char* kRocprofilerPcSamplingBetaEnabled =
+    "ROCPROFILER_PC_SAMPLING_BETA_ENABLED";
 
 // ── Deep engine knobs ───────────────────────────────────────────────────────
 constexpr const char* kDeepPcOnly  = "GPUFL_DEEP_PC_ONLY";

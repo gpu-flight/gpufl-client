@@ -68,6 +68,10 @@ struct TraceArgs {
     // lower = more frequent → catches shorter kernels). 0 = leave the engine
     // default. Plumbed to the injected target via GPUFL_PC_SAMPLING_PERIOD.
     uint32_t pc_sample_period = 0;      // --pc-sample-period; 0 = engine default
+    // --amd-pc-sampling=stochastic: opt in to rocprofiler-sdk's beta PC
+    // sampling for the PcSampling passes. Only then, and only in those
+    // passes' processes, does the launcher set the SDK's beta switch.
+    bool amd_pc_sampling = false;
     std::vector<std::string> command;   // tokens after `--`
 };
 

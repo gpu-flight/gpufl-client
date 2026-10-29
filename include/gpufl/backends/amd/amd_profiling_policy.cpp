@@ -1,5 +1,6 @@
 #include "gpufl/backends/amd/amd_profiling_policy.hpp"
 
+#include <algorithm>
 #include <unordered_set>
 
 namespace gpufl::amd {
@@ -44,6 +45,58 @@ const char* AmdSelectedPathWireName(const AmdProfilingPath path) {
         case AmdProfilingPath::DeviceCounting: return "amd.device_counting";
     }
     return "amd.unknown";
+}
+
+const char* AmdSessionEngineWireName(const AmdResolvedProfilingPlan& plan) {
+    if (plan.selected_path == AmdProfilingPath::PcSampling &&
+        plan.trace_requested) {
+        return AmdSelectedPathWireName(AmdProfilingPath::BufferTracing);
+    }
+    return AmdSelectedPathWireName(plan.selected_path);
+}
+
+AmdProfilingRequest ResolveAmdProfilingRequest(const ProfilingEngine selected,
+                                               const std::string_view combo) {
+    AmdProfilingRequest request;
+    request.engine = selected;
+    switch (ClassifyAmdPcSamplingGroup(combo, ',')) {
+        case AmdPcSamplingGroup::Absent:
+            break;
+        case AmdPcSamplingGroup::Samples: {
+            request.engine = ProfilingEngine::PcSampling;
+            const auto names = SplitAmdEngineGroup(combo, ',');
+            request.trace_requested =
+                std::find(names.begin(), names.end(), "Trace") != names.end();
+            break;
+        }
+        case AmdPcSamplingGroup::Dropped:
+            request.pc_sampling_dropped = true;
+            break;
+    }
+    return request;
+}
+
+AmdResolvedProfilingPlan ResolveAmdProfilingPlan(
+    const AmdProfilingRequest& request, const AmdProfilingSupport& support) {
+    AmdResolvedProfilingPlan plan =
+        ResolveAmdProfilingPlan(request.engine, support);
+    plan.trace_requested = request.trace_requested;
+    plan.pc_sampling_dropped = request.pc_sampling_dropped;
+    return plan;
+}
+
+std::optional<AmdPcSamplingRefusal> AmdPcSamplingPreflight(
+    const MonitorOptions& opts) {
+    if (opts.amd_pc_sampling != AmdPcSamplingMethod::Stochastic) {
+        return AmdPcSamplingRefusal::NotOptedIn;
+    }
+    // The sampler runs with the whole context, which tracing keeps running
+    // between windows; the other engines honor windows, so refuse rather
+    // than sample where no window asked.
+    if (opts.deep_arm_mode == DeepArmMode::WindowOnly) {
+        return AmdPcSamplingRefusal::WindowOnly;
+    }
+    return std::nullopt;
 }
 
 bool AmdRequestNeedsDispatchCounting(const ProfilingEngine engine) {
@@ -111,8 +164,9 @@ AmdResolvedProfilingPlan ResolveAmdProfilingPlan(
                 plan.selected_path = AmdProfilingPath::PcSampling;
                 return plan;
             }
-            return RetainBaselineTracing(requested, support,
-                                   "amd_pc_sampling_unavailable_baseline_tracing_retained");
+            return RetainBaselineTracing(
+                requested, support,
+                AmdPcSamplingRefusalReason(support.pc_sampling_refusal));
         case ProfilingEngine::PmSampling:
             if (support.device_counting) {
                 plan.selected_path = AmdProfilingPath::DeviceCounting;

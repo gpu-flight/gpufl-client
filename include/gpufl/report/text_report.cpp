@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <map>
 #include <numeric>
+#include <set>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -1591,6 +1592,43 @@ void TextReport::writeProfileAnalysis(std::ostringstream& out) const {
         return shortenStallName(raw);
     };
 
+    // AMD stochastic PC sampling names each sample's bucket instead of a
+    // CUPTI reason number: amd_pcs_issued_<instruction type> or
+    // amd_pcs_not_issued_<reason the wave waited>.
+    const std::string amdIssuedPrefix = "amd_pcs_issued_";
+    const std::string amdWaitingPrefix = "amd_pcs_not_issued_";
+    // "alu_dependency" reads "ALU Dependency": words capitalized, the ISA's
+    // unit names as acronyms. Empty when the row isn't an AMD bucket.
+    auto amdBucket = [&](const ProfileSampleRecord& ps, bool& issued) {
+        const std::string& m = ps.metric_name;
+        if (ps.sample_kind != 0) return std::string();
+        issued = m.compare(0, amdIssuedPrefix.size(), amdIssuedPrefix) == 0;
+        if (!issued &&
+            m.compare(0, amdWaitingPrefix.size(), amdWaitingPrefix) != 0) {
+            return std::string();
+        }
+        static const std::set<std::string> kAcronyms = {
+            "alu", "ex", "lds", "salu", "tex", "valu"};
+        std::string name;
+        size_t start =
+            issued ? amdIssuedPrefix.size() : amdWaitingPrefix.size();
+        while (start < m.size()) {
+            size_t end = m.find('_', start);
+            if (end == std::string::npos) end = m.size();
+            std::string word = m.substr(start, end - start);
+            const bool acronym = kAcronyms.count(word) > 0;
+            for (size_t i = 0; i < word.size(); ++i) {
+                if (acronym || i == 0)
+                    word[i] = static_cast<char>(
+                        std::toupper(static_cast<unsigned char>(word[i])));
+            }
+            if (!name.empty() && !word.empty()) name += ' ';
+            name += word;
+            start = end + 1;
+        }
+        return name;
+    };
+
     // ── Collect per-function data ───────────────────────────────────────────
     std::map<std::string, FuncProfile> byFunc;
     for (const auto& ps : profile_samples_) {
@@ -1598,7 +1636,17 @@ void TextReport::writeProfileAnalysis(std::ostringstream& out) const {
         std::string fn = ps.function_name.empty() ? "(unknown)" : ps.function_name;
         auto& fp = byFunc[fn];
 
-        if (ps.stall_reason > 1) {
+        bool issued = false;
+        if (const std::string bucket = amdBucket(ps, issued);
+            !bucket.empty()) {
+            if (issued) {
+                fp.amdIssued[bucket] += ps.metric_value;
+                fp.totalAmdIssued += ps.metric_value;
+            } else {
+                fp.amdWaiting[bucket] += ps.metric_value;
+                fp.totalAmdWaiting += ps.metric_value;
+            }
+        } else if (ps.stall_reason > 1) {
             std::string reason = resolveStallDisplay(ps);
             if (isNotIssued(ps.reason_name.empty() ? ps.metric_name
                                                    : ps.reason_name)) {
@@ -1623,12 +1671,18 @@ void TextReport::writeProfileAnalysis(std::ostringstream& out) const {
             fp.idealStoreSectors += ps.metric_value;
     }
 
-    // ── Rank functions by total stall samples ───────────────────────────────
+    // ── Rank functions by PC samples ────────────────────────────────────────
+    // NVIDIA counts a sample once under its warp state (totalStalls); AMD
+    // once in its bucket.
+    auto pcSamples = [](const FuncProfile& fp) {
+        return fp.totalStalls + fp.totalAmdIssued + fp.totalAmdWaiting;
+    };
     std::vector<std::pair<std::string, const FuncProfile*>> ranked;
     for (const auto& [fn, fp] : byFunc)
         ranked.emplace_back(fn, &fp);
-    std::sort(ranked.begin(), ranked.end(),
-              [](const auto& a, const auto& b) { return a.second->totalStalls > b.second->totalStalls; });
+    std::sort(ranked.begin(), ranked.end(), [&](const auto& a, const auto& b) {
+        return pcSamples(*a.second) > pcSamples(*b.second);
+    });
     if (static_cast<int>(ranked.size()) > top_n_)
         ranked.resize(top_n_);
 
@@ -1650,6 +1704,8 @@ void TextReport::writeProfileAnalysis(std::ostringstream& out) const {
         out << "\n  " << shortName;
         if (fp->totalStalls > 0)
             out << "  (" << fmtCount(fp->totalStalls) << " stall samples)";
+        else if (pcSamples(*fp) > 0)
+            out << "  (" << fmtCount(pcSamples(*fp)) << " PC samples)";
         out << "\n  " << std::string((std::min)(shortName.size() + 30, size_t(72)), '-') << "\n";
 
         // Stall distribution
@@ -1661,6 +1717,16 @@ void TextReport::writeProfileAnalysis(std::ostringstream& out) const {
             out << "    Not issued (" << fmtCount(fp->totalNotIssued)
                 << " samples on cycles with no instruction issued):\n";
             writeStallShares(fp->notIssuedStalls, fp->totalNotIssued);
+        }
+        if (!fp->amdWaiting.empty()) {
+            out << "    Waiting (" << fmtCount(fp->totalAmdWaiting)
+                << " samples of a wave that issued nothing, by reason):\n";
+            writeStallShares(fp->amdWaiting, fp->totalAmdWaiting);
+        }
+        if (!fp->amdIssued.empty()) {
+            out << "    Issued (" << fmtCount(fp->totalAmdIssued)
+                << " samples, by instruction type):\n";
+            writeStallShares(fp->amdIssued, fp->totalAmdIssued);
         }
 
         // Instruction analysis
@@ -1716,6 +1782,8 @@ void TextReport::writeProfileAnalysis(std::ostringstream& out) const {
         if (ps.metric_name.empty()) continue;
         if (ps.metric_name == "isa_inst_present") continue;
         if (ps.stall_reason > 1 && ps.sample_kind == 0) continue;  // stall data already shown
+        bool issued = false;
+        if (!amdBucket(ps, issued).empty()) continue;  // shown per function
         if (ps.metric_name == "smsp__sass_inst_executed") continue;
         if (ps.metric_name == "smsp__sass_thread_inst_executed") continue;
         if (ps.metric_name == "smsp__sass_sectors_mem_global") continue;

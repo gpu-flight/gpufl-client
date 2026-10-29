@@ -24,6 +24,8 @@
 
 namespace gpufl::amd {
 
+class PcSamplingEngine;
+
 class RocprofilerBackend final : public IMonitorBackend {
    public:
     RocprofilerBackend() = default;
@@ -79,6 +81,7 @@ class RocprofilerBackend final : public IMonitorBackend {
         uint64_t bytes = 0;
     };
 
+    std::shared_ptr<AmdProfilingEngine> currentEngine() const;
     bool configureRocprofiler(const MonitorOptions& opts, std::string* reason);
     void resetToolState();
     bool registerTool(std::string* reason);
@@ -169,7 +172,18 @@ class RocprofilerBackend final : public IMonitorBackend {
     uint32_t client_handle_{0};
     rocprofiler_client_finalize_t client_finalize_{nullptr};
 
-    std::unique_ptr<AmdProfilingEngine> engine_;
+    // The collector thread drains the engine while shutdown() may release
+    // it, so other threads copy engine_ under engine_mutex_ and call it
+    // outside the lock (an engine call can wait on rocprofiler-sdk).
+    // toolInitialize sets it before any of those threads start.
+    mutable std::mutex engine_mutex_;
+    std::shared_ptr<AmdProfilingEngine> engine_;
+    // engine_ when it is the PC sampling engine, for its capability counts.
+    PcSamplingEngine* pc_engine_ = nullptr;
+    // What this session asked for, after reading a '+' pass's combo.
+    AmdProfilingRequest request_;
+    // What rocprofiler-sdk answered when it refused PC sampling.
+    std::string pc_sampling_detail_;
 
     mutable std::mutex profiling_plan_mutex_;
     AmdResolvedProfilingPlan resolved_plan_{};
@@ -196,6 +210,10 @@ class RocprofilerBackend final : public IMonitorBackend {
     mutable uint64_t capability_synchronization_rows_baseline_ = 0;
     mutable uint64_t capability_memory_activity_rows_baseline_ = 0;
     mutable uint64_t capability_pm_sample_rows_baseline_ = 0;
+    mutable uint64_t capability_pc_samples_baseline_ = 0;
+    mutable uint64_t capability_pc_samples_issued_baseline_ = 0;
+    mutable uint64_t capability_pc_samples_not_issued_baseline_ = 0;
+    mutable uint64_t capability_pc_samples_lost_baseline_ = 0;
     mutable uint64_t capability_dropped_records_baseline_ = 0;
     mutable uint64_t capability_queue_dropped_records_baseline_ = 0;
     mutable uint64_t capability_buffer_flush_failures_baseline_ = 0;

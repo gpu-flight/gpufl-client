@@ -32,12 +32,14 @@ protected:
         saveAndUnset_(gpufl::env::kProfilingEngine, profiling_engine_);
         saveAndUnset_(gpufl::env::kPcSamplingPeriod, pc_sampling_period_);
         saveAndUnset_(gpufl::env::kDeepArm, deep_arm_);
+        saveAndUnset_(gpufl::env::kAmdPcSampling, amd_pc_sampling_);
     }
 
     void TearDown() override {
         restore_(gpufl::env::kProfilingEngine, profiling_engine_);
         restore_(gpufl::env::kPcSamplingPeriod, pc_sampling_period_);
         restore_(gpufl::env::kDeepArm, deep_arm_);
+        restore_(gpufl::env::kAmdPcSampling, amd_pc_sampling_);
     }
 
 private:
@@ -55,6 +57,7 @@ private:
     std::optional<std::string> profiling_engine_;
     std::optional<std::string> pc_sampling_period_;
     std::optional<std::string> deep_arm_;
+    std::optional<std::string> amd_pc_sampling_;
 };
 
 TEST_F(MonitorConfigurationTest, CopiesEveryInitOptionWithNoEnvironmentOverride) {
@@ -143,6 +146,23 @@ TEST_F(MonitorConfigurationTest, InvalidOverridesPreserveConfiguredValues) {
     EXPECT_EQ(actual.pc_sampling_period, 10u);
     EXPECT_EQ(actual.deep_arm_mode, gpufl::DeepArmMode::WindowOnly);
     EXPECT_TRUE(actual.pm_sampling_scope_only);
+}
+
+TEST_F(MonitorConfigurationTest, AmdPcSamplingIsOffUnlessTheRunOptsIn) {
+    gpufl::InitOptions options;
+    options.profiling_engine = gpufl::ProfilingEngine::PcSampling;
+
+    EXPECT_EQ(gpufl::detail::buildMonitorOptions(options).amd_pc_sampling,
+              gpufl::AmdPcSamplingMethod::None);
+
+    setEnv(gpufl::env::kAmdPcSampling, "stochastic");
+    EXPECT_EQ(gpufl::detail::buildMonitorOptions(options).amd_pc_sampling,
+              gpufl::AmdPcSamplingMethod::Stochastic);
+
+    // Host-trap is never configured, whatever the environment says.
+    setEnv(gpufl::env::kAmdPcSampling, "host_trap");
+    EXPECT_EQ(gpufl::detail::buildMonitorOptions(options).amd_pc_sampling,
+              gpufl::AmdPcSamplingMethod::None);
 }
 
 TEST_F(MonitorConfigurationTest, AlwaysOverrideCanDisableWindowOnlyArming) {
