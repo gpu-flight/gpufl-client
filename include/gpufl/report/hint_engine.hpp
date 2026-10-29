@@ -17,6 +17,12 @@ struct FuncProfile {
     // issued no instruction (CUPTI's `_not_issued` reasons).
     std::map<std::string, uint64_t> notIssuedStalls;
     uint64_t totalNotIssued = 0;
+    // AMD stochastic PC samples, each in one bucket: the instruction type
+    // the wave issued, or the reason it waited.
+    std::map<std::string, uint64_t> amdIssued;
+    uint64_t totalAmdIssued = 0;
+    std::map<std::string, uint64_t> amdWaiting;
+    uint64_t totalAmdWaiting = 0;
     uint64_t warpInsts     = 0;
     uint64_t threadInsts   = 0;
     uint64_t globalSectors     = 0;

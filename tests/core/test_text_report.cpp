@@ -197,4 +197,40 @@ TEST_F(TextReportTest, PcStallSharesExcludeNotIssuedSamples) {
         << report;
 }
 
+TEST_F(TextReportTest, AmdPcSamplesBreakDownPerFunction) {
+    // AMD stochastic rows: stall_reason 0, the bucket in the metric name,
+    // each sample in one bucket. busyKernel has more samples than idleKernel
+    // and is listed first.
+    WriteLog("scope", {
+        R"({"type":"job_start","session_id":"s1","app":"amd_pcs","ts_ns":1000})",
+        R"({"type":"dictionary_update","session_id":"s1","function_dict":{"1":"idleKernel@","2":"busyKernel@"},"metric_dict":{"1":"amd_pcs_not_issued_waitcnt","2":"amd_pcs_issued_valu","3":"amd_pcs_not_issued_alu_dependency"}})",
+        R"({"type":"profile_sample_batch","session_id":"s1","columns":["function_id","metric_id","metric_value","stall_reason","sample_kind"],"rows":[[1,1,5,0,0],[2,1,30,0,0],[2,3,10,0,0],[2,2,60,0,0]]})",
+        R"({"type":"shutdown","session_id":"s1","ts_ns":3000})",
+    });
+
+    const std::string report = Generate();
+    const auto busy = report.find("busyKernel");
+    const auto idle = report.find("idleKernel");
+    ASSERT_NE(busy, std::string::npos) << report;
+    ASSERT_NE(idle, std::string::npos) << report;
+    EXPECT_LT(busy, idle) << report;
+    EXPECT_NE(report.find("(100 PC samples)"), std::string::npos) << report;
+
+    const auto waiting = report.find("    Waiting (40 samples", busy);
+    const auto issued = report.find("    Issued (60 samples", busy);
+    ASSERT_NE(waiting, std::string::npos) << report;
+    ASSERT_NE(issued, std::string::npos) << report;
+    const auto waitcnt = report.find("Waitcnt", waiting);
+    ASSERT_LT(waitcnt, issued) << report;
+    EXPECT_NE(report.substr(waitcnt, 60).find(" 75.0%"), std::string::npos)
+        << report;
+    EXPECT_NE(report.find("ALU Dependency", waiting), std::string::npos)
+        << report;
+    EXPECT_NE(report.find("VALU", issued), std::string::npos) << report;
+
+    // Shown per function, so not summed again.
+    EXPECT_EQ(report.find("Other Profile Metrics:"), std::string::npos)
+        << report;
+}
+
 }  // namespace
