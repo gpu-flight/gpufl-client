@@ -78,6 +78,16 @@ bool setEnv(const char* name, const std::string& value) {
 #endif
 }
 
+// Removing a variable that is not set succeeds: that is the state asked for.
+bool unsetEnv(const char* name) {
+#ifdef _WIN32
+    return SetEnvironmentVariableA(name, nullptr) != 0 ||
+           GetLastError() == ERROR_ENVVAR_NOT_FOUND;
+#else
+    return ::unsetenv(name) == 0;
+#endif
+}
+
 void appendQuotedArg(const std::string& arg, std::string& cmd) {
     if (!arg.empty() && arg.find_first_of(" \t\n\v\"") == std::string::npos) {
         cmd += arg;
@@ -258,10 +268,6 @@ bool configureAgentEnvironment(const AgentOptions& opts, std::string& error) {
         error = "agent source folder is empty";
         return false;
     }
-    if (opts.log_types.empty()) {
-        error = "agent log types are empty";
-        return false;
-    }
     if (opts.cursor_file.empty()) {
         error = "agent cursor file is empty";
         return false;
@@ -276,7 +282,10 @@ bool configureAgentEnvironment(const AgentOptions& opts, std::string& error) {
     }
     if (!setEnv("GPUFL_SOURCE_FOLDER", opts.source_folders) ||
         !setEnv("GPUFL_SOURCE_FOLDERS", opts.source_folders) ||
-        !setEnv("GPUFL_LOG_TYPES", opts.log_types) ||
+        // An empty list leaves the channels to the agent (every channel it finds), so
+        // a GPUFL_LOG_TYPES inherited from the caller's shell is removed, not passed on.
+        !(opts.log_types.empty() ? unsetEnv("GPUFL_LOG_TYPES")
+                                 : setEnv("GPUFL_LOG_TYPES", opts.log_types)) ||
         !setEnv("GPUFL_CURSOR_FILE", opts.cursor_file) ||
         !setEnv("GPUFL_PUBLISHER_TYPE", "http") ||
         !setEnv("GPUFL_HTTP_HOST", opts.backend_url) ||
