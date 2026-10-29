@@ -35,8 +35,8 @@ class AmdProfilingEngine {
     /// Periodically drain buffered profiling data into the monitor ring buffer.
     virtual void drain() = 0;
 
-    /// After the context has stopped, or when the SDK finalizes the tool
-    /// first: deliver what the engine still holds. Called more than once.
+    /// After the context has stopped: deliver what the engine holds that is
+    /// ready. Called more than once.
     virtual void finish() {}
 
     /// A code object was loaded. crc is the key its disassembly was queued
@@ -50,7 +50,8 @@ class AmdProfilingEngine {
     /// honor their sampling cadence; callback/buffer engines leave it idle.
     virtual void service() {}
 
-    /// Release resources.
+    /// Release resources. Also called when the SDK finalizes the tool before
+    /// gpufl shuts down, so it may run twice.
     virtual void shutdown() = 0;
 
     /// True once this engine has emitted at least one profiling sample.
