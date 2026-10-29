@@ -110,8 +110,10 @@ bool applySegmentationEnv(const TraceArgs& args, const std::string& run_id,
                           const TracePlatform& platform);
 
 /**
- * @brief True when a --passes token runs PcSampling: "PcSampling" or a '+'
- *        group naming it, such as "Trace+PcSampling". Deep is not one.
+ * @brief True when a --passes token samples PCs on an AMD GPU: "PcSampling"
+ *        or a '+' group that the AMD backend resolves to it, such as
+ *        "Trace+PcSampling" (amd::ClassifyAmdPcSamplingGroup, which the
+ *        backend reads too). Deep is not one.
  */
 bool passRunsPcSampling(const std::string& pass);
 

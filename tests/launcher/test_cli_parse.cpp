@@ -649,6 +649,17 @@ TEST(CliParseTrace, PassesTrimsWhitespace) {
     EXPECT_EQ(r.args->passes[1], "SassMetrics");
 }
 
+TEST(CliParseTrace, PassesStoresAGroupWithItsNamesTrimmed) {
+    // Every later reader compares the stored token: the combo it publishes,
+    // its first engine, and whether it gets the AMD PC sampling opt-in.
+    auto r = parseTraceArgs(argsFor(
+        {"--passes=Trace+ PcSampling,PmSampling\t+\tTrace", "--", "./bin"}));
+    ASSERT_TRUE(r.args.has_value()) << r.error;
+    ASSERT_EQ(r.args->passes.size(), 2u);
+    EXPECT_EQ(r.args->passes[0], "Trace+PcSampling");
+    EXPECT_EQ(r.args->passes[1], "PmSampling+Trace");
+}
+
 TEST(CliParseTrace, PassesDeepParsedAsEngine) {
     auto r = parseTraceArgs(argsFor({"--passes=Deep", "--", "./bin"}));
     ASSERT_TRUE(r.args.has_value()) << r.error;

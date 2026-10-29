@@ -502,6 +502,7 @@ void DictionaryManager::flushDisassembly(Logger& logger,
         std::lock_guard lk(mu_);
         pending = std::move(pending_disasm_cubins_);
         pending_disasm_cubins_.clear();
+        for (const auto& entry : pending) amd_isa_requests_.erase(entry.first);
     }
     if (pending.empty()) {
         // A module loaded after the last flush may still carry PTX.
@@ -513,7 +514,41 @@ void DictionaryManager::flushDisassembly(Logger& logger,
     // (it lives in the fatbin, not these SASS cubins). Same worker thread, also
     // a subprocess, so it's injection-teardown-safe like nvdisasm.
     flushPtx(logger, session_id);
+    disassemble(logger, session_id, pending);
+}
 
+void DictionaryManager::requestAmdIsaLines(const uint64_t crc) {
+    std::lock_guard lk(mu_);
+    if (retain_amd_isa_lines_ && !amd_isa_lines_.count(crc)) {
+        amd_isa_requests_.insert(crc);
+    }
+}
+
+void DictionaryManager::flushRequestedAmdDisassembly(
+    Logger& logger, const std::string& session_id) {
+    std::unordered_map<uint64_t, std::vector<uint8_t>> pending;
+    {
+        std::lock_guard lk(mu_);
+        // A request can come before its code object is enqueued; it stays
+        // until then.
+        for (auto it = amd_isa_requests_.begin();
+             it != amd_isa_requests_.end();) {
+            const auto entry = pending_disasm_cubins_.find(*it);
+            if (entry == pending_disasm_cubins_.end()) {
+                ++it;
+                continue;
+            }
+            pending.emplace(entry->first, std::move(entry->second));
+            pending_disasm_cubins_.erase(entry);
+            it = amd_isa_requests_.erase(it);
+        }
+    }
+    if (!pending.empty()) disassemble(logger, session_id, pending);
+}
+
+void DictionaryManager::disassemble(
+    Logger& logger, const std::string& session_id,
+    std::unordered_map<uint64_t, std::vector<uint8_t>>& pending) {
     for (auto& [crc, bytes] : pending) {
         // Write cubin to a temp file
         std::string tmpPathStr;

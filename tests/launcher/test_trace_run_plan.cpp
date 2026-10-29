@@ -220,11 +220,17 @@ TEST(TraceRunPlanTest, TraceCommonHonorsExplicitCaptureOptOuts) {
     fs::remove_all(root, ec);
 }
 
-TEST(TraceRunPlanTest, PassRunsPcSamplingOnlyForItsOwnEngine) {
+TEST(TraceRunPlanTest, PassRunsPcSamplingOnlyWhereTheAmdBackendSamples) {
     using gpufl::launcher::passRunsPcSampling;
     EXPECT_TRUE(passRunsPcSampling("PcSampling"));
     EXPECT_TRUE(passRunsPcSampling("Trace+PcSampling"));
     EXPECT_TRUE(passRunsPcSampling("PcSampling+Trace"));
+    EXPECT_TRUE(passRunsPcSampling("Trace+ PcSampling"));
+    // The AMD backend runs one service beside tracing: a group with another
+    // engine keeps its first one.
+    EXPECT_TRUE(passRunsPcSampling("PcSampling+PmSampling"));
+    EXPECT_FALSE(passRunsPcSampling("PmSampling+PcSampling"));
+    EXPECT_FALSE(passRunsPcSampling("Trace+PcSampling+PmSampling"));
     EXPECT_FALSE(passRunsPcSampling("Trace"));
     EXPECT_FALSE(passRunsPcSampling("Deep"));
     EXPECT_FALSE(passRunsPcSampling("SassMetrics"));
@@ -253,7 +259,7 @@ TEST(TraceRunPlanTest, AmdPcSamplingOptInReachesOnlyPcSamplingChildren) {
         args.output_dir = (root / (opted_in ? "in" : "out")).string();
         args.source_root = root.string();
         args.passes = {"Trace", "PcSampling", "Trace+PcSampling", "Deep",
-                       "SassMetrics"};
+                       "SassMetrics", "PmSampling+PcSampling"};
         args.amd_pc_sampling = opted_in;
         EXPECT_EQ(gpufl::launcher::runTraceCommon(args, platform), 0);
         return platform.env_per_run;
@@ -268,12 +274,13 @@ TEST(TraceRunPlanTest, AmdPcSamplingOptInReachesOnlyPcSamplingChildren) {
         return it == env.end() ? std::string("unset") : it->second;
     };
 
+    // PmSampling+PcSampling runs PmSampling on AMD, so it gets neither.
     const auto opted = run(true);
-    ASSERT_EQ(opted.size(), 5u);
+    ASSERT_EQ(opted.size(), 6u);
     const std::vector<std::string> expected_beta = {"unset", "ON", "ON",
-                                                    "unset", "unset"};
+                                                    "unset", "unset", "unset"};
     const std::vector<std::string> expected_opt_in = {
-        "unset", "stochastic", "stochastic", "unset", "unset"};
+        "unset", "stochastic", "stochastic", "unset", "unset", "unset"};
     for (size_t pass = 0; pass < opted.size(); ++pass) {
         EXPECT_EQ(beta(opted[pass]), expected_beta[pass]) << pass;
         EXPECT_EQ(opt_in(opted[pass]), expected_opt_in[pass]) << pass;
@@ -283,6 +290,44 @@ TEST(TraceRunPlanTest, AmdPcSamplingOptInReachesOnlyPcSamplingChildren) {
         EXPECT_EQ(beta(env), "unset");
         EXPECT_EQ(opt_in(env), "unset");
     }
+
+    fs::remove_all(root, ec);
+}
+
+TEST(TraceRunPlanTest, AmdPcSamplingWarnsOfAGroupThatWontSample) {
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() /
+        ("gpufl_trace_amd_pcs_warn_" +
+         std::to_string(gpufl::detail::GetPid()));
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    fs::create_directories(root, ec);
+    ASSERT_FALSE(ec) << ec.message();
+    { std::ofstream inject(root / "gpufl_inject.so"); ASSERT_TRUE(inject); }
+
+    ExecutingPlanningPlatform platform(root);
+    TraceArgs args;
+    args.command = {"target"};
+    args.output_dir = (root / "out").string();
+    args.source_root = root.string();
+    args.passes = {"PmSampling+PcSampling"};
+    args.amd_pc_sampling = true;
+    testing::internal::CaptureStderr();
+    EXPECT_EQ(gpufl::launcher::runTraceCommon(args, platform), 0);
+    const std::string err = testing::internal::GetCapturedStderr();
+
+    EXPECT_NE(err.find("[gpufl] warning: AMD GPUs sample PCs alone or beside "
+                       "Trace only, so pass PmSampling+PcSampling runs its "
+                       "first engine there without PC sampling"),
+              std::string::npos)
+        << err;
+    EXPECT_NE(err.find("--amd-pc-sampling applies to no pass"),
+              std::string::npos)
+        << err;
+    ASSERT_EQ(platform.env_per_run.size(), 1u);
+    EXPECT_EQ(platform.env_per_run[0].count(
+                  gpufl::env::kRocprofilerPcSamplingBetaEnabled),
+              0u);
 
     fs::remove_all(root, ec);
 }

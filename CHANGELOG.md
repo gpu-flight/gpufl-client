@@ -178,7 +178,11 @@ types are additive.
   (`sample_kind` 0, `stall_reason` 0) named `amd_pcs_not_issued_<reason>` or
   `amd_pcs_issued_<type>`, at offsets from the function's first instruction and
   with the ISA rows' source lines. Without the flag an AMD PcSampling pass only
-  traces, and the `pc_sampling` capability row says why sampling didn't run.
+  traces, and the `pc_sampling` capability row says why sampling didn't run;
+  that includes window-only deep arming, which AMD's sampler can't honor, and a
+  group such as `PmSampling+PcSampling`, which runs its first engine on AMD.
+  A `Trace+PcSampling` session reports `amd.buffer_tracing` as its engine.
+  `gpufl report` breaks the samples down per function.
 
 ### Changed
 

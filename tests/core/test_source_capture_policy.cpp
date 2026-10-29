@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -12,6 +13,7 @@
 #include "gpufl/core/dictionary_manager.hpp"
 #include "gpufl/core/logger/log_sink.hpp"
 #include "gpufl/core/logger/logger.hpp"
+#include "gpufl/core/monitor.hpp"
 #include "gpufl/core/source_capture_policy.hpp"
 
 namespace {
@@ -402,6 +404,81 @@ TEST_F(SourceCapturePolicyTest, AmdIsaLineTableAnswersPcSampleLookups) {
     EXPECT_EQ(tracing.lookupAmdIsaSource(42, "_Z6kernelPf", 8, &line),
               Lookup::NotParsed);
 }
+
+// AMD PC sampling asks for the line tables of code objects with DWARF
+// lines; every collector flush disassembles those, and only those, so its
+// rows need not wait for the run's end.
+TEST_F(SourceCapturePolicyTest, AmdIsaRequestsDisassembleOnlyWhatWasAsked) {
+    struct SavedEnvironment {
+        const char* key;
+        bool present;
+        std::string value;
+        explicit SavedEnvironment(const char* name) : key(name),
+            present(std::getenv(name) != nullptr),
+            value(present ? std::getenv(name) : "") {}
+        ~SavedEnvironment() {
+            if (present) setenv(key, value.c_str(), 1);
+            else unsetenv(key);
+        }
+    } rocm("ROCM_PATH");
+    const fs::path kernel = write("src/kernel.hip", "a\nb\nc\nd\ne\nf\n");
+    const std::string listing =
+        "\nkernel.co:\tfile format elf64-amdgpu\n\n"
+        "Disassembly of section .text:\n\n"
+        "0000000000001700 <_Z6kernelPf>:\n"
+        "; " + kernel.string() + ":5\n"
+        "\ts_load_dwordx2 s[0:1], s[0:1], 0x0 // 000000001700: C0060000\n"
+        "\ts_endpgm // 000000001708: BF810000\n";
+    const auto tool = write("llvm/bin/llvm-objdump",
+                            "#!/bin/sh\ncat <<'LISTING'\n" + listing +
+                                "LISTING\n");
+    fs::permissions(tool, fs::perms::owner_all);
+    ASSERT_EQ(setenv("ROCM_PATH", root_.c_str(), 1), 0);
+    std::vector<uint8_t> elf(20, 0);
+    elf[0] = 0x7f; elf[1] = 'E'; elf[2] = 'L'; elf[3] = 'F'; elf[18] = 0xe0;
+
+    using Lookup = gpufl::DictionaryManager::IsaSourceLookup;
+    gpufl::DictionaryManager dictionary;
+    dictionary.configureSourceCapture(true, settings());
+    gpufl::Logger logger;
+    const auto lookup = [&](const uint64_t crc) {
+        return dictionary.lookupAmdIsaSource(crc, "_Z6kernelPf", 0, nullptr);
+    };
+
+    // Not retained: nothing is asked for.
+    dictionary.requestAmdIsaLines(41);
+    dictionary.retainAmdIsaLines();
+    dictionary.enqueueDisassembly(41, elf.data(), elf.size());
+    dictionary.flushRequestedAmdDisassembly(logger, "amd-isa-requests");
+    EXPECT_EQ(lookup(41), Lookup::NotParsed);
+
+    // Asked for before the backend enqueues it: the request waits.
+    dictionary.requestAmdIsaLines(42);
+    dictionary.flushRequestedAmdDisassembly(logger, "amd-isa-requests");
+    EXPECT_EQ(lookup(42), Lookup::NotParsed);
+    dictionary.enqueueDisassembly(42, elf.data(), elf.size());
+    dictionary.enqueueDisassembly(43, elf.data(), elf.size());
+    dictionary.flushRequestedAmdDisassembly(logger, "amd-isa-requests");
+    EXPECT_EQ(lookup(42), Lookup::Found);
+    EXPECT_EQ(lookup(43), Lookup::NotParsed);
+
+    // The full flush still takes everything else.
+    dictionary.flushDisassembly(logger, "amd-isa-requests");
+    EXPECT_EQ(lookup(41), Lookup::Found);
+    EXPECT_EQ(lookup(43), Lookup::Found);
+}
 #endif
+
+// Only the collector disassembles during a run; with no collector, a wait
+// for line tables gives up at once instead of holding shutdown.
+TEST(AmdIsaLineWait, ReturnsAtOnceWithoutACollector) {
+    const auto start = std::chrono::steady_clock::now();
+    EXPECT_FALSE(gpufl::Monitor::WaitForAmdIsaLines(
+        {42}, std::chrono::milliseconds(2000)));
+    EXPECT_LT(std::chrono::steady_clock::now() - start,
+              std::chrono::milliseconds(500));
+    EXPECT_TRUE(
+        gpufl::Monitor::WaitForAmdIsaLines({}, std::chrono::milliseconds(0)));
+}
 
 }  // namespace

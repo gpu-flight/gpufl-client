@@ -49,6 +49,7 @@ public:
     bool enqueueLoadedPtx(const void* image, size_t limit);
     void flushDisassembly();
     void retainAmdIsaLines();
+    void requestAmdIsaLines(uint64_t crc);
     DictionaryManager::IsaSourceLookup lookupAmdIsaSource(
         uint64_t crc, const std::string& function, uint32_t pc_offset,
         DictionaryManager::IsaSourceLine* out);

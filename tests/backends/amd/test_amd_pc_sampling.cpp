@@ -1,11 +1,13 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <fstream>
 #include <iterator>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -18,17 +20,48 @@ namespace {
 using gpufl::amd::AmdCodeObjectFunction;
 using gpufl::amd::AmdPcSampleAggregator;
 using gpufl::amd::AmdPcSamplingCall;
+using gpufl::amd::AmdPcSamplingGroup;
+using gpufl::amd::AmdPcSamplingListing;
 using gpufl::amd::AmdPcSamplingRefusal;
 
 // tests/backends/amd/data/pc_sampling_fixture.hip, built for gfx942 by
 // ROCm 7.2.0's clang (the command is in the source). Two kernels and the
-// non-inlined device function one of them calls.
-std::vector<uint8_t> ReadFixture() {
-    std::ifstream in(std::string(GPUFL_AMD_TEST_DATA_DIR) +
-                         "/pc_sampling_fixture.gfx942.co",
+// non-inlined device function one of them calls. The .lines copy has DWARF
+// line tables; pc_sampling_unsized.s is two kernels written as Tensile
+// writes them, without symbol sizes.
+std::vector<uint8_t> ReadFixture(
+    const std::string& name = "pc_sampling_fixture.gfx942.co") {
+    std::ifstream in(std::string(GPUFL_AMD_TEST_DATA_DIR) + "/" + name,
                      std::ios::binary);
     return std::vector<uint8_t>(std::istreambuf_iterator<char>(in),
                                 std::istreambuf_iterator<char>());
+}
+
+uint64_t ReadLe(const std::vector<uint8_t>& bytes, const size_t at,
+                const size_t width) {
+    uint64_t value = 0;
+    for (size_t i = width; i-- > 0;) value = (value << 8) | bytes[at + i];
+    return value;
+}
+
+void WriteLe(std::vector<uint8_t>& bytes, const size_t at, uint64_t value,
+             const size_t width) {
+    for (size_t i = 0; i < width; ++i, value >>= 8) {
+        bytes[at + i] = static_cast<uint8_t>(value);
+    }
+}
+
+// The file offset of the first section header of an ELF64 type.
+size_t SectionHeader(const std::vector<uint8_t>& elf, const uint32_t type) {
+    const size_t table = ReadLe(elf, 0x28, 8);
+    const size_t entry = ReadLe(elf, 0x3a, 2);
+    const size_t count = ReadLe(elf, 0x3c, 2);
+    for (size_t i = 0; i < count; ++i) {
+        if (ReadLe(elf, table + i * entry + 4, 4) == type) {
+            return table + i * entry;
+        }
+    }
+    return 0;
 }
 
 constexpr uint64_t kVectorAdd = 0x1f00;
@@ -45,10 +78,11 @@ const std::vector<uint32_t> kScaledRows = {
     0x0,  0x8,  0x10, 0x14, 0x18, 0x20, 0x24, 0x28, 0x2c, 0x30, 0x34, 0x3c,
     0x40, 0x48, 0x4c, 0x54, 0x5c, 0x60, 0x68, 0x70, 0x74, 0x7c, 0x80, 0x88};
 
-std::shared_ptr<const std::vector<AmdCodeObjectFunction>> FixtureFunctions() {
-    const auto bytes = ReadFixture();
+std::shared_ptr<const std::vector<AmdCodeObjectFunction>> FixtureFunctions(
+    const std::string& name = "pc_sampling_fixture.gfx942.co") {
+    const auto bytes = ReadFixture(name);
     return std::make_shared<const std::vector<AmdCodeObjectFunction>>(
-        gpufl::amd::ParseAmdCodeObjectFunctions(bytes.data(), bytes.size()));
+        gpufl::amd::ParseAmdCodeObject(bytes.data(), bytes.size()).functions);
 }
 
 gpufl::amd::AmdCaptureCapabilityInput PcSamplingInput(
@@ -220,6 +254,81 @@ TEST(AmdPcSamplingStatus, ClassifiesEachRefusal) {
               AmdPcSamplingRefusal::ConfigurationFailed);
 }
 
+TEST(AmdPcSamplingConfiguration, TakesTheStochasticSamplerInCycles) {
+    using gpufl::amd::ChooseAmdPcSamplingConfiguration;
+    // What AMD's driver lists for an MI300-series GPU nobody samples.
+    const auto idle = ChooseAmdPcSamplingConfiguration(
+        {{false, 1, 1000000}, {true, 256, uint64_t{1} << 31}});
+    EXPECT_EQ(idle.interval, uint64_t{1} << 20);
+
+    // Another process's stochastic session lists its interval as both
+    // bounds; the run joins it.
+    const auto joined =
+        ChooseAmdPcSamplingConfiguration({{true, 1 << 18, 1 << 18}});
+    EXPECT_EQ(joined.interval, 1u << 18);
+
+    const auto odd = ChooseAmdPcSamplingConfiguration(
+        {{true, (1 << 18) + 1, (1 << 18) + 5}});
+    EXPECT_EQ(odd.interval, 0u);
+    EXPECT_EQ(odd.refusal, AmdPcSamplingRefusal::ConfigurationFailed);
+    EXPECT_EQ(odd.detail,
+              "no power-of-2 interval from 262145 to 262149 cycles");
+}
+
+TEST(AmdPcSamplingConfiguration, TellsABusyGpuFromOneWithoutTheMethod) {
+    using gpufl::amd::ChooseAmdPcSamplingConfiguration;
+    // Host-trap only (gfx90a), or nothing at all.
+    EXPECT_EQ(ChooseAmdPcSamplingConfiguration({{false, 1, 1000000}}).refusal,
+              AmdPcSamplingRefusal::MethodUnavailable);
+    EXPECT_EQ(ChooseAmdPcSamplingConfiguration({}).refusal,
+              AmdPcSamplingRefusal::MethodUnavailable);
+
+    // An MI325X another process samples by host-trap lists only that
+    // session: the GPU is busy, not lacking stochastic sampling.
+    const auto busy = ChooseAmdPcSamplingConfiguration({{false, 100, 100}});
+    EXPECT_EQ(busy.interval, 0u);
+    EXPECT_EQ(busy.refusal, AmdPcSamplingRefusal::Unavailable);
+}
+
+TEST(AmdPcSamplingGroup, SamplesOnlyWhereTheAmdBackendRunsIt) {
+    using gpufl::amd::ClassifyAmdPcSamplingGroup;
+    EXPECT_EQ(ClassifyAmdPcSamplingGroup("PcSampling", '+'),
+              AmdPcSamplingGroup::Samples);
+    EXPECT_EQ(ClassifyAmdPcSamplingGroup("Trace+PcSampling", '+'),
+              AmdPcSamplingGroup::Samples);
+    EXPECT_EQ(ClassifyAmdPcSamplingGroup("PcSampling+Trace", '+'),
+              AmdPcSamplingGroup::Samples);
+    EXPECT_EQ(ClassifyAmdPcSamplingGroup("Trace,PcSampling", ','),
+              AmdPcSamplingGroup::Samples);
+    // Any other group keeps its first engine.
+    EXPECT_EQ(ClassifyAmdPcSamplingGroup("PcSampling+PmSampling", '+'),
+              AmdPcSamplingGroup::Samples);
+    EXPECT_EQ(ClassifyAmdPcSamplingGroup("PmSampling+PcSampling", '+'),
+              AmdPcSamplingGroup::Dropped);
+    EXPECT_EQ(ClassifyAmdPcSamplingGroup("Trace+PcSampling+PmSampling", '+'),
+              AmdPcSamplingGroup::Dropped);
+    EXPECT_EQ(ClassifyAmdPcSamplingGroup("Trace", '+'),
+              AmdPcSamplingGroup::Absent);
+    EXPECT_EQ(ClassifyAmdPcSamplingGroup("Deep", '+'),
+              AmdPcSamplingGroup::Absent);
+    EXPECT_EQ(ClassifyAmdPcSamplingGroup("PcSamplingX", '+'),
+              AmdPcSamplingGroup::Absent);
+    EXPECT_EQ(ClassifyAmdPcSamplingGroup("", ','), AmdPcSamplingGroup::Absent);
+}
+
+TEST(AmdPcSamplingGroup, TrimsSpacesAndTabsAlike) {
+    using gpufl::amd::ClassifyAmdPcSamplingGroup;
+    EXPECT_EQ(ClassifyAmdPcSamplingGroup("Trace+ PcSampling", '+'),
+              AmdPcSamplingGroup::Samples);
+    EXPECT_EQ(ClassifyAmdPcSamplingGroup("Trace,\tPcSampling", ','),
+              AmdPcSamplingGroup::Samples);
+    EXPECT_EQ(ClassifyAmdPcSamplingGroup("PmSampling \t, PcSampling", ','),
+              AmdPcSamplingGroup::Dropped);
+    const std::vector<std::string_view> names =
+        gpufl::amd::SplitAmdEngineGroup(" Trace +\tPcSampling\t+", '+');
+    EXPECT_EQ(names, (std::vector<std::string_view>{"Trace", "PcSampling"}));
+}
+
 TEST(AmdPcSamplingCodeObject, ListsTheRecordedFunctions) {
     const auto functions = FixtureFunctions();
     ASSERT_EQ(functions->size(), 3u);
@@ -235,12 +344,80 @@ TEST(AmdPcSamplingCodeObject, ListsTheRecordedFunctions) {
     EXPECT_EQ((*functions)[2].size, 140u);
 
     const std::vector<uint8_t> not_elf(64, 0);
-    EXPECT_TRUE(gpufl::amd::ParseAmdCodeObjectFunctions(not_elf.data(),
-                                                        not_elf.size())
-                    .empty());
+    EXPECT_TRUE(
+        gpufl::amd::ParseAmdCodeObject(not_elf.data(), not_elf.size())
+            .functions.empty());
     const auto bytes = ReadFixture();
-    EXPECT_TRUE(gpufl::amd::ParseAmdCodeObjectFunctions(bytes.data(), 1024)
-                    .empty());
+    EXPECT_TRUE(
+        gpufl::amd::ParseAmdCodeObject(bytes.data(), 1024).functions.empty());
+}
+
+// Rows of a code object without DWARF lines never wait for its ISA rows.
+TEST(AmdPcSamplingCodeObject, FindsTheLineTable) {
+    const auto plain = ReadFixture();
+    EXPECT_FALSE(
+        gpufl::amd::ParseAmdCodeObject(plain.data(), plain.size()).line_info);
+
+    const auto lines = ReadFixture("pc_sampling_fixture.lines.gfx942.co");
+    const auto code_object =
+        gpufl::amd::ParseAmdCodeObject(lines.data(), lines.size());
+    EXPECT_TRUE(code_object.line_info);
+    ASSERT_EQ(code_object.functions.size(), 3u);
+    EXPECT_EQ(code_object.functions[0].name, "_Z9vectorAddPKfS0_Pfi");
+    EXPECT_EQ(code_object.functions[0].vaddr, kVectorAdd);
+    EXPECT_EQ(code_object.functions[2].name, "_Z6scaledPKfPffi");
+    EXPECT_EQ(code_object.functions[2].vaddr, kScaled);
+}
+
+// rocBLAS's and hipBLASLt's Tensile kernels are function symbols of size
+// 0. Each runs to the next function's start, or to the end of .text, so
+// their samples are kept rather than lost.
+TEST(AmdPcSamplingCodeObject, UnsizedKernelsRunToTheNextFunction) {
+    const auto functions = FixtureFunctions("pc_sampling_unsized.gfx942.co");
+    ASSERT_EQ(functions->size(), 2u);
+    EXPECT_EQ((*functions)[0].name, "first_kernel");
+    EXPECT_EQ((*functions)[0].vaddr, 0x1400u);
+    EXPECT_EQ((*functions)[0].size, 0x100u);
+    EXPECT_EQ((*functions)[1].name, "second_kernel");
+    EXPECT_EQ((*functions)[1].vaddr, 0x1500u);
+    EXPECT_EQ((*functions)[1].size, 0x8u);  // .text ends at 0x1508
+
+    // s_cbranch_scc1, after a local label that doesn't end the kernel.
+    const auto branch = gpufl::amd::LocateAmdPcSample(*functions, 0x140c);
+    ASSERT_TRUE(branch.has_value());
+    EXPECT_EQ(branch->function->name, "first_kernel");
+    EXPECT_EQ(branch->pc_offset, 0xcu);
+    const auto end = gpufl::amd::LocateAmdPcSample(*functions, 0x1504);
+    ASSERT_TRUE(end.has_value());
+    EXPECT_EQ(end->function->name, "second_kernel");
+    EXPECT_EQ(end->pc_offset, 0x4u);
+    EXPECT_FALSE(gpufl::amd::LocateAmdPcSample(*functions, 0x1508));
+}
+
+// A sh_entsize near 2^64 used to wrap the symbol offset and read the bytes
+// before the table. The table then holds no whole entry.
+TEST(AmdPcSamplingCodeObject, AHugeSymbolEntrySizeReadsNoSymbol) {
+    auto elf = ReadFixture("pc_sampling_unsized.gfx942.co");
+    const size_t symtab = SectionHeader(elf, 2 /* SHT_SYMTAB */);
+    ASSERT_NE(symtab, 0u);
+    const size_t table = ReadLe(elf, symtab + 24, 8);
+    const size_t table_size = ReadLe(elf, symtab + 32, 8);
+    // Plant a function symbol just before the table: a wrapped offset
+    // would find it.
+    size_t kernel = 0;
+    for (size_t at = table; at + 24 <= table + table_size; at += 24) {
+        if (elf[at + 4] == 0x12 && ReadLe(elf, at + 8, 8) == 0x1400) {
+            kernel = at;
+        }
+    }
+    ASSERT_NE(kernel, 0u);
+    std::copy(elf.begin() + kernel, elf.begin() + kernel + 24,
+              elf.begin() + table - 24);
+    WriteLe(elf, table - 24 + 16, 4, 8);
+    WriteLe(elf, symtab + 56, ~uint64_t{0} - 23, 8);
+
+    EXPECT_TRUE(gpufl::amd::ParseAmdCodeObject(elf.data(), elf.size())
+                    .functions.empty());
 }
 
 // rocprofiler-sdk names a kernel by kernel_address = kernel_object (the
@@ -309,9 +486,12 @@ TEST(AmdPcSampleAggregator, AddsUpOneRowPerFunctionOffsetAndBucket) {
 
     // Rows wait for their code object's ISA line table.
     EXPECT_TRUE(aggregator.takeRows([](uint64_t) { return false; }).empty());
+    EXPECT_EQ(aggregator.waitingCodeObjects(),
+              (std::vector<uint64_t>{0xc0ffee}));
     const auto rows = aggregator.takeRows([](const uint64_t crc) {
         return crc == 0xc0ffee;
     });
+    EXPECT_TRUE(aggregator.waitingCodeObjects().empty());
     ASSERT_EQ(rows.size(), 3u);
     EXPECT_EQ(rows[0].function, "_Z12scaleAndBiasff");
     EXPECT_EQ(rows[0].pc_offset, 0x4u);
@@ -378,6 +558,38 @@ TEST(AmdPcSamplingCapability, NamesEachRefusal) {
     EXPECT_EQ(failed.message,
               "rocprofiler-sdk refused PC sampling: "
               "ROCPROFILER_STATUS_ERROR_CONTEXT_CONFLICT.");
+
+    const auto window = Refused(AmdPcSamplingRefusal::WindowOnly);
+    EXPECT_EQ(window.status, "skipped");
+    EXPECT_EQ(window.mode, "disabled");
+    EXPECT_EQ(window.reason_code, "amd_pc_sampling_window_only_unsupported");
+    EXPECT_NE(window.message.find("can't be limited to deep windows"),
+              std::string::npos);
+}
+
+// PmSampling+PcSampling runs PmSampling on AMD: the PC sampling row says so
+// rather than reading as never requested.
+TEST(AmdPcSamplingCapability, NamesADroppedGroupMember) {
+    gpufl::amd::AmdProfilingRequest request;
+    request.engine = gpufl::ProfilingEngine::PmSampling;
+    request.pc_sampling_dropped = true;
+    gpufl::amd::AmdProfilingSupport support;
+    support.device_counting = true;
+    gpufl::amd::AmdCaptureCapabilityInput input;
+    input.plan = gpufl::amd::ResolveAmdProfilingPlan(request, support);
+    input.trace_configured = true;
+    const auto event = gpufl::amd::BuildAmdCaptureCapabilitiesEvent(input);
+
+    EXPECT_EQ(event.selected_engine, "amd.device_counting");
+    const auto* row = PcSamplingRow(event);
+    ASSERT_NE(row, nullptr);
+    EXPECT_TRUE(row->requested);
+    EXPECT_EQ(row->status, "skipped");
+    EXPECT_EQ(row->mode, "disabled");
+    EXPECT_EQ(row->reason_code, "amd_pc_sampling_group_unsupported");
+    EXPECT_EQ(row->message,
+              "On AMD GPUs, PC sampling runs alone or beside Trace, so this "
+              "pass's group ran pm_sampling instead.");
 }
 
 TEST(AmdPcSamplingCapability, CountsWhatWasCollected) {
@@ -405,4 +617,12 @@ TEST(AmdPcSamplingCapability, CountsWhatWasCollected) {
     EXPECT_EQ(empty.message,
               "AMD PC sampling was enabled but recorded no samples this "
               "session.");
+
+    // Every sample lost is not a quiet run.
+    const auto lost = Sampled(0, 0, 4);
+    EXPECT_EQ(lost.status, "partial");
+    EXPECT_EQ(lost.reason_code, "amd_pc_sampling_samples_dropped");
+    EXPECT_EQ(lost.message,
+              "Stochastic PC sampling every 1,048,576 cycles kept no samples: "
+              "4 were dropped or matched no kernel.");
 }

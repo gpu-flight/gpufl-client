@@ -30,6 +30,28 @@ inline constexpr uint64_t kAmdPcSamplingIntervalCycles = uint64_t{1} << 20;
 std::optional<uint64_t> ResolveAmdPcSamplingInterval(uint64_t min_interval,
                                                      uint64_t max_interval);
 
+// The engines of a pass's group, written as the launcher's
+// "Trace+PcSampling" (separator '+') or GPUFL_ENGINE_COMBO's
+// "Trace,PcSampling" (','): each name trimmed of spaces and tabs, empty
+// names left out.
+std::vector<std::string_view> SplitAmdEngineGroup(std::string_view engines,
+                                                  char separator);
+
+// How an AMD process treats PcSampling in a pass's engine group. The AMD
+// backend runs one service beside tracing, and PC sampling can't share
+// rocprofiler-sdk's context with counters: a group of PcSampling and Trace
+// samples, and any other group keeps its first engine, so it samples only
+// when PcSampling comes first. The launcher and the AMD backend both ask
+// this, so the opt-in reaches exactly the processes that sample.
+enum class AmdPcSamplingGroup {
+    Absent,   // no PcSampling in the group
+    Samples,  // the process samples PCs, once opted in
+    Dropped,  // PcSampling is named, but another engine runs instead
+};
+
+AmdPcSamplingGroup ClassifyAmdPcSamplingGroup(std::string_view engines,
+                                              char separator);
+
 // A sample's bucket: amd_pcs_issued_<type> when the wave issued the sampled
 // instruction, amd_pcs_not_issued_<reason> when it did not. sdk_name is what
 // rocprofiler_get_pc_sampling_instruction_type_name or ..._not_issued_reason_
@@ -51,9 +73,37 @@ enum class AmdPcSamplingRefusal {
     Unavailable,
     // Any other refusal.
     ConfigurationFailed,
+    // Window-only deep arming (GPUFL_DEEP_ARM=window): rocprofiler-sdk
+    // samples for as long as the context runs, so no window bounds it.
+    WindowOnly,
+    // The pass's '+' group also named an engine PC sampling can't share a
+    // context with, and that engine ran (AmdPcSamplingGroup::Dropped).
+    GroupUnsupported,
 };
 
 const char* AmdPcSamplingRefusalReason(AmdPcSamplingRefusal refusal);
+
+// One configuration rocprofiler_query_pc_sampling_agent_configurations
+// listed. While a process samples the GPU, the agent lists only that
+// session's configuration, its interval as both bounds.
+struct AmdPcSamplingListing {
+    bool stochastic_cycles = false;  // the stochastic method, in cycles
+    uint64_t min_interval = 0;
+    uint64_t max_interval = 0;
+};
+
+struct AmdPcSamplingChoice {
+    uint64_t interval = 0;  // cycles; 0 when refused
+    AmdPcSamplingRefusal refusal = AmdPcSamplingRefusal::ConfigurationFailed;
+    std::string detail;
+};
+
+// The stochastic interval to configure from what the agent lists, or why
+// there is none. Another process's stochastic session is joined at its
+// interval; another process's host-trap session makes the GPU unavailable,
+// which is not the same as a GPU without stochastic sampling.
+AmdPcSamplingChoice ChooseAmdPcSamplingConfiguration(
+    const std::vector<AmdPcSamplingListing>& listed);
 
 enum class AmdPcSamplingCall { Query, Configure };
 
@@ -72,10 +122,19 @@ struct AmdCodeObjectFunction {
     std::string name;
 };
 
-// Functions of an AMDGPU code object (ELF64), sorted by address. Empty for
-// anything that isn't a readable ELF64 file.
-std::vector<AmdCodeObjectFunction> ParseAmdCodeObjectFunctions(
-    const uint8_t* data, size_t size);
+// What PC sampling reads from a loaded AMDGPU code object (ELF64).
+struct AmdCodeObject {
+    // Sorted by address. A symbol without a size, as Tensile's assembly
+    // kernels in rocBLAS and hipBLASLt have, extends to the next function
+    // or to the end of its section.
+    std::vector<AmdCodeObjectFunction> functions;
+    // A .debug_line section, from which llvm-objdump -l gives the ISA rows
+    // their source lines. Without one, no row has a line to wait for.
+    bool line_info = false;
+};
+
+// Empty for anything that isn't a readable ELF64 file.
+AmdCodeObject ParseAmdCodeObject(const uint8_t* data, size_t size);
 
 struct AmdPcSampleLocation {
     const AmdCodeObjectFunction* function = nullptr;
@@ -127,6 +186,9 @@ class AmdPcSampleAggregator {
     // which ready(crc) is true. Other rows stay for a later take.
     template <typename Ready>
     std::vector<AmdPcSampleRow> takeRows(Ready&& ready);
+
+    // The code objects (by crc) that rows are waiting in.
+    std::vector<uint64_t> waitingCodeObjects() const;
 
     const AmdPcSamplingTotals& totals() const { return totals_; }
 

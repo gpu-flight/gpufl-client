@@ -9,6 +9,7 @@
 #include <rocprofiler-sdk/rocprofiler.h>
 
 #include <algorithm>
+#include <chrono>
 #include <unordered_map>
 
 #include "gpufl/core/common.hpp"
@@ -25,6 +26,11 @@ constexpr size_t kBufferWatermark = kBufferBytes / 4;
 
 // Rows per Monitor::PushProfileSamples call, bounding the staging vector.
 constexpr size_t kRowsPerPush = 4096;
+
+// How long the last push waits for the collector to disassemble code
+// objects whose rows need source lines. The launcher kills a --window run
+// five seconds after asking it to stop.
+constexpr auto kFinalIsaWait = std::chrono::seconds(2);
 
 // rocprofiler-sdk delivers the buffer from its own thread, possibly after
 // the engine is gone (its finalizer flushes every PC sampling buffer). The
@@ -130,26 +136,19 @@ bool PcSamplingEngine::initialize(const rocprofiler_context_id_t context,
     // Only an opted-in run gets here, so the listing always prints.
     GFL_LOG_INFO("[PcSamplingEngine] the GPU lists PC sampling: ",
                  DescribeConfigurations(configs));
-    const rocprofiler_pc_sampling_configuration_t* stochastic = nullptr;
+    std::vector<AmdPcSamplingListing> listed;
+    listed.reserve(configs.size());
     for (const auto& config : configs) {
-        if (config.method == ROCPROFILER_PC_SAMPLING_METHOD_STOCHASTIC &&
-            config.unit == ROCPROFILER_PC_SAMPLING_UNIT_CYCLES) {
-            stochastic = &config;
-            break;
-        }
+        listed.push_back(
+            {config.method == ROCPROFILER_PC_SAMPLING_METHOD_STOCHASTIC &&
+                 config.unit == ROCPROFILER_PC_SAMPLING_UNIT_CYCLES,
+             config.min_interval, config.max_interval});
     }
-    if (stochastic == nullptr) {
-        return refuse(AmdPcSamplingRefusal::MethodUnavailable, std::string());
+    AmdPcSamplingChoice choice = ChooseAmdPcSamplingConfiguration(listed);
+    if (choice.interval == 0) {
+        return refuse(choice.refusal, std::move(choice.detail));
     }
-    const auto interval = ResolveAmdPcSamplingInterval(
-        stochastic->min_interval, stochastic->max_interval);
-    if (!interval) {
-        return refuse(AmdPcSamplingRefusal::ConfigurationFailed,
-                      "no power-of-2 interval from " +
-                          std::to_string(stochastic->min_interval) + " to " +
-                          std::to_string(stochastic->max_interval) +
-                          " cycles");
-    }
+    const uint64_t interval = choice.interval;
 
     status = rocprofiler_create_buffer(
         context_, kBufferBytes, kBufferWatermark,
@@ -172,14 +171,14 @@ bool PcSamplingEngine::initialize(const rocprofiler_context_id_t context,
 
     status = rocprofiler_configure_pc_sampling_service(
         context_, agent_, ROCPROFILER_PC_SAMPLING_METHOD_STOCHASTIC,
-        ROCPROFILER_PC_SAMPLING_UNIT_CYCLES, *interval, buffer_, 0);
+        ROCPROFILER_PC_SAMPLING_UNIT_CYCLES, interval, buffer_, 0);
     if (status != ROCPROFILER_STATUS_SUCCESS) {
         return refuse(ClassifyAmdPcSamplingStatus(AmdPcSamplingCall::Configure,
                                                   StatusName(status)),
                       StatusName(status));
     }
 
-    interval_ = *interval;
+    interval_ = interval;
     // Rows carry the source line of their ISA row.
     Monitor::RetainAmdIsaLines();
     {
@@ -200,33 +199,61 @@ void PcSamplingEngine::stop() {
     started_.store(false, std::memory_order_release);
 }
 
-void PcSamplingEngine::flush() {
-    if (buffer_.handle == 0) return;
+bool PcSamplingEngine::flush() {
+    std::lock_guard lock(sdk_mutex_);
+    if (finalized_.load(std::memory_order_acquire)) return false;
+    if (buffer_.handle == 0) return true;
     if (const auto status = rocprofiler_flush_buffer(buffer_);
         status != ROCPROFILER_STATUS_SUCCESS) {
         GFL_LOG_DEBUG("[PcSamplingEngine] rocprofiler_flush_buffer: ",
                       StatusName(status));
     }
+    return true;
 }
 
 void PcSamplingEngine::drain() {
-    if (!isPrepared()) return;
+    if (!configured_.load(std::memory_order_acquire)) return;
     flush();
     pushRows(false);
 }
 
 void PcSamplingEngine::finish() {
-    if (!isPrepared()) return;
-    // The context has stopped: deliver the last samples, then let the ISA
-    // line tables catch up so these rows carry their source lines. A later
-    // call finds nothing left unless the context ran again.
+    if (!configured_.load(std::memory_order_acquire)) return;
+    // The context has stopped: deliver the last samples and push the rows
+    // that are ready. Rows still waiting for line tables go in shutdown(),
+    // after the capability row, so no disassembly delays that row.
     flush();
-    Monitor::FlushDisassemblyNow();
-    pushRows(true);
+    pushRows(false);
 }
 
 void PcSamplingEngine::shutdown() {
-    finish();
+    if (!configured_.load(std::memory_order_acquire)) return;
+    {
+        std::lock_guard lock(sdk_mutex_);
+        if (finalized_.load(std::memory_order_acquire)) return;
+        if (buffer_.handle != 0) {
+            (void) rocprofiler_flush_buffer(buffer_);
+        }
+        finalized_.store(true, std::memory_order_release);
+    }
+
+    // The collector disassembles requested code objects on its next beat;
+    // give it a bounded moment, then push every row either way.
+    std::vector<uint64_t> waiting;
+    {
+        std::lock_guard lock(mutex_);
+        for (const uint64_t crc : aggregator_.waitingCodeObjects()) {
+            if (!rowsReady(crc)) waiting.push_back(crc);
+        }
+    }
+    if (!waiting.empty() &&
+        !Monitor::WaitForAmdIsaLines(waiting, kFinalIsaWait)) {
+        GFL_LOG_WARN("[PcSamplingEngine] PC sample rows of ", waiting.size(),
+                     " code object(s) go out before their ISA rows, without "
+                     "source lines");
+    }
+    pushRows(true);
+
     std::lock_guard lock(g_live_engine_mutex);
     if (g_live_engine == this) g_live_engine = nullptr;
 }
@@ -250,21 +277,27 @@ void PcSamplingEngine::onCodeObjectLoaded(const uint64_t code_object_id,
                                           const uint8_t* data,
                                           const size_t size) {
     if (!isPrepared()) return;
-    std::shared_ptr<const std::vector<AmdCodeObjectFunction>> functions;
+    std::shared_ptr<const AmdCodeObject> code_object;
     {
         std::lock_guard lock(mutex_);
-        if (const auto it = functions_by_crc_.find(crc);
-            it != functions_by_crc_.end()) {
-            functions = it->second;
+        if (const auto it = code_objects_by_crc_.find(crc);
+            it != code_objects_by_crc_.end()) {
+            code_object = it->second;
         }
     }
-    if (!functions) {
-        functions = std::make_shared<const std::vector<AmdCodeObjectFunction>>(
-            ParseAmdCodeObjectFunctions(data, size));
+    if (!code_object) {
+        code_object = std::make_shared<const AmdCodeObject>(
+            ParseAmdCodeObject(data, size));
+        // Its rows carry source lines, which come with its ISA rows: have
+        // the collector disassemble it now, not when the run ends.
+        if (code_object->line_info) Monitor::RequestAmdIsaLines(crc);
     }
     std::lock_guard lock(mutex_);
-    functions_by_crc_.emplace(crc, functions);
-    aggregator_.addCodeObject(code_object_id, crc, std::move(functions));
+    code_objects_by_crc_.emplace(crc, code_object);
+    aggregator_.addCodeObject(
+        code_object_id, crc,
+        std::shared_ptr<const std::vector<AmdCodeObjectFunction>>(
+            code_object, &code_object->functions));
 }
 
 void PcSamplingEngine::bufferCallback(rocprofiler_context_id_t,
@@ -334,6 +367,12 @@ void PcSamplingEngine::consume(rocprofiler_record_header_t** headers,
     }
 }
 
+bool PcSamplingEngine::rowsReady(const uint64_t crc) const {
+    const auto it = code_objects_by_crc_.find(crc);
+    return it == code_objects_by_crc_.end() || !it->second->line_info ||
+           IsaParsed(crc);
+}
+
 void PcSamplingEngine::pushRows(const bool final) {
     std::vector<AmdPcSampleRow> rows;
     std::vector<std::string> names;
@@ -343,7 +382,7 @@ void PcSamplingEngine::pushRows(const bool final) {
         rows = aggregator_.takeRows([&](const uint64_t crc) {
             if (final) return true;
             const auto [it, inserted] = ready.try_emplace(crc, false);
-            if (inserted) it->second = IsaParsed(crc);
+            if (inserted) it->second = rowsReady(crc);
             return it->second;
         });
         if (rows.empty()) return;

@@ -107,6 +107,10 @@ void MonitorBatchManager::flushAll(FlushMode mode) {
     if (mode == FlushMode::Full) {
         dictManager_.flushSourceContent(logger, session_id);
         dictManager_.flushDisassembly(logger, session_id);
+    } else {
+        // Code objects AMD PC sampling needs line tables for now, so its
+        // rows can leave while the run goes on.
+        dictManager_.flushRequestedAmdDisassembly(logger, session_id);
     }
 
     if (!kernelBatch_.empty()) {
@@ -226,6 +230,10 @@ void MonitorBatchManager::flushDisassembly() {
 
 void MonitorBatchManager::retainAmdIsaLines() {
     dictManager_.retainAmdIsaLines();
+}
+
+void MonitorBatchManager::requestAmdIsaLines(const uint64_t crc) {
+    dictManager_.requestAmdIsaLines(crc);
 }
 
 DictionaryManager::IsaSourceLookup MonitorBatchManager::lookupAmdIsaSource(

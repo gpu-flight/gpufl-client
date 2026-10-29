@@ -36,6 +36,10 @@ struct AmdResolvedProfilingPlan {
     AmdProfilingPath selected_path = AmdProfilingPath::None;
     bool degraded = false;
     std::string reason_code;
+    // The pass's '+' group named Trace beside PcSampling.
+    bool trace_requested = false;
+    // The pass's '+' group named PcSampling, and another engine ran.
+    bool pc_sampling_dropped = false;
 };
 
 // Request names describe cross-vendor intent; selected paths below identify
@@ -43,16 +47,38 @@ struct AmdResolvedProfilingPlan {
 const char* AmdRequestIntentWireName(ProfilingEngine engine);
 const char* AmdSelectedPathWireName(AmdProfilingPath path);
 
+// What a session reports as its engine: the session's profiling_engine and
+// capture_capabilities' selected_engine. A Trace+PcSampling group traced
+// every kernel and asked for that timing, so it reports amd.buffer_tracing;
+// its pc_sampling row says what sampling did.
+const char* AmdSessionEngineWireName(const AmdResolvedProfilingPlan& plan);
+
 AmdResolvedProfilingPlan ResolveAmdProfilingPlan(
     ProfilingEngine requested,
     const AmdProfilingSupport& support);
 
-// GPUFL_ENGINE_COMBO lists a '+' pass's engines, while the AMD backend runs
-// one service beside tracing. Every AMD session traces, so Trace+PcSampling
-// is PC sampling. Any other group keeps its first engine: PC sampling can't
-// share a context with counters.
-ProfilingEngine ResolveAmdRequestedEngine(ProfilingEngine selected,
-                                          std::string_view combo);
+// What a session asked the AMD backend for: GPUFL_PROFILING_ENGINE, read
+// with a '+' pass's GPUFL_ENGINE_COMBO.
+struct AmdProfilingRequest {
+    ProfilingEngine engine = ProfilingEngine::Monitor;
+    bool trace_requested = false;      // see AmdResolvedProfilingPlan
+    bool pc_sampling_dropped = false;  // see AmdResolvedProfilingPlan
+};
+
+// The AMD backend runs one service beside tracing, so a group is resolved
+// by ClassifyAmdPcSamplingGroup: PcSampling with Trace is PC sampling, and
+// any other group keeps its first engine (`selected`).
+AmdProfilingRequest ResolveAmdProfilingRequest(ProfilingEngine selected,
+                                               std::string_view combo);
+
+AmdResolvedProfilingPlan ResolveAmdProfilingPlan(
+    const AmdProfilingRequest& request,
+    const AmdProfilingSupport& support);
+
+// Why a PcSampling request must not call rocprofiler-sdk's PC sampling API
+// at all (no opt-in, or window-only arming), or nullopt to query the agent.
+std::optional<AmdPcSamplingRefusal> AmdPcSamplingPreflight(
+    const MonitorOptions& opts);
 
 bool AmdRequestNeedsDispatchCounting(ProfilingEngine engine);
 bool AmdRequestNeedsPcSampling(ProfilingEngine engine);

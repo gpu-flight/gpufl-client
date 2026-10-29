@@ -178,8 +178,8 @@ class RocprofilerBackend final : public IMonitorBackend {
     std::shared_ptr<AmdProfilingEngine> engine_;
     // engine_ when it is the PC sampling engine, for its capability counts.
     PcSamplingEngine* pc_engine_ = nullptr;
-    // The engine this session asked for, after reading a '+' pass's combo.
-    ProfilingEngine requested_engine_ = ProfilingEngine::Monitor;
+    // What this session asked for, after reading a '+' pass's combo.
+    AmdProfilingRequest request_;
     // What rocprofiler-sdk answered when it refused PC sampling.
     std::string pc_sampling_detail_;
 

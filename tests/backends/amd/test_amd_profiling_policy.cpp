@@ -133,6 +133,8 @@ TEST(AmdProfilingPolicy, PcSamplingRefusalsKeepTracingWithTheirReason) {
         {AmdPcSamplingRefusal::Unavailable, "amd_pc_sampling_unavailable"},
         {AmdPcSamplingRefusal::ConfigurationFailed,
          "amd_pc_sampling_configuration_failed"},
+        {AmdPcSamplingRefusal::WindowOnly,
+         "amd_pc_sampling_window_only_unsupported"},
     };
     for (const auto& [refusal, reason] : cases) {
         gpufl::amd::AmdProfilingSupport support;
@@ -179,25 +181,100 @@ TEST(AmdProfilingPolicy, PcSamplingJoinsNoCounterGroup) {
 
 TEST(AmdProfilingPolicy, TracePlusPcSamplingRequestsPcSampling) {
     using gpufl::ProfilingEngine;
-    using gpufl::amd::ResolveAmdRequestedEngine;
+    using gpufl::amd::ResolveAmdProfilingRequest;
     // `--passes=Trace+PcSampling` publishes the first engine and the combo.
-    EXPECT_EQ(ResolveAmdRequestedEngine(ProfilingEngine::Trace,
-                                        "Trace,PcSampling"),
-              ProfilingEngine::PcSampling);
-    EXPECT_EQ(ResolveAmdRequestedEngine(ProfilingEngine::PcSampling,
-                                        "PcSampling, Trace"),
-              ProfilingEngine::PcSampling);
-    EXPECT_EQ(ResolveAmdRequestedEngine(ProfilingEngine::Trace, ""),
+    const auto group =
+        ResolveAmdProfilingRequest(ProfilingEngine::Trace, "Trace,PcSampling");
+    EXPECT_EQ(group.engine, ProfilingEngine::PcSampling);
+    EXPECT_TRUE(group.trace_requested);
+    EXPECT_FALSE(group.pc_sampling_dropped);
+    const auto tab = ResolveAmdProfilingRequest(ProfilingEngine::PcSampling,
+                                                "PcSampling,\tTrace");
+    EXPECT_EQ(tab.engine, ProfilingEngine::PcSampling);
+    EXPECT_TRUE(tab.trace_requested);
+
+    const auto alone =
+        ResolveAmdProfilingRequest(ProfilingEngine::PcSampling, "");
+    EXPECT_EQ(alone.engine, ProfilingEngine::PcSampling);
+    EXPECT_FALSE(alone.trace_requested);
+    EXPECT_EQ(ResolveAmdProfilingRequest(ProfilingEngine::Trace, "").engine,
               ProfilingEngine::Trace);
-    EXPECT_EQ(ResolveAmdRequestedEngine(ProfilingEngine::PcSampling, ""),
-              ProfilingEngine::PcSampling);
-    // With a counter engine in the group, its first engine runs alone.
-    EXPECT_EQ(ResolveAmdRequestedEngine(ProfilingEngine::PmSampling,
-                                        "PmSampling,PcSampling"),
-              ProfilingEngine::PmSampling);
-    EXPECT_EQ(ResolveAmdRequestedEngine(ProfilingEngine::Trace,
-                                        "Trace,PmSampling"),
+    EXPECT_EQ(ResolveAmdProfilingRequest(ProfilingEngine::Trace,
+                                         "Trace,PmSampling")
+                  .engine,
               ProfilingEngine::Trace);
+}
+
+TEST(AmdProfilingPolicy, AGroupWithACounterEngineDropsPcSampling) {
+    using gpufl::ProfilingEngine;
+    using gpufl::amd::ResolveAmdProfilingRequest;
+    // The group keeps its first engine, and says PcSampling didn't run.
+    const auto dropped = ResolveAmdProfilingRequest(ProfilingEngine::PmSampling,
+                                                    "PmSampling,PcSampling");
+    EXPECT_EQ(dropped.engine, ProfilingEngine::PmSampling);
+    EXPECT_TRUE(dropped.pc_sampling_dropped);
+    EXPECT_FALSE(dropped.trace_requested);
+    const auto three = ResolveAmdProfilingRequest(
+        ProfilingEngine::Trace, "Trace,PcSampling,PmSampling");
+    EXPECT_EQ(three.engine, ProfilingEngine::Trace);
+    EXPECT_TRUE(three.pc_sampling_dropped);
+
+    // PcSampling first: the group samples.
+    const auto first = ResolveAmdProfilingRequest(ProfilingEngine::PcSampling,
+                                                  "PcSampling,PmSampling");
+    EXPECT_EQ(first.engine, ProfilingEngine::PcSampling);
+    EXPECT_FALSE(first.pc_sampling_dropped);
+}
+
+// The backend counts kernel timing only for tracing engines, and a
+// Trace+PcSampling group traced every kernel.
+TEST(AmdProfilingPolicy, TracePlusPcSamplingReportsItsTracing) {
+    gpufl::amd::AmdProfilingSupport support;
+    support.pc_sampling = true;
+    const auto group = gpufl::amd::ResolveAmdProfilingPlan(
+        gpufl::amd::ResolveAmdProfilingRequest(gpufl::ProfilingEngine::Trace,
+                                               "Trace,PcSampling"),
+        support);
+    EXPECT_EQ(group.selected_path, gpufl::amd::AmdProfilingPath::PcSampling);
+    EXPECT_STREQ(gpufl::amd::AmdSessionEngineWireName(group),
+                 "amd.buffer_tracing");
+
+    gpufl::amd::AmdCaptureCapabilityInput input;
+    input.plan = group;
+    input.trace_configured = true;
+    input.pc_samples = 3;
+    input.pc_samples_issued = 3;
+    const auto event = gpufl::amd::BuildAmdCaptureCapabilitiesEvent(input);
+    EXPECT_EQ(event.requested_engine, "pc_sampling");
+    EXPECT_EQ(event.selected_engine, "amd.buffer_tracing");
+    const auto* pc = FindCapability(event, "pc_sampling");
+    ASSERT_NE(pc, nullptr);
+    EXPECT_EQ(pc->status, "collected");
+    EXPECT_EQ(pc->mode, "rocprofiler_pc_sampling_stochastic");
+
+    const auto alone = gpufl::amd::ResolveAmdProfilingPlan(
+        gpufl::amd::ResolveAmdProfilingRequest(
+            gpufl::ProfilingEngine::PcSampling, ""),
+        support);
+    EXPECT_STREQ(gpufl::amd::AmdSessionEngineWireName(alone),
+                 "amd.pc_sampling");
+}
+
+TEST(AmdProfilingPolicy, PcSamplingNeedsTheOptInAndWholeRunArming) {
+    using gpufl::amd::AmdPcSamplingPreflight;
+    using gpufl::amd::AmdPcSamplingRefusal;
+    gpufl::MonitorOptions options;
+    EXPECT_EQ(AmdPcSamplingPreflight(options),
+              AmdPcSamplingRefusal::NotOptedIn);
+
+    options.amd_pc_sampling = gpufl::AmdPcSamplingMethod::Stochastic;
+    EXPECT_FALSE(AmdPcSamplingPreflight(options).has_value());
+
+    // rocprofiler-sdk samples while the context runs, which tracing keeps
+    // running between deep windows.
+    options.deep_arm_mode = gpufl::DeepArmMode::WindowOnly;
+    EXPECT_EQ(AmdPcSamplingPreflight(options),
+              AmdPcSamplingRefusal::WindowOnly);
 }
 
 TEST(AmdProfilingPolicy, SassIntentFallsBackToDispatchCounting) {

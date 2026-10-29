@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -480,6 +481,21 @@ class Monitor {
      * disassembled from now on; LookupAmdIsaSource answers from them.
      */
     static void RetainAmdIsaLines();
+
+    /**
+     * AMD PC sampling needs this code object's line table while the run
+     * goes on: the collector disassembles it at its next flush once it is
+     * enqueued, rather than at the last one. Ignored unless retained.
+     */
+    static void RequestAmdIsaLines(uint64_t crc);
+
+    /**
+     * Waits at most `timeout` for the collector to disassemble each code
+     * object (LookupAmdIsaSource past NotParsed). False on timeout, and at
+     * once when the collector isn't running.
+     */
+    static bool WaitForAmdIsaLines(const std::vector<uint64_t>& crcs,
+                                   std::chrono::milliseconds timeout);
 
     /**
      * The source line an AMD ISA row shows for an instruction of a code

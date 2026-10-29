@@ -2,6 +2,11 @@
 //   clang++ -O2 -x hip --offload-arch=gfx942 --offload-device-only \
 //     --no-gpu-bundle-output pc_sampling_fixture.hip \
 //     -o pc_sampling_fixture.gfx942.co
+// and its copy with DWARF line tables, from the repository root:
+//   clang++ -O2 -gline-tables-only -ffile-prefix-map=$PWD=. -x hip \
+//     --offload-arch=gfx942 --offload-device-only --no-gpu-bundle-output \
+//     tests/backends/amd/data/pc_sampling_fixture.hip \
+//     -o tests/backends/amd/data/pc_sampling_fixture.lines.gfx942.co
 #include <hip/hip_runtime.h>
 
 __device__ __noinline__ float scaleAndBias(float x, float s) {

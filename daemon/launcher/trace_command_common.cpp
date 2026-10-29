@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "agent_launcher.hpp"
+#include "gpufl/backends/amd/amd_pc_sampling_policy.hpp"
 #include "gpufl/core/env_vars.hpp"
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/json/json.hpp"
@@ -733,18 +734,8 @@ bool applyLaunchIdEnv(const char* inherited, const TracePlatform& platform) {
 }
 
 bool passRunsPcSampling(const std::string& pass) {
-    size_t start = 0;
-    while (true) {
-        const size_t plus = pass.find('+', start);
-        if (pass.compare(start,
-                         plus == std::string::npos ? std::string::npos
-                                                   : plus - start,
-                         "PcSampling") == 0) {
-            return true;
-        }
-        if (plus == std::string::npos) return false;
-        start = plus + 1;
-    }
+    return amd::ClassifyAmdPcSamplingGroup(pass, '+') ==
+           amd::AmdPcSamplingGroup::Samples;
 }
 
 bool applyAmdPcSamplingEnv(const TraceArgs& args, const std::string& pass,
@@ -907,11 +898,23 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
 
     const RunOptions& run_opts = trace_plan.run_options;
 
-    if (args.amd_pc_sampling && !args.quiet &&
-        std::none_of(plan.begin(), plan.end(), passRunsPcSampling)) {
-        std::fprintf(stderr,
-                     "[gpufl] warning: --amd-pc-sampling applies to no pass; "
-                     "add PcSampling or Trace+PcSampling to --passes\n");
+    if (args.amd_pc_sampling && !args.quiet) {
+        for (const std::string& pass : plan) {
+            if (amd::ClassifyAmdPcSamplingGroup(pass, '+') ==
+                amd::AmdPcSamplingGroup::Dropped) {
+                std::fprintf(stderr,
+                             "[gpufl] warning: AMD GPUs sample PCs alone or "
+                             "beside Trace only, so pass %s runs its first "
+                             "engine there without PC sampling\n",
+                             pass.c_str());
+            }
+        }
+        if (std::none_of(plan.begin(), plan.end(), passRunsPcSampling)) {
+            std::fprintf(stderr,
+                         "[gpufl] warning: --amd-pc-sampling applies to no "
+                         "pass; add PcSampling or Trace+PcSampling to "
+                         "--passes\n");
+        }
     }
 
     AgentProcess agent;

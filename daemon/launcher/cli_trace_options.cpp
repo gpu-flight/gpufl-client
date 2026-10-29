@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "cli_option_manager.hpp"
@@ -197,7 +198,10 @@ bool isValidEngine(const std::string& engine) {
 
 // A token may be a single engine ("Trace") or a '+'-joined composite group
 // ("Trace+PcSampling") that runs those engines together in ONE process.
-std::string validatePassToken(const std::string& token) {
+// `normalized` gets the token with its engine names trimmed, the form the
+// launcher stores and every later reader of the pass compares.
+std::string validatePassToken(const std::string& token,
+                              std::string& normalized) {
     std::vector<std::string> parts;
     std::size_t start = 0;
     while (true) {
@@ -206,6 +210,11 @@ std::string validatePassToken(const std::string& token) {
             start, plus == std::string::npos ? std::string::npos : plus - start)));
         if (plus == std::string::npos) break;
         start = plus + 1;
+    }
+    normalized.clear();
+    for (const std::string& part : parts) {
+        if (!normalized.empty()) normalized += '+';
+        normalized += part;
     }
     const bool composite = parts.size() > 1;
     for (const std::string& part : parts) {
@@ -250,11 +259,12 @@ std::string parsePasses(const FlagBreak& flag,
         const std::string item = detail::trim(value.substr(
             start, comma == std::string::npos ? std::string::npos : comma - start));
         if (!item.empty()) {
-            if (const std::string error = validatePassToken(item);
+            std::string normalized;
+            if (const std::string error = validatePassToken(item, normalized);
                 !error.empty()) {
                 return error;
             }
-            args.passes.push_back(item);
+            args.passes.push_back(std::move(normalized));
         }
         if (comma == std::string::npos) break;
         start = comma + 1;
