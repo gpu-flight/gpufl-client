@@ -133,8 +133,9 @@ std::string buildSourceCaptureManifestJson(
 // on an inherited lock.
 //
 // Returns a readable FILE* (caller fcloses) and sets outPid for reaping,
-// or nullptr on failure.
-FILE *spawnReadPipe(char *const argv[], pid_t &outPid) {
+// or nullptr on failure. With stdinPath, the child reads that file as stdin.
+FILE *spawnReadPipe(char *const argv[], pid_t &outPid,
+                    const char *stdinPath = nullptr) {
     int pipefd[2];
     if (::pipe(pipefd) != 0) return nullptr;
 
@@ -144,6 +145,10 @@ FILE *spawnReadPipe(char *const argv[], pid_t &outPid) {
     posix_spawn_file_actions_adddup2(&fa, pipefd[1], STDOUT_FILENO);
     posix_spawn_file_actions_addopen(&fa, STDERR_FILENO, "/dev/null",
                                      O_WRONLY, 0);
+    if (stdinPath) {
+        posix_spawn_file_actions_addopen(&fa, STDIN_FILENO, stdinPath,
+                                         O_RDONLY, 0);
+    }
     // close the inherited pipe fds in the child (write end is dup'd to 1)
     posix_spawn_file_actions_addclose(&fa, pipefd[0]);
     posix_spawn_file_actions_addclose(&fa, pipefd[1]);
@@ -169,6 +174,114 @@ FILE *spawnReadPipe(char *const argv[], pid_t &outPid) {
     }
     outPid = pid;
     return ::fdopen(pipefd[0], "r");
+}
+
+// Whether a file named by an AMD code object's line table ships with the
+// toolchain rather than the program: ROCm's headers, clang's own headers
+// (__clang_hip_math.h holds expf and fmaxf) and the system include
+// directories.
+bool isToolchainSource(const std::string& path) {
+    return path.rfind("/opt/rocm", 0) == 0 ||
+           path.find("/include/hip/") != std::string::npos ||
+           path.find("/lib/clang/") != std::string::npos ||
+           path.rfind("/usr/include/", 0) == 0 ||
+           path.rfind("/usr/local/include/", 0) == 0;
+}
+
+struct CallSite {
+    std::string file;
+    uint32_t line = 0;
+};
+
+// Where in the program's own source each address's inlined toolchain code
+// was called from, by one llvm-symbolizer run over the code object.
+// --inlines lists an address's frames innermost first, as
+// "file:line:column"; the first frame in a program file is the statement
+// that called into the headers. An address with no such frame is left out.
+std::unordered_map<uint64_t, CallSite> inlinedCallSites(
+    const std::string& symbolizer, const std::string& codeObject,
+    const std::vector<uint64_t>& addresses) {
+    std::unordered_map<uint64_t, CallSite> sites;
+    // The addresses go to stdin from a file: a large code object's don't
+    // fit on a command line.
+    char listPath[] = "/tmp/gpufl_addrs_XXXXXX";
+    const int fd = mkstemp(listPath);
+    if (fd < 0) return sites;
+    FILE* list = ::fdopen(fd, "w");
+    if (!list) {
+        ::close(fd);
+        ::unlink(listPath);
+        return sites;
+    }
+    for (const uint64_t address : addresses) {
+        std::fprintf(list, "0x%llx\n",
+                     static_cast<unsigned long long>(address));
+    }
+    const bool listed = !std::ferror(list);
+    if (std::fclose(list) != 0 || !listed) {
+        ::unlink(listPath);
+        return sites;
+    }
+
+    std::vector<std::string> args = {
+        symbolizer,  "--obj=" + codeObject, "--inlines",
+        "--addresses", "--functions=none",  "--output-style=LLVM"};
+    std::vector<char*> argv;
+    argv.reserve(args.size() + 1);
+    for (auto& a : args) argv.push_back(a.data());
+    argv.push_back(nullptr);
+    pid_t childPid = -1;
+    FILE* pipe = spawnReadPipe(argv.data(), childPid, listPath);
+    if (pipe) {
+        // Each address is echoed as "0x..." before its frames, and a blank
+        // line ends them.
+        uint64_t address = 0;
+        bool searching = false;
+        char lineBuf[4096];
+        while (std::fgets(lineBuf, sizeof(lineBuf), pipe)) {
+            std::string raw = lineBuf;
+            while (!raw.empty() &&
+                   (raw.back() == '\n' || raw.back() == '\r'))
+                raw.pop_back();
+            if (raw.empty()) {
+                searching = false;
+                continue;
+            }
+            if (raw.rfind("0x", 0) == 0) {
+                try {
+                    address = std::stoull(raw, nullptr, 16);
+                    searching = true;
+                } catch (...) {
+                    searching = false;
+                }
+                continue;
+            }
+            if (!searching) continue;
+            // An absolute path, which may itself hold ':', then line and
+            // column. "??:0:0" is a frame with no line.
+            const size_t column = raw.rfind(':');
+            if (raw[0] != '/' || column == std::string::npos) continue;
+            const size_t line = raw.rfind(':', column - 1);
+            if (line == std::string::npos) continue;
+            CallSite site{raw.substr(0, line), 0};
+            try {
+                site.line = static_cast<uint32_t>(
+                    std::stoul(raw.substr(line + 1, column - line - 1)));
+            } catch (...) {
+                continue;
+            }
+            if (site.line == 0 || isToolchainSource(site.file)) continue;
+            sites.emplace(address, std::move(site));
+            searching = false;
+        }
+        ::fclose(pipe);
+        if (childPid > 0) {
+            int status = 0;
+            ::waitpid(childPid, &status, 0);
+        }
+    }
+    ::unlink(listPath);
+    return sites;
 }
 #endif  // !_WIN32
 
@@ -612,6 +725,7 @@ void DictionaryManager::disassemble(
         FILE* pipe = nullptr;
 #ifndef _WIN32
         pid_t childPid = -1;
+        std::string llvmBin;  // ROCm's LLVM tools, for an AMD code object
 #endif
         if (isAmd) {
 #ifdef _WIN32
@@ -621,10 +735,11 @@ void DictionaryManager::disassemble(
 #else
             // llvm-objdump -d -l (-l adds DWARF source lines for correlation)
             const char* rocmPath = std::getenv("ROCM_PATH");
-            std::string objdump = (rocmPath && rocmPath[0])
-                ? std::string(rocmPath) + "/llvm/bin/llvm-objdump"
-                : std::string("/opt/rocm/llvm/bin/llvm-objdump");
-            std::vector<std::string> args = {objdump, "-d", "-l", tmpPathStr};
+            llvmBin = (rocmPath && rocmPath[0])
+                ? std::string(rocmPath) + "/llvm/bin/"
+                : std::string("/opt/rocm/llvm/bin/");
+            std::vector<std::string> args = {llvmBin + "llvm-objdump", "-d",
+                                             "-l", tmpPathStr};
             std::vector<char*> argv;
             argv.reserve(args.size() + 1);
             for (auto& a : args) argv.push_back(a.data());
@@ -673,6 +788,7 @@ void DictionaryManager::disassemble(
             std::string sass;
             std::string source_file;   // empty if no DWARF
             uint32_t source_line = 0;
+            uint64_t address = 0;      // AMD: the ELF address
         };
 
         std::unordered_map<std::string, std::vector<DisasmEntry>> funcEntries;
@@ -757,8 +873,9 @@ void DictionaryManager::disassemble(
                 ins = ins.substr(insStart);
                 while (!ins.empty() && (ins.back() == ' ' || ins.back() == '\t'))
                     ins.pop_back();
-                funcEntries[currentFunc].push_back(
-                    {pc, std::move(ins), currentSourceFile, currentSourceLine});
+                funcEntries[currentFunc].push_back({pc, std::move(ins),
+                                                    currentSourceFile,
+                                                    currentSourceLine, absPC});
             } else {
                 // NVIDIA nvdisasm -g format:
                 // Function:     "_Z11vectorScalePiii:"
@@ -841,6 +958,37 @@ void DictionaryManager::disassemble(
         if (childPid > 0) {
             int status = 0;
             ::waitpid(childPid, &status, 0);
+        }
+
+        // -l gives an instruction inlined from a toolchain header
+        // (__syncthreads(), expf, threadIdx.x) the header's line. It takes
+        // its call's line in the program's own source instead, before the
+        // ISA rows and the PC samples' line table are built from these
+        // entries. Without such a call it keeps the header's line.
+        if (isAmd) {
+            std::vector<uint64_t> inlined;
+            for (const auto& [funcName, entries] : funcEntries) {
+                for (const auto& e : entries) {
+                    if (isToolchainSource(e.source_file)) {
+                        inlined.push_back(e.address);
+                    }
+                }
+            }
+            if (!inlined.empty()) {
+                const auto sites = inlinedCallSites(
+                    llvmBin + "llvm-symbolizer", tmpPathStr, inlined);
+                for (auto& [funcName, entries] : funcEntries) {
+                    for (auto& e : entries) {
+                        const auto site = sites.find(e.address);
+                        if (site == sites.end()) continue;
+                        e.source_file = site->second.file;
+                        e.source_line = site->second.line;
+                    }
+                }
+                GFL_LOG_DEBUG("[flushDisassembly] ", sites.size(), " of ",
+                              inlined.size(), " instructions from toolchain "
+                              "headers take their call's line, crc=", crc);
+            }
         }
 #endif
         std::remove(tmpPathStr.c_str());

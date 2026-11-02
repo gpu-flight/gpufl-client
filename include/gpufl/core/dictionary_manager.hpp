@@ -147,7 +147,8 @@ class DictionaryManager {
     // llvm-objdump line table flushDisassembly parsed. NotParsed until the
     // code object's disassembly has run; Found or NoLine afterwards. On
     // Found, function_source is the file the function's ISA rows are keyed
-    // by, and source_file/source_line the instruction's own line.
+    // by, and source_file/source_line the instruction's own line, or for
+    // code inlined from a toolchain header, its call's line in the program.
     enum class IsaSourceLookup { NotParsed, NoLine, Found };
     struct IsaSourceLine {
         std::string function_source;

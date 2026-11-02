@@ -354,6 +354,19 @@ types are additive.
   512 registers per SIMD, granules of 8, 64 KiB of LDS per CU). RDNA keeps its
   previous result, and other AMD targets get no estimate. `capture_capabilities`
   gains an `occupancy_estimate` row with mode `amd_target_model_v1`.
+- **AMD code inlined from HIP and clang headers is on the line that called
+  it.** `llvm-objdump -l` gives an instruction the line of its innermost
+  inline frame, so `__syncthreads()`, `expf`, `fmaxf`, `blockIdx` and
+  `blockDim` mapped to lines of `amd_device_functions.h`, `__clang_hip_math.h`
+  and `amd_hip_runtime.h`, outside the program's source. In lab 0029's softmax
+  kernel that was 43% of the PC samples' stalls, barrier waits among them.
+  One `llvm-symbolizer --inlines` run per code object now finds the nearest
+  call in the program's own source for each such instruction, and its
+  `isa_source_map` row and the PC samples at it take that line. Toolchain
+  files are those under `/opt/rocm*`, `include/hip/`, clang's `lib/clang/`,
+  `/usr/include` and `/usr/local/include`. An instruction with no call in the
+  program, such as one in a rocPRIM kernel, keeps its line, as does every
+  instruction when `llvm-symbolizer` is missing. NVIDIA rows are unchanged.
 
 ## [1.2.1] - 2026-06-23
 
