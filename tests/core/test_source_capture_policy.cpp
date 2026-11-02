@@ -1,12 +1,15 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "gpufl/core/common.hpp"
@@ -375,6 +378,7 @@ TEST_F(SourceCapturePolicyTest, AmdIsaLineTableAnswersPcSampleLookups) {
     EXPECT_EQ(line.source_line, 6u);
 
     // An inlined header line belongs to the function keyed by its own file.
+    // With no llvm-symbolizer to name its call, it keeps the header's line.
     ASSERT_EQ(dictionary.lookupAmdIsaSource(42, "_Z6kernelPf", 0xc, &line),
               Lookup::Found);
     EXPECT_EQ(line.function_source, kernel.string());
@@ -466,6 +470,213 @@ TEST_F(SourceCapturePolicyTest, AmdIsaRequestsDisassembleOnlyWhatWasAsked) {
     dictionary.flushDisassembly(logger, "amd-isa-requests");
     EXPECT_EQ(lookup(41), Lookup::Found);
     EXPECT_EQ(lookup(43), Lookup::Found);
+}
+
+// llvm-objdump -l gives code inlined from a toolchain header the header's
+// line. One llvm-symbolizer run per code object finds each such
+// instruction's call in the program, and the ISA rows and the PC samples'
+// line table take that call's line. The tools' output is recorded from
+// tests/backends/amd/data/inline_call_sites.gfx942.co.
+TEST_F(SourceCapturePolicyTest, AmdInlinedHeaderCodeTakesItsCallsLine) {
+    struct SavedEnvironment {
+        const char* key;
+        bool present;
+        std::string value;
+        explicit SavedEnvironment(const char* name) : key(name),
+            present(std::getenv(name) != nullptr),
+            value(present ? std::getenv(name) : "") {}
+        ~SavedEnvironment() {
+            if (present) setenv(key, value.c_str(), 1);
+            else unsetenv(key);
+        }
+    } rocm("ROCM_PATH");
+    const fs::path kernel = write("src/softmax.hip", "softmaxRows\n");
+    const std::string hip =
+        "/opt/rocm-7.2.0/lib/llvm/bin/../../../include/hip/amd_detail/";
+    const std::string runtime = hip + "amd_hip_runtime.h";
+    const std::string device = hip + "amd_device_functions.h";
+    const std::string math =
+        "/opt/rocm-7.2.0/lib/llvm/lib/clang/22/include/__clang_hip_math.h";
+    const std::string scan =
+        "/opt/rocm-7.2.0/include/rocprim/block/block_scan.hpp";
+    // blockIdx.x, a line of the kernel's own, __syncthreads()'s wait and
+    // barrier, and expf; then a function whose every frame is a header.
+    const std::string listing =
+        "\nkernel.co:\tfile format elf64-amdgpu\n\n"
+        "Disassembly of section .text:\n\n"
+        "0000000000001c00 <_Z11softmaxRowsPKfPfii>:\n"
+        "; _Z11softmaxRowsPKfPfii():\n"
+        "; " + runtime + ":259\n"
+        "\ts_load_dwordx2 s[8:9], s[0:1], 0x10 // 000000001C00: C0060200\n"
+        "; " + kernel.string() + ":17\n"
+        "\ts_waitcnt lgkmcnt(0) // 000000001C08: BF8CC07F\n"
+        "; " + device + ":691\n"
+        "\ts_waitcnt lgkmcnt(0) // 000000001CC4: BF8CC07F\n"
+        "; " + device + ":692\n"
+        "\ts_barrier // 000000001CC8: BF8A0000\n"
+        "; " + math + ":431\n"
+        "\tv_exp_f32_e32 v7, v7 // 000000001DF0: 7E0E4107\n\n"
+        "0000000000002400 <_Z8scanTilePf>:\n"
+        "; " + scan + ":180\n"
+        "\tv_add_f32_e32 v0, v0, v1 // 000000002400: 02000300\n";
+    // llvm-symbolizer --inlines: each address's frames, innermost first.
+    const std::string frames =
+        "0x1c00\n" + runtime + ":259:58\n" + runtime + ":287:3\n" +
+        kernel.string() + ":16:15\n\n"
+        "0x1cc4\n" + device + ":691:5\n" + device + ":707:50\n" + device +
+        ":714:3\n" + kernel.string() + ":25:5\n\n"
+        "0x1cc8\n" + device + ":692:5\n" + device + ":707:50\n" + device +
+        ":714:3\n" + kernel.string() + ":25:5\n\n"
+        "0x1df0\n" + math + ":431:32\n" + kernel.string() + ":34:62\n\n"
+        "0x2400\n" + scan + ":180:9\n"
+        "/opt/rocm-7.2.0/include/rocprim/device/device_scan.hpp:95:5\n\n";
+    const auto objdump = write("llvm/bin/llvm-objdump",
+                               "#!/bin/sh\ncat <<'LISTING'\n" + listing +
+                                   "LISTING\n");
+    fs::permissions(objdump, fs::perms::owner_all);
+    const auto symbolizer = write(
+        "llvm/bin/llvm-symbolizer",
+        "#!/bin/sh\n"
+        "echo run >> \"$ROCM_PATH/symbolizer-runs\"\n"
+        "printf '%s\\n' \"$@\" > \"$ROCM_PATH/symbolizer-args\"\n"
+        "cat > \"$ROCM_PATH/symbolizer-stdin\"\n"
+        "cat <<'FRAMES'\n" + frames + "FRAMES\n");
+    fs::permissions(symbolizer, fs::perms::owner_all);
+    ASSERT_EQ(setenv("ROCM_PATH", root_.c_str(), 1), 0);
+    std::vector<uint8_t> elf(20, 0);
+    elf[0] = 0x7f; elf[1] = 'E'; elf[2] = 'L'; elf[3] = 'F'; elf[18] = 0xe0;
+
+    gpufl::DictionaryManager dictionary;
+    dictionary.configureSourceCapture(true, settings());
+    dictionary.retainAmdIsaLines();
+    auto lines = std::make_shared<std::vector<std::string>>();
+    gpufl::Logger logger;
+    logger.addSink(std::make_unique<RecordingSink>(lines));
+    dictionary.enqueueDisassembly(42, elf.data(), elf.size());
+    dictionary.flushDisassembly(logger, "amd-inline-call-sites");
+
+    // One run for the code object, asked only about the header lines.
+    const auto read_lines = [&](const char* name) {
+        std::ifstream input(root_ / name);
+        std::vector<std::string> values;
+        for (std::string value; std::getline(input, value);) {
+            values.push_back(value);
+        }
+        return values;
+    };
+    EXPECT_EQ(read_lines("symbolizer-runs").size(), 1u);
+    const auto args = read_lines("symbolizer-args");
+    EXPECT_NE(std::find(args.begin(), args.end(), "--inlines"), args.end());
+    EXPECT_TRUE(std::any_of(args.begin(), args.end(), [](const auto& arg) {
+        return arg.rfind("--obj=", 0) == 0;
+    }));
+    auto asked = read_lines("symbolizer-stdin");
+    std::sort(asked.begin(), asked.end());
+    EXPECT_EQ(asked, (std::vector<std::string>{"0x1c00", "0x1cc4", "0x1cc8",
+                                               "0x1df0", "0x2400"}));
+
+    using Lookup = gpufl::DictionaryManager::IsaSourceLookup;
+    const auto lookup = [&](const char* function, const uint32_t pc) {
+        gpufl::DictionaryManager::IsaSourceLine line;
+        EXPECT_EQ(dictionary.lookupAmdIsaSource(42, function, pc, &line),
+                  Lookup::Found);
+        return std::make_pair(line.source_file, line.source_line);
+    };
+    const auto at = [](const std::string& file, const uint32_t line) {
+        return std::make_pair(file, line);
+    };
+    const char* softmax = "_Z11softmaxRowsPKfPfii";
+    EXPECT_EQ(lookup(softmax, 0x0), at(kernel.string(), 16));
+    EXPECT_EQ(lookup(softmax, 0x8), at(kernel.string(), 17));
+    EXPECT_EQ(lookup(softmax, 0xc4), at(kernel.string(), 25));
+    EXPECT_EQ(lookup(softmax, 0xc8), at(kernel.string(), 25));
+    EXPECT_EQ(lookup(softmax, 0x1f0), at(kernel.string(), 34));
+    // No frame in the program: rocPRIM's line stays.
+    EXPECT_EQ(lookup("_Z8scanTilePf", 0x0), at(scan, 180));
+
+    // The ISA row of the s_barrier (pc 200) is on line 25, and no row
+    // names the HIP or clang headers.
+    std::string emitted;
+    for (const auto& json : *lines) emitted += json + "\n";
+    const uint32_t file = dictionary.internSourceFile(kernel.string());
+    const uint32_t metric = dictionary.internMetric("isa_inst_present");
+    EXPECT_NE(emitted.find(",200," + std::to_string(metric) + ",1,0,2,0," +
+                           std::to_string(file) + ",25]"),
+              std::string::npos);
+    EXPECT_EQ(emitted.find("amd_hip_runtime.h"), std::string::npos);
+    EXPECT_EQ(emitted.find("amd_device_functions.h"), std::string::npos);
+    EXPECT_EQ(emitted.find("__clang_hip_math.h"), std::string::npos);
+    EXPECT_NE(emitted.find("block_scan.hpp"), std::string::npos);
+}
+
+// The same through ROCm's own llvm-objdump and llvm-symbolizer, on the
+// checked-in code object, where ROCm is installed.
+TEST_F(SourceCapturePolicyTest, AmdInlinedHeaderCodeOfACompiledKernel) {
+    const char* rocm = std::getenv("ROCM_PATH");
+    const fs::path bin =
+        fs::path(rocm && rocm[0] ? rocm : "/opt/rocm") / "llvm" / "bin";
+    if (!fs::exists(bin / "llvm-objdump") ||
+        !fs::exists(bin / "llvm-symbolizer")) {
+        GTEST_SKIP() << "No llvm-objdump and llvm-symbolizer in " << bin;
+    }
+    std::ifstream input(
+        std::string(GPUFL_AMD_TEST_DATA_DIR) + "/inline_call_sites.gfx942.co",
+        std::ios::binary);
+    const std::vector<uint8_t> code_object(
+        (std::istreambuf_iterator<char>(input)),
+        std::istreambuf_iterator<char>());
+    ASSERT_FALSE(code_object.empty());
+
+    gpufl::DictionaryManager dictionary;
+    dictionary.retainAmdIsaLines();
+    auto lines = std::make_shared<std::vector<std::string>>();
+    gpufl::Logger logger;
+    logger.addSink(std::make_unique<RecordingSink>(lines));
+    dictionary.enqueueDisassembly(7, code_object.data(), code_object.size());
+    dictionary.flushDisassembly(logger, "amd-inline-call-sites");
+
+    // The fixture's lines; -ffile-prefix-map put it under /src.
+    const std::string source =
+        "/src/tests/backends/amd/data/inline_call_sites.hip";
+    using Lookup = gpufl::DictionaryManager::IsaSourceLookup;
+    const auto line_of = [&](const char* function, const uint32_t pc) {
+        gpufl::DictionaryManager::IsaSourceLine line;
+        EXPECT_EQ(dictionary.lookupAmdIsaSource(7, function, pc, &line),
+                  Lookup::Found);
+        EXPECT_EQ(line.source_file, source) << function << " +" << pc;
+        EXPECT_EQ(line.function_source, source);
+        return line.source_line;
+    };
+    const char* softmax = "_Z11softmaxRowsPKfPfii";
+    // Each __syncthreads(): its s_waitcnt and s_barrier.
+    EXPECT_EQ(line_of(softmax, 0xc4), 25u);
+    EXPECT_EQ(line_of(softmax, 0xc8), 25u);
+    EXPECT_EQ(line_of(softmax, 0x108), 28u);
+    EXPECT_EQ(line_of(softmax, 0x168), 31u);
+    EXPECT_EQ(line_of(softmax, 0x248), 36u);
+    EXPECT_EQ(line_of(softmax, 0x268), 39u);
+    // Each expf's v_exp_f32, and the wait on fmaxf's load.
+    EXPECT_EQ(line_of(softmax, 0x1f0), 34u);
+    EXPECT_EQ(line_of(softmax, 0x344), 44u);
+    EXPECT_EQ(line_of(softmax, 0x9c), 23u);
+    // blockIdx.x and blockDim.x.
+    EXPECT_EQ(line_of(softmax, 0x0), 16u);
+    EXPECT_EQ(line_of(softmax, 0xcc), 26u);
+    // blockSum's own statements keep their lines, and its barrier goes to
+    // its __syncthreads(), not to normalize's call of blockSum.
+    const char* normalize = "_Z9normalizePf";
+    EXPECT_EQ(line_of(normalize, 0x20), 51u);
+    EXPECT_EQ(line_of(normalize, 0x2c), 52u);
+    EXPECT_EQ(line_of(normalize, 0x30), 54u);
+
+    for (const auto& json : *lines) {
+        for (const char* header : {"amd_hip_runtime.h",
+                                   "amd_device_functions.h",
+                                   "__clang_hip_math.h"}) {
+            EXPECT_EQ(json.find(header), std::string::npos)
+                << json.substr(0, 200);
+        }
+    }
 }
 #endif
 
