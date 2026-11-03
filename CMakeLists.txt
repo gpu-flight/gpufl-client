@@ -212,6 +212,7 @@ target_sources(gpufl PRIVATE
     include/gpufl/core/metric_id.cpp
     include/gpufl/core/deep_window_rule.cpp
     include/gpufl/core/deep_window_rules.cpp
+    include/gpufl/core/window_requests.cpp
     include/gpufl/core/metric_registry.cpp
     include/gpufl/core/monitor_batch_manager.cpp
     include/gpufl/core/monitor_record_builders.cpp

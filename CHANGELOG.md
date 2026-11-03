@@ -5,6 +5,33 @@ inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows PEP 440 for the Python wheel and semver-style
 `MAJOR.MINOR.PATCH` for the C++ library.
 
+## [Unreleased]
+
+### Added
+
+- **Windows asked for by another process of the launch.** A process that sees a
+  problem but runs no GPU work, such as a serving framework's API server, can
+  ask the GPU processes of its `gpufl trace` launch for one bounded deep window.
+  It writes a request file under
+  `<GPUFL_LOG_DIR>/.gpufl-window-requests/<GPUFL_LAUNCH_ID>/` (schema
+  `gpufl.window_request/1`), and every process of the launch with a CUDA
+  context acts on it once and answers in `<request_id>.<pid>.result.json`:
+  `opened`, `busy`, `cooldown`, `budget`, `expired`, `engine_unavailable` or
+  `invalid`. A process without a CUDA context leaves requests alone.
+
+  On top of the coordinator's one window at a time, requests are capped per
+  process: one window's length (`GPUFL_WINDOW_REQUEST_MAX_MS`, 1000), windows
+  per hour (`GPUFL_WINDOW_REQUEST_MAX_PER_HOUR`, 6), capture time per hour
+  (`GPUFL_WINDOW_REQUEST_MAX_CAPTURE_MS_PER_HOUR`, 10000) and the cooldown
+  (`GPUFL_WINDOW_REQUEST_COOLDOWN_MS`, 60000). `GPUFL_WINDOW_REQUESTS=0` turns
+  the channel off. A malformed limit turns it off with an error rather than
+  using a default nobody asked for.
+
+- **A window says who asked for it.** The `trigger` of a `deep_window` event
+  gains `source` (`rule` or `request`), `request_id` and `expression`. They are
+  written only when set, so other windows read as before; the wire version is
+  unchanged.
+
 ## [1.3.0] - 2026-08-07
 
 Headline: **profiling that arms itself.** A run can watch a metric only it

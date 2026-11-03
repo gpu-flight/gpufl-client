@@ -20,6 +20,7 @@ set(GPUFL_TEST_SOURCES
     core/test_batch_models.cpp
     core/test_bench_invoker.cpp
     core/test_deep_window.cpp
+    core/test_window_requests.cpp
     core/test_disabled.cpp
     core/test_file_log_sink_rotation.cpp
     core/test_lifecycle_control_journal.cpp

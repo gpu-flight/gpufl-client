@@ -271,6 +271,7 @@ DeepWindowSpec RuleEvaluator::specWithTrigger(const MetricSample& sample) const 
     DeepWindowSpec spec = rule_.window;
     spec.trigger.present         = true;
     spec.trigger.rule_id         = rule_id_;
+    spec.trigger.source          = "rule";
     spec.trigger.metric          = rule_.metric.canonical;
     spec.trigger.op              = toString(rule_.op);
     spec.trigger.threshold       = rule_.threshold;
