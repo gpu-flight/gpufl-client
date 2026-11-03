@@ -38,6 +38,13 @@ struct DeepWindowTrigger {
     int64_t     sustained_ms = 0;
     int64_t     first_true_ns = 0;   // start of the run of true readings
     int64_t     fired_ns = 0;
+    /// "rule" for this process's own rule, "request" for another process's
+    /// request through the window request channel.
+    std::string source;
+    /// The request's id, which joins the window to the asker's own record.
+    std::string request_id;
+    /// What the asker evaluated, as it wrote it.
+    std::string expression;
 };
 
 /**

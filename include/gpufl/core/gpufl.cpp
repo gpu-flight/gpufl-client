@@ -24,6 +24,7 @@
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/deep_window.hpp"
 #include "gpufl/core/deep_window_rules.hpp"
+#include "gpufl/core/window_requests.hpp"
 #include "gpufl/core/events.hpp"
 #include "gpufl/core/logger/logger.hpp"
 #include "gpufl/core/version.hpp"
@@ -243,6 +244,9 @@ bool init(const InitOptions& opts) {
     // engine capability, and a metric window that starts from a running
     // runtime rather than from a half-built one.
     detail::DeepWindowRules::InstallFromEnv();
+    // Another process of the launch may ask this one for a window; it needs
+    // the same live backend, and the log directory the asker writes under.
+    detail::WindowRequestChannel::InstallFromEnv(g_opts.log_path);
 
     GFL_LOG_DEBUG("Initialization complete!");
     return true;

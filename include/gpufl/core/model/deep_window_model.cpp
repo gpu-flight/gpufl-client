@@ -49,8 +49,18 @@ std::string DeepWindowModel::buildJson() const {
                 << ",\"rate_window_ms\":" << e_.trigger.rate_window_ms
                 << ",\"sustained_ms\":"  << e_.trigger.sustained_ms
                 << ",\"first_true_ns\":" << e_.trigger.first_true_ns
-                << ",\"fired_ns\":"      << e_.trigger.fired_ns
-                << "}";
+                << ",\"fired_ns\":"      << e_.trigger.fired_ns;
+        // Only when set, so a window from an older path reads as it always did.
+        if (!e_.trigger.source.empty()) {
+            trigger << ",\"source\":\"" << jsonEscape(e_.trigger.source) << "\"";
+        }
+        if (!e_.trigger.request_id.empty()) {
+            trigger << ",\"request_id\":\"" << jsonEscape(e_.trigger.request_id) << "\"";
+        }
+        if (!e_.trigger.expression.empty()) {
+            trigger << ",\"expression\":\"" << jsonEscape(e_.trigger.expression) << "\"";
+        }
+        trigger << "}";
     }
 
     std::ostringstream oss;

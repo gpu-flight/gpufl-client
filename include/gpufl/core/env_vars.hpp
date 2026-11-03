@@ -234,6 +234,18 @@ constexpr const char* kDeepWindowCooldownMs = "GPUFL_DEEP_WINDOW_COOLDOWN_MS";
 // it from --deep-after. Unset = no scheduled window.
 constexpr const char* kDeepAfterMs         = "GPUFL_DEEP_AFTER_MS";
 
+// ── Window requests from other processes of the launch ─────────────────────
+// Another process of the same launch (the vLLM adapter in the API server) asks
+// for a bounded window by dropping a file in
+// <GPUFL_LOG_DIR>/.gpufl-window-requests/<GPUFL_LAUNCH_ID>/. "0" turns that off.
+constexpr const char* kWindowRequests      = "GPUFL_WINDOW_REQUESTS";
+// Caps on what may be asked: one window's length, and per hour the windows and
+// the capture time. Together with the cooldown they bound a live server's cost.
+constexpr const char* kWindowRequestMaxMs  = "GPUFL_WINDOW_REQUEST_MAX_MS";
+constexpr const char* kWindowRequestMaxPerHour = "GPUFL_WINDOW_REQUEST_MAX_PER_HOUR";
+constexpr const char* kWindowRequestMaxCaptureMsPerHour = "GPUFL_WINDOW_REQUEST_MAX_CAPTURE_MS_PER_HOUR";
+constexpr const char* kWindowRequestCooldownMs = "GPUFL_WINDOW_REQUEST_COOLDOWN_MS";
+
 // ── Conditional deep window ─────────────────────────────────────────────────
 // Open a window when a metric crosses a threshold, e.g.
 // "custom.token_rate<1000 for 2s". Separate options rather than one grammar:

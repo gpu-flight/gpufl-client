@@ -1,6 +1,7 @@
 #include "gpufl/core/monitor.hpp"
 
 #include "gpufl/core/deep_window_rules.hpp"
+#include "gpufl/core/window_requests.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -539,6 +540,9 @@ void CollectorLoop() {
                 }
             }
             if (g_state.adapter) g_state.adapter->drainProfilingData();
+            // On the beat, not every iteration: it reads a directory, and a
+            // request waits for the next launch boundary to open anyway.
+            detail::WindowRequestChannel::Service();
             // Boundary arbitration shares this collector beat with CUPTI drain
             // and batch flush, so no second flush thread can race the cutover.
             if (Runtime* rt = runtime(); rt && rt->segment_runtime) {
