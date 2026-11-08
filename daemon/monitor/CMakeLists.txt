@@ -21,9 +21,18 @@ if(GPUFL_HAS_NVML)
     endif()
 endif()
 
-install(TARGETS gpufl-monitor
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-)
+if(GPUFL_WHEEL_LAYOUT)
+    # Beside the launcher in site-packages/gpufl/bin. A top-level bin/ in
+    # site-packages would take the place of the scripts directory under
+    # `pip install --target`, and pip would then skip the `gpufl` entry.
+    install(TARGETS gpufl-monitor
+        RUNTIME DESTINATION ${GPUFL_WHEEL_BINDIR}
+    )
+else()
+    install(TARGETS gpufl-monitor
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
+endif()
 
 # Copy required DLLs on Windows
 if(WIN32)

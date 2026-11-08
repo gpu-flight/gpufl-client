@@ -119,7 +119,8 @@ if(APPLE AND GPUFL_ENABLE_METAL AND GPUFL_HAS_METAL)
 endif()
 
 # The Linux injection capture gate is a pure state machine (fake driver hooks).
-# The SIGTERM flush and the POSIX trace runner fork real processes.
+# The SIGTERM flush and the POSIX trace runner fork real processes. The Linux
+# wheel's PATH entry resolves its launcher with access(2).
 if(UNIX AND NOT APPLE)
   list(APPEND GPUFL_TEST_SOURCES
     inject/test_capture_gate.cpp
@@ -128,6 +129,8 @@ if(UNIX AND NOT APPLE)
     ${CMAKE_SOURCE_DIR}/include/gpufl/inject/sigterm_flush_linux.cpp
     launcher/test_trace_process_group.cpp
     ${CMAKE_SOURCE_DIR}/daemon/launcher/trace_command.cpp
+    launcher/test_wheel_entry_paths.cpp
+    ${CMAKE_SOURCE_DIR}/daemon/launcher/wheel_entry_paths.cpp
   )
 endif()
 

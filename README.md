@@ -54,6 +54,31 @@ Try the portal with real session data - no sign-up required:
 pip install "gpufl[analyzer,viz]"
 ```
 
+What `pip install gpufl` installs depends on the platform:
+
+- **Linux x86-64** (Python 3.12 and 3.13): the `gpufl` Python package and the
+  native `gpufl` command (`gpufl trace`, `gpufl upload`, `gpufl monitor`,
+  `gpufl info`, `gpufl --version`). pip puts the command where it puts scripts:
+  the `bin/` of the venv or conda environment, or `~/.local/bin` for
+  `pip install --user`. An activated environment, or pipx, puts it on `PATH`.
+  The command links the NVIDIA driver's `libcuda.so.1` and
+  `libnvidia-ml.so.1`, so it starts only on a machine with the NVIDIA driver
+  installed, even for `--version`.
+
+  ```bash
+  python3 -m venv .venv && . .venv/bin/activate
+  pip install gpufl
+  gpufl --version
+  gpufl trace -- python train.py
+  ```
+
+- **Windows** (Python 3.12 and 3.13): the Python package only. The wheel has no
+  `gpufl.exe`: build it with `build-windows.ps1 -Mode trace` (see
+  [Windows](#windows) below). Without it, upload logs with
+  `python -m gpufl.cli upload`.
+- **macOS**: no wheel is published, so pip builds the source distribution. See
+  [macOS / Apple Metal](#macos--apple-metal) for what a source build needs.
+
 For full NVML support (GPU utilization/VRAM monitoring), build from source inside a CUDA devel container:
 ```bash
 git clone https://github.com/gpu-flight/gpufl-client.git

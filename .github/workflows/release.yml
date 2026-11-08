@@ -218,6 +218,14 @@ jobs:
           # under gpufl.libs/ so the wheel ships its own OpenSSL and
           # HTTPS works on user machines without any system install.
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: "auditwheel repair --plat manylinux_2_28_x86_64 --exclude libcuda.so.1 --exclude libnvidia-ml.so.1 -w {dest_dir} {wheel}"
+          # cibuildwheel installs each repaired Linux wheel into a fresh venv and
+          # runs this. It checks that `pip install gpufl` gives a working `gpufl`:
+          # the native command is on PATH, `gpufl --version` reports the wheel's
+          # version, and `gpufl trace` finds libgpufl_inject.so. A failure fails
+          # this job, so upload_pypi never publishes the wheel. build.yml runs
+          # the same check on pull requests. Windows wheels ship no gpufl.exe yet,
+          # so there is no Windows test command.
+          CIBW_TEST_COMMAND_LINUX: python {project}/tests/package/check_wheel_launcher.py
           # On Windows, cibuildwheel's default is `delvewheel repair`.
           # We need delvewheel to find the OpenSSL DLLs (libssl-3-x64.dll,
           # libcrypto-3-x64.dll) so it copies them into the wheel. The
