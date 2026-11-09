@@ -30,6 +30,8 @@ EXPECTED_INIT_OPTIONS_FIELDS = {
     "enable_debug_output":    (False,   bool),
     "enable_stack_trace":     (False,   bool),
     "enable_source_collection": (True,  bool),
+    "source_include_third_party": (False, bool),
+    "source_excluded_dirs":   ([],      list),
     "flush_logs_always":      (False,   bool),
 }
 
@@ -57,6 +59,10 @@ class TestInitOptions:
         assert opts.app_name == "test_app"
         opts.enable_source_collection = False
         assert opts.enable_source_collection is False
+        opts.source_include_third_party = True
+        assert opts.source_include_third_party is True
+        opts.source_excluded_dirs = ["generated", "build/cache"]
+        assert opts.source_excluded_dirs == ["generated", "build/cache"]
         opts.system_sample_rate_ms = 100
         assert opts.system_sample_rate_ms == 100
 
@@ -163,6 +169,8 @@ class TestInitFunction:
             enable_debug_output=False,
             enable_stack_trace=True,
             enable_source_collection=True,
+            source_include_third_party=False,
+            source_excluded_dirs=["generated"],
         )
         assert isinstance(result, bool)
         gpufl.shutdown()

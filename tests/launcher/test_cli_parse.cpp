@@ -302,6 +302,25 @@ TEST(CliParseTrace, SourceCaptureDefaultsOnAndCanBeDisabled) {
     EXPECT_EQ(rooted.args->source_root, "./cuda-project");
 }
 
+TEST(CliParseTrace, SourceThirdPartyFlags) {
+    auto defaults = parseTraceArgs(argsFor({"--", "./bin"}));
+    ASSERT_TRUE(defaults.args.has_value()) << defaults.error;
+    EXPECT_FALSE(defaults.args->source_include_third_party);
+    EXPECT_TRUE(defaults.args->source_exclude.empty());
+
+    auto given = parseTraceArgs(argsFor(
+        {"--source-include-third-party", "--source-exclude", "generated",
+         "--source-exclude=build/cache", "--", "./bin"}));
+    ASSERT_TRUE(given.args.has_value()) << given.error;
+    EXPECT_TRUE(given.args->source_include_third_party);
+    EXPECT_EQ(given.args->source_exclude,
+              (std::vector<std::string>{"generated", "build/cache"}));
+
+    auto empty = parseTraceArgs(argsFor({"--source-exclude=", "--", "./bin"}));
+    ASSERT_FALSE(empty.args.has_value());
+    EXPECT_EQ(empty.error, "--source-exclude cannot be empty");
+}
+
 TEST(CliParseTrace, StacksAcceptsOnAndOffAndRefusesAnythingElse) {
     auto absent = parseTraceArgs(argsFor({"--", "./bin"}));
     ASSERT_TRUE(absent.args.has_value()) << absent.error;
@@ -357,6 +376,7 @@ TEST(CliParseHelp, TraceSimpleOptionsComeFromTheRegistry) {
     EXPECT_NE(help.find("--backend-url=<URL>"), std::string::npos);
     EXPECT_NE(help.find("--no-source"), std::string::npos);
     EXPECT_NE(help.find("--source-root=<DIR>"), std::string::npos);
+    EXPECT_NE(help.find("--source-exclude=<DIR>"), std::string::npos);
     EXPECT_NE(help.find("GPUFL_BACKEND_URL"), std::string::npos);
 }
 

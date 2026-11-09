@@ -89,6 +89,23 @@ StartupSettingSources resolveStartupOptions(InitOptions& options) {
     if (const char* value = std::getenv(env::kSourceRoot); value && *value) {
         options.source_capture.approved_roots = {value};
     }
+    if (const char* value = std::getenv(env::kSourceIncludeThirdParty)) {
+        options.source_capture.include_third_party =
+            std::strcmp(value, "1") == 0;
+    }
+    if (const char* value = std::getenv(env::kSourceExclude)) {
+        const std::string list = value;
+        std::size_t start = 0;
+        while (start <= list.size()) {
+            std::size_t end = list.find(kSourceExcludeListSeparator, start);
+            if (end == std::string::npos) end = list.size();
+            if (end > start) {
+                options.source_capture.excluded_dirs.push_back(
+                    list.substr(start, end - start));
+            }
+            start = end + 1;
+        }
+    }
     if (options.enable_source_collection &&
         options.source_capture.approved_roots.empty()) {
         std::error_code ec;

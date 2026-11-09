@@ -243,6 +243,133 @@ TEST_F(SourceCapturePolicyTest, BoundsDetailedManifestEntries) {
     EXPECT_EQ(policy.manifest().omitted_manifest_entries, 1u);
 }
 
+TEST_F(SourceCapturePolicyTest, SkipsVendoredDirectoriesWithoutReadingThem) {
+    const fs::path vendored =
+        write("third_party/cutlass/gemm.cuh", "__device__ int cutlass;\n");
+    const fs::path fetched =
+        write("build/_deps/cub-src/cub.cuh", "__device__ int cub;\n");
+    const fs::path venv = write(
+        ".venv/lib/python3.12/site-packages/torch/include/aten.h", "aten\n");
+    // Excluded before the extension check, so nothing about the file matters.
+    const fs::path notes = write("vendor/notes.txt", "notes\n");
+    // Only directories count: a file named like one is project code.
+    const fs::path own = write("src/vendor.cu", "__global__ void own() {}\n");
+    gpufl::detail::SourceCapturePolicy policy;
+    policy.configure(true, settings());
+
+    const auto result =
+        policy.capture(vendored.string(), 1, "profiler_source_correlation");
+    EXPECT_EQ(result.record.disposition,
+              SourceCaptureDisposition::ExcludedThirdParty);
+    EXPECT_EQ(result.record.logical_path, "third_party/cutlass/gemm.cuh");
+    EXPECT_EQ(result.record.bytes, 0u);
+    EXPECT_TRUE(result.lines.empty());
+    EXPECT_STREQ(gpufl::detail::sourceCaptureDispositionName(
+                     result.record.disposition),
+                 "excluded_third_party");
+    for (const fs::path& path : {fetched, venv, notes}) {
+        EXPECT_EQ(policy.capture(path.string(), 2, "debug_line")
+                      .record.disposition,
+                  SourceCaptureDisposition::ExcludedThirdParty)
+            << path;
+    }
+    EXPECT_EQ(policy.capture(own.string(), 3, "debug_line").record.disposition,
+              SourceCaptureDisposition::Captured);
+    EXPECT_EQ(policy.manifest().captured_files, 1u);
+    EXPECT_EQ(policy.manifest().skipped_files, 4u);
+}
+
+TEST_F(SourceCapturePolicyTest, MatchesVendoredDirectoryNamesInAnyCase) {
+    const fs::path upper = write("ThirdParty/Eigen/core.h", "eigen\n");
+    const fs::path mixed = write("src/External/lib.cuh", "lib\n");
+    gpufl::detail::SourceCapturePolicy policy;
+    policy.configure(true, settings());
+
+    EXPECT_EQ(policy.capture(upper.string(), 1, "debug_line").record.disposition,
+              SourceCaptureDisposition::ExcludedThirdParty);
+    EXPECT_EQ(policy.capture(mixed.string(), 2, "debug_line").record.disposition,
+              SourceCaptureDisposition::ExcludedThirdParty);
+}
+
+TEST_F(SourceCapturePolicyTest, RootInsideAVendoredNameIsStillProjectCode) {
+    // The project itself lives under a folder named external: only the
+    // directories below the approved root are judged.
+    const fs::path source =
+        write("external/myproj/src/kernel.cu", "__global__ void k() {}\n");
+    gpufl::SourceCaptureSettings config;
+    config.approved_roots = {(root_ / "external" / "myproj").string()};
+    gpufl::detail::SourceCapturePolicy policy;
+    policy.configure(true, config);
+
+    const auto result = policy.capture(source.string(), 1, "debug_line");
+    EXPECT_EQ(result.record.disposition, SourceCaptureDisposition::Captured);
+    EXPECT_EQ(result.record.logical_path, "src/kernel.cu");
+}
+
+TEST_F(SourceCapturePolicyTest, SkipsGitSubmodulePaths) {
+    write(".gitmodules",
+          "[submodule \"deps/cutlass\"]\n"
+          "\tpath = deps/cutlass\n"
+          "\turl = https://github.com/NVIDIA/cutlass.git\n"
+          "[submodule \"escape\"]\n"
+          "\tpath = ../outside\n");
+    const fs::path submodule = write("deps/cutlass/include/gemm.h", "gemm\n");
+    const fs::path sibling = write("deps/cutlass-ext/ext.cuh", "ext\n");
+    const fs::path own = write("deps/own.cu", "own\n");
+    gpufl::detail::SourceCapturePolicy policy;
+    policy.configure(true, settings());
+
+    EXPECT_EQ(policy.capture(submodule.string(), 1, "debug_line")
+                  .record.disposition,
+              SourceCaptureDisposition::ExcludedThirdParty);
+    EXPECT_EQ(policy.capture(sibling.string(), 2, "debug_line")
+                  .record.disposition,
+              SourceCaptureDisposition::Captured);
+    EXPECT_EQ(policy.capture(own.string(), 3, "debug_line").record.disposition,
+              SourceCaptureDisposition::Captured);
+}
+
+TEST_F(SourceCapturePolicyTest, IncludeThirdPartyKeepsExplicitExclusions) {
+    write(".gitmodules", "[submodule \"deps/cub\"]\n\tpath = deps/cub\n");
+    const fs::path vendored = write("third_party/cutlass/gemm.cuh", "gemm\n");
+    const fs::path submodule = write("deps/cub/cub.cuh", "cub\n");
+    const fs::path generated = write("src/Generated/tables.cu", "tables\n");
+    auto config = settings();
+    config.include_third_party = true;
+    config.excluded_dirs = {"generated"};
+    gpufl::detail::SourceCapturePolicy policy;
+    policy.configure(true, config);
+
+    EXPECT_EQ(policy.capture(vendored.string(), 1, "debug_line")
+                  .record.disposition,
+              SourceCaptureDisposition::Captured);
+    EXPECT_EQ(policy.capture(submodule.string(), 2, "debug_line")
+                  .record.disposition,
+              SourceCaptureDisposition::Captured);
+    EXPECT_EQ(policy.capture(generated.string(), 3, "debug_line")
+                  .record.disposition,
+              SourceCaptureDisposition::ExcludedThirdParty);
+}
+
+TEST_F(SourceCapturePolicyTest, ExcludedDirectoryPathsSkipTheirSubtree) {
+    const fs::path cached = write("build/cache/kernel.cu", "cached\n");
+    const fs::path built = write("build/kernel.cu", "built\n");
+    const fs::path tool = write("tools/gen/tool.cu", "tool\n");
+    auto config = settings();
+    config.excluded_dirs = {"build/cache", (root_ / "tools").string()};
+    gpufl::detail::SourceCapturePolicy policy;
+    policy.configure(true, config);
+
+    EXPECT_EQ(policy.capture(cached.string(), 1, "debug_line")
+                  .record.disposition,
+              SourceCaptureDisposition::ExcludedThirdParty);
+    EXPECT_EQ(policy.capture(built.string(), 2, "debug_line")
+                  .record.disposition,
+              SourceCaptureDisposition::Captured);
+    EXPECT_EQ(policy.capture(tool.string(), 3, "debug_line").record.disposition,
+              SourceCaptureDisposition::ExcludedThirdParty);
+}
+
 class RecordingSink final : public gpufl::ILogSink {
    public:
     explicit RecordingSink(std::shared_ptr<std::vector<std::string>> lines)
@@ -285,6 +412,33 @@ TEST_F(SourceCapturePolicyTest, DictionaryEmitsContentAndBoundedManifest) {
               std::string::npos);
     EXPECT_NE((*lines)[2].find(R"("lines":["first","second"])"),
               std::string::npos);
+}
+
+TEST_F(SourceCapturePolicyTest, ManifestNamesVendoredFilesWithoutContent) {
+    const fs::path vendored =
+        write("third_party/cutlass/gemm.cuh", "vendored-secret\n");
+    gpufl::DictionaryManager dictionary;
+    dictionary.configureSourceCapture(true, settings());
+    EXPECT_EQ(dictionary.internSourceFile(vendored.string()), 1u);
+
+    auto lines = std::make_shared<std::vector<std::string>>();
+    gpufl::Logger logger;
+    logger.addSink(std::make_unique<RecordingSink>(lines));
+    dictionary.flushDictionary(logger, "session-1");
+    dictionary.flushSourceContent(logger, "session-1");
+
+    ASSERT_EQ(lines->size(), 2u);
+    EXPECT_NE((*lines)[1].find(R"("type":"source_capture_manifest")"),
+              std::string::npos);
+    EXPECT_NE((*lines)[1].find(
+                  R"("logical_path":"third_party/cutlass/gemm.cuh")"),
+              std::string::npos);
+    EXPECT_NE((*lines)[1].find(R"("disposition":"excluded_third_party")"),
+              std::string::npos);
+    for (const auto& line : *lines) {
+        EXPECT_EQ(line.find("source_file_content"), std::string::npos);
+        EXPECT_EQ(line.find("vendored-secret"), std::string::npos);
+    }
 }
 
 

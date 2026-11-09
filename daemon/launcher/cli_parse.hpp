@@ -23,6 +23,12 @@ struct TraceArgs {
     bool quiet = false;                 // -q
     bool no_source = false;             // --no-source: explicit source-content opt-out
     std::string source_root;            // --source-root: approved project source boundary
+    // --source-include-third-party: also capture vendored code (third_party/,
+    // submodules, _deps/, site-packages/, ...) inside the source root.
+    bool source_include_third_party = false;
+    // --source-exclude, repeatable: directories never captured, even with
+    // --source-include-third-party.
+    std::vector<std::string> source_exclude;
     // --stacks=on|off: host call stacks on launches, memcpy and syncs. Unset
     // leaves the injection preset (on) or a config file to decide.
     std::optional<bool> stack_traces;

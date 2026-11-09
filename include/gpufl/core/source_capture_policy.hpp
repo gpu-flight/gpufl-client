@@ -33,7 +33,32 @@ struct SourceCaptureLimits {
 struct SourceCaptureSettings {
     std::vector<std::string> approved_roots;
     SourceCaptureLimits limits;
+    /**
+     * Vendored code inside an approved root is not captured by default: a
+     * file is skipped when a directory between the root and the file is
+     * named like third_party, external, vendor, _deps, site-packages, .venv
+     * or node_modules (case-insensitive), or lies under a git submodule path
+     * listed in <root>/.gitmodules. True captures it like project code.
+     */
+    bool include_third_party = false;
+    /**
+     * Extra exclusions, applied even with include_third_party. A bare name
+     * (no slash) matches any directory component below the root, like the
+     * default names. A value with a slash is a directory relative to each
+     * approved root, or an absolute path; its whole subtree is skipped.
+     */
+    std::vector<std::string> excluded_dirs;
 };
+
+/**
+ * Separator joining excluded_dirs in GPUFL_SOURCE_EXCLUDE: the platform's
+ * path-list separator, as in PATH. An entry cannot contain it.
+ */
+#ifdef _WIN32
+constexpr char kSourceExcludeListSeparator = ';';
+#else
+constexpr char kSourceExcludeListSeparator = ':';
+#endif
 
 namespace detail {
 
@@ -45,6 +70,7 @@ enum class SourceCaptureDisposition {
     OutsideApprovedRoots,
     SymlinkEscape,
     ExcludedSystemRoot,
+    ExcludedThirdParty,
     UnsupportedExtension,
     NonTextContent,
     NotRegularFile,
@@ -107,11 +133,21 @@ class SourceCapturePolicy {
         const std::filesystem::path& discovered_path,
         std::uint32_t source_file_id) const;
     void record(SourceCaptureRecord value);
+    void configureThirdPartyExclusions();
+    bool isThirdParty(const std::filesystem::path& canonical,
+                      std::size_t canonical_root,
+                      const std::filesystem::path& absolute) const;
+    bool hasExcludedDirectoryName(const std::filesystem::path& file,
+                                  const std::filesystem::path& root) const;
 
     bool enabled_ = false;
     SourceCaptureSettings settings_;
     std::vector<std::filesystem::path> approved_lexical_roots_;
     std::vector<std::filesystem::path> approved_roots_;
+    // Lower-case directory names, and canonical directory subtrees, whose
+    // files are ExcludedThirdParty. Built once per configure().
+    std::vector<std::string> excluded_dir_names_;
+    std::vector<std::filesystem::path> excluded_subtrees_;
     SourceCaptureManifest manifest_;
     bool manifest_dirty_ = false;
 };

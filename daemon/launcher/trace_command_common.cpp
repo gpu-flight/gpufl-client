@@ -29,6 +29,7 @@
 #include "gpufl/core/logger/session_ownership.hpp"
 #include "gpufl/core/logger/window_metadata.hpp"
 #include "gpufl/core/process_identity.hpp"
+#include "gpufl/core/source_capture_policy.hpp"
 #include "gpufl/inject/inject_entry.hpp"
 #include "gpufl/upload/upload_logs.hpp"
 
@@ -41,6 +42,28 @@ fs::path findInjectLib(const TracePlatform& platform, const fs::path& exe) {
         if (fs::exists(c, ec)) return fs::weakly_canonical(c, ec);
     }
     return {};
+}
+
+// The vendored-code choices are launcher-owned: set from the flags, removed
+// without them, so a parent shell's value cannot change what is captured.
+bool applySourceExclusionEnv(const TraceArgs& args,
+                             const TracePlatform& platform) {
+    if (args.source_include_third_party) {
+        if (!setEnvOrPrint(platform, env::kSourceIncludeThirdParty, "1")) {
+            return false;
+        }
+    } else if (!unsetEnvOrPrint(platform, env::kSourceIncludeThirdParty)) {
+        return false;
+    }
+    if (args.source_exclude.empty()) {
+        return unsetEnvOrPrint(platform, env::kSourceExclude);
+    }
+    std::string joined;
+    for (std::size_t i = 0; i < args.source_exclude.size(); ++i) {
+        if (i > 0) joined += kSourceExcludeListSeparator;
+        joined += args.source_exclude[i];
+    }
+    return setEnvOrPrint(platform, env::kSourceExclude, joined);
 }
 
 fs::path resolveSourceRoot(const TraceArgs& args, std::string& error) {
@@ -849,6 +872,7 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
                        args.no_source ? "0" : "1") ||
         !setEnvOrPrint(platform, env::kSourceRoot,
                        source_root.string()) ||
+        !applySourceExclusionEnv(args, platform) ||
         !setEnvOrPrint(platform, env::kInjectUpload, "0")) {
         return 2;
     }

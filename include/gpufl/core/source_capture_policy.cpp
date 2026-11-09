@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <system_error>
 
@@ -13,12 +14,109 @@ namespace {
 
 namespace fs = std::filesystem;
 
+// Directories under which a project keeps code it did not write: vendored
+// trees, CMake FetchContent checkouts (build/_deps/*-src), and Python or
+// Node packages installed inside the project. Compared case-insensitively.
+constexpr std::array<const char*, 13> kThirdPartyDirNames = {
+    "third_party", "thirdparty",    "third-party",   "3rdparty", "external",
+    "extern",      "vendor",        "_deps",         "site-packages",
+    "dist-packages", ".venv",       "venv",          "node_modules"};
+
+// Bounds on reading <root>/.gitmodules, once per configure().
+constexpr std::size_t kMaxGitmodulesBytes = 64 * 1024;
+constexpr std::size_t kMaxGitmodulesEntries = 256;
+
 std::string lowerAscii(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(),
                    [](const unsigned char ch) {
                        return static_cast<char>(std::tolower(ch));
                    });
     return value;
+}
+
+std::string trimAscii(const std::string& value) {
+    const std::size_t begin = value.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos) return {};
+    const std::size_t end = value.find_last_not_of(" \t\r\n");
+    return value.substr(begin, end - begin + 1);
+}
+
+bool containsSlash(const std::string& value) {
+#ifdef _WIN32
+    return value.find_first_of("/\\") != std::string::npos;
+#else
+    return value.find('/') != std::string::npos;
+#endif
+}
+
+fs::path withoutTrailingSeparator(fs::path value) {
+    value = value.lexically_normal();
+    if (!value.empty() && value.filename().empty() &&
+        value.has_relative_path()) {
+        value = value.parent_path();
+    }
+    return value;
+}
+
+// A relative path that stays strictly inside its root: not absolute, no
+// "..", and not the root itself.
+bool isContainedRelativePath(const fs::path& value) {
+    if (value.empty() || value.has_root_path()) return false;
+    for (const auto& part : value) {
+        if (part == "..") return false;
+    }
+    const fs::path normal = withoutTrailingSeparator(value);
+    return !normal.empty() && normal != ".";
+}
+
+// The `path = X` entries of <root>/.gitmodules: each is a submodule checkout,
+// which is someone else's repository. Every other line is ignored. A missing
+// or unreadable file yields nothing.
+std::vector<fs::path> readGitmodulePaths(const fs::path& root) {
+    std::vector<fs::path> paths;
+    const fs::path file = root / ".gitmodules";
+    std::error_code ec;
+    // A regular file only: opening a FIFO named .gitmodules would block.
+    if (!fs::is_regular_file(file, ec) || ec) return paths;
+    std::ifstream stream(file, std::ios::binary);
+    if (!stream.is_open()) return paths;
+    std::string content(kMaxGitmodulesBytes, '\0');
+    stream.read(content.data(), static_cast<std::streamsize>(content.size()));
+    content.resize(static_cast<std::size_t>(stream.gcount()));
+    if (content.size() == kMaxGitmodulesBytes) {
+        // Possibly cut mid-line: keep complete lines only.
+        const std::size_t last_newline = content.rfind('\n');
+        content.resize(last_newline == std::string::npos ? 0
+                                                         : last_newline);
+    }
+
+    std::size_t start = 0;
+    while (start < content.size() && paths.size() < kMaxGitmodulesEntries) {
+        std::size_t end = content.find('\n', start);
+        if (end == std::string::npos) end = content.size();
+        const std::string line = trimAscii(content.substr(start, end - start));
+        start = end + 1;
+
+        const std::size_t equals = line.find('=');
+        if (equals == std::string::npos ||
+            lowerAscii(trimAscii(line.substr(0, equals))) != "path") {
+            continue;
+        }
+        std::string value = trimAscii(line.substr(equals + 1));
+        if (!value.empty() && value.front() == '"') {
+            const std::size_t close = value.find('"', 1);
+            value = close == std::string::npos ? std::string()
+                                               : value.substr(1, close - 1);
+        } else {
+            // Unquoted, git treats # and ; as the start of a comment.
+            value = trimAscii(value.substr(0, value.find_first_of("#;")));
+        }
+        const fs::path relative(value);
+        if (isContainedRelativePath(relative)) {
+            paths.push_back(withoutTrailingSeparator(relative));
+        }
+    }
+    return paths;
 }
 
 bool componentEquals(const fs::path& left, const fs::path& right) {
@@ -180,6 +278,8 @@ const char* sourceCaptureDispositionName(
             return "symlink_escape";
         case SourceCaptureDisposition::ExcludedSystemRoot:
             return "excluded_system_root";
+        case SourceCaptureDisposition::ExcludedThirdParty:
+            return "excluded_third_party";
         case SourceCaptureDisposition::UnsupportedExtension:
             return "unsupported_extension";
         case SourceCaptureDisposition::NonTextContent:
@@ -208,6 +308,7 @@ void SourceCapturePolicy::configure(
     settings_ = settings;
     approved_lexical_roots_ = existingLexicalRoots(settings.approved_roots);
     approved_roots_ = existingCanonicalRoots(settings.approved_roots);
+    configureThirdPartyExclusions();
     manifest_ = {};
     manifest_.enabled = enabled_;
     manifest_.approved_root_count = approved_roots_.size();
@@ -220,8 +321,95 @@ void SourceCapturePolicy::reset() {
     settings_ = {};
     approved_lexical_roots_.clear();
     approved_roots_.clear();
+    excluded_dir_names_.clear();
+    excluded_subtrees_.clear();
     manifest_ = {};
     manifest_dirty_ = false;
+}
+
+void SourceCapturePolicy::configureThirdPartyExclusions() {
+    excluded_dir_names_.clear();
+    excluded_subtrees_.clear();
+    if (!enabled_) return;  // Nothing is captured, so nothing is read.
+    const auto add_subtree = [&](const fs::path& path) {
+        std::error_code ec;
+        fs::path canonical = fs::weakly_canonical(path, ec);
+        if (ec) return;
+        canonical = withoutTrailingSeparator(std::move(canonical));
+        if (std::find(excluded_subtrees_.begin(), excluded_subtrees_.end(),
+                      canonical) == excluded_subtrees_.end()) {
+            excluded_subtrees_.push_back(std::move(canonical));
+        }
+    };
+
+    if (!settings_.include_third_party) {
+        for (const char* name : kThirdPartyDirNames) {
+            excluded_dir_names_.emplace_back(name);
+        }
+        for (const auto& root : approved_roots_) {
+            for (const auto& relative : readGitmodulePaths(root)) {
+                add_subtree(root / relative);
+            }
+        }
+    }
+
+    // Explicit exclusions apply whatever include_third_party says.
+    for (const auto& value : settings_.excluded_dirs) {
+        if (value.empty()) continue;
+        if (!containsSlash(value)) {
+            if (value != "." && value != "..") {
+                excluded_dir_names_.push_back(lowerAscii(value));
+            }
+            continue;
+        }
+        const fs::path path(value);
+        if (path.is_absolute()) {
+            add_subtree(path);
+            continue;
+        }
+        for (const auto& root : approved_roots_) add_subtree(root / path);
+    }
+}
+
+bool SourceCapturePolicy::hasExcludedDirectoryName(
+    const fs::path& file, const fs::path& root) const {
+    if (excluded_dir_names_.empty()) return false;
+    auto it = file.begin();
+    for (auto root_it = root.begin(); root_it != root.end(); ++root_it) {
+        if (it == file.end()) return false;
+        ++it;
+    }
+    // Only the directories strictly between the root and the file count:
+    // the root's own components (and those above it) and the file name
+    // never do.
+    for (; it != file.end() && std::next(it) != file.end(); ++it) {
+        const std::string component = lowerAscii(it->string());
+        if (std::find(excluded_dir_names_.begin(), excluded_dir_names_.end(),
+                      component) != excluded_dir_names_.end()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool SourceCapturePolicy::isThirdParty(const fs::path& canonical,
+                                       const std::size_t canonical_root,
+                                       const fs::path& absolute) const {
+    if (hasExcludedDirectoryName(canonical, approved_roots_[canonical_root])) {
+        return true;
+    }
+    // The path as discovered counts too, so an in-root symlink named like
+    // third_party does not hide vendored code behind its target's name.
+    for (const auto& root : approved_lexical_roots_) {
+        if (isWithin(absolute, root) &&
+            hasExcludedDirectoryName(absolute, root)) {
+            return true;
+        }
+    }
+    return std::any_of(excluded_subtrees_.begin(), excluded_subtrees_.end(),
+                       [&](const fs::path& subtree) {
+                           return isWithin(canonical, subtree);
+                       });
 }
 
 std::string SourceCapturePolicy::unavailableLogicalPath(
@@ -306,6 +494,11 @@ SourceCaptureResult SourceCapturePolicy::capture(
         if (isWithin(canonical, excluded)) {
             return reject(SourceCaptureDisposition::ExcludedSystemRoot);
         }
+    }
+    // Before the extension check and before any read: vendored code stays
+    // in the manifest under its logical path, but its content is never read.
+    if (isThirdParty(canonical, canonical_root, absolute)) {
+        return reject(SourceCaptureDisposition::ExcludedThirdParty);
     }
     if (!hasAllowedExtension(canonical)) {
         return reject(SourceCaptureDisposition::UnsupportedExtension);
