@@ -302,17 +302,15 @@ TEST(CliParseTrace, SourceCaptureDefaultsOnAndCanBeDisabled) {
     EXPECT_EQ(rooted.args->source_root, "./cuda-project");
 }
 
-TEST(CliParseTrace, SourceThirdPartyFlags) {
+TEST(CliParseTrace, SourceExcludeIsRepeatableAndEmptyByDefault) {
     auto defaults = parseTraceArgs(argsFor({"--", "./bin"}));
     ASSERT_TRUE(defaults.args.has_value()) << defaults.error;
-    EXPECT_FALSE(defaults.args->source_include_third_party);
     EXPECT_TRUE(defaults.args->source_exclude.empty());
 
     auto given = parseTraceArgs(argsFor(
-        {"--source-include-third-party", "--source-exclude", "generated",
-         "--source-exclude=build/cache", "--", "./bin"}));
+        {"--source-exclude", "generated", "--source-exclude=build/cache", "--",
+         "./bin"}));
     ASSERT_TRUE(given.args.has_value()) << given.error;
-    EXPECT_TRUE(given.args->source_include_third_party);
     EXPECT_EQ(given.args->source_exclude,
               (std::vector<std::string>{"generated", "build/cache"}));
 

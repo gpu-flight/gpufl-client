@@ -169,9 +169,8 @@ TEST(TraceRunPlanTest, TraceCommonExecutesThePlannedSinglePass) {
 
     ExecutingPlanningPlatform platform(root);
     // Inherited from the parent shell; without --stacks it must not survive,
-    // nor may the vendored-code choices without their flags.
+    // nor may source exclusions without --source-exclude.
     platform.env[gpufl::env::kStackTrace] = "0";
-    platform.env[gpufl::env::kSourceIncludeThirdParty] = "1";
     platform.env[gpufl::env::kSourceExclude] = "inherited";
     TraceArgs args;
     args.command = {"target", "--work"};
@@ -189,7 +188,6 @@ TEST(TraceRunPlanTest, TraceCommonExecutesThePlannedSinglePass) {
     EXPECT_EQ(platform.env[gpufl::env::kProfilingEngine], "Trace");
     EXPECT_EQ(platform.env[gpufl::env::kIncludeSource], "1");
     EXPECT_EQ(platform.env.count(gpufl::env::kStackTrace), 0u);
-    EXPECT_EQ(platform.env.count(gpufl::env::kSourceIncludeThirdParty), 0u);
     EXPECT_EQ(platform.env.count(gpufl::env::kSourceExclude), 0u);
     EXPECT_EQ(fs::weakly_canonical(platform.env[gpufl::env::kSourceRoot]),
               fs::weakly_canonical(root));
@@ -197,10 +195,10 @@ TEST(TraceRunPlanTest, TraceCommonExecutesThePlannedSinglePass) {
     fs::remove_all(root, ec);
 }
 
-TEST(TraceRunPlanTest, TraceCommonPublishesSourceThirdPartyChoices) {
+TEST(TraceRunPlanTest, TraceCommonPublishesSourceExclusions) {
     namespace fs = std::filesystem;
     const fs::path root = fs::temp_directory_path() /
-        ("gpufl_trace_source_third_party_" +
+        ("gpufl_trace_source_exclude_" +
          std::to_string(gpufl::detail::GetPid()));
     std::error_code ec;
     fs::remove_all(root, ec);
@@ -213,11 +211,9 @@ TEST(TraceRunPlanTest, TraceCommonPublishesSourceThirdPartyChoices) {
     args.command = {"target"};
     args.output_dir = (root / "capture").string();
     args.source_root = root.string();
-    args.source_include_third_party = true;
     args.source_exclude = {"generated", "build/cache"};
 
     EXPECT_EQ(gpufl::launcher::runTraceCommon(args, platform), 0);
-    EXPECT_EQ(platform.env[gpufl::env::kSourceIncludeThirdParty], "1");
     EXPECT_EQ(platform.env[gpufl::env::kSourceExclude],
               std::string("generated") + gpufl::kSourceExcludeListSeparator +
                   "build/cache");

@@ -89,10 +89,6 @@ StartupSettingSources resolveStartupOptions(InitOptions& options) {
     if (const char* value = std::getenv(env::kSourceRoot); value && *value) {
         options.source_capture.approved_roots = {value};
     }
-    if (const char* value = std::getenv(env::kSourceIncludeThirdParty)) {
-        options.source_capture.include_third_party =
-            std::strcmp(value, "1") == 0;
-    }
     if (const char* value = std::getenv(env::kSourceExclude)) {
         const std::string list = value;
         std::size_t start = 0;

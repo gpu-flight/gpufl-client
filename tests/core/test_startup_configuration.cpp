@@ -36,8 +36,6 @@ protected:
         saveAndUnset_(gpufl::env::kIncludeSource, include_source_);
         saveAndUnset_(gpufl::env::kSourceRoot, source_root_);
         saveAndUnset_(gpufl::env::kStackTrace, stack_trace_);
-        saveAndUnset_(gpufl::env::kSourceIncludeThirdParty,
-                      source_include_third_party_);
         saveAndUnset_(gpufl::env::kSourceExclude, source_exclude_);
         saveAndUnset_(gpufl::env::kRunId, run_id_);
         saveAndUnset_(gpufl::env::kSegmentEveryMs, segment_every_ms_);
@@ -52,8 +50,6 @@ protected:
         restore_(gpufl::env::kIncludeSource, include_source_);
         restore_(gpufl::env::kSourceRoot, source_root_);
         restore_(gpufl::env::kStackTrace, stack_trace_);
-        restore_(gpufl::env::kSourceIncludeThirdParty,
-                 source_include_third_party_);
         restore_(gpufl::env::kSourceExclude, source_exclude_);
         restore_(gpufl::env::kRunId, run_id_);
         restore_(gpufl::env::kSegmentEveryMs, segment_every_ms_);
@@ -79,7 +75,6 @@ private:
     std::optional<std::string> include_source_;
     std::optional<std::string> source_root_;
     std::optional<std::string> stack_trace_;
-    std::optional<std::string> source_include_third_party_;
     std::optional<std::string> source_exclude_;
     std::optional<std::string> run_id_;
     std::optional<std::string> segment_every_ms_;
@@ -170,10 +165,10 @@ TEST_F(StartupConfigurationTest, IncludeSourceEnvironmentOverridesConfigFile) {
     std::filesystem::remove_all(temp_root, ec);
 }
 
-TEST_F(StartupConfigurationTest, SourceThirdPartyChoicesFromConfigAndLauncher) {
+TEST_F(StartupConfigurationTest, SourceExclusionsFromConfigAndLauncher) {
     const auto temp_root =
         std::filesystem::temp_directory_path() /
-        ("gpufl_source_third_party_config_" +
+        ("gpufl_source_exclude_config_" +
          std::to_string(gpufl::detail::GetPid()));
     const auto config_path = temp_root / "config.json";
     std::error_code ec;
@@ -183,19 +178,17 @@ TEST_F(StartupConfigurationTest, SourceThirdPartyChoicesFromConfigAndLauncher) {
     {
         std::ofstream config(config_path);
         ASSERT_TRUE(config);
-        config << R"({"source_include_third_party":true,)"
-                  R"("source_excluded_dirs":["generated"]})";
+        config << R"({"source_excluded_dirs":["generated"]})";
     }
 
     gpufl::InitOptions options;
+    EXPECT_TRUE(options.source_capture.excluded_dirs.empty());
     options.config_file = config_path.string();
     gpufl::detail::resolveStartupOptions(options);
-    EXPECT_TRUE(options.source_capture.include_third_party);
     EXPECT_EQ(options.source_capture.excluded_dirs,
               (std::vector<std::string>{"generated"}));
 
     // The launcher's values apply after the file; exclusions only add.
-    setEnv(gpufl::env::kSourceIncludeThirdParty, "0");
     const std::string launcher_dirs =
         std::string("build/cache") + gpufl::kSourceExcludeListSeparator +
         "tools";
@@ -203,7 +196,6 @@ TEST_F(StartupConfigurationTest, SourceThirdPartyChoicesFromConfigAndLauncher) {
     options = gpufl::InitOptions{};
     options.config_file = config_path.string();
     gpufl::detail::resolveStartupOptions(options);
-    EXPECT_FALSE(options.source_capture.include_third_party);
     EXPECT_EQ(options.source_capture.excluded_dirs,
               (std::vector<std::string>{"generated", "build/cache", "tools"}));
 

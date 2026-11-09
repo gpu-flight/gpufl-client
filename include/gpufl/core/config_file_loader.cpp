@@ -61,8 +61,6 @@ ConfigFileLoader::Applied ConfigFileLoader::apply(InitOptions& opts,
     // without erroring on the unknown key.
     if (cfg.contains("enable_source_collection"))
         opts.enable_source_collection = cfg.value<bool>("enable_source_collection", opts.enable_source_collection);
-    if (cfg.contains("source_include_third_party") && cfg["source_include_third_party"].is_bool())
-        opts.source_capture.include_third_party = cfg["source_include_third_party"].get_bool();
     // Exclusions only ever add: the file cannot drop a directory the caller
     // already excluded.
     if (cfg.contains("source_excluded_dirs") && cfg["source_excluded_dirs"].is_array()) {

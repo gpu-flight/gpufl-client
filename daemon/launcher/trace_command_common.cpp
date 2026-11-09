@@ -44,17 +44,11 @@ fs::path findInjectLib(const TracePlatform& platform, const fs::path& exe) {
     return {};
 }
 
-// The vendored-code choices are launcher-owned: set from the flags, removed
-// without them, so a parent shell's value cannot change what is captured.
+// The user's source exclusions are launcher-owned: set from --source-exclude,
+// removed without it, so a parent shell's value cannot change what is
+// captured.
 bool applySourceExclusionEnv(const TraceArgs& args,
                              const TracePlatform& platform) {
-    if (args.source_include_third_party) {
-        if (!setEnvOrPrint(platform, env::kSourceIncludeThirdParty, "1")) {
-            return false;
-        }
-    } else if (!unsetEnvOrPrint(platform, env::kSourceIncludeThirdParty)) {
-        return false;
-    }
     if (args.source_exclude.empty()) {
         return unsetEnvOrPrint(platform, env::kSourceExclude);
     }

@@ -535,20 +535,12 @@ const CliOptionManager<TraceArgs>& traceOptions() {
                  "directory (default: current working directory)",
                  kSection(TraceHelpSection::Capture),
                  &parseNonEmptyStringOption<&TraceArgs::source_root>)
-            .add({"--source-include-third-party"}, "",
-                 "Also capture vendored code inside the source root. By "
-                 "default a file is skipped when a directory between the root "
-                 "and the file is named third_party, thirdparty, third-party, "
-                 "3rdparty, external, extern, vendor, _deps, site-packages, "
-                 "dist-packages, .venv, venv or node_modules (any case), or "
-                 "is a git submodule path listed in <root>/.gitmodules",
-                 kSection(TraceHelpSection::Capture),
-                 &setFlag<&TraceArgs::source_include_third_party>)
             .add({"--source-exclude"}, "<DIR>",
-                 "Never capture source under this directory. A bare name "
-                 "matches any directory of that name below the source root; "
-                 "a path is relative to the source root, or absolute. "
-                 "Repeatable; applies even with --source-include-third-party",
+                 "Never capture source under this directory, e.g. vendored "
+                 "code. A bare name (any case) matches any directory of that "
+                 "name below the source root; a path is relative to the "
+                 "source root, or absolute. Repeatable. Nothing is excluded "
+                 "by default",
                  kSection(TraceHelpSection::Capture), &parseSourceExclude)
             .add({"--stacks"}, "on|off",
                  "Capture the host call stack at every kernel launch, "

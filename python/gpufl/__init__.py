@@ -263,7 +263,6 @@ except ImportError as e:
             self.enable_debug_output = False
             self.enable_stack_trace = False
             self.enable_source_collection = True
-            self.source_include_third_party = False
             self.source_excluded_dirs = []
             self.flush_logs_always = False
             self.profiling_engine = ProfilingEngine.Monitor
@@ -511,14 +510,11 @@ def init(*args,
             ``analysis_id``. Sets ``GPUFL_PASS_COUNT``.
         **kwargs: All other InitOptions fields passed to C++ init. Source
             collection (``enable_source_collection``, on by default) skips
-            vendored code inside the project: files under a directory named
-            third_party, thirdparty, third-party, 3rdparty, external, extern,
-            vendor, _deps, site-packages, dist-packages, .venv, venv or
-            node_modules, or under a git submodule path. Pass
-            ``source_include_third_party=True`` to capture it, and
-            ``source_excluded_dirs=[...]`` to skip more directories (a bare
-            name matches any directory of that name; a path is relative to
-            the project root, or absolute).
+            nothing inside the project unless you pass
+            ``source_excluded_dirs=[...]``, e.g. for vendored code: a bare
+            name matches any directory of that name (any case) below the
+            project root; a path is relative to the project root, or
+            absolute.
 
     Returns:
         bool: True on successful init, False when stub-mode, disabled,
