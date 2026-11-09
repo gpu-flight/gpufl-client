@@ -52,6 +52,8 @@ struct InitOptions {
     // Capture remains correlation-driven: these roots constrain which
     // profiler-reported CUDA/C++ files may be opened. Normal startup supplies
     // the current working directory when callers leave the list empty.
+    // source_capture.excluded_dirs lists directories the user never wants
+    // captured; nothing is excluded by default.
     SourceCaptureSettings source_capture;
     bool flush_logs_always = false;
     // Enable CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION so frameworks

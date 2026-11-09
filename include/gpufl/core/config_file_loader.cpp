@@ -61,6 +61,15 @@ ConfigFileLoader::Applied ConfigFileLoader::apply(InitOptions& opts,
     // without erroring on the unknown key.
     if (cfg.contains("enable_source_collection"))
         opts.enable_source_collection = cfg.value<bool>("enable_source_collection", opts.enable_source_collection);
+    // Exclusions only ever add: the file cannot drop a directory the caller
+    // already excluded.
+    if (cfg.contains("source_excluded_dirs") && cfg["source_excluded_dirs"].is_array()) {
+        const auto& dirs = cfg["source_excluded_dirs"];
+        for (size_t i = 0; i < dirs.size(); ++i) {
+            if (dirs[i].is_string() && !dirs[i].get_string().empty())
+                opts.source_capture.excluded_dirs.push_back(dirs[i].get_string());
+        }
+    }
     if (cfg.contains("enable_debug_output"))
         opts.enable_debug_output = cfg.value<bool>("enable_debug_output", opts.enable_debug_output);
     if (cfg.contains("enable_external_correlation"))

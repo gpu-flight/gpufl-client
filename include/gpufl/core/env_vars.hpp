@@ -93,6 +93,12 @@ constexpr const char* kIncludeSource        = "GPUFL_INCLUDE_SOURCE";
 // This is local process configuration only; it must not be serialized into
 // product events or broad logs.
 constexpr const char* kSourceRoot           = "GPUFL_SOURCE_ROOT";
+// Launcher-owned user exclusions for source capture. `gpufl trace` sets it to
+// its --source-exclude values, joined with the platform's path-list
+// separator (kSourceExcludeListSeparator), and removes it without the flag.
+// Applied after file configuration; the directories add to any already
+// configured.
+constexpr const char* kSourceExclude        = "GPUFL_SOURCE_EXCLUDE";
 // Launcher-owned host call-stack contract. `gpufl trace --stacks=on|off`
 // publishes "1" or "0", applied after file configuration like kIncludeSource
 // so the command-line choice wins. Without the flag the launcher removes it,

@@ -8,6 +8,7 @@
 
 #include "cli_option_manager.hpp"
 #include "gpufl/core/segmentation_config.hpp"
+#include "gpufl/core/source_capture_policy.hpp"
 
 namespace gpufl::launcher {
 
@@ -275,6 +276,31 @@ std::string parsePasses(const FlagBreak& flag,
     return {};
 }
 
+// ── --source-exclude ──────────────────────────────────────────────────────
+
+// Repeatable: each occurrence adds one directory. The list reaches the target
+// joined by the path-list separator, so an entry cannot contain it.
+std::string parseSourceExclude(const FlagBreak& flag,
+                               const std::vector<std::string>& argv,
+                               std::size_t& index,
+                               TraceArgs& args) {
+    std::string value;
+    if (const std::string error =
+            detail::takeFlagValue(flag, argv, index, value);
+        !error.empty()) {
+        return error;
+    }
+    if (value.empty()) return flag.key + " cannot be empty";
+    if (value.find(kSourceExcludeListSeparator) != std::string::npos) {
+        return "invalid " + flag.key + " value: " + value +
+               " (a directory cannot contain '" +
+               std::string(1, kSourceExcludeListSeparator) +
+               "'; exclude a parent directory instead)";
+    }
+    args.source_exclude.push_back(std::move(value));
+    return {};
+}
+
 // ── --stacks ──────────────────────────────────────────────────────────────
 
 // on|off rather than a --no-stacks switch: `on` must be able to override a
@@ -509,6 +535,13 @@ const CliOptionManager<TraceArgs>& traceOptions() {
                  "directory (default: current working directory)",
                  kSection(TraceHelpSection::Capture),
                  &parseNonEmptyStringOption<&TraceArgs::source_root>)
+            .add({"--source-exclude"}, "<DIR>",
+                 "Never capture source under this directory, e.g. vendored "
+                 "code. A bare name (any case) matches any directory of that "
+                 "name below the source root; a path is relative to the "
+                 "source root, or absolute. Repeatable. Nothing is excluded "
+                 "by default",
+                 kSection(TraceHelpSection::Capture), &parseSourceExclude)
             .add({"--stacks"}, "on|off",
                  "Capture the host call stack at every kernel launch, "
                  "memcpy/memset and synchronization call. Default: on, unless "

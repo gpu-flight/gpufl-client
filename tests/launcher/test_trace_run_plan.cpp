@@ -9,6 +9,7 @@
 
 #include "gpufl/core/common.hpp"
 #include "gpufl/core/env_vars.hpp"
+#include "gpufl/core/source_capture_policy.hpp"
 #include "trace_command_common.hpp"
 #include "trace_run_plan.hpp"
 
@@ -167,8 +168,10 @@ TEST(TraceRunPlanTest, TraceCommonExecutesThePlannedSinglePass) {
     { std::ofstream inject(root / "gpufl_inject.so"); ASSERT_TRUE(inject); }
 
     ExecutingPlanningPlatform platform(root);
-    // Inherited from the parent shell; without --stacks it must not survive.
+    // Inherited from the parent shell; without --stacks it must not survive,
+    // nor may source exclusions without --source-exclude.
     platform.env[gpufl::env::kStackTrace] = "0";
+    platform.env[gpufl::env::kSourceExclude] = "inherited";
     TraceArgs args;
     args.command = {"target", "--work"};
     args.name = "trace-plan-test";
@@ -185,8 +188,35 @@ TEST(TraceRunPlanTest, TraceCommonExecutesThePlannedSinglePass) {
     EXPECT_EQ(platform.env[gpufl::env::kProfilingEngine], "Trace");
     EXPECT_EQ(platform.env[gpufl::env::kIncludeSource], "1");
     EXPECT_EQ(platform.env.count(gpufl::env::kStackTrace), 0u);
+    EXPECT_EQ(platform.env.count(gpufl::env::kSourceExclude), 0u);
     EXPECT_EQ(fs::weakly_canonical(platform.env[gpufl::env::kSourceRoot]),
               fs::weakly_canonical(root));
+
+    fs::remove_all(root, ec);
+}
+
+TEST(TraceRunPlanTest, TraceCommonPublishesSourceExclusions) {
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() /
+        ("gpufl_trace_source_exclude_" +
+         std::to_string(gpufl::detail::GetPid()));
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    fs::create_directories(root, ec);
+    ASSERT_FALSE(ec) << ec.message();
+    { std::ofstream inject(root / "gpufl_inject.so"); ASSERT_TRUE(inject); }
+
+    ExecutingPlanningPlatform platform(root);
+    TraceArgs args;
+    args.command = {"target"};
+    args.output_dir = (root / "capture").string();
+    args.source_root = root.string();
+    args.source_exclude = {"generated", "build/cache"};
+
+    EXPECT_EQ(gpufl::launcher::runTraceCommon(args, platform), 0);
+    EXPECT_EQ(platform.env[gpufl::env::kSourceExclude],
+              std::string("generated") + gpufl::kSourceExcludeListSeparator +
+                  "build/cache");
 
     fs::remove_all(root, ec);
 }

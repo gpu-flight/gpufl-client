@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <system_error>
 
@@ -18,6 +19,23 @@ std::string lowerAscii(std::string value) {
                    [](const unsigned char ch) {
                        return static_cast<char>(std::tolower(ch));
                    });
+    return value;
+}
+
+bool containsSlash(const std::string& value) {
+#ifdef _WIN32
+    return value.find_first_of("/\\") != std::string::npos;
+#else
+    return value.find('/') != std::string::npos;
+#endif
+}
+
+fs::path withoutTrailingSeparator(fs::path value) {
+    value = value.lexically_normal();
+    if (!value.empty() && value.filename().empty() &&
+        value.has_relative_path()) {
+        value = value.parent_path();
+    }
     return value;
 }
 
@@ -180,6 +198,8 @@ const char* sourceCaptureDispositionName(
             return "symlink_escape";
         case SourceCaptureDisposition::ExcludedSystemRoot:
             return "excluded_system_root";
+        case SourceCaptureDisposition::ExcludedByUser:
+            return "excluded_by_user";
         case SourceCaptureDisposition::UnsupportedExtension:
             return "unsupported_extension";
         case SourceCaptureDisposition::NonTextContent:
@@ -208,6 +228,7 @@ void SourceCapturePolicy::configure(
     settings_ = settings;
     approved_lexical_roots_ = existingLexicalRoots(settings.approved_roots);
     approved_roots_ = existingCanonicalRoots(settings.approved_roots);
+    configureExclusions();
     manifest_ = {};
     manifest_.enabled = enabled_;
     manifest_.approved_root_count = approved_roots_.size();
@@ -220,8 +241,85 @@ void SourceCapturePolicy::reset() {
     settings_ = {};
     approved_lexical_roots_.clear();
     approved_roots_.clear();
+    excluded_dir_names_.clear();
+    excluded_subtrees_.clear();
     manifest_ = {};
     manifest_dirty_ = false;
+}
+
+// Only what the user listed in settings.excluded_dirs is excluded; there are
+// no built-in names or automatic rules.
+void SourceCapturePolicy::configureExclusions() {
+    excluded_dir_names_.clear();
+    excluded_subtrees_.clear();
+    if (!enabled_) return;  // Nothing is captured while disabled.
+    const auto add_subtree = [&](const fs::path& path) {
+        std::error_code ec;
+        fs::path canonical = fs::weakly_canonical(path, ec);
+        if (ec) return;
+        canonical = withoutTrailingSeparator(std::move(canonical));
+        if (std::find(excluded_subtrees_.begin(), excluded_subtrees_.end(),
+                      canonical) == excluded_subtrees_.end()) {
+            excluded_subtrees_.push_back(std::move(canonical));
+        }
+    };
+
+    for (const auto& value : settings_.excluded_dirs) {
+        if (value.empty()) continue;
+        if (!containsSlash(value)) {
+            if (value != "." && value != "..") {
+                excluded_dir_names_.push_back(lowerAscii(value));
+            }
+            continue;
+        }
+        const fs::path path(value);
+        if (path.is_absolute()) {
+            add_subtree(path);
+            continue;
+        }
+        for (const auto& root : approved_roots_) add_subtree(root / path);
+    }
+}
+
+bool SourceCapturePolicy::hasExcludedDirectoryName(
+    const fs::path& file, const fs::path& root) const {
+    if (excluded_dir_names_.empty()) return false;
+    auto it = file.begin();
+    for (auto root_it = root.begin(); root_it != root.end(); ++root_it) {
+        if (it == file.end()) return false;
+        ++it;
+    }
+    // Only the directories strictly between the root and the file count:
+    // the root's own components (and those above it) and the file name
+    // never do.
+    for (; it != file.end() && std::next(it) != file.end(); ++it) {
+        const std::string component = lowerAscii(it->string());
+        if (std::find(excluded_dir_names_.begin(), excluded_dir_names_.end(),
+                      component) != excluded_dir_names_.end()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool SourceCapturePolicy::isExcludedByUser(const fs::path& canonical,
+                                           const std::size_t canonical_root,
+                                           const fs::path& absolute) const {
+    if (hasExcludedDirectoryName(canonical, approved_roots_[canonical_root])) {
+        return true;
+    }
+    // The path as discovered counts too, so an in-root symlink carrying an
+    // excluded name is not let through under its target's name.
+    for (const auto& root : approved_lexical_roots_) {
+        if (isWithin(absolute, root) &&
+            hasExcludedDirectoryName(absolute, root)) {
+            return true;
+        }
+    }
+    return std::any_of(excluded_subtrees_.begin(), excluded_subtrees_.end(),
+                       [&](const fs::path& subtree) {
+                           return isWithin(canonical, subtree);
+                       });
 }
 
 std::string SourceCapturePolicy::unavailableLogicalPath(
@@ -306,6 +404,12 @@ SourceCaptureResult SourceCapturePolicy::capture(
         if (isWithin(canonical, excluded)) {
             return reject(SourceCaptureDisposition::ExcludedSystemRoot);
         }
+    }
+    // Before the extension check and before any read: a file under a
+    // directory the user excluded stays in the manifest under its logical
+    // path, but its content is never read.
+    if (isExcludedByUser(canonical, canonical_root, absolute)) {
+        return reject(SourceCaptureDisposition::ExcludedByUser);
     }
     if (!hasAllowedExtension(canonical)) {
         return reject(SourceCaptureDisposition::UnsupportedExtension);
