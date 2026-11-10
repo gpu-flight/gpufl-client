@@ -140,17 +140,18 @@ jobs:
         uses: pypa/cibuildwheel@v2.22.0
         env:
           CIBW_VIRTUALENV_VERSION: "20.27.1"
-          # OpenSSL hints: manylinux_2_28 (AlmaLinux 8) ships OpenSSL 1.1.1
-          # as the system default, but cpp-httplib v0.18.5 requires >= 3.0.0
-          # (SSL_get1_peer_certificate). We install EL8's `openssl3-devel`
-          # compat package (see CIBW_BEFORE_ALL_LINUX) which lays OpenSSL 3.x
-          # down under NON-standard prefixes - headers in /usr/include/openssl3,
-          # dev symlinks in /usr/lib64/openssl3 - so find_package(OpenSSL)
-          # won't see it without these explicit cache vars. The runtime
-          # SONAME is still libssl.so.3 in /usr/lib64, so auditwheel bundles
-          # it into gpufl.libs/ as before. Verified against the actual
-          # quay.io/pypa/manylinux_2_28_x86_64 image (OpenSSL 3.5.5).
-          CIBW_ENVIRONMENT_LINUX: "CUDA_HOME=/usr/local/cuda PATH=/usr/local/cuda/bin:$PATH CMAKE_ARGS='-DGPUFL_ENABLE_NVIDIA=ON -DGPUFL_ENABLE_AMD=OFF -DBUILD_TESTING=OFF -DOPENSSL_INCLUDE_DIR=/usr/include/openssl3 -DOPENSSL_SSL_LIBRARY=/usr/lib64/openssl3/libssl.so -DOPENSSL_CRYPTO_LIBRARY=/usr/lib64/openssl3/libcrypto.so'"
+          # OpenSSL: Linux wheels link a private static OpenSSL into every gpufl
+          # binary with its symbols hidden (GPUFL_PRIVATE_OPENSSL; see
+          # CMakeLists.txt). A shared OpenSSL bundled in gpufl.libs, as up to
+          # 1.3.0rc8, joined the global symbol scope of every program
+          # `gpufl trace` preloads the injection library into, and took over
+          # that program's own OpenSSL users: a traced Python's ssl module
+          # loaded EL8's CA paths and no certificates on Ubuntu.
+          # CIBW_BEFORE_ALL_LINUX builds the archives into /opt/gpufl-openssl;
+          # cpp-httplib v0.18.5 needs OpenSSL >= 3.0.0, and the image's own is
+          # 1.1.1. CMake checks that every piece comes from that prefix and
+          # that no binary NEEDs, imports or exports OpenSSL.
+          CIBW_ENVIRONMENT_LINUX: "CUDA_HOME=/usr/local/cuda PATH=/usr/local/cuda/bin:$PATH CMAKE_ARGS='-DGPUFL_ENABLE_NVIDIA=ON -DGPUFL_ENABLE_AMD=OFF -DBUILD_TESTING=OFF -DGPUFL_PRIVATE_OPENSSL=ON -DOPENSSL_ROOT_DIR=/opt/gpufl-openssl'"
           # Windows build needs the OpenSSL install path so find_package(OpenSSL)
           # in CMakeLists.txt succeeds, otherwise HTTPS upload (gpufl::uploadLogs)
           # silently falls back to HTTP-only - see openssl-windows.html in the
@@ -169,17 +170,18 @@ jobs:
           # release before v0.1.1 silently shipped wheels without NVML
           # because this package was missing here.
           #
-          # openssl3-devel (NOT openssl-devel - that's 1.1.1 on EL8) provides
-          # OpenSSL 3.x headers + .so symlinks so cpp-httplib's
-          # CPPHTTPLIB_OPENSSL_SUPPORT path compiles (it #errors on < 3.0.0).
-          # It installs under /usr/include/openssl3 + /usr/lib64/openssl3 -
-          # see the OPENSSL_* hints in CIBW_ENVIRONMENT_LINUX. auditwheel
-          # bundles the resulting libssl.so.3 / libcrypto.so.3 (from
-          # /usr/lib64) into the wheel under gpufl.libs/ automatically
-          # (they're not on the manylinux_2_28 whitelist or our --exclude list).
+          # scripts/build-static-openssl.sh downloads the pinned OpenSSL
+          # release, checks its SHA-256 and builds static archives into
+          # /opt/gpufl-openssl (perl-core for its Configure). openssl3-libs
+          # is only for the wheel check: the libssl.so.3 a traced Python loads
+          # in check 6. Nothing links it - FindOpenSSL searches only
+          # OPENSSL_ROOT_DIR - and the check fails if anything NEEDs it.
+          # openssl is the image's 1.1.1 command line tool, which the check
+          # uses to make its test certificates.
           CIBW_BEFORE_ALL_LINUX: >-
             curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo > /etc/yum.repos.d/cuda.repo &&
-            dnf install -y --nogpgcheck cuda-nvcc-13-1 cuda-cudart-devel-13-1 cuda-cupti-13-1 cuda-driver-devel-13-1 cuda-nvml-devel-13-1 openssl3-devel
+            dnf install -y --nogpgcheck cuda-nvcc-13-1 cuda-cudart-devel-13-1 cuda-cupti-13-1 cuda-driver-devel-13-1 cuda-nvml-devel-13-1 perl-core openssl openssl3-libs &&
+            bash {project}/scripts/build-static-openssl.sh /opt/gpufl-openssl
           # Use the OpenSSL the windows-2022 image already installs at
           # C:\Program Files\OpenSSL (actions/runner-images Install-OpenSSL.ps1)
           # rather than `choco install openssl`, whose installer download from
@@ -214,17 +216,20 @@ jobs:
           # only the unversioned link-time placeholder - the versioned
           # `.so.1` the SONAME chains to lives on the user's machine.
           #
-          # libssl/libcrypto are NOT excluded - auditwheel bundles them
-          # under gpufl.libs/ so the wheel ships its own OpenSSL and
-          # HTTPS works on user machines without any system install.
+          # There is no libssl or libcrypto for auditwheel to bundle: OpenSSL
+          # is linked statically (see CIBW_ENVIRONMENT_LINUX), so HTTPS still
+          # works on user machines without any system install.
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: "auditwheel repair --plat manylinux_2_28_x86_64 --exclude libcuda.so.1 --exclude libnvidia-ml.so.1 -w {dest_dir} {wheel}"
           # cibuildwheel installs each repaired Linux wheel into a fresh venv and
           # runs this. It checks that `pip install gpufl` gives a working `gpufl`:
           # the native command is on PATH, `gpufl --version` reports the wheel's
-          # version, and `gpufl trace` finds libgpufl_inject.so. A failure fails
-          # this job, so upload_pypi never publishes the wheel. build.yml runs
-          # the same check on pull requests. Windows wheels ship no gpufl.exe yet,
-          # so there is no Windows test command.
+          # version, and `gpufl trace` finds libgpufl_inject.so. It then checks
+          # that the wheel keeps its OpenSSL private, that a traced program
+          # keeps its own, and that gpufl's own HTTPS works against a local
+          # TLS server (the script's docstring has the details). A failure
+          # fails this job, so upload_pypi never publishes the wheel. build.yml
+          # runs the same check on pull requests. Windows wheels ship no
+          # gpufl.exe yet, so there is no Windows test command.
           CIBW_TEST_COMMAND_LINUX: python {project}/tests/package/check_wheel_launcher.py
           # On Windows, cibuildwheel's default is `delvewheel repair`.
           # We need delvewheel to find the OpenSSL DLLs (libssl-3-x64.dll,

@@ -6,6 +6,7 @@ add_executable(gpufl-monitor
 )
 
 target_link_libraries(gpufl-monitor PRIVATE gpufl::gpufl)
+gpufl_check_private_openssl(gpufl-monitor)
 
 if(GPUFL_HAS_CUDA)
     target_link_libraries(gpufl-monitor PRIVATE CUDA::cudart)
