@@ -205,6 +205,11 @@ types are additive.
   written only when set, so other windows read as before; the wire version is
   unchanged.
 
+- **Python 3.14 wheels** for Linux x86-64 and Windows. Without them pip built
+  the source distribution on a 3.14 interpreter (Ubuntu 26.04's default
+  `python3`), which fails without a CUDA toolkit. The free-threaded build
+  (`cp314t`) is not published.
+
 ### Changed
 
 - **`--passes` and `--deep-*` are separate execution modes and cannot be
@@ -323,6 +328,8 @@ types are additive.
     TLS server. On pull requests the check also runs on an Ubuntu host.
   - Source builds are unchanged and keep linking the system OpenSSL. Windows
     wheels still ship the OpenSSL DLLs.
+- **The PyPI project links** pointed at `github.com/gpufl/gpufl-client`, which
+  does not exist; they now point at `github.com/gpu-flight/gpufl-client`.
 - **`gpufl-monitor` from a Linux wheel crashed at startup.** auditwheel's
   rewrite of the non-PIE executable left a read-only segment over the page
   holding its dynamic section, so the loader crashed before `main`. Linux
