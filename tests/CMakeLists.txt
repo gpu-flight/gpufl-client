@@ -44,6 +44,7 @@ set(GPUFL_TEST_SOURCES
     core/test_source_capture_policy.cpp
     core/test_startup_configuration.cpp
     core/test_text_report.cpp
+    core/test_tls_trust.cpp
     upload/test_upload_logs.cpp
     # Launcher CLI parser test - portable (no CUDA / no POSIX).
     # The portable CLI parser sources are compiled directly into the test

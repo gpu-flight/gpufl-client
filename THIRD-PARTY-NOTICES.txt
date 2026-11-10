@@ -67,7 +67,9 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ================================================================================
-3. OpenSSL  (libssl, libcrypto - bundled as shared libraries in the wheel)
+3. OpenSSL  (libssl, libcrypto - statically linked into gpufl, gpufl-monitor,
+   libgpufl_inject.so and the Python extension in Linux wheels; bundled as
+   shared libraries in Windows wheels)
    https://www.openssl.org/
 --------------------------------------------------------------------------------
 Copyright 1999-2025 The OpenSSL Project Authors. All Rights Reserved.

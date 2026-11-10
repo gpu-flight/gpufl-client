@@ -26,6 +26,11 @@ on:
       - '.gitignore'
       - 'images/**'
 
+# Every job reads the repository and nothing else; a job that needs more
+# names it in its own permissions block, which replaces this one.
+permissions:
+  contents: read
+
 jobs:
   amd-startup:
     name: AMD preload startup (CPU only)
@@ -37,8 +42,9 @@ jobs:
   linux-wheels:
     # The Linux wheels release.yml publishes, built the same way. cibuildwheel
     # installs each into a fresh venv and runs the check: the `gpufl` command
-    # is on PATH, reports the wheel's version, and `gpufl trace` finds
-    # libgpufl_inject.so. release.yml runs the same check before publishing.
+    # is on PATH, reports the wheel's version, `gpufl trace` finds
+    # libgpufl_inject.so, and the wheel keeps its OpenSSL to itself.
+    # release.yml runs the same check before publishing.
     name: Linux wheels - gpufl command from a fresh venv
     runs-on: ubuntu-22.04
     steps:
@@ -51,10 +57,11 @@ jobs:
           # each setting. Change the two together.
           CIBW_BUILD: "cp312-manylinux_x86_64 cp313-manylinux_x86_64"
           CIBW_MANYLINUX_X86_64_IMAGE: quay.io/pypa/manylinux_2_28_x86_64:2026.05.17-1
-          CIBW_ENVIRONMENT_LINUX: "CUDA_HOME=/usr/local/cuda PATH=/usr/local/cuda/bin:$PATH CMAKE_ARGS='-DGPUFL_ENABLE_NVIDIA=ON -DGPUFL_ENABLE_AMD=OFF -DBUILD_TESTING=OFF -DOPENSSL_INCLUDE_DIR=/usr/include/openssl3 -DOPENSSL_SSL_LIBRARY=/usr/lib64/openssl3/libssl.so -DOPENSSL_CRYPTO_LIBRARY=/usr/lib64/openssl3/libcrypto.so'"
+          CIBW_ENVIRONMENT_LINUX: "CUDA_HOME=/usr/local/cuda PATH=/usr/local/cuda/bin:$PATH CMAKE_ARGS='-DGPUFL_ENABLE_NVIDIA=ON -DGPUFL_ENABLE_AMD=OFF -DBUILD_TESTING=OFF -DGPUFL_PRIVATE_OPENSSL=ON -DOPENSSL_ROOT_DIR=/opt/gpufl-openssl'"
           CIBW_BEFORE_ALL_LINUX: >-
             curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo > /etc/yum.repos.d/cuda.repo &&
-            dnf install -y --nogpgcheck cuda-nvcc-13-1 cuda-cudart-devel-13-1 cuda-cupti-13-1 cuda-driver-devel-13-1 cuda-nvml-devel-13-1 openssl3-devel
+            dnf install -y --nogpgcheck cuda-nvcc-13-1 cuda-cudart-devel-13-1 cuda-cupti-13-1 cuda-driver-devel-13-1 cuda-nvml-devel-13-1 perl-core openssl openssl3-libs &&
+            bash {project}/scripts/build-static-openssl.sh /opt/gpufl-openssl
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: "auditwheel repair --plat manylinux_2_28_x86_64 --exclude libcuda.so.1 --exclude libnvidia-ml.so.1 -w {dest_dir} {wheel}"
           CIBW_TEST_COMMAND_LINUX: python {project}/tests/package/check_wheel_launcher.py
 
@@ -63,6 +70,52 @@ jobs:
           name: linux-wheels
           path: ./wheelhouse/*.whl
           retention-days: 7
+
+  linux-wheels-ubuntu-host:
+    # The same check on an Ubuntu host, where the OpenSSL problem it guards
+    # against shows. Up to 1.3.0rc8 the wheel bundled EL8's shared OpenSSL,
+    # and `gpufl trace` brought it into the traced program: Ubuntu's Python
+    # then looked for CA certificates under EL8's /etc/pki/tls and found
+    # none. Inside the manylinux container that cannot show, because
+    # /etc/pki/tls exists there and the image's Python links OpenSSL 1.1.1.
+    # Here check 6 runs the runner's own Pythons, whose ssl module loads
+    # libssl.so.3, and check 7 adds its test CA to Ubuntu's trust store with
+    # sudo, which exercises gpufl's CA bundle discovery on the Debian layout.
+    # Stand-in driver libraries replace libcuda and NVML; nothing needs a GPU.
+    # Pull requests only: release.yml relies on the in-container check, so
+    # this job's runner cannot hold up a release.
+    name: Linux wheels - OpenSSL on an Ubuntu host (py${{ matrix.python-version }})
+    needs: linux-wheels
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-wheels
+          path: wheelhouse
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install the wheel into a fresh venv
+        run: |
+          tag="cp$(echo '${{ matrix.python-version }}' | tr -d .)"
+          python -m venv "$RUNNER_TEMP/gpufl-venv"
+          "$RUNNER_TEMP/gpufl-venv/bin/pip" install wheelhouse/gpufl-*-"$tag"-"$tag"-*.whl
+
+      - name: Check the gpufl command and its OpenSSL
+        env:
+          GPUFL_WHEEL_CHECK_STRICT: "1"
+          GPUFL_WHEEL_CHECK_SUDO: "1"
+          GPUFL_WHEEL_CHECK_STANDIN_DRIVER: "1"
+          GPUFL_WHEEL_CHECK_REQUIRE_OPENSSL3_PYTHON: "1"
+        run: '"$RUNNER_TEMP/gpufl-venv/bin/python" tests/package/check_wheel_launcher.py'
 
   build:
     name: Build on ${{ matrix.os }} py${{ matrix.python-version }} perfworks=${{ matrix.perfworks }}

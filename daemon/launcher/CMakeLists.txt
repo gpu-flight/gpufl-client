@@ -45,6 +45,7 @@ set_target_properties(gpufl_launcher PROPERTIES OUTPUT_NAME gpufl)
 # Most of gpufl's object files are unreferenced from the launcher and
 # get DCE'd at link time with --gc-sections.
 target_link_libraries(gpufl_launcher PRIVATE gpufl::gpufl)
+gpufl_check_private_openssl(gpufl_launcher)
 
 # trace_command_common.cpp inspects and rewrites .log.gz files when it needs
 # to synthesize a missing shutdown marker after an injected trace exits.
