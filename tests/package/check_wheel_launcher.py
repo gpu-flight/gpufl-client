@@ -402,10 +402,17 @@ ours = sorted(
 print("SSL-SCOPE inject=%d gpufl_openssl=%s" % (inject, ",".join(ours) or "-"))
 """
 
+# cert_store_stats() counts only the certificates loaded from the CA file;
+# those in a hashed CA directory (Ubuntu 22.04's only store) load lazily, so
+# the probe also counts the directory's hash links.
 PYTHON_SSL_PROBE = r"""
-import json, os, ssl
+import json, os, re, ssl
 paths = ssl.get_default_verify_paths()
 count = ssl.create_default_context().cert_store_stats()["x509_ca"]
+capath = paths.openssl_capath
+hashed = 0
+if capath and os.path.isdir(capath):
+    hashed = sum(1 for n in os.listdir(capath) if re.match(r"^[0-9a-f]{8}\.[0-9]+$", n))
 libssl = set()
 with open("/proc/self/maps") as f:
     for line in f:
@@ -417,6 +424,7 @@ print("PY-SSL " + json.dumps({
     "cafile": paths.openssl_cafile,
     "capath": paths.openssl_capath,
     "x509_ca": count,
+    "capath_hashed": hashed,
     "libssl": sorted(libssl),
 }, sort_keys=True))
 """
@@ -494,8 +502,8 @@ def check_traced_openssl(
             if proc.returncode != 0 or len(lines) != 1:
                 fail(f"{python} ({label}) should print its ssl settings and exit 0")
             seen[label] = json.loads(lines[0][len("PY-SSL "):])
-        if seen["untraced"]["x509_ca"] <= 0:
-            fail(f"{python} loads no CA certificates even untraced: {seen['untraced']}")
+        if seen["untraced"]["x509_ca"] + seen["untraced"]["capath_hashed"] <= 0:
+            fail(f"{python} finds no CA certificates even untraced: {seen['untraced']}")
         if seen["traced"] != seen["untraced"]:
             fail(
                 f"`gpufl trace` changed {python}'s OpenSSL: untraced {seen['untraced']}, "
@@ -508,7 +516,8 @@ def check_traced_openssl(
             level2.append(str(python))
         passed(
             f"{python} under trace: {seen['traced']['openssl']}, cafile "
-            f"{seen['traced']['cafile']}, {seen['traced']['x509_ca']} CA certificates, as untraced"
+            f"{seen['traced']['cafile']} ({seen['traced']['x509_ca']} CA certificates), capath "
+            f"{seen['traced']['capath']} ({seen['traced']['capath_hashed']} hashed), as untraced"
         )
     if REQUIRE_OPENSSL3_PYTHON and not level2:
         fail(
