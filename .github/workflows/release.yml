@@ -101,7 +101,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $version = "20.27.1"
+          # Must match the virtualenv that the cibuildwheel version in the
+          # "Build wheels" step pins (its cibuildwheel/resources/virtualenv.toml).
+          $version = "21.2.0"
           $cacheDir = Join-Path $env:LOCALAPPDATA "pypa\cibuildwheel\Cache"
           New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
           $dest = Join-Path $cacheDir "virtualenv-$version.pyz"
@@ -110,6 +112,7 @@ jobs:
             exit 0
           }
           $urls = @(
+            "https://github.com/pypa/get-virtualenv/releases/download/$version/virtualenv.pyz",
             "https://raw.githubusercontent.com/pypa/get-virtualenv/$version/public/virtualenv.pyz",
             "https://raw.githubusercontent.com/pypa/get-virtualenv/refs/tags/$version/public/virtualenv.pyz",
             "https://bootstrap.pypa.io/virtualenv.pyz"
@@ -137,9 +140,12 @@ jobs:
           if (-not $ok) { throw "Failed to prefetch virtualenv.pyz from all sources." }
 
       - name: Build wheels
-        uses: pypa/cibuildwheel@v2.22.0
+        # 3.x builds CPython 3.14. It runs tests from a temporary directory as
+        # 2.x did, so {project} still points at the checkout, and it takes
+        # its virtualenv version from its own pins (prefetched on Windows
+        # above), not from CIBW_VIRTUALENV_VERSION.
+        uses: pypa/cibuildwheel@v3.4.1
         env:
-          CIBW_VIRTUALENV_VERSION: "20.27.1"
           # OpenSSL: Linux wheels link a private static OpenSSL into every gpufl
           # binary with its symbols hidden (GPUFL_PRIVATE_OPENSSL; see
           # CMakeLists.txt). A shared OpenSSL bundled in gpufl.libs, as up to
@@ -205,7 +211,9 @@ jobs:
           # manylinux_2_28 ABI; verified to have cp312+cp313, openssl3-devel,
           # and libssl.so.3 in /usr/lib64 (so auditwheel still bundles it).
           CIBW_MANYLINUX_X86_64_IMAGE: quay.io/pypa/manylinux_2_28_x86_64:2026.05.17-1
-          CIBW_BUILD: "cp312-manylinux_x86_64 cp313-manylinux_x86_64 cp312-win_amd64 cp313-win_amd64"
+          # Listed explicitly: 3.x would otherwise also build the free-threaded
+          # cp314t, which gpufl does not support.
+          CIBW_BUILD: "cp312-manylinux_x86_64 cp313-manylinux_x86_64 cp314-manylinux_x86_64 cp312-win_amd64 cp313-win_amd64 cp314-win_amd64"
           # libnvidia-ml.so.1 is excluded for the same reason as libcuda.so.1:
           # it ships with the NVIDIA driver, not the CUDA toolkit, and is
           # not present in the manylinux build container. Auditwheel

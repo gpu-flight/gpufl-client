@@ -46,11 +46,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build the Linux wheels and check each in a fresh venv
-        uses: pypa/cibuildwheel@v2.22.0
+        uses: pypa/cibuildwheel@v3.4.1
         env:
           # Copied from release.yml's build_wheels job, whose comments explain
           # each setting. Change the two together.
-          CIBW_BUILD: "cp312-manylinux_x86_64 cp313-manylinux_x86_64"
+          CIBW_BUILD: "cp312-manylinux_x86_64 cp313-manylinux_x86_64 cp314-manylinux_x86_64"
           CIBW_MANYLINUX_X86_64_IMAGE: quay.io/pypa/manylinux_2_28_x86_64:2026.05.17-1
           CIBW_ENVIRONMENT_LINUX: "CUDA_HOME=/usr/local/cuda PATH=/usr/local/cuda/bin:$PATH CMAKE_ARGS='-DGPUFL_ENABLE_NVIDIA=ON -DGPUFL_ENABLE_AMD=OFF -DBUILD_TESTING=OFF -DGPUFL_PRIVATE_OPENSSL=ON -DOPENSSL_ROOT_DIR=/opt/gpufl-openssl'"
           CIBW_BEFORE_ALL_LINUX: >-
@@ -85,7 +85,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12", "3.13"]
+        python-version: ["3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
 
@@ -120,7 +120,7 @@ jobs:
         # Pin windows-2022 (VS 2022): windows-latest moved to VS 2026 (Jun
         # 2026), whose MSVC toolset CUDA 13.x nvcc doesn't support.
         os: [ubuntu-22.04, windows-2022]
-        python-version: ["3.12", "3.13"]
+        python-version: ["3.12", "3.13", "3.14"]
         perfworks: ["ON"]  # quoted: unquoted ON/OFF are YAML 1.1 booleans
         include:
           # Release wheels build without PerfWorks (manylinux ships no nvperf)
