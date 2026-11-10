@@ -34,11 +34,14 @@ Issues = "https://github.com/gpufl/gpufl-client/issues"
 # `gpufl version`). Shipping both meant two different programs competing
 # for the `gpufl` name on PATH; the native binary now owns it.
 #
+# So there is no [project.scripts] entry. On Linux the wheel's CMake install
+# puts the `gpufl` command in the scripts directory itself: a small native
+# program that execs the launcher installed in site-packages/gpufl/bin (see
+# daemon/launcher/wheel_entry_paths.hpp). Windows wheels ship no launcher.
+#
 # The Python uploader is unchanged and still available cross-platform as
 #     python -m gpufl.cli upload <log_path> [--backend-url … --api-key …]
-# and the in-process API `gpufl.upload_logs(...)` is unaffected. With no
-# [project.scripts] entry, `pip install gpufl` no longer creates a `gpufl`
-# command (avoiding the collision with the binary).
+# and the in-process API `gpufl.upload_logs(...)` is unaffected.
 
 [project.optional-dependencies]
 # PyTorch integration - first-class. Uses TorchDispatchMode (stable

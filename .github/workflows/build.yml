@@ -34,6 +34,36 @@ jobs:
       - uses: actions/checkout@v4
       - run: python3 tests/inject/test_amd_startup.py
 
+  linux-wheels:
+    # The Linux wheels release.yml publishes, built the same way. cibuildwheel
+    # installs each into a fresh venv and runs the check: the `gpufl` command
+    # is on PATH, reports the wheel's version, and `gpufl trace` finds
+    # libgpufl_inject.so. release.yml runs the same check before publishing.
+    name: Linux wheels - gpufl command from a fresh venv
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the Linux wheels and check each in a fresh venv
+        uses: pypa/cibuildwheel@v2.22.0
+        env:
+          # Copied from release.yml's build_wheels job, whose comments explain
+          # each setting. Change the two together.
+          CIBW_BUILD: "cp312-manylinux_x86_64 cp313-manylinux_x86_64"
+          CIBW_MANYLINUX_X86_64_IMAGE: quay.io/pypa/manylinux_2_28_x86_64:2026.05.17-1
+          CIBW_ENVIRONMENT_LINUX: "CUDA_HOME=/usr/local/cuda PATH=/usr/local/cuda/bin:$PATH CMAKE_ARGS='-DGPUFL_ENABLE_NVIDIA=ON -DGPUFL_ENABLE_AMD=OFF -DBUILD_TESTING=OFF -DOPENSSL_INCLUDE_DIR=/usr/include/openssl3 -DOPENSSL_SSL_LIBRARY=/usr/lib64/openssl3/libssl.so -DOPENSSL_CRYPTO_LIBRARY=/usr/lib64/openssl3/libcrypto.so'"
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo > /etc/yum.repos.d/cuda.repo &&
+            dnf install -y --nogpgcheck cuda-nvcc-13-1 cuda-cudart-devel-13-1 cuda-cupti-13-1 cuda-driver-devel-13-1 cuda-nvml-devel-13-1 openssl3-devel
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: "auditwheel repair --plat manylinux_2_28_x86_64 --exclude libcuda.so.1 --exclude libnvidia-ml.so.1 -w {dest_dir} {wheel}"
+          CIBW_TEST_COMMAND_LINUX: python {project}/tests/package/check_wheel_launcher.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-wheels
+          path: ./wheelhouse/*.whl
+          retention-days: 7
+
   build:
     name: Build on ${{ matrix.os }} py${{ matrix.python-version }} perfworks=${{ matrix.perfworks }}
     runs-on: ${{ matrix.os }}

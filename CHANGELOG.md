@@ -277,6 +277,24 @@ types are additive.
 
 ### Fixed
 
+- **`pip install gpufl` gives a working `gpufl` command on Linux.** The wheel
+  installed the launcher as `site-packages/bin/gpufl`, which is not on `PATH`,
+  and `libgpufl_inject.so` in `site-packages/lib64/`, where the launcher does
+  not look. So `gpufl` was "command not found" after a pip install, and
+  `gpufl trace` could not have found its library even from the full path.
+  - **New layout.** Linux wheels now install the launcher and `gpufl-monitor`
+    in `site-packages/gpufl/bin`, and `libgpufl_inject.so` with the counter
+    runtime in `site-packages/gpufl/lib`.
+  - **The command on `PATH`.** pip puts a small native `gpufl` in the
+    environment's `bin/`. It execs that launcher, so the native binary still
+    owns the name and there is no Python console script. It finds the
+    launcher in a venv, conda, `pip install --user`, `--prefix`, `--target`,
+    and Debian- or Fedora-style system installs.
+  - **CI.** `release.yml` installs every Linux wheel into a fresh virtual
+    environment and runs `gpufl --version`, `gpufl upload --help` and
+    `gpufl trace -- true` before anything is published. `build.yml` runs the
+    same check on pull requests.
+  - **Windows** wheels still contain no `gpufl.exe`.
 - **Linux `gpufl trace` capture readiness.** The injected library started
   CUPTI on a worker thread while the application went on into context and
   module setup. On an L4, whole Trace sessions received every kernel and

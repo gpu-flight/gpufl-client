@@ -57,6 +57,22 @@ endif()
 option(BUILD_PYTHON "Build Python bindings" OFF)
 option(BUILD_TESTING "Build the testing tree." ON)
 
+# A Linux wheel (scikit-build-core sets SKBUILD) installs the launcher and
+# gpufl-monitor in site-packages/gpufl/bin, with libgpufl_inject.so and the
+# counter runtime in gpufl/lib, where the launcher's existing ../lib lookup
+# finds them, as in a source install's bin/ and lib/. daemon/launcher then puts
+# a small native `gpufl` on PATH that runs that launcher; wheel_entry_paths.hpp
+# there explains why the launcher itself cannot be the file on PATH. Fixed
+# destinations also keep the wheel's layout off GNUInstallDirs, whose LIBDIR
+# is lib64 on manylinux and lib on Debian.
+if(SKBUILD AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(GPUFL_WHEEL_LAYOUT ON)
+    set(GPUFL_WHEEL_BINDIR gpufl/bin)
+    set(GPUFL_WHEEL_LIBDIR gpufl/lib)
+else()
+    set(GPUFL_WHEEL_LAYOUT OFF)
+endif()
+
 # This example is intentionally independent from CUDA, HIP, and gpufl.  It is
 # useful as a small CPU-only rendering workload on machines without a GPU.
 if(BUILD_GPUFL_EXAMPLE AND CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
@@ -85,10 +101,17 @@ target_include_directories(gpufl_counter_runtime PUBLIC include)
 # each falling back to their own in-process registry - the exact split this
 # library exists to prevent, and one that shows up as a counter reading Missing
 # forever rather than as a missing file.
-install(TARGETS gpufl_counter_runtime
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-)
+if(GPUFL_WHEEL_LAYOUT)
+    # Beside libgpufl_inject.so, where the injected library looks first.
+    install(TARGETS gpufl_counter_runtime
+        LIBRARY DESTINATION ${GPUFL_WHEEL_LIBDIR}
+    )
+else()
+    install(TARGETS gpufl_counter_runtime
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    )
+endif()
 set_target_properties(gpufl_counter_runtime PROPERTIES
     CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON
@@ -872,9 +895,15 @@ if(BUILD_GPUFL_INJECT AND ((UNIX AND NOT APPLE) OR WIN32))
             CXX_VISIBILITY_PRESET hidden
             VISIBILITY_INLINES_HIDDEN ON
         )
-        install(TARGETS gpufl_inject
-            LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-        )
+        if(GPUFL_WHEEL_LAYOUT)
+            install(TARGETS gpufl_inject
+                LIBRARY DESTINATION ${GPUFL_WHEEL_LIBDIR}
+            )
+        else()
+            install(TARGETS gpufl_inject
+                LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            )
+        endif()
     else()
         # Windows: exports come from __declspec(dllexport) in the source;
         # the DLL lives beside the launcher exe (RUNTIME), not in lib/.

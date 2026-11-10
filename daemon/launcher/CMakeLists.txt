@@ -65,9 +65,55 @@ target_include_directories(gpufl_launcher PRIVATE
 
 target_compile_features(gpufl_launcher PRIVATE cxx_std_17)
 
-install(TARGETS gpufl_launcher
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-)
+if(GPUFL_WHEEL_LAYOUT)
+    install(TARGETS gpufl_launcher
+        RUNTIME DESTINATION ${GPUFL_WHEEL_BINDIR}
+    )
+else()
+    install(TARGETS gpufl_launcher
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
+endif()
+
+# The `gpufl` a Linux wheel puts on PATH: pip installs this into the
+# environment's scripts directory, and it execs the launcher installed above in
+# site-packages (see wheel_entry_paths.hpp). It looks only for the launcher of
+# the interpreter the wheel is built for, so it needs that interpreter's
+# directory name under lib/: python3.12, or python3.13t when free-threaded.
+if(GPUFL_WHEEL_LAYOUT)
+    if(NOT Python_EXECUTABLE)
+        find_package(Python COMPONENTS Interpreter REQUIRED)
+    endif()
+    execute_process(
+        COMMAND "${Python_EXECUTABLE}" -c
+            "import os, sysconfig; print(os.path.basename(os.path.dirname(sysconfig.get_path('platlib', 'posix_prefix', vars={'platbase': '/'}))))"
+        OUTPUT_VARIABLE GPUFL_WHEEL_PYTHON_DIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE gpufl_wheel_python_dir_rc
+    )
+    if(NOT gpufl_wheel_python_dir_rc EQUAL 0
+       OR NOT GPUFL_WHEEL_PYTHON_DIR MATCHES "^python[0-9]+\\.[0-9]+t?$")
+        message(FATAL_ERROR
+            "gpufl wheel: cannot work out ${Python_EXECUTABLE}'s lib/ "
+            "directory (got '${GPUFL_WHEEL_PYTHON_DIR}')")
+    endif()
+    message(STATUS "gpufl wheel: the PATH entry runs "
+                   "lib/${GPUFL_WHEEL_PYTHON_DIR}/.../gpufl/bin/gpufl")
+
+    add_executable(gpufl_wheel_entry wheel_entry.cpp wheel_entry_paths.cpp)
+    target_compile_definitions(gpufl_wheel_entry PRIVATE
+        GPUFL_WHEEL_PYTHON_DIR="${GPUFL_WHEEL_PYTHON_DIR}"
+    )
+    target_compile_features(gpufl_wheel_entry PRIVATE cxx_std_17)
+    # Named gpufl like the launcher, so it builds in a directory of its own.
+    set_target_properties(gpufl_wheel_entry PROPERTIES
+        OUTPUT_NAME gpufl
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/wheel_entry
+    )
+    install(TARGETS gpufl_wheel_entry
+        RUNTIME DESTINATION ${SKBUILD_SCRIPTS_DIR}
+    )
+endif()
 
 # On Windows, colocate gpufl_inject.dll next to gpufl.exe so the launcher's
 # "colocated" discovery candidate resolves in the build tree and the DLL
