@@ -56,7 +56,7 @@ pip install "gpufl[analyzer,viz]"
 
 What `pip install gpufl` installs depends on the platform:
 
-- **Linux x86-64** (Python 3.12 and 3.13): the `gpufl` Python package and the
+- **Linux x86-64** (Python 3.12, 3.13 and 3.14): the `gpufl` Python package and the
   native `gpufl` command (`gpufl trace`, `gpufl upload`, `gpufl monitor`,
   `gpufl info`, `gpufl --version`). pip puts the command where it puts scripts:
   the `bin/` of the venv or conda environment, or `~/.local/bin` for
@@ -65,6 +65,16 @@ What `pip install gpufl` installs depends on the platform:
   `libnvidia-ml.so.1`, so it starts only on a machine with the NVIDIA driver
   installed, even for `--version`.
 
+  `gpufl upload` and `gpufl trace --upload` hand the upload to the
+  `gpufl-agent` service, which the wheel does not install: put `gpufl-agent` on
+  `PATH` or pass `--agent-jar`. Without it, upload from Python with
+  `gpufl.upload_logs(...)` or `python -m gpufl.cli upload`.
+
+  `pip install --user gpufl` and the source installer (`scripts/install`, whose
+  default prefix is `~/.local`) both install `~/.local/bin/gpufl`; whichever
+  ran last owns the command. Use a venv, or give the source installer another
+  `--prefix`, to keep both.
+
   ```bash
   python3 -m venv .venv && . .venv/bin/activate
   pip install gpufl
@@ -72,7 +82,7 @@ What `pip install gpufl` installs depends on the platform:
   gpufl trace -- python train.py
   ```
 
-- **Windows** (Python 3.12 and 3.13): the Python package only. The wheel has no
+- **Windows** (Python 3.12, 3.13 and 3.14): the Python package only. The wheel has no
   `gpufl.exe`: build it with `build-windows.ps1 -Mode trace` (see
   [Windows](#windows) below). Without it, upload logs with
   `python -m gpufl.cli upload`.

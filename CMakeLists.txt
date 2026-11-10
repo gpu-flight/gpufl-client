@@ -64,8 +64,11 @@ option(BUILD_TESTING "Build the testing tree." ON)
 # a small native `gpufl` on PATH that runs that launcher; wheel_entry_paths.hpp
 # there explains why the launcher itself cannot be the file on PATH. Fixed
 # destinations also keep the wheel's layout off GNUInstallDirs, whose LIBDIR
-# is lib64 on manylinux and lib on Debian.
-if(SKBUILD AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+# is lib64 on manylinux and lib on Debian. PROJECT_IS_TOP_LEVEL keeps it to
+# gpufl-client's own wheel: another scikit-build project that pulls this one
+# in with FetchContent or add_subdirectory also has SKBUILD set, and gets the
+# normal layout.
+if(SKBUILD AND PROJECT_IS_TOP_LEVEL AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(GPUFL_WHEEL_LAYOUT ON)
     set(GPUFL_WHEEL_BINDIR gpufl/bin)
     set(GPUFL_WHEEL_LIBDIR gpufl/lib)
