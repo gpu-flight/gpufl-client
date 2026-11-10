@@ -6,6 +6,11 @@ on:
       - 'v*'
   workflow_dispatch:
 
+# Every job reads the repository and nothing else; a job that needs more
+# names it in its own permissions block, which replaces this one.
+permissions:
+  contents: read
+
 jobs:
   build_wheels:
     name: Build wheels on ${{ matrix.os }}

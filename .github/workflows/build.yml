@@ -26,6 +26,11 @@ on:
       - '.gitignore'
       - 'images/**'
 
+# Every job reads the repository and nothing else; a job that needs more
+# names it in its own permissions block, which replaces this one.
+permissions:
+  contents: read
+
 jobs:
   amd-startup:
     name: AMD preload startup (CPU only)
