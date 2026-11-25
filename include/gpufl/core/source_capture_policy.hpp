@@ -33,7 +33,26 @@ struct SourceCaptureLimits {
 struct SourceCaptureSettings {
     std::vector<std::string> approved_roots;
     SourceCaptureLimits limits;
+    /**
+     * Directories the user chose never to capture; empty by default, and
+     * nothing is excluded unless asked. A bare name (no slash) matches any
+     * directory component between an approved root and the file,
+     * case-insensitively; the root's own components and the file name never
+     * count. A value with a slash is a directory relative to each approved
+     * root, or an absolute path; its whole subtree is skipped.
+     */
+    std::vector<std::string> excluded_dirs;
 };
+
+/**
+ * Separator joining excluded_dirs in GPUFL_SOURCE_EXCLUDE: the platform's
+ * path-list separator, as in PATH. An entry cannot contain it.
+ */
+#ifdef _WIN32
+constexpr char kSourceExcludeListSeparator = ';';
+#else
+constexpr char kSourceExcludeListSeparator = ':';
+#endif
 
 namespace detail {
 
@@ -45,6 +64,7 @@ enum class SourceCaptureDisposition {
     OutsideApprovedRoots,
     SymlinkEscape,
     ExcludedSystemRoot,
+    ExcludedByUser,
     UnsupportedExtension,
     NonTextContent,
     NotRegularFile,
@@ -107,11 +127,22 @@ class SourceCapturePolicy {
         const std::filesystem::path& discovered_path,
         std::uint32_t source_file_id) const;
     void record(SourceCaptureRecord value);
+    void configureExclusions();
+    bool isExcludedByUser(const std::filesystem::path& canonical,
+                          std::size_t canonical_root,
+                          const std::filesystem::path& absolute) const;
+    bool hasExcludedDirectoryName(const std::filesystem::path& file,
+                                  const std::filesystem::path& root) const;
 
     bool enabled_ = false;
     SourceCaptureSettings settings_;
     std::vector<std::filesystem::path> approved_lexical_roots_;
     std::vector<std::filesystem::path> approved_roots_;
+    // From settings.excluded_dirs: lower-case directory names, and canonical
+    // directory subtrees, whose files are ExcludedByUser. Built once per
+    // configure().
+    std::vector<std::string> excluded_dir_names_;
+    std::vector<std::filesystem::path> excluded_subtrees_;
     SourceCaptureManifest manifest_;
     bool manifest_dirty_ = false;
 };

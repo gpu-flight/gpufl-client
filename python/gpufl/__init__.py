@@ -263,6 +263,7 @@ except ImportError as e:
             self.enable_debug_output = False
             self.enable_stack_trace = False
             self.enable_source_collection = True
+            self.source_excluded_dirs = []
             self.flush_logs_always = False
             self.profiling_engine = ProfilingEngine.Monitor
             self.pm_sampling_interval_us = 100
@@ -507,7 +508,13 @@ def init(*args,
         pass_count: Total passes planned for the analysis group (lets the
             backend flag a missing/failed pass). Only meaningful alongside
             ``analysis_id``. Sets ``GPUFL_PASS_COUNT``.
-        **kwargs: All other InitOptions fields passed to C++ init.
+        **kwargs: All other InitOptions fields passed to C++ init. Source
+            collection (``enable_source_collection``, on by default) skips
+            nothing inside the project unless you pass
+            ``source_excluded_dirs=[...]``, e.g. for vendored code: a bare
+            name matches any directory of that name (any case) below the
+            project root; a path is relative to the project root, or
+            absolute.
 
     Returns:
         bool: True on successful init, False when stub-mode, disabled,

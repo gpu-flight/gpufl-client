@@ -23,6 +23,9 @@ struct TraceArgs {
     bool quiet = false;                 // -q
     bool no_source = false;             // --no-source: explicit source-content opt-out
     std::string source_root;            // --source-root: approved project source boundary
+    // --source-exclude, repeatable: directories the user chose never to
+    // capture. Empty (the default) excludes nothing.
+    std::vector<std::string> source_exclude;
     // --stacks=on|off: host call stacks on launches, memcpy and syncs. Unset
     // leaves the injection preset (on) or a config file to decide.
     std::optional<bool> stack_traces;

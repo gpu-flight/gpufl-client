@@ -94,6 +94,12 @@ PYBIND11_MODULE(_gpufl_client, m) {
         .def_readwrite("enable_debug_output",   &gpufl::InitOptions::enable_debug_output)
         .def_readwrite("enable_stack_trace",    &gpufl::InitOptions::enable_stack_trace)
         .def_readwrite("enable_source_collection", &gpufl::InitOptions::enable_source_collection)
+        // InitOptions::source_capture.excluded_dirs, under the source_ prefix.
+        .def_property("source_excluded_dirs",
+            [](const gpufl::InitOptions& o) { return o.source_capture.excluded_dirs; },
+            [](gpufl::InitOptions& o, std::vector<std::string> value) {
+                o.source_capture.excluded_dirs = std::move(value);
+            })
         .def_readwrite("flush_logs_always",     &gpufl::InitOptions::flush_logs_always)
         // feature gates - surfaced on the InitOptions class so
         // power users can tweak them via the dataclass-style API.
@@ -144,7 +150,8 @@ PYBIND11_MODULE(_gpufl_client, m) {
                      std::vector<std::string> pm_sampling_metrics,
                      bool pm_sampling_scope_only,
                      bool deep_window_only,
-                     bool flush_logs_always) -> bool {
+                     bool flush_logs_always,
+                     std::vector<std::string> source_excluded_dirs) -> bool {
 
         gpufl::InitOptions opts;
         opts.app_name              = app_name;
@@ -156,6 +163,7 @@ PYBIND11_MODULE(_gpufl_client, m) {
         opts.enable_debug_output   = enable_debug_output;
         opts.enable_stack_trace    = enable_stack_trace;
         opts.enable_source_collection = enable_source_collection;
+        opts.source_capture.excluded_dirs = std::move(source_excluded_dirs);
         opts.flush_logs_always     = flush_logs_always;
         opts.profiling_engine      = profiling_engine;
         opts.config_file           = config_file;
@@ -192,7 +200,10 @@ PYBIND11_MODULE(_gpufl_client, m) {
        py::arg("pm_sampling_metrics")         = std::vector<std::string>{},
        py::arg("pm_sampling_scope_only")      = true,
        py::arg("deep_window_only")            = false,
-       py::arg("flush_logs_always")           = false);
+       py::arg("flush_logs_always")           = false,
+       // Appended, not beside enable_source_collection, so positional
+       // callers keep their meaning.
+       py::arg("source_excluded_dirs")        = std::vector<std::string>{});
 
     m.def("system_start", [](std::string name) { gpufl::systemStart(std::move(name)); },
         py::arg("name") = "system");
