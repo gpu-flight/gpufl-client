@@ -10,7 +10,7 @@ project(gpufl_client
 # pre-release tokens (`rc1`, `a1`, `b1`, …) aren't valid in CMake's
 # `project(... VERSION ...)`, so we layer them on top here. Final releases
 # leave this empty.
-set(GPUFL_VERSION_SUFFIX "rc8")
+set(GPUFL_VERSION_SUFFIX "rc9")
 
 # -----------------------
 # CUDA Architectures (CI Friendly)
@@ -57,6 +57,49 @@ endif()
 option(BUILD_PYTHON "Build Python bindings" OFF)
 option(BUILD_TESTING "Build the testing tree." ON)
 
+# A Linux wheel (scikit-build-core sets SKBUILD) installs the launcher and
+# gpufl-monitor in site-packages/gpufl/bin, with libgpufl_inject.so and the
+# counter runtime in gpufl/lib, where the launcher's existing ../lib lookup
+# finds them, as in a source install's bin/ and lib/. daemon/launcher then puts
+# a small native `gpufl` on PATH that runs that launcher; wheel_entry_paths.hpp
+# there explains why the launcher itself cannot be the file on PATH. Fixed
+# destinations also keep the wheel's layout off GNUInstallDirs, whose LIBDIR
+# is lib64 on manylinux and lib on Debian. PROJECT_IS_TOP_LEVEL keeps it to
+# gpufl-client's own wheel: another scikit-build project that pulls this one
+# in with FetchContent or add_subdirectory also has SKBUILD set, and gets the
+# normal layout.
+if(SKBUILD AND PROJECT_IS_TOP_LEVEL AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(GPUFL_WHEEL_LAYOUT ON)
+    set(GPUFL_WHEEL_BINDIR gpufl/bin)
+    set(GPUFL_WHEEL_LIBDIR gpufl/lib)
+    # Build the wheel's executables as PIE. auditwheel's patchelf rewrites
+    # their RPATH and NEEDED entries; for a non-PIE executable (the manylinux
+    # compiler's default) it moves the headers into new segments, and in
+    # rc8's gpufl-monitor that left a read-only segment over the page holding
+    # .dynamic, so the loader crashed writing DT_DEBUG before main. patchelf
+    # lays out PIEs like shared libraries, which it handles safely.
+    include(CheckPIESupported)
+    check_pie_supported(LANGUAGES CXX)
+    if(NOT CMAKE_CXX_LINK_PIE_SUPPORTED)
+        message(FATAL_ERROR "gpufl wheel: the C++ toolchain cannot link PIE executables")
+    endif()
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+else()
+    set(GPUFL_WHEEL_LAYOUT OFF)
+endif()
+
+# Linux wheels link a private static OpenSSL into every gpufl binary and hide
+# its symbols. `gpufl trace` preloads libgpufl_inject.so into the traced
+# program, and a shared OpenSSL the inject NEEDs would join that program's
+# global symbol scope: Python's _ssl, libcurl and the program's children would
+# then bind to gpufl's OpenSSL, with its build host's CA paths. The wheel
+# workflows build the archives with scripts/build-static-openssl.sh and pass
+# -DGPUFL_PRIVATE_OPENSSL=ON -DOPENSSL_ROOT_DIR=<prefix>. It stays OFF for
+# everything else, sdist builds included, which link the system OpenSSL.
+option(GPUFL_PRIVATE_OPENSSL
+    "Link a private static OpenSSL into every gpufl binary and hide its symbols (Linux wheels)"
+    OFF)
+
 # This example is intentionally independent from CUDA, HIP, and gpufl.  It is
 # useful as a small CPU-only rendering workload on machines without a GPU.
 if(BUILD_GPUFL_EXAMPLE AND CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
@@ -85,10 +128,17 @@ target_include_directories(gpufl_counter_runtime PUBLIC include)
 # each falling back to their own in-process registry - the exact split this
 # library exists to prevent, and one that shows up as a counter reading Missing
 # forever rather than as a missing file.
-install(TARGETS gpufl_counter_runtime
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-)
+if(GPUFL_WHEEL_LAYOUT)
+    # Beside libgpufl_inject.so, where the injected library looks first.
+    install(TARGETS gpufl_counter_runtime
+        LIBRARY DESTINATION ${GPUFL_WHEEL_LIBDIR}
+    )
+else()
+    install(TARGETS gpufl_counter_runtime
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    )
+endif()
 set_target_properties(gpufl_counter_runtime PROPERTIES
     CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON
@@ -303,7 +353,54 @@ include(FetchContent)
 # Resolve OpenSSL in this directory before cpp-httplib configures itself.
 # Imported targets created only inside FetchContent's subdirectory are not
 # guaranteed to be visible here, even though OpenSSL_FOUND can remain true.
-find_package(OpenSSL 3.0 QUIET COMPONENTS SSL Crypto)
+if(GPUFL_PRIVATE_OPENSSL)
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        message(FATAL_ERROR "GPUFL_PRIVATE_OPENSSL is for Linux wheels only")
+    endif()
+    if(NOT OPENSSL_ROOT_DIR)
+        message(FATAL_ERROR
+            "GPUFL_PRIVATE_OPENSSL needs OPENSSL_ROOT_DIR, the prefix "
+            "scripts/build-static-openssl.sh installed into")
+    endif()
+    # A normal variable, so cpp-httplib's own find_package in its
+    # subdirectory takes the archives too.
+    set(OPENSSL_USE_STATIC_LIBS TRUE)
+    # FindOpenSSL takes a static OpenSSL's own dependencies from pkg-config's
+    # openssl.pc (Libs.private). Read only the private prefix's, never the
+    # host's: Ubuntu's, for one, adds -l:libjitterentropy.a. The imported
+    # targets keep what this first find gives them, and the environment is
+    # restored for the rest of the configure.
+    set(gpufl_saved_pkg_config_path "$ENV{PKG_CONFIG_PATH}")
+    set(gpufl_saved_pkg_config_libdir "$ENV{PKG_CONFIG_LIBDIR}")
+    set(ENV{PKG_CONFIG_PATH} "")
+    set(ENV{PKG_CONFIG_LIBDIR} "${OPENSSL_ROOT_DIR}/lib/pkgconfig")
+    unset(__pkg_config_checked__OPENSSL CACHE)
+    find_package(OpenSSL 3.0 REQUIRED COMPONENTS SSL Crypto)
+    set(ENV{PKG_CONFIG_PATH} "${gpufl_saved_pkg_config_path}")
+    set(ENV{PKG_CONFIG_LIBDIR} "${gpufl_saved_pkg_config_libdir}")
+    # The manylinux image has OpenSSL 1.1.1 headers in /usr/include: make
+    # sure every piece came from the private prefix, and that it is static.
+    file(REAL_PATH "${OPENSSL_ROOT_DIR}" gpufl_openssl_root)
+    foreach(gpufl_openssl_piece
+            OPENSSL_INCLUDE_DIR OPENSSL_SSL_LIBRARY OPENSSL_CRYPTO_LIBRARY)
+        file(REAL_PATH "${${gpufl_openssl_piece}}" gpufl_openssl_path)
+        string(FIND "${gpufl_openssl_path}" "${gpufl_openssl_root}/" gpufl_openssl_at)
+        if(NOT gpufl_openssl_at EQUAL 0)
+            message(FATAL_ERROR
+                "GPUFL_PRIVATE_OPENSSL: ${gpufl_openssl_piece} is "
+                "${gpufl_openssl_path}, outside OPENSSL_ROOT_DIR "
+                "${gpufl_openssl_root}")
+        endif()
+    endforeach()
+    if(NOT OPENSSL_SSL_LIBRARY MATCHES "/libssl\\.a$"
+       OR NOT OPENSSL_CRYPTO_LIBRARY MATCHES "/libcrypto\\.a$")
+        message(FATAL_ERROR
+            "GPUFL_PRIVATE_OPENSSL needs libssl.a and libcrypto.a, found "
+            "${OPENSSL_SSL_LIBRARY} and ${OPENSSL_CRYPTO_LIBRARY}")
+    endif()
+else()
+    find_package(OpenSSL 3.0 QUIET COMPONENTS SSL Crypto)
+endif()
 
 FetchContent_Declare(
     httplib
@@ -336,6 +433,33 @@ else()
     set(GPUFL_HTTPLIB_TLS 0)
 endif()
 target_compile_definitions(gpufl PRIVATE GPUFL_HTTPLIB_TLS=${GPUFL_HTTPLIB_TLS})
+target_sources(gpufl PRIVATE include/gpufl/core/tls_trust.cpp)
+
+# gpufl_check_private_openssl(<target>) fails the build if <target> still
+# NEEDs, imports, exports or version-references OpenSSL, or lacks the private
+# copy. A no-op unless GPUFL_PRIVATE_OPENSSL is ON.
+function(gpufl_check_private_openssl target)
+    if(GPUFL_PRIVATE_OPENSSL)
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND}
+                -DFILE=$<TARGET_FILE:${target}>
+                -DREADELF=${CMAKE_READELF}
+                -P ${PROJECT_SOURCE_DIR}/cmake/check_private_openssl.cmake
+            COMMENT "Checking that ${target} keeps OpenSSL private"
+            VERBATIM)
+    endif()
+endfunction()
+
+if(GPUFL_PRIVATE_OPENSSL)
+    target_compile_definitions(gpufl PRIVATE GPUFL_PRIVATE_OPENSSL=1)
+    # Every binary that links gpufl (the inject, the launcher, gpufl-monitor,
+    # the Python extension, the tests) makes the symbols it pulls from the two
+    # archives local, so none of them is exported or interposable. GNU ld
+    # matches the archives by basename. BUILD_INTERFACE keeps the flag out of
+    # the installed SDK export.
+    target_link_options(gpufl INTERFACE
+        "$<BUILD_INTERFACE:LINKER:--exclude-libs,libssl.a:libcrypto.a>")
+endif()
 # Enable cpp-httplib's gzip path. PUBLIC so any consumer that includes
 # httplib.h via gpufl's headers (notably the test target's embedded
 # httplib::Server) gets the same wire-format support - without this,
@@ -833,6 +957,7 @@ if(BUILD_GPUFL_INJECT AND ((UNIX AND NOT APPLE) OR WIN32))
         target_compile_definitions(gpufl_inject PRIVATE GPUFL_AMD_PRELOAD_STARTUP=1)
     endif()
     target_link_libraries(gpufl_inject PRIVATE gpufl::gpufl)
+    gpufl_check_private_openssl(gpufl_inject)
 
     # The injected DLL is loaded by the CUDA driver into the profiled target,
     # whose DLL search path has no reason to include our bin directory. The
@@ -872,9 +997,15 @@ if(BUILD_GPUFL_INJECT AND ((UNIX AND NOT APPLE) OR WIN32))
             CXX_VISIBILITY_PRESET hidden
             VISIBILITY_INLINES_HIDDEN ON
         )
-        install(TARGETS gpufl_inject
-            LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-        )
+        if(GPUFL_WHEEL_LAYOUT)
+            install(TARGETS gpufl_inject
+                LIBRARY DESTINATION ${GPUFL_WHEEL_LIBDIR}
+            )
+        else()
+            install(TARGETS gpufl_inject
+                LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            )
+        endif()
     else()
         # Windows: exports come from __declspec(dllexport) in the source;
         # the DLL lives beside the launcher exe (RUNTIME), not in lib/.
@@ -969,6 +1100,7 @@ if(BUILD_PYTHON)
     pybind11_add_module(_gpufl_client python/bindings.cpp)
 
     target_link_libraries(_gpufl_client PRIVATE gpufl::gpufl)
+    gpufl_check_private_openssl(_gpufl_client)
 
     # Same for the Python extension: it may be the first module to bind, in
     # which case it is the one that loads the runtime for the whole process.

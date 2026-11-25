@@ -11,6 +11,7 @@
 
 #include "gpufl/core/debug_logger.hpp"
 #include "gpufl/core/json/json.hpp"
+#include "gpufl/core/tls_trust.hpp"
 #include "gpufl/core/version.hpp"
 
 namespace gpufl {
@@ -71,6 +72,12 @@ void probeBackendVersion(const std::string& base_url,
     std::string scheme_host_port = scheme + "://" + host;
     if (port > 0) scheme_host_port += ":" + std::to_string(port);
     httplib::Client cli(scheme_host_port);
+#if GPUFL_HTTPLIB_TLS
+    if (scheme == "https") {
+        const tls::CaPaths ca = tls::caPathsForThisBuild();
+        if (!ca.empty()) cli.set_ca_cert_path(ca.file, ca.dir);
+    }
+#endif
     cli.set_connection_timeout(2, 0);
     cli.set_read_timeout(2, 0);
 

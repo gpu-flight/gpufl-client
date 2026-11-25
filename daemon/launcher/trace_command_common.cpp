@@ -30,6 +30,7 @@
 #include "gpufl/core/logger/window_metadata.hpp"
 #include "gpufl/core/process_identity.hpp"
 #include "gpufl/core/source_capture_policy.hpp"
+#include "gpufl/core/tls_trust.hpp"
 #include "gpufl/inject/inject_entry.hpp"
 #include "gpufl/upload/upload_logs.hpp"
 
@@ -1019,6 +1020,11 @@ int runTraceCommon(const TraceArgs& args, const TracePlatform& platform) {
         if (args.verbose) {
             std::fprintf(stderr, "[gpufl] inject lib: %s\n",
                          inject_lib.string().c_str());
+            if (gpufl::tls::privateOpenSslBuild()) {
+                std::fprintf(stderr,
+                             "[gpufl] TLS: %s; traced programs keep their own OpenSSL\n",
+                             gpufl::tls::describeTls().c_str());
+            }
             std::fprintf(stderr, "[gpufl] app_name: %s\n", app_name.c_str());
         }
     }

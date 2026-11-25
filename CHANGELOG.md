@@ -205,6 +205,11 @@ types are additive.
   written only when set, so other windows read as before; the wire version is
   unchanged.
 
+- **Python 3.14 wheels** for Linux x86-64 and Windows. Without them pip built
+  the source distribution on a 3.14 interpreter (Ubuntu 26.04's default
+  `python3`), which fails without a CUDA toolkit. The free-threaded build
+  (`cp314t`) is not published.
+
 ### Changed
 
 - **`--passes` and `--deep-*` are separate execution modes and cannot be
@@ -277,6 +282,60 @@ types are additive.
 
 ### Fixed
 
+- **`pip install gpufl` gives a working `gpufl` command on Linux.** The wheel
+  installed the launcher as `site-packages/bin/gpufl`, which is not on `PATH`,
+  and `libgpufl_inject.so` in `site-packages/lib64/`, where the launcher does
+  not look. So `gpufl` was "command not found" after a pip install, and
+  `gpufl trace` could not have found its library even from the full path.
+  - **New layout.** Linux wheels now install the launcher and `gpufl-monitor`
+    in `site-packages/gpufl/bin`, and `libgpufl_inject.so` with the counter
+    runtime in `site-packages/gpufl/lib`.
+  - **The command on `PATH`.** pip puts a small native `gpufl` in the
+    environment's `bin/`. It execs that launcher, so the native binary still
+    owns the name and there is no Python console script. It finds the
+    launcher in a venv, conda, `pip install --user`, `--prefix`, `--target`,
+    and Debian- or Fedora-style system installs.
+  - **CI.** `release.yml` installs every Linux wheel into a fresh virtual
+    environment and runs `gpufl --version`, `gpufl upload --help` and
+    `gpufl trace -- true` before anything is published. `build.yml` runs the
+    same check on pull requests.
+  - **Windows** wheels still contain no `gpufl.exe`.
+- **`gpufl trace` no longer brings an OpenSSL into the traced program.**
+  Linux wheels up to 1.3.0rc8 bundled a shared OpenSSL that
+  `libgpufl_inject.so` depended on. Preloading the library put that OpenSSL
+  into the traced program's global symbol scope, so the program's own OpenSSL
+  users - Python's `ssl` module, libcurl, and the program's children - bound
+  to it. They then read CA certificates from paths of the wheel's build host.
+  On Ubuntu, a traced Python loaded no CA certificates, and its HTTPS requests
+  failed with `CERTIFICATE_VERIFY_FAILED`.
+  - **Private OpenSSL.** Linux wheels now link OpenSSL 3.5.9 statically into
+    the launcher, `gpufl-monitor`, `libgpufl_inject.so` and the Python
+    extension, with every OpenSSL symbol hidden. The wheel bundles no
+    `libssl` or `libcrypto`, and a traced program resolves its own OpenSSL
+    exactly as it would untraced.
+  - **gpufl's own HTTPS** (uploads from the Python extension, the
+    session-complete signal and the backend version check) finds the host's
+    CA bundle itself: `/etc/ssl/certs/ca-certificates.crt` on Debian and
+    Ubuntu, `/etc/pki/tls/certs/ca-bundle.crt` on RHEL and Fedora, and the
+    other common layouts. `SSL_CERT_FILE` and `SSL_CERT_DIR` still take
+    precedence. A certificate failure names the bundle that was used.
+  - **Diagnostics.** `gpufl trace --verbose` and `gpufl info` print the
+    OpenSSL version and CA bundle in wheel builds; `gpufl info --json` is
+    unchanged.
+  - **CI.** The wheel check now also fails a wheel whose ELFs need, import
+    or export OpenSSL, or whose traced programs bind an OpenSSL symbol into
+    the wheel, and it runs gpufl's uploads and version check against a local
+    TLS server. On pull requests the check also runs on an Ubuntu host.
+  - Source builds are unchanged and keep linking the system OpenSSL. Windows
+    wheels still ship the OpenSSL DLLs.
+- **The PyPI project links** pointed at `github.com/gpufl/gpufl-client`, which
+  does not exist; they now point at `github.com/gpu-flight/gpufl-client`.
+- **`gpufl-monitor` from a Linux wheel crashed at startup.** auditwheel's
+  rewrite of the non-PIE executable left a read-only segment over the page
+  holding its dynamic section, so the loader crashed before `main`. Linux
+  wheels now build their executables as position-independent (PIE), which
+  auditwheel lays out like a shared library. The wheel check loads every
+  ELF in the wheel through `ldd`, which also catches this.
 - **Linux `gpufl trace` capture readiness.** The injected library started
   CUPTI on a worker thread while the application went on into context and
   module setup. On an L4, whole Trace sessions received every kernel and

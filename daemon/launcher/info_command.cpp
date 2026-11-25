@@ -8,6 +8,7 @@
 
 #include "gpufl/core/backend_factory.hpp"
 #include "gpufl/core/json/json.hpp"
+#include "gpufl/core/tls_trust.hpp"
 #include "gpufl/core/version.hpp"
 
 #if GPUFL_HAS_CUDA
@@ -210,6 +211,10 @@ std::string renderInfoText(const InfoReport& report) {
         << "CUDA driver:  " << formatCudaVersion(report.cuda_driver_version) << '\n'
         << "CUDA runtime: " << formatCudaVersion(report.cuda_runtime_version) << '\n'
         << "Devices:      " << report.devices.size() << "\n";
+    // Wheels only; the JSON form never carries it (gpufl-backend parses it).
+    if (tls::privateOpenSslBuild()) {
+        out << "TLS:          " << tls::describeTls() << '\n';
+    }
 
     for (const GpuStaticDeviceInfo& device : report.devices) {
         const std::string architecture = architectureLabel(device);

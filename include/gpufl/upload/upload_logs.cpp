@@ -52,6 +52,7 @@
 #include "gpufl/core/logger/file_compressor.hpp"
 #include "gpufl/core/logger/log_salvage.hpp"
 #include "gpufl/core/logger/logger.hpp"
+#include "gpufl/core/tls_trust.hpp"
 #include "gpufl/core/version.hpp"
 
 namespace gpufl {
@@ -586,6 +587,14 @@ std::unique_ptr<httplib::Client> makeClient(const UrlParts& url,
         cli->set_read_timeout(opts.read_timeout_ms / 1000,
                               (opts.read_timeout_ms % 1000) * 1000);
         cli->set_keep_alive(true);
+#if GPUFL_HTTPLIB_TLS
+        // A wheel's private OpenSSL is pointed at the host's CA bundle; a
+        // source build's system OpenSSL keeps its own default.
+        if (url.scheme == "https") {
+            const tls::CaPaths ca = tls::caPathsForThisBuild();
+            if (!ca.empty()) cli->set_ca_cert_path(ca.file, ca.dir);
+        }
+#endif
         return cli;
     } catch (const std::exception& e) {
         GFL_LOG_ERROR("[uploadLogs] httplib client construction failed for '",
@@ -876,6 +885,9 @@ StreamPostResult postStreamChunk(httplib::Client&         client,
     if (!res) {
         std::ostringstream os;
         os << "transport error httplib::Error=" << static_cast<int>(res.error());
+        if (res.error() == httplib::Error::SSLServerVerification) {
+            os << " (" << tls::verificationFailureHint() << ")";
+        }
         out.failure_reason = os.str();
         out.outcome = StreamPostOutcome::TransientFailure;
         return out;
@@ -941,7 +953,10 @@ bool postSessionCompleteImpl(httplib::Client& client,
     auto res = client.Post(path.c_str(), headers, std::string(), "application/json");
     if (!res) {
         GFL_LOG_DEBUG("[sessionComplete] transport error for ", session_id,
-                      " (httplib::Error=", static_cast<int>(res.error()), ")");
+                      " (httplib::Error=", static_cast<int>(res.error()), ")",
+                      res.error() == httplib::Error::SSLServerVerification
+                          ? " " + tls::verificationFailureHint()
+                          : std::string());
         return false;
     }
     if (res->status >= 200 && res->status < 300) {
